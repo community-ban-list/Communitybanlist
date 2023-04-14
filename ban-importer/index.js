@@ -32,5 +32,11 @@ async function main() {
 }
 
 main()
-  .then(() => console.log('Done!'))
-  .catch(console.log);
+    .then(() => {
+        console.log('Done!');
+        process.exit(0);
+    })
+    .catch((error) => {
+        console.error(error);
+        throw error;
+    });

@@ -14,6 +14,7 @@ COPY package.json .
 
 # Install dependencies
 RUN yarn install --production
+RUN yarn global add pm2
 
 # Build client
 RUN yarn build-web-server
@@ -22,4 +23,4 @@ RUN yarn build-web-server
 EXPOSE 80
 
 # Run servicce
-CMD [ "node", "web-server/index.js" ]
+CMD [ "pm2-runtime", "web-server/index.js" ]

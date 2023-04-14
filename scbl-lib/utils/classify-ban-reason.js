@@ -38,7 +38,8 @@ const reasons = {
   'Sharing team info':
     /shar(e|ing) (ticket|team|hab|fob|info|game|enemy)|ticket (count|sharing)|(info|intel) shar(e|ing)/i,
   Advertising: /advertising|werb(ung|en)/i,
-  Ableism: /ableis(t|m)/i
+  Ableism: /ableis(t|m)/i,
+  'Ban Evasion': /(alt|ban) evasion/i
 };
 
 export default function (...reason) {
