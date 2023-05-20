@@ -13,6 +13,7 @@ COPY package.json .
 
 # Install dependencies
 RUN yarn install --production
+RUN yarn global add pm2
 
 # Run servicce
-CMD [ "node", "ban-importer/index.js" ]
+CMD [ "pm2-runtime", "ban-importer/index.js" "--no-autorestart"]
