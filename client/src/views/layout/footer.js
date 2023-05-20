@@ -45,7 +45,7 @@ export default function () {
               <Button
                 className="btn-icon-only rounded-circle ml-1"
                 color="github"
-                href="https://github.com/CommunityBanList/Communitybanlist"
+                href="https://github.com/community-ban-list/Communitybanlist"
                 id="tooltip-footer-github"
                 target="_blank"
                 rel="noopener noreferrer"
@@ -68,7 +68,7 @@ export default function () {
               <Nav className="nav-footer justify-content-end">
                 <NavItem>
                   <NavLink
-                    href="https://github.com/CommunityBanList/Communitybanlist"
+                    href="https://github.com/community-ban-list/Communitybanlist"
                     target="_blank"
                     rel="noopener noreferrer"
                   >
@@ -77,7 +77,7 @@ export default function () {
                 </NavItem>
                 <NavItem>
                   <NavLink
-                    href="https://github.com/CommunityBanList/Communitybanlist/blob/master/LICENSE"
+                    href="https://github.com/community-ban-list/Communitybanlist/blob/master/LICENSE"
                     target="_blank"
                     rel="noopener noreferrer"
                   >

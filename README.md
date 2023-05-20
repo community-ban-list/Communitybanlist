@@ -4,9 +4,9 @@
 
 #### Community Ban List
 
-[![GitHub issues](https://img.shields.io/github/issues/CommunityBanList/Communitybanlist.svg?style=flat-square)](https://github.com/CommunityBanList/Communitybanlist/issues)
-[![GitHub pull requests](https://img.shields.io/github/issues-pr-raw/CommunityBanList/Communitybanlist.svg?style=flat-square)](https://github.com/CommunityBanList/Communitybanlist/pulls)
-![GitHub contributors](https://img.shields.io/github/contributors/CommunityBanList/Communitybanlist.svg?style=flat-square)
+[![GitHub issues](https://img.shields.io/github/issues/community-ban-list/Communitybanlist.svg?style=flat-square)](https://github.com/community-ban-list/Communitybanlist/issues)
+[![GitHub pull requests](https://img.shields.io/github/issues-pr-raw/community-ban-list/Communitybanlist.svg?style=flat-square)](https://github.com/community-ban-list/Communitybanlist/pulls)
+![GitHub contributors](https://img.shields.io/github/contributors/community-ban-list/Communitybanlist.svg?style=flat-square)
 
 ##### [Community Ban List Website](https://communitybanlist.com/)
 
