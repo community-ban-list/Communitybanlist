@@ -62,7 +62,7 @@ if (inProduction) {
   });
 
   router.get('/favicon.png', async (ctx) => {
-    ctx.body = fs.readFileSync(path.resolve('./assets/cbl-logo-square.png'));
+    ctx.body = fs.readFileSync(path.resolve('./assets/img/brand/cbl-logo-square.png'));
   });
 
   router.get('*', async (ctx) => {
