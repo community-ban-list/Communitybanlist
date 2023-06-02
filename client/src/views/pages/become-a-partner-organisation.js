@@ -52,46 +52,45 @@ export default function () {
                             <br />
                             <h5>Partner Aggrement</h5>
                             <p>
-                                <ul>
-                                    <li>
-                                        Ban Evidence
-                                        <li>
-                                            Community Ban List is not responsible for retaining Ban Evidence. Community Ban List does
-                                            not import any Ban Evidence into our Databases. The Partner Organization is responsible for
-                                            the storage of any Ban Evidence or Summary of Events leading to a Ban.
-                                        </li>
-                                        <li>
-                                            Partner Organizations that Export Player Bans to the Community Ban List Database agree to act
-                                            in good faith when submitting Bans to Community Ban List. 
-                                            <b>
-                                                Bans Exported to Community Ban List must have occurred on your Game Server(s). 
-                                                Bans that did not occur on your Game Server(s) may NOT be Exported to Community Ban List.
-                                            </b>
-                                        </li>
-                                        <li>
-                                            Partner Organizations agree to share Ban Evidence or a Summary of Events with other Partners upon
-                                            request. 
-                                        </li>
-                                        <li>
-                                            Failure to act in good faith, or cooperate with Partners, undermines the Community Ban List and 
-                                            may result in a Partner Organization being removed.
-                                        </li>
-                                    </li>
-                                    <li>
-                                        Partner Organization Representative
-                                        <li>
-                                            Partner Organizations shall have at least one active Representative from their Community in the
-                                            Community Ban List Discord for purposes of any important or needed communications with Community
-                                            Ban List Staff and other Partner Organizations.
-                                        </li>
-                                        <li>
-                                            If the Partner Organization’s Representative becomes inactive or unresponsive to requests from
-                                            Community Ban List Staff or other Partner Organization Representatives the Partner Organization
-                                            shall replace their Representative or risk having their Organization removed from the Community
-                                            Ban List service.
-                                        </li>
-                                    </li>
-                                </ul>
+                                Ban Evidence
+                            </p>
+                            <p>
+                                Community Ban List is not responsible for retaining Ban Evidence. Community Ban List does
+                                not import any Ban Evidence into our Databases. The Partner Organization is responsible for
+                                the storage of any Ban Evidence or Summary of Events leading to a Ban.
+                            </p>
+                            <p>
+                                Partner Organizations that Export Player Bans to the Community Ban List Database agree to act
+                                in good faith when submitting Bans to Community Ban List.
+                                <p>
+                                    <b>
+                                        Bans Exported to Community Ban List must have occurred on your Game Server(s).
+                                        Bans that did not occur on your Game Server(s) may NOT be Exported to Community Ban List.
+                                    </b>
+                                </p>
+                            </p>
+                            <p>
+                                Partner Organizations agree to share Ban Evidence or a Summary of Events with other Partners upon
+                                request.
+                            </p>
+                            <p>
+                                Failure to act in good faith, or cooperate with Partners, undermines the Community Ban List and
+                                may result in a Partner Organization being removed.
+                            </p>
+                            <br />
+                            <p>
+                                Partner Organization Representative
+                            </p>
+                            <p>
+                                Partner Organizations shall have at least one active Representative from their Community in the
+                                Community Ban List Discord for purposes of any important or needed communications with Community
+                                Ban List Staff and other Partner Organizations.
+                            </p>
+                            <p>
+                                If the Partner Organization’s Representative becomes inactive or unresponsive to requests from
+                                Community Ban List Staff or other Partner Organization Representatives the Partner Organization
+                                shall replace their Representative or risk having their Organization removed from the Community
+                                Ban List service.
                             </p>
                             <h5>Form</h5>
                             <p>
