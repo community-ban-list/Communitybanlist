@@ -249,7 +249,12 @@ export default class Core {
     try {
       await hook.send(message);
     } catch (err) {
-      Logger.verbose('Core', 1, `Failed to send Discord Webhook: ${exportBanList.name}`, err);
+      Logger.verbose(
+        'Core',
+        1,
+        `Failed to send Discord Webhook. See logs above to see which webhook to take action on.`,
+        err
+      );
     }
   }
 
@@ -277,7 +282,12 @@ export default class Core {
     try {
       await hook.send(message);
     } catch (err) {
-      Logger.verbose('Core', 1, `Failed to send Discord Webhook: ${exportBanList.name}`, err);
+      Logger.verbose(
+        'Core',
+        1,
+        `Failed to send Discord Webhook. See logs above to see which webhook to take action on.`,
+        err
+      );
     }
   }
 }
