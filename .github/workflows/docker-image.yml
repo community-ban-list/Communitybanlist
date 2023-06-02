@@ -14,5 +14,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    - name: Build the Docker image
-      run: docker build . --file web-server/Dockerfile --tag my-image-name:$(date +%s)
+    - name: Build the Docker image for the web server
+      run: docker build . --file web-server/Dockerfile --tag cblwebserver:$(date +%s)
+
+    - name: Build the Docker image for the ban importer
+      run: docker build . --file ban-importer/Dockerfile --tag cblbanimporter:$(date +%s)
