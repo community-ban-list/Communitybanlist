@@ -13,6 +13,8 @@ COPY package.json .
 
 # Install dependencies
 RUN yarn install --production
+
+# Install pm2
 RUN yarn global add pm2
 
 # Run servicce

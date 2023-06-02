@@ -212,13 +212,14 @@ export default class Core {
 
       message.setTitle("We've updated your export ban list.");
       message.setDescription(
-        `We've made some changes to who's on your export ban list named "${exportBanList.name}". Sadly, there's too many changes for us to document them individually.`
+        `We've made some changes to who's on your export ban list named "${exportBanList.name}".\n Sadly, there's too many changes for us to document them individually.`
       );
 
+      // Catch broken webhooks.
       try {
         await hook.send(message);
       } catch (err) {
-        Logger.verbose('Core', 1, `Failed to send Discord Webhook: `, err);
+        Logger.verbose('Core', 1, `Failed to send Discord Webhook: ${exportBanList.name}`, err);
       }
     }
   }
@@ -244,10 +245,11 @@ export default class Core {
     );
     message.setThumbnail(exportBan.SteamUser.avatarMedium);
 
+    // Catch broken webhooks.
     try {
       await hook.send(message);
     } catch (err) {
-      Logger.verbose('Core', 1, `Failed to send Discord Webhook: `, err);
+      Logger.verbose('Core', 1, `Failed to send Discord Webhook: ${exportBanList.name}`, err);
     }
   }
 
@@ -271,10 +273,11 @@ export default class Core {
     );
     message.setThumbnail(exportBan.SteamUser.avatarMedium);
 
+    // Catch broken webhooks.
     try {
       await hook.send(message);
     } catch (err) {
-      Logger.verbose('Core', 1, `Failed to send Discord Webhook: `, err);
+      Logger.verbose('Core', 1, `Failed to send Discord Webhook: ${exportBanList.name}`, err);
     }
   }
 }
