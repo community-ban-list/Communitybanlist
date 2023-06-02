@@ -17,5 +17,5 @@ RUN yarn install --production
 # Install pm2
 RUN yarn global add pm2
 
-# Run servicce
+# Run service
 CMD [ "pm2-runtime", "ban-importer/index.js", "--no-autorestart" ]

@@ -24,5 +24,5 @@ RUN yarn build-web-server
 # Expose ports
 EXPOSE 80
 
-# Run servicce
+# Run service
 CMD [ "pm2-runtime", "web-server/index.js" ]
