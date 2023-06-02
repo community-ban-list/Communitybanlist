@@ -32,11 +32,11 @@ async function main() {
 }
 
 main()
-    .then(() => {
-        console.log('Done!');
-        process.exit(0);
-    })
-    .catch((error) => {
-        console.error(error);
-        throw error;
-    });
+  .then(() => {
+    console.log('Done!');
+    process.exit(0);
+  })
+  .catch((error) => {
+    console.error(error);
+    throw error;
+  });

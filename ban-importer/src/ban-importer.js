@@ -24,7 +24,7 @@ export default class BanImporter {
 
   async queueBan(importedBans) {
     Logger.verbose('BanImporter', 1, `Queueing batch of ${importedBans.length} raw bans...`);
-    if(importedBans.length === 0) return;
+    if (importedBans.length === 0) return;
     try {
       await SteamUser.bulkCreate(
         importedBans.map((importedBan) => ({ id: importedBan.steamUser })),
@@ -123,7 +123,9 @@ export default class BanImporter {
     }
 
     Logger.verbose('BanImporter', 1, 'Waiting for bans to be saved...');
-    await this.saveBanQueue.drain(() =>{console.log("Finished Drain")});
+    await this.saveBanQueue.drain(() => {
+      console.log('Finished Drain');
+    });
 
     Logger.verbose('BanImporter', 1, 'Getting deleted bans...');
     const deletedBans = await Ban.findAll({

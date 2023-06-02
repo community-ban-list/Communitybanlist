@@ -38,7 +38,7 @@ export default class BanFetcher {
     for (const line of data.split('\n')) {
       // Split the line to get the steam user, expiry data and reason.
       const match = line.match(/([0-9]{17}):([0-9]+) ?\/\/(.+)/);
-    
+
       // Skip the line if there's no match, i.e. no ban is contained on the line.
       if (!match) continue;
 
@@ -59,7 +59,7 @@ export default class BanFetcher {
 
         reason: classifyBanReason(reason),
         rawReason: reason,
-        
+
         banList: banList
       });
     }
@@ -124,7 +124,7 @@ export default class BanFetcher {
             expires: expires,
             expired: !(ban.attributes.expires === null || expires.getTime() > Date.now()),
 
-            reason: classifyBanReason(ban.attributes.reason,ban.attributes.note),
+            reason: classifyBanReason(ban.attributes.reason, ban.attributes.note),
             rawReason: ban.attributes.reason,
             rawNote: ban.attributes.note,
 
@@ -143,7 +143,9 @@ export default class BanFetcher {
         });
       } catch (err) {
         Logger.verbose('BanFetcher', 1, `Failed to fetch ban list (ID: ${banList.id}): `, err);
-        if(err.response.status === 404){ break;}
+        if (err.response.status === 404) {
+          break;
+        }
       }
     }
   }

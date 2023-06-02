@@ -49,7 +49,7 @@ export default function (...reason) {
     if (regex.test(reason[0])) classifiedReasons.push(type);
   }
 
-  if(classifiedReasons.length===0 && reason.length > 1) {
+  if (classifiedReasons.length === 0 && reason.length > 1) {
     for (const [type, regex] of Object.entries(reasons)) {
       if (regex.test(reason[1])) classifiedReasons.push(type);
     }
