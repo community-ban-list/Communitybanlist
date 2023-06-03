@@ -21,13 +21,13 @@ export default function () {
                 CommunityBanList.com!
               </p>
             </CardBody>
-            <CardBody>
+            <CardBody className="border-bottom">
               <h3>Introduction to Partner Organisations</h3>
               <p>
                 Partner organisations are gaming communities that contribute ban information from
                 their server's ban lists to the CommunityBanList.com database. Any Gaming community
                 can become a partner organisation providing they apply and are accepted on our
-                discord
+                discord.
               </p>
               <p>
                 Becoming a partner organisation requires very little effort. We request that you
@@ -49,7 +49,8 @@ export default function () {
                 protecting the integrity of our partner's communities so, please consider
                 contributing to thank others for their contributions.
               </p>
-              <br />
+            </CardBody>
+            <CardBody>
               <h3>Partner Aggrement</h3>
               <p>
                 <h4>Ban Evidence</h4>
