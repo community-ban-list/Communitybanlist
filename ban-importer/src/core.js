@@ -13,6 +13,7 @@ const DISCORD_ALERT_CAP = 50;
 export default class Core {
   static async updateSteamUserInfo() {
     Logger.verbose('Core', 1, 'Fetching Steam users to update...');
+    const profileStartTime = Date.now();
     const users = await SteamUser.findAll({
       attributes: ['id'],
       where: {
@@ -60,11 +61,16 @@ export default class Core {
       }
     }
 
-    Logger.verbose('Core', 1, 'Finished updating Steam users.');
+    Logger.verbose(
+      'Core',
+      1,
+      `Finished updating Steam users. Took ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
+    );
   }
 
   static async updateReputationPoints() {
     Logger.verbose('Core', 1, 'Updating reputation points of outdated Steam users...');
+    const profileStartTime = Date.now();
     await sequelize.query(
       `
         UPDATE SteamUsers SU
@@ -137,10 +143,19 @@ export default class Core {
         WHERE SU.lastRefreshedReputationPoints IS NULL
       `
     );
+    Logger.verbose(
+      'Core',
+      1,
+      `Finished Updating reputation points of outdated Steam users. Took ${(
+        (Date.now() - profileStartTime) /
+        1000
+      ).toFixed(2)}s`
+    );
   }
 
   static async updateReputationRank() {
     Logger.verbose('Core', 1, 'Updating reputation rank of Steam users...');
+    const profileStartTime = Date.now();
     await sequelize.query(
       `
         UPDATE SteamUsers su
@@ -153,14 +168,32 @@ export default class Core {
             lastRefreshedReputationRank = NOW();
       `
     );
+    Logger.verbose(
+      'Core',
+      1,
+      `Finished Updating reputation rank of Steam users. Took ${(
+        (Date.now() - profileStartTime) /
+        1000
+      ).toFixed(2)}s`
+    );
   }
 
   static async exportExportBans() {
+    Logger.verbose('Core', 1, 'Exporting Bans...');
+    const profileStartTime = Date.now();
     // Get bans that need exporting.
     const exportBans = await ExportBan.findAll({
       where: { status: { [Op.in]: ['TO_BE_CREATED', 'TO_BE_DELETED'] } },
       include: [ExportBanList, SteamUser]
     });
+    Logger.verbose(
+      'Core',
+      1,
+      `Step Done: Getting Bans that need exporting after ${(
+        (Date.now() - profileStartTime) /
+        1000
+      ).toFixed(2)}s`
+    );
 
     // Tally the number of changes per ban list.
     const listChangeCount = {};
@@ -173,11 +206,26 @@ export default class Core {
           count: 1
         };
     }
+    Logger.verbose(
+      'Core',
+      1,
+      `Step Done: Tallying number of Bans after ${((Date.now() - profileStartTime) / 1000).toFixed(
+        2
+      )}s`
+    );
 
     // Mark whether to do Discord alerts for each ban.
     for (const exportBan of exportBans)
       exportBan.doDiscordAlert =
         listChangeCount[exportBan.ExportBanList.id].count < DISCORD_ALERT_CAP;
+    Logger.verbose(
+      'Core',
+      1,
+      `Step Done: Marking Bans for discord alerts after ${(
+        (Date.now() - profileStartTime) /
+        1000
+      ).toFixed(2)}s`
+    );
 
     // Update the export bans.
     for (const exportBan of exportBans) {
@@ -203,6 +251,13 @@ export default class Core {
         );
       }
     }
+    Logger.verbose(
+      'Core',
+      1,
+      `Step Done: Updating export Bans after ${((Date.now() - profileStartTime) / 1000).toFixed(
+        2
+      )}s`
+    );
 
     // Do Discord alerts for ban lists exceeding the threshold.
     for (const { exportBanList, count } of Object.values(listChangeCount)) {
@@ -222,6 +277,11 @@ export default class Core {
         Logger.verbose('Core', 1, `Failed to send Discord Webhook: ${exportBanList.name}`, err);
       }
     }
+    Logger.verbose(
+      'Core',
+      1,
+      `Finished Exporting Bans. Took ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
+    );
   }
 
   static async createExportBan(exportBan) {
