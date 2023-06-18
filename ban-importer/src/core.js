@@ -158,14 +158,16 @@ export default class Core {
     const profileStartTime = Date.now();
     await sequelize.query(
       `
+        SET @Dt = NOW();
+        CREATE TEMPORARY TABLE Temp_RankedSteamUsers
+          SELECT id, RANK() OVER (ORDER BY reputationPoints DESC) AS reputationRank
+        FROM SteamUsers;
+      
         UPDATE SteamUsers su
-        LEFT JOIN (
-          SELECT id, RANK() OVER (ORDER BY reputationPoints DESC) AS "reputationRank"
-          FROM SteamUsers
-        ) rr ON su.id = rr.id
-        SET 
-            su.reputationRank = rr.reputationRank,
-            lastRefreshedReputationRank = NOW();
+        JOIN Temp_RankedSteamUsers rr ON su.id = rr.id
+        SET su.reputationRank = rr.reputationRank,
+            su.lastRefreshedReputationRank = @Dt;
+        DROP TEMPORARY TABLE Temp_RankedSteamUsers;
       `
     );
     Logger.verbose(
