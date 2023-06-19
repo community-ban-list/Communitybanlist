@@ -156,12 +156,18 @@ export default class Core {
   static async updateReputationRank() {
     Logger.verbose('Core', 1, 'Updating reputation rank of Steam users...');
     const profileStartTime = Date.now();
-    await sequelize.query('SET @Dt = NOW();');
+    await sequelize.query(`
+    SET @Dt = NOW();
+    `);
     await sequelize.query(
       `  
       CREATE TEMPORARY TABLE Temp_RankedSteamUsers
         SELECT id, RANK() OVER (ORDER BY reputationPoints DESC) AS reputationRank
       FROM SteamUsers;
+      `
+    );
+    await sequelize.query(
+      `
       UPDATE SteamUsers su
       JOIN Temp_RankedSteamUsers rr ON su.id = rr.id
       SET su.reputationRank = rr.reputationRank,
