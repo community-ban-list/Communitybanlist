@@ -160,14 +160,13 @@ export default class Core {
       `
         SET @Dt = NOW();
         CREATE TEMPORARY TABLE Temp_RankedSteamUsers
-          SELECT id, RANK() OVER (ORDER BY reputationPoints DESC) AS reputationRank
+          SELECT id, RANK() OVER (PARTITION BY is ORDER BY reputationPoints DESC) AS reputationRank
         FROM SteamUsers;
       
         UPDATE SteamUsers su
         JOIN Temp_RankedSteamUsers rr ON su.id = rr.id
         SET su.reputationRank = rr.reputationRank,
             su.lastRefreshedReputationRank = @Dt;
-        DROP TEMPORARY TABLE Temp_RankedSteamUsers;
       `
     );
     Logger.verbose(
