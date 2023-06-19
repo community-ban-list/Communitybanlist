@@ -160,7 +160,7 @@ export default class Core {
       `
         SET @Dt = NOW();
         CREATE TEMPORARY TABLE Temp_RankedSteamUsers
-          SELECT id, RANK() OVER (PARTITION BY is ORDER BY reputationPoints DESC) AS reputationRank
+          SELECT id, RANK() OVER (PARTITION BY id ORDER BY reputationPoints DESC) AS reputationRank
         FROM SteamUsers;
       
         UPDATE SteamUsers su
