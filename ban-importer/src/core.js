@@ -159,21 +159,19 @@ export default class Core {
     await sequelize.query(
       `
       SET @Dt = NOW();
-      -- Delete all contents of Temp_RankedSteamUsers
-      DELETE FROM Temp_RankedSteamUsers;
+
+      DELETE FROM Temp_RankedSteamUsers WHERE 1=1;
       
-      -- Insert new data into Temp_RankedSteamUsers
       INSERT INTO Temp_RankedSteamUsers (id, reputationRank)
       SELECT id, RANK() OVER (ORDER BY reputationPoints DESC) AS reputationRank
       FROM SteamUsers;
       
-      -- Update SteamUsers table using Temp_RankedSteamUsers
+
       UPDATE SteamUsers su
       JOIN Temp_RankedSteamUsers rr ON su.id = rr.id
       SET su.reputationRank = rr.reputationRank,
           su.lastRefreshedReputationRank = @Dt;
       
-      -- Delete all contents of Temp_RankedSteamUsers
       DELETE FROM Temp_RankedSteamUsers;
       `
     );
