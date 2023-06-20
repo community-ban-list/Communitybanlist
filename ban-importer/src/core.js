@@ -162,7 +162,7 @@ export default class Core {
     await sequelize.query(
       `  
       CREATE TEMPORARY TABLE Temp_RankedSteamUsers
-        SELECT id, RANK() OVER (ORDER BY reputationPoints DESC) AS reputationRank
+        SELECT id, DENSE_RANK() OVER (ORDER BY reputationPoints DESC) AS reputationRank
       FROM SteamUsers;
       `
     );
