@@ -10,14 +10,24 @@ export default class ExportBanManager {
     Logger.verbose('ExportBanManager', 1, 'Fetching Steam users to update...');
     const profileStartTime = Date.now();
     const users = await SteamUser.findAll({ attributes: ['id'] });
-    Logger.verbose('ExportBanManager', 1, `Fetched ${users.length} Steam users to update.`);
-
+    Logger.verbose(
+      'ExportBanManager',
+      1,
+      `Fetched ${users.length} Steam users to update after ${(
+        (Date.now() - profileStartTime) /
+        1000
+      ).toFixed(2)}s`
+    );
+    let currentRunTime = profileStartTime;
     while (users.length > 0) {
+      currentRunTime = Date.now();
       const batch = users.splice(0, Math.min(UPDATE_BATCH_SIZE, users.length));
       Logger.verbose(
         'ExportBanManager',
         1,
-        `Updating batch of ${batch.length} Steam users' export bans (${users.length} remaining)...`
+        `Updating batch of ${batch.length} Steam users' export bans (${
+          users.length
+        } remaining)... Batch time: ${((Date.now() - currentRunTime) / 1000).toFixed(2)}s`
       );
 
       // Generate the export bans.
@@ -83,7 +93,14 @@ export default class ExportBanManager {
         }
       );
 
-      Logger.verbose('ExportBanManager', 1, `Saving ${generatedBans.length} export bans...`);
+      Logger.verbose(
+        'ExportBanManager',
+        1,
+        `Saving ${generatedBans.length} export bans... Batch time: ${(
+          (Date.now() - currentRunTime) /
+          1000
+        ).toFixed(2)}s`
+      );
       // Create new bans.
       await ExportBan.bulkCreate(generatedBans, { ignoreDuplicates: true });
 
@@ -145,6 +162,14 @@ export default class ExportBanManager {
             }
           }
         }
+      );
+      Logger.verbose(
+        'ExportBanManager',
+        1,
+        `Finished Updating batch. Overall batch time: ${(
+          (Date.now() - currentRunTime) /
+          1000
+        ).toFixed(2)}s`
       );
     }
     Logger.verbose(
