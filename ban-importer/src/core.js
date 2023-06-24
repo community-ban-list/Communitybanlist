@@ -159,10 +159,13 @@ export default class Core {
     await sequelize.query(`
     SET @Dt = NOW();
     `);
+
+    //Leave this at RANK() because that way we can actually count how many ppl were on ranks before this one. 
+    //DENSE_RANK() fucks counting up when browsing ranks
     await sequelize.query(
       `  
       CREATE TEMPORARY TABLE Temp_RankedSteamUsers
-        SELECT id, DENSE_RANK() OVER (ORDER BY reputationPoints DESC) AS reputationRank
+        SELECT id, RANK() OVER (ORDER BY reputationPoints DESC) AS reputationRank
       FROM SteamUsers;
       `
     );
