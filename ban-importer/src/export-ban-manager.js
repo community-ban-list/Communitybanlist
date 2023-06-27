@@ -101,8 +101,17 @@ export default class ExportBanManager {
           1000
         ).toFixed(2)}s`
       );
+
       // Create new bans.
       await ExportBan.bulkCreate(generatedBans, { ignoreDuplicates: true });
+      Logger.verbose(
+        'ExportBanManager',
+        1,
+        `Step Create ${generatedBans.length} new bans done. Batch time: ${(
+          (Date.now() - currentRunTime) /
+          1000
+        ).toFixed(2)}s`
+      );
 
       // Cancel deletion of bans that should still be present.
       await ExportBan.update(
@@ -117,6 +126,14 @@ export default class ExportBanManager {
             status: 'TO_BE_DELETED'
           }
         }
+      );
+      Logger.verbose(
+        'ExportBanManager',
+        1,
+        `Step Cancel deletion of bans that should still be present done. Batch time: ${(
+          (Date.now() - currentRunTime) /
+          1000
+        ).toFixed(2)}s`
       );
 
       // Queue existing bans to be deleted.
@@ -136,6 +153,14 @@ export default class ExportBanManager {
           }
         }
       );
+      Logger.verbose(
+        'ExportBanManager',
+        1,
+        `Step Queue existing bans to be deleted done. Batch time: ${(
+          (Date.now() - currentRunTime) /
+          1000
+        ).toFixed(2)}s`
+      );
 
       // Delete bans that have not yet been created.
       await ExportBan.destroy({
@@ -149,6 +174,14 @@ export default class ExportBanManager {
           status: 'TO_BE_CREATED'
         }
       });
+      Logger.verbose(
+        'ExportBanManager',
+        1,
+        `Step Delete bans that have not yet been created done. Batch time: ${(
+          (Date.now() - currentRunTime) /
+          1000
+        ).toFixed(2)}s`
+      );
 
       // Mark Steam users as updated.
       await SteamUser.update(
