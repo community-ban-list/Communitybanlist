@@ -42,6 +42,11 @@ export default class Core {
         const { data } = await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
           steamids: batch.map((user) => user.id).join(',')
         });
+        Logger.verbose(
+          'Core',
+          1,
+          `Got Steam users... ${JSON.stringify(data)}`
+        );
 
         for (const user of data.response.players) {
           await SteamUser.update(
@@ -358,5 +363,51 @@ export default class Core {
         err
       );
     }
+  }
+
+  //https://stackoverflow.com/a/68396354
+  // Implements promise.race
+  static async race(promises) {
+    // Create a promise that resolves as soon as
+    // any of the promises passed in resolve or reject.
+    const raceResultPromise = new Promise((resolve, reject) => {
+      // Keep track of whether we've heard back from any promise yet.
+      let resolved = false;
+
+      // Protect the resolve call so that only the first
+      // promise can resolve the race.
+      const resolver = (promisedVal) => {
+        if (resolved) {
+          return;
+        }
+        resolved = true;
+
+        resolve(promisedVal);
+      };
+
+      // Protect the rejects too because they can end the race.
+      const rejector = (promisedErr) => {
+        if (resolved) {
+          return;
+        }
+        resolved = true;
+
+        reject(promisedErr);
+      };
+
+      // Place the promises in the race, each can
+      // call the resolver, but the resolver only
+      // allows the first to win.
+      promises.forEach(async (promise) => {
+        try {
+          const promisedVal = await promise;
+          resolver(promisedVal);
+        } catch (e) {
+          rejector(e);
+        }
+      });
+    });
+
+    return raceResultPromise;
   }
 }

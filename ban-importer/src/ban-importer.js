@@ -107,6 +107,7 @@ export default class BanImporter {
   }
 
   async importBans() {
+    const profileStartTime = Date.now();
     Logger.verbose('BanImporter', 1, 'Fetching ban lists to import...');
     const banLists = await BanList.findAll();
     Logger.verbose('BanImporter', 1, `Fetched ${banLists.length} ban lists to import.`);
@@ -124,7 +125,10 @@ export default class BanImporter {
 
     Logger.verbose('BanImporter', 1, 'Waiting for bans to be saved...');
     await this.saveBanQueue.drain(() => {
-      console.log('Finished Drain');
+      console.log(`Finished Drain after ${(
+        (Date.now() - profileStartTime) /
+        1000
+      ).toFixed(2)}s`);
     });
 
     Logger.verbose('BanImporter', 1, 'Getting deleted bans...');
