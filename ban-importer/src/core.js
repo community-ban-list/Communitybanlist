@@ -7,9 +7,8 @@ import { HOST } from 'scbl-lib/config';
 
 const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
 const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 10;
-const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT =
-  process.env.UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT || 300000;
-const UPDATE_STEAM_USER_INFO_BATCH_RETRIES = process.env.UPDATE_STEAM_USER_INFO_BATCH_RETRIES || 3;
+const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 300000;
+const UPDATE_STEAM_USER_INFO_BATCH_RETRIES = 3;
 
 const DISCORD_ALERT_CAP = 50;
 
@@ -59,10 +58,13 @@ export default class Core {
       let numAttempts = 0;
       while (!data && numAttempts < UPDATE_STEAM_USER_INFO_BATCH_RETRIES) {
         try {
-          const { myData } = await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
-            steamids: batch.map((user) => user.id).join(',')
-          });
+          const { myData } = await withTimeout(
+            await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
+              steamids: batch.map((user) => user.id).join(',')
+            })
+          );
           data = myData;
+          numAttempts = 50;
         } catch (err) {
           if (err.message === 'timeout') {
             Logger.verbose(
@@ -79,9 +81,12 @@ export default class Core {
               1,
               `Failed to update batch of ${batch.length} Steam users: ${batch
                 .map((user) => user.id)
-                .join(',')}`,
+                .join(',')} HTTP Response : ${err.response?.status}`,
               err
             );
+            if (err.response?.status === 429) {
+              process.exit(1);
+            }
           }
         }
       }
