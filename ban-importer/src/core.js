@@ -65,6 +65,7 @@ export default class Core {
           );
           data = myData;
           numAttempts = 50;
+          Logger.verbose('Core', 1, `DEBUG: ${JSON.stringify(myData)}`, err);
         } catch (err) {
           if (err.message === 'timeout') {
             Logger.verbose(
@@ -85,7 +86,7 @@ export default class Core {
               err
             );
             if (err.response?.status === 429) {
-              process.exit(1);
+              throw err;
             }
           }
         }
