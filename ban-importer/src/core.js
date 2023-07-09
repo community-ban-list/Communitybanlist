@@ -7,8 +7,26 @@ import { HOST } from 'scbl-lib/config';
 
 const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
 const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 10;
+const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT =
+  process.env.UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT || 300000;
+const UPDATE_STEAM_USER_INFO_BATCH_RETRIES = process.env.UPDATE_STEAM_USER_INFO_BATCH_RETRIES || 3;
 
 const DISCORD_ALERT_CAP = 50;
+
+async function withTimeout(promise) {
+  const myError = new Error(`timeout`);
+  Error.captureStackTrace(myError);
+  const timeout = new Promise(function timeoutClosure1(resolve, reject) {
+    setTimeout(
+      function timeoutClosure2() {
+        reject(myError);
+      }.bind(null, myError),
+      UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT
+    );
+  });
+
+  return Promise.race([promise, timeout]);
+}
 
 export default class Core {
   static async updateSteamUserInfo() {
@@ -37,32 +55,60 @@ export default class Core {
         1,
         `Updating batch of ${batch.length} Steam users (${users.length} remaining)...`
       );
-
-      try {
-        const { data } = await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
-          steamids: batch.map((user) => user.id).join(',')
-        });
-        Logger.verbose(
-          'Core',
-          1,
-          `Got Steam users... ${JSON.stringify(data)}`
-        );
-
-        for (const user of data.response.players) {
-          await SteamUser.update(
-            {
-              name: user.personaname,
-              profileURL: user.profileurl,
-              avatar: user.avatar,
-              avatarMedium: user.avatarmedium,
-              avatarFull: user.avatarfull,
-              lastRefreshedInfo: Date.now()
-            },
-            { where: { id: user.steamid } }
-          );
+      let data = null;
+      let numAttempts = 0;
+      while (!data && numAttempts < UPDATE_STEAM_USER_INFO_BATCH_RETRIES) {
+        try {
+          const { myData } = await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
+            steamids: batch.map((user) => user.id).join(',')
+          });
+          data = myData;
+        } catch (err) {
+          if (err.message === 'timeout') {
+            Logger.verbose(
+              'Core',
+              1,
+              `Failed to update batch of ${batch.length} Steam users. Retrying : `,
+              err
+            );
+            numAttempts++;
+            continue;
+          } else {
+            Logger.verbose(
+              'Core',
+              1,
+              `Failed to update batch of ${batch.length} Steam users: ${batch
+                .map((user) => user.id)
+                .join(',')}`,
+              err
+            );
+          }
         }
-      } catch (err) {
-        Logger.verbose('Core', 1, `Failed to update batch of ${batch.length} Steam users: `, err);
+      }
+
+      for (const user of data?.response?.players) {
+        try {
+          withTimeout(
+            await SteamUser.update(
+              {
+                name: user.personaname,
+                profileURL: user.profileurl,
+                avatar: user.avatar,
+                avatarMedium: user.avatarmedium,
+                avatarFull: user.avatarfull,
+                lastRefreshedInfo: Date.now()
+              },
+              { where: { id: user.steamid } }
+            )
+          );
+        } catch (err) {
+          if (err.message === 'timeout') {
+            Logger.verbose('Core', 1, `Failed to update Steam user: `, err);
+            continue;
+          } else {
+            Logger.verbose('Core', 1, `Failed to update Steam user: `, err);
+          }
+        }
       }
     }
 
