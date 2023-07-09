@@ -73,8 +73,7 @@ export default class Core {
             Logger.verbose(
               'Core',
               1,
-              `Failed to update batch of ${batch.length} Steam users. Retrying : `,
-              err
+              `Failed to update batch of ${batch.length} Steam users. Retrying due to ${err.message}`
             );
             numAttempts++;
             continue;
