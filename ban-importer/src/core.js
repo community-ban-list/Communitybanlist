@@ -88,7 +88,7 @@ export default class Core {
 
       for (const user of data?.response?.players) {
         try {
-          withTimeout(
+          await withTimeout(
             await SteamUser.update(
               {
                 name: user.personaname,
@@ -102,12 +102,8 @@ export default class Core {
             )
           );
         } catch (err) {
-          if (err.message === 'timeout') {
-            Logger.verbose('Core', 1, `Failed to update Steam user: `, err);
-            continue;
-          } else {
-            Logger.verbose('Core', 1, `Failed to update Steam user: `, err);
-          }
+          Logger.verbose('Core', 1, `Failed to update Steam user: `, err);
+          continue;
         }
       }
     }
@@ -211,7 +207,7 @@ export default class Core {
     SET @Dt = NOW();
     `);
 
-    //Leave this at RANK() because that way we can actually count how many ppl were on ranks before this one. 
+    //Leave this at RANK() because that way we can actually count how many ppl were on ranks before this one.
     //DENSE_RANK() fucks counting up when browsing ranks
     await sequelize.query(
       `  
