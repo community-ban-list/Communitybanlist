@@ -58,12 +58,12 @@ export default class Core {
       let numAttempts = 0;
       while (!data && numAttempts < UPDATE_STEAM_USER_INFO_BATCH_RETRIES) {
         try {
-          const { myData } = await withTimeout(
+          const myData = await withTimeout(
             await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
               steamids: batch.map((user) => user.id).join(',')
             })
           );
-          data = myData;
+          data = myData.data;
           numAttempts = 50;
           Logger.verbose('Core', 1, `DEBUG: ${JSON.stringify(myData)}`);
         } catch (err) {
