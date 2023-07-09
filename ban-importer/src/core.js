@@ -68,7 +68,6 @@ export default class Core {
             doSleep(10000)
           );
           data = myData.data;
-          numAttempts = 50;
         } catch (err) {
           if (err.message === 'timeout') {
             Logger.verbose(
@@ -94,8 +93,19 @@ export default class Core {
           }
         }
       }
+      if (!data) {
+        Logger.verbose(
+          'Core',
+          1,
+          `Failed to update batch of ${batch.length} Steam users: ran out of retries. ${batch
+            .map((user) => user.id)
+            .join(',')} HTTP Response : ${err.response?.status}`,
+          err
+        );
+        continue;
+      }
 
-      for (const user of data?.response?.players) {
+      for (const user of data.response.players) {
         try {
           await withTimeout(
             await SteamUser.update(
