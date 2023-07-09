@@ -7,7 +7,7 @@ import { HOST } from 'scbl-lib/config';
 
 const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
 const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 10;
-const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 300000;
+const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 3000;
 const UPDATE_STEAM_USER_INFO_BATCH_RETRIES = 3;
 
 const DISCORD_ALERT_CAP = 50;
@@ -25,6 +25,9 @@ async function withTimeout(promise) {
   });
 
   return Promise.race([promise, timeout]);
+}
+async function doSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export default class Core {
@@ -59,9 +62,10 @@ export default class Core {
       while (!data && numAttempts < UPDATE_STEAM_USER_INFO_BATCH_RETRIES) {
         try {
           const myData = await withTimeout(
-            await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
+            /*await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
               steamids: batch.map((user) => user.id).join(',')
-            })
+            })//*/
+            doSleep(10000)
           );
           data = myData.data;
           numAttempts = 50;
@@ -85,7 +89,7 @@ export default class Core {
               err
             );
             if (err.response?.status === 429) {
-              throw err;
+              doSleep(300000 / 200);
             }
           }
         }
