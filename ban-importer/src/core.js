@@ -65,7 +65,6 @@ export default class Core {
           );
           data = myData.data;
           numAttempts = 50;
-          Logger.verbose('Core', 1, `DEBUG: ${JSON.stringify(myData)}`);
         } catch (err) {
           if (err.message === 'timeout') {
             Logger.verbose(
