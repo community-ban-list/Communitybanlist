@@ -99,8 +99,7 @@ export default class Core {
           1,
           `Failed to update batch of ${batch.length} Steam users: ran out of retries. ${batch
             .map((user) => user.id)
-            .join(',')} HTTP Response : ${err.response?.status}`,
-          err
+            .join(',')}`
         );
         continue;
       }
