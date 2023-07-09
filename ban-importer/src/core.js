@@ -82,11 +82,11 @@ export default class Core {
               1,
               `Failed to update batch of ${batch.length} Steam users: ${batch
                 .map((user) => user.id)
-                .join(',')} HTTP Response : ${err.response?.status}`,
+                .join(',')} Retrying due to ${err.message}`,
               err.message
             );
             numAttempts++;
-            await doSleep(300000 / 200);
+            await doSleep(10000);
             continue;
           }
         }
