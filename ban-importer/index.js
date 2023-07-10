@@ -20,7 +20,7 @@ async function main() {
   if (TASKS_TO_COMPLETE.IMPORT_BANS) {
     const importer = new BanImporter();
     await importer.importBans();
-  }
+  } //*/
 
   if (TASKS_TO_COMPLETE.UPDATE_STEAM_USER_INFO) await Core.updateSteamUserInfo();
   if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_POINTS) await Core.updateReputationPoints();

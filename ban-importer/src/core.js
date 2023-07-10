@@ -7,8 +7,28 @@ import { HOST } from 'scbl-lib/config';
 
 const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
 const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 10;
+const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 30000;
+const UPDATE_STEAM_USER_INFO_BATCH_RETRIES = 3;
 
 const DISCORD_ALERT_CAP = 50;
+
+async function withTimeout(promise) {
+  const myError = new Error(`timeout`);
+  Error.captureStackTrace(myError);
+  const timeout = new Promise(function timeoutClosure1(resolve, reject) {
+    setTimeout(
+      function timeoutClosure2() {
+        reject(myError);
+      }.bind(null, myError),
+      UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT
+    );
+  });
+
+  return Promise.race([promise, timeout]);
+}
+async function doSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export default class Core {
   static async updateSteamUserInfo() {
@@ -37,27 +57,70 @@ export default class Core {
         1,
         `Updating batch of ${batch.length} Steam users (${users.length} remaining)...`
       );
-
-      try {
-        const { data } = await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
-          steamids: batch.map((user) => user.id).join(',')
-        });
-
-        for (const user of data.response.players) {
-          await SteamUser.update(
-            {
-              name: user.personaname,
-              profileURL: user.profileurl,
-              avatar: user.avatar,
-              avatarMedium: user.avatarmedium,
-              avatarFull: user.avatarfull,
-              lastRefreshedInfo: Date.now()
-            },
-            { where: { id: user.steamid } }
+      let data = null;
+      let numAttempts = 0;
+      while (!data && numAttempts < UPDATE_STEAM_USER_INFO_BATCH_RETRIES) {
+        try {
+          const myData = await withTimeout(
+            await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
+              steamids: batch.map((user) => user.id).join(',')
+            }) //*/
           );
+          data = myData.data;
+        } catch (err) {
+          if (err.message === 'timeout') {
+            Logger.verbose(
+              'Core',
+              1,
+              `Failed to update batch of ${batch.length} Steam users. Retrying due to ${err.message}`
+            );
+            numAttempts++;
+            continue;
+          } else {
+            Logger.verbose(
+              'Core',
+              1,
+              `Failed to update batch of ${batch.length} Steam users: ${batch
+                .map((user) => user.id)
+                .join(',')} Retrying due to ${err.message}`,
+              err.message
+            );
+            numAttempts++;
+            await doSleep(10000);
+            continue;
+          }
         }
-      } catch (err) {
-        Logger.verbose('Core', 1, `Failed to update batch of ${batch.length} Steam users: `, err);
+      }
+      if (!data) {
+        Logger.verbose(
+          'Core',
+          1,
+          `Failed to update batch of ${batch.length} Steam users: ran out of retries. ${batch
+            .map((user) => user.id)
+            .join(',')}`
+        );
+        continue;
+      }
+
+      for (const user of data.response.players) {
+        try {
+          await withTimeout(
+            await SteamUser.update(
+              {
+                name: user.personaname,
+                profileURL: user.profileurl,
+                avatar: user.avatar,
+                avatarMedium: user.avatarmedium,
+                avatarFull: user.avatarfull,
+                lastRefreshedInfo: Date.now()
+              },
+              { where: { id: user.steamid } }
+            )
+          );
+        } catch (err) {
+          Logger.verbose('Core', 1, `Failed to update Steam user: `, err);
+          continue;
+        }
       }
     }
 
@@ -156,16 +219,25 @@ export default class Core {
   static async updateReputationRank() {
     Logger.verbose('Core', 1, 'Updating reputation rank of Steam users...');
     const profileStartTime = Date.now();
+    await sequelize.query(`
+    SET @Dt = NOW();
+    `);
+
+    //Leave this at RANK() because that way we can actually count how many ppl were on ranks before this one.
+    //DENSE_RANK() fucks counting up when browsing ranks
+    await sequelize.query(
+      `  
+      CREATE TEMPORARY TABLE Temp_RankedSteamUsers
+        SELECT id, RANK() OVER (ORDER BY reputationPoints DESC) AS reputationRank
+      FROM SteamUsers;
+      `
+    );
     await sequelize.query(
       `
-        UPDATE SteamUsers su
-        LEFT JOIN (
-          SELECT id, RANK() OVER (ORDER BY reputationPoints DESC) AS "reputationRank"
-          FROM SteamUsers
-        ) rr ON su.id = rr.id
-        SET 
-            su.reputationRank = rr.reputationRank,
-            lastRefreshedReputationRank = NOW();
+      UPDATE SteamUsers su
+      JOIN Temp_RankedSteamUsers rr ON su.id = rr.id
+      SET su.reputationRank = rr.reputationRank,
+          su.lastRefreshedReputationRank = @Dt;
       `
     );
     Logger.verbose(
@@ -349,5 +421,51 @@ export default class Core {
         err
       );
     }
+  }
+
+  //https://stackoverflow.com/a/68396354
+  // Implements promise.race
+  static async race(promises) {
+    // Create a promise that resolves as soon as
+    // any of the promises passed in resolve or reject.
+    const raceResultPromise = new Promise((resolve, reject) => {
+      // Keep track of whether we've heard back from any promise yet.
+      let resolved = false;
+
+      // Protect the resolve call so that only the first
+      // promise can resolve the race.
+      const resolver = (promisedVal) => {
+        if (resolved) {
+          return;
+        }
+        resolved = true;
+
+        resolve(promisedVal);
+      };
+
+      // Protect the rejects too because they can end the race.
+      const rejector = (promisedErr) => {
+        if (resolved) {
+          return;
+        }
+        resolved = true;
+
+        reject(promisedErr);
+      };
+
+      // Place the promises in the race, each can
+      // call the resolver, but the resolver only
+      // allows the first to win.
+      promises.forEach(async (promise) => {
+        try {
+          const promisedVal = await promise;
+          resolver(promisedVal);
+        } catch (e) {
+          rejector(e);
+        }
+      });
+    });
+
+    return raceResultPromise;
   }
 }
