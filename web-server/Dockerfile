@@ -25,4 +25,4 @@ RUN yarn build-web-server
 EXPOSE 80
 
 # Run service
-CMD [ "pm2-runtime", "web-server/index.js", "--name CBL Web Service" ]
+CMD [ "pm2-runtime", "web-server/index.js", "--name "CBL Web Service"" ]
