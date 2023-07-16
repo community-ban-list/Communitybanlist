@@ -6,7 +6,7 @@ import { createDiscordWebhookMessage, Logger } from 'scbl-lib/utils';
 import { HOST } from 'scbl-lib/config';
 
 const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
-const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 20;
+const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 100;
 const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 5000;
 const UPDATE_STEAM_USER_INFO_BATCH_RETRIES = 3;
 
@@ -87,7 +87,7 @@ export default class Core {
               err.message
             );
             numAttempts++;
-            await doSleep(10000);
+            await doSleep(5000);
             continue;
           }
         }
@@ -103,7 +103,13 @@ export default class Core {
         continue;
       }
 
-      Logger.verbose('Core', 1, `Done fetching SteamUsers. Updating DB ${data.response.players}`);
+      Logger.verbose(
+        'Core',
+        1,
+        `Done fetching SteamUsers. Updating DB ${data.response.players
+          .map((user) => user.id)
+          .join(',')}`
+      );
       for (const user of data.response.players) {
         try {
           await withTimeout(
