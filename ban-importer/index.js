@@ -15,6 +15,7 @@ const TASKS_TO_COMPLETE = {
 };
 
 async function main() {
+  const profileStartTime = Date.now();
   await connect();
 
   if (TASKS_TO_COMPLETE.IMPORT_BANS) {
@@ -29,11 +30,16 @@ async function main() {
   if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS) await Core.exportExportBans();
 
   await disconnect();
+  console.log(
+    `Finished All Tasks. Complete CBL run Took ${((Date.now() - profileStartTime) / 1000).toFixed(
+      2
+    )}s`
+  );
 }
 
 main()
   .then(() => {
-    console.log('Done!');
+    console.log(`Done!`);
     process.exit(0);
   })
   .catch((error) => {
