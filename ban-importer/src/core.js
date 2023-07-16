@@ -56,9 +56,7 @@ export default class Core {
       Logger.verbose(
         'Core',
         1,
-        `Updating batch of ${batch.length} Steam users (${users.length} remaining)... ${batch
-          .map((user) => user.id)
-          .join(',')}`
+        `Updating batch of ${batch.length} Steam users (${users.length} remaining)...`
       );
       let data = null;
       let numAttempts = 0;
