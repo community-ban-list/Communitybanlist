@@ -65,7 +65,7 @@ export default class Core {
           const myData = await withTimeout(
             await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
               steamids: batch.map((user) => user.id).join(',')
-            }) //* /
+            })
           );
           data = myData.data;
         } catch (err) {
@@ -81,10 +81,8 @@ export default class Core {
             Logger.verbose(
               'Core',
               1,
-              `Failed to update batch of ${batch.length} Steam users: ${batch
-                .map((user) => user.id)
-                .join(',')} Retrying due to ${err.message}`,
-              err.message
+              `Failed to update batch of ${batch.length} Steam users due to Error: ${err.message}`,
+              err
             );
             numAttempts++;
             await doSleep(5000);
