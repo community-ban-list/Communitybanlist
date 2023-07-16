@@ -52,6 +52,7 @@ export default class Core {
     while (users.length > 0) {
       const batch = users.splice(0, Math.min(UPDATE_STEAM_USER_INFO_BATCH_SIZE, users.length));
 
+      // WARNING!!: This is causing failures. Needs research on why.
       Logger.verbose(
         'Core',
         1,
@@ -64,7 +65,7 @@ export default class Core {
           const myData = await withTimeout(
             await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
               steamids: batch.map((user) => user.id).join(',')
-            }) //*/
+            }) //* /
           );
           data = myData.data;
         } catch (err) {
@@ -223,8 +224,8 @@ export default class Core {
     SET @Dt = NOW();
     `);
 
-    //Leave this at RANK() because that way we can actually count how many ppl were on ranks before this one.
-    //DENSE_RANK() fucks counting up when browsing ranks
+    // Leave this at RANK() because that way we can actually count how many ppl were on ranks before this one.
+    // DENSE_RANK() fucks counting up when browsing ranks
     await sequelize.query(
       `  
       CREATE TEMPORARY TABLE Temp_RankedSteamUsers
@@ -423,7 +424,7 @@ export default class Core {
     }
   }
 
-  //https://stackoverflow.com/a/68396354
+  // https://stackoverflow.com/a/68396354
   // Implements promise.race
   static async race(promises) {
     // Create a promise that resolves as soon as
