@@ -106,9 +106,7 @@ export default class Core {
       Logger.verbose(
         'Core',
         1,
-        `Done fetching SteamUsers. Updating DB ${data.response.players
-          .map((user) => user.id)
-          .join(',')}`
+        `Done fetching SteamUsers. Updating DB ${JSON.stringify(data.response.players)}`
       );
       for (const user of data.response.players) {
         try {
