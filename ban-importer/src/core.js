@@ -14,18 +14,13 @@ const DISCORD_ALERT_CAP = 50;
 
 async function withTimeout(promise) {
   const myError = new Error(`timeout`);
-  Error.captureStackTrace(myError);
   const timeout = new Promise(function timeoutClosure1(resolve, reject) {
-    setTimeout(
-      function timeoutClosure2() {
-        reject(myError);
-      }.bind(null, myError),
-      UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT
-    );
+    setTimeout(reject(myError), UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT);
   });
 
-  return Promise.race([promise, timeout]);
+  return Promise.race([promise, timeout, doSleep(UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT + 50)]);
 }
+
 async function doSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
