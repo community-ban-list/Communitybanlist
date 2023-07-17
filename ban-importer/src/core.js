@@ -18,11 +18,15 @@ async function withTimeout(promise) {
     setTimeout(reject(myError), UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT);
   });
 
-  return Promise.race([promise, timeout, doSleep(UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT + 50)]);
+  return Promise.race([promise, timeout, doTimeout(UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT + 50)]);
 }
 
 async function doSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function doTimeout(ms) {
+  return new Promise((resolve, reject) => setTimeout(reject, ms));
 }
 
 export default class Core {
