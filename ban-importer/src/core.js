@@ -53,14 +53,15 @@ export default class Core {
       const batch = users.splice(0, Math.min(UPDATE_STEAM_USER_INFO_BATCH_SIZE, users.length));
 
       // WARNING!!: This is causing failures. Needs research on why.
-      Logger.verbose(
-        'Core',
-        1,
-        `Updating batch of ${batch.length} Steam users (${users.length} remaining)...`
-      );
+
       let data = null;
       let numAttempts = 0;
       while (!data && numAttempts < UPDATE_STEAM_USER_INFO_BATCH_RETRIES) {
+        Logger.verbose(
+          'Core',
+          1,
+          `Updating batch of ${batch.length} Steam users (${users.length} remaining)...`
+        );
         try {
           const myData = await withTimeout(
             await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
