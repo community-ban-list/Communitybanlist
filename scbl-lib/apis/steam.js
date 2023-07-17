@@ -13,13 +13,16 @@ const makeRequest = new Bottleneck({
   reservoirRefreshInterval: 300000,
   minTime: 1500 //300s per 200 requests as a rule of thumb to stop hitting burst rate limit on Steam
 }).wrap(async (method, url, params, data = {}) => {
-  return await axios({
+  console.log('starting steam axios request');
+  const retVar = await axios({
     method: method,
     timeout: 5000,
     url: 'http://api.steampowered.com/' + url,
     params: { ...params, key: STEAM_API_KEY },
     data
   });
+  console.log('done with steam axios request');
+  return retVar;
 });
 
 export default async function (method, url, params, data = {}, priority = 5) {
