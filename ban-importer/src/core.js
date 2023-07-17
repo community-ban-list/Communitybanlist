@@ -6,7 +6,7 @@ import { createDiscordWebhookMessage, Logger } from 'scbl-lib/utils';
 import { HOST } from 'scbl-lib/config';
 
 const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
-const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 100;
+const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 50;
 const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 5000;
 const UPDATE_STEAM_USER_INFO_BATCH_RETRIES = 3;
 
