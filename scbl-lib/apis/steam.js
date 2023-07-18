@@ -1,5 +1,6 @@
 import axios from 'axios';
 import Bottleneck from 'bottleneck';
+import { AbortSignal } from 'node-abort-controller';
 
 import { STEAM_API_KEY } from '../config.js';
 
