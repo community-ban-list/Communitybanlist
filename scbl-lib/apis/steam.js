@@ -7,12 +7,8 @@ if (!STEAM_API_KEY) throw new Error('Environmental variable STEAM_API_KEY must b
 const STEAM_API_RESERVIOR = 200;
 const STEAM_API_RETRIES = 3;
 
-function newAbortSignal(timeoutMs) {
-  const abortController = new AbortController();
-  setTimeout(() => abortController.abort(), timeoutMs || 0);
-
-  return abortController.signal;
-}
+const CancelToken = axios.CancelToken;
+const source = CancelToken.source();
 
 const makeRequest = new Bottleneck({
   reservoir: STEAM_API_RESERVIOR,
@@ -24,10 +20,16 @@ const makeRequest = new Bottleneck({
   const retVar = await axios({
     method: method,
     timeout: 4000,
-    signal: newAbortSignal(5000),
+    cancelToken: source.token,
     url: 'http://api.steampowered.com/' + url,
     params: { ...params, key: STEAM_API_KEY },
     data
+  }).catch(function (thrown) {
+    if (axios.isCancel(thrown)) {
+      console.log('Request canceled', thrown.message);
+    } else {
+      // handle error
+    }
   });
   console.log('done with steam axios request');
   return retVar;
