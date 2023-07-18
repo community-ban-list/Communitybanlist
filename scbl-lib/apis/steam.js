@@ -16,7 +16,8 @@ const makeRequest = new Bottleneck({
   console.log('starting steam axios request');
   const retVar = await axios({
     method: method,
-    timeout: 5000,
+    timeout: 4000,
+    signal: AbortSignal.timeout(5000),
     url: 'http://api.steampowered.com/' + url,
     params: { ...params, key: STEAM_API_KEY },
     data
