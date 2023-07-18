@@ -18,7 +18,6 @@ const makeRequest = new Bottleneck({
     method: method,
     timeout: 4000,
     signal: AbortSignal.timeout(5000),
-    cancelToken: source.token,
     url: 'http://api.steampowered.com/' + url,
     params: { ...params, key: STEAM_API_KEY },
     data
