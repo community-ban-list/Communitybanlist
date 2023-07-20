@@ -31,7 +31,7 @@ async function doTimeout(ms) {
 
 export default class Core {
   static async updateSteamUserInfo() {
-    Logger.verbose('Core', 1, 'Fetching Steam users to update...');
+    Logger.verbose('Core', 2, 'Fetching Steam users to update...');
     const profileStartTime = Date.now();
     const users = await SteamUser.findAll({
       attributes: ['id'],
@@ -252,7 +252,7 @@ export default class Core {
   }
 
   static async updateReputationRank() {
-    Logger.verbose('Core', 1, 'Updating reputation rank of Steam users...');
+    Logger.verbose('Core', 2, 'Updating reputation rank of Steam users...');
     const profileStartTime = Date.now();
     await sequelize.query(`
     SET @Dt = NOW();
@@ -296,7 +296,7 @@ export default class Core {
     });
     Logger.verbose(
       'Core',
-      1,
+      2,
       `Step Done: Getting Bans that need exporting after ${(
         (Date.now() - profileStartTime) /
         1000
@@ -316,7 +316,7 @@ export default class Core {
     }
     Logger.verbose(
       'Core',
-      1,
+      2,
       `Step Done: Tallying number of Bans after ${((Date.now() - profileStartTime) / 1000).toFixed(
         2
       )}s`
@@ -351,7 +351,7 @@ export default class Core {
       } catch (err) {
         Logger.verbose(
           'Core',
-          2,
+          1,
           `Failed to ${
             exportBan.status === 'TO_BE_CREATED' ? 'create' : 'delete'
           } export ban (ID: ${exportBan.id}): `,

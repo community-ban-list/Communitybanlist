@@ -123,12 +123,12 @@ export default class BanImporter {
       }
     }
 
-    Logger.verbose('BanImporter', 1, 'Waiting for bans to be saved...');
+    Logger.verbose('BanImporter', 2, 'Waiting for bans to be saved...');
     await this.saveBanQueue.drain(() => {
       console.log(`Finished Drain after ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`);
     });
 
-    Logger.verbose('BanImporter', 1, 'Getting deleted bans...');
+    Logger.verbose('BanImporter', 2, 'Getting deleted bans...');
     const deletedBans = await Ban.findAll({
       attributes: ['steamUser'],
       where: {
@@ -138,7 +138,7 @@ export default class BanImporter {
     });
     Logger.verbose('BanImporter', 1, `Got ${deletedBans.length} deleted bans`);
 
-    Logger.verbose('BanImporter', 1, 'Queuing Steams for update from deleted bans...');
+    Logger.verbose('BanImporter', 2, 'Queuing Steams for update from deleted bans...');
     await SteamUser.update(
       {
         lastRefreshedInfo: null,
@@ -155,7 +155,7 @@ export default class BanImporter {
       }
     );
 
-    Logger.verbose('BanImporter', 1, 'Deleting deleted bans...');
+    Logger.verbose('BanImporter', 2, 'Deleting deleted bans...');
     await Ban.destroy({
       where: {
         id: { [Op.notIn]: this.importedBanIDs },
