@@ -349,20 +349,21 @@ export default class Core {
         if (exportBan.status === 'TO_BE_CREATED') await Core.createExportBan(exportBan);
         else await Core.deleteExportBan(exportBan);
       } catch (err) {
-        await Logger.verbose(
-          'Core',
-          1,
-          `Failed to ${
-            exportBan.status === 'TO_BE_CREATED' ? 'create' : 'delete'
-          } export ban (ID: ${exportBan.id}): `,
-          err
-        );
         if (err.response.status === 404 && exportBan.status !== 'TO_BE_CREATED') {
           await exportBan.destroy();
           await Logger.verbose(
             'Core',
             1,
-            `Removed export ban (ID: ${exportBan.id}) from Lists instead.`
+            `Removed export ban (ID: ${exportBan.id}) from Lists due to error 404 during deletion.`
+          );
+        } else {
+          await Logger.verbose(
+            'Core',
+            1,
+            `Failed to ${
+              exportBan.status === 'TO_BE_CREATED' ? 'create' : 'delete'
+            } export ban (ID: ${exportBan.id}): `,
+            err
           );
         }
       }
