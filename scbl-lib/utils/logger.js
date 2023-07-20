@@ -1,17 +1,23 @@
 import chalk from 'chalk';
+import { createDiscordWebhookMessage } from './create-discord-webhook-message.js';
 
 class Logger {
   constructor() {
     this.verboseness = {};
     this.colors = {};
+    this.discordHook = createDiscordWebhookMessage(
+      `https://discord.com/api/webhooks/1131519627608993843/UtaS_uOs7lCLQNE7r9--QVcinHqwKpy5g11gKdvDz_k02uUKMl0Axx4TAotChe-VjfUw`
+    )[0];
   }
 
   verbose(module, verboseness, message, ...extras) {
     let colorFunc = chalk[this.colors[module] || 'white'];
     if (typeof colorFunc !== 'function') colorFunc = chalk.white;
 
-    if ((this.verboseness[module] || 1) >= verboseness)
+    if ((this.verboseness[module] || 1) >= verboseness) {
       console.log(`[${colorFunc(module)}][${verboseness}] ${message}`, ...extras);
+      this.discordHook.send(`[${module}][${verboseness}] ${message}`);
+    }
   }
 
   setVerboseness(module, verboseness) {
