@@ -358,7 +358,7 @@ export default class Core {
           err
         );
         if (err.response.status === 404 && exportBan.status !== 'TO_BE_CREATED') {
-          await this.deleteExportBan(exportBan);
+          await exportBan.destroy();
           Logger.verbose('Core', 1, `Removed export ban (ID: ${exportBan.id}) from Lists instead.`);
         }
       }
