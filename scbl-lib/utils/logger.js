@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { createDiscordWebhookMessage } from './create-discord-webhook-message.js';
+import createDiscordWebhookMessage from './create-discord-webhook-message.js';
 
 class Logger {
   constructor() {
