@@ -140,7 +140,7 @@ export default class Core {
   static async updateReputationPoints() {
     Logger.verbose('Core', 1, 'Updating reputation points of outdated Steam users...');
     const profileStartTime = Date.now();
-    await sequelize.query(
+    const retVar = await sequelize.query(
       `
         UPDATE SteamUsers SU
         LEFT JOIN (
@@ -210,15 +210,15 @@ export default class Core {
           SU.reputationPointsMonthChange = IFNULL(PPBLC.points, 0) - IFNULL(PPBLMB.points, 0),
           SU.lastRefreshedReputationPoints = NOW()
         WHERE SU.lastRefreshedReputationPoints IS NULL
-      `
+      `,
+      { type: sequelize.QueryTypes.BULKUPDATE }
     );
     Logger.verbose(
       'Core',
       1,
-      `Finished Updating reputation points of outdated Steam users. Took ${(
-        (Date.now() - profileStartTime) /
-        1000
-      ).toFixed(2)}s`
+      `Finished Updating reputation points of ${JSON.stringify(
+        retVar
+      )} outdated Steam users. Took ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
     );
   }
 

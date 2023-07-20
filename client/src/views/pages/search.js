@@ -359,7 +359,7 @@ export default function (props) {
                     <br />
                     The ban information contained on this page has been imported from the ban lists
                     of our partner organisations. The Community Ban List has <strong>
-                      not
+                      NOT
                     </strong>{' '}
                     modified any of this information, other than where explicitly stated, or made
                     any judgement of the validity of the bans. For more information on how to get
