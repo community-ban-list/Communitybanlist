@@ -7,7 +7,7 @@ const UPDATE_BATCH_SIZE = process.env.UPDATE_EXPORT_BANS_BATCH_SIZE || 100;
 
 export default class ExportBanManager {
   static async updateExportBans() {
-    Logger.verbose('ExportBanManager', 1, 'Fetching Steam users to update...');
+    Logger.verbose('ExportBanManager', 2, 'Fetching Steam users to update...');
     const profileStartTime = Date.now();
     const users = await SteamUser.findAll({ attributes: ['id'] });
     Logger.verbose(

@@ -1,4 +1,5 @@
 import { connect, disconnect } from 'scbl-lib/db';
+import { Logger } from 'scbl-lib/utils';
 
 import Core from './src/core.js';
 
@@ -31,6 +32,13 @@ async function main() {
   if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS) await Core.exportExportBans();
 
   await disconnect();
+  Logger.verbose(
+    'Core',
+    1,
+    `Finished All Tasks. Complete CBL run Took ${((Date.now() - profileStartTime) / 1000).toFixed(
+      2
+    )}s`
+  );
   console.log(
     `Finished All Tasks. Complete CBL run Took ${((Date.now() - profileStartTime) / 1000).toFixed(
       2
