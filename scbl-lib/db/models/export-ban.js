@@ -12,7 +12,7 @@ class ExportBan extends Sequelize.Model {
   async createBattlemetricsBan() {
     if (!this.ExportBanList) await this.getExportBanList();
 
-    Logger.verbose('ExportBan', 1, 'Creating Battlemetrics ban...');
+    Logger.verbose('ExportBan', 2, 'Creating Battlemetrics ban...');
     const {
       data: { data: banData }
     } = await battlemetrics(
@@ -62,7 +62,7 @@ class ExportBan extends Sequelize.Model {
   async deleteBattlemetricsBan() {
     if (!this.exportBanList) await this.getExportBanList();
 
-    Logger.verbose('ExportBan', 1, 'Deleting Battlemetrics ban...');
+    Logger.verbose('ExportBan', 2, 'Deleting Battlemetrics ban...');
     await battlemetrics('delete', `bans/${this.battlemetricsID}`);
 
     this.battlemetricsID = null;
