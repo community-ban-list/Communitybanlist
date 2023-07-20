@@ -198,7 +198,7 @@ export default class ExportBanManager {
       );
       Logger.verbose(
         'ExportBanManager',
-        1,
+        2,
         `Finished Updating batch. (${users.length} remaining) Overall batch time: ${(
           (Date.now() - currentRunTime) /
           1000

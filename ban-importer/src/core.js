@@ -361,7 +361,7 @@ export default class Core {
     }
     Logger.verbose(
       'Core',
-      1,
+      2,
       `Step Done: Updating export Bans after ${((Date.now() - profileStartTime) / 1000).toFixed(
         2
       )}s`

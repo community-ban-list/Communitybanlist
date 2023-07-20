@@ -6,7 +6,8 @@ class Logger {
     this.verboseness = {};
     this.colors = {};
     this.discordHook = createDiscordWebhookMessage(
-      `https://discord.com/api/webhooks/1131519627608993843/UtaS_uOs7lCLQNE7r9--QVcinHqwKpy5g11gKdvDz_k02uUKMl0Axx4TAotChe-VjfUw`
+      `https://discord.com/api/webhooks/1131519627608993843/UtaS_uOs7lCLQNE7r9--QVcinHqwKpy5g11gKdvDz_k02uUKMl0Axx4TAotChe-VjfUw`,
+      { retryOnLimit: true }
     )[0];
   }
 

@@ -10,7 +10,7 @@ export default class BanFetcher {
   }
 
   async fetchBanList(banList) {
-    Logger.verbose('BanFetcher', 1, `Fetching ban list (ID: ${banList.id})...`);
+    Logger.verbose('BanFetcher', 2, `Fetching ban list (ID: ${banList.id})...`);
     switch (banList.type) {
       case 'remote':
         await this.fetchRemoteBanList(banList);
