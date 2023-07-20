@@ -6,12 +6,12 @@ import BanImporter from './src/ban-importer.js';
 import ExportBanManager from './src/export-ban-manager.js';
 
 const TASKS_TO_COMPLETE = {
-  IMPORT_BANS: false,
-  UPDATE_STEAM_USER_INFO: false, // TODO: This is causing random hangs; Try ading more debug code until we can find out what causes it.
+  IMPORT_BANS: true,
+  UPDATE_STEAM_USER_INFO: true, // TODO: This is causing random hangs; Try ading more debug code until we can find out what causes it.
   UPDATE_REPUTATION_POINTS: true,
   UPDATE_REPUTATION_RANK: true,
-  UPDATE_EXPORT_BANS: false,
-  EXPORT_EXPORT_BANS: false
+  UPDATE_EXPORT_BANS: true,
+  EXPORT_EXPORT_BANS: true
 };
 
 async function main() {
