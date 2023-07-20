@@ -141,14 +141,14 @@ export default class Core {
     Logger.verbose('Core', 1, 'Clearing reputation points of orphaned Steam users...');
     const profileStartTime = Date.now();
     const affectedRows = await sequelize.query(
-      `UPDATE "BANLIST"."SteamUsers" 
+      `UPDATE "SteamUsers" 
       SET 
       "reputationPoints" = '0', "reputationPointsMonthBefore" = '0', "lastRefreshedReputationPoints" = now(), "lastRefreshedReputationRank" = now(), "lastRefreshedExport" = now() 
       WHERE 
       "id" IN (
         SELECT id FROM (
-          SELECT id FROM "BANLIST"."SteamUsers" where id NOT IN (
-            SELECT steamUser from "BANLIST"."Bans"
+          SELECT id FROM "SteamUsers" where id NOT IN (
+            SELECT steamUser from "Bans"
             )
              and reputationPoints > 0 and isSCBLUser is not null
           ) as X
