@@ -143,9 +143,9 @@ export default class Core {
     const affectedRows = await sequelize.query(
       `UPDATE SteamUsers 
       SET 
-      "reputationPoints" = '0', "reputationPointsMonthBefore" = '0', "lastRefreshedReputationPoints" = now(), "lastRefreshedReputationRank" = now(), "lastRefreshedExport" = now() 
+      reputationPoints = 0, reputationPointsMonthBefore = 0, lastRefreshedReputationPoints = now(), lastRefreshedReputationRank = now(), lastRefreshedExport = now() 
       WHERE 
-      "id" IN (
+      id IN (
         SELECT id FROM (
           SELECT id FROM SteamUsers where id NOT IN (
             SELECT steamUser from Bans
