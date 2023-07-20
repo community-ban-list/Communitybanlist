@@ -11,14 +11,14 @@ class Logger {
     )[0];
   }
 
-  verbose(module, verboseness, message, ...extras) {
+  async verbose(module, verboseness, message, ...extras) {
     let colorFunc = chalk[this.colors[module] || 'white'];
     if (typeof colorFunc !== 'function') colorFunc = chalk.white;
 
     if ((this.verboseness[module] || 2) >= verboseness)
       console.log(`[${colorFunc(module)}][${verboseness}] ${message}`, ...extras);
 
-    if (verboseness === 1) this.discordHook.send(`[${module}][${verboseness}] ${message}`);
+    if (verboseness === 1) await this.discordHook.send(`[${module}][${verboseness}] ${message}`);
   }
 
   setVerboseness(module, verboseness) {
