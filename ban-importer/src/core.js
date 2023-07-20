@@ -138,7 +138,7 @@ export default class Core {
   }
 
   static async clearOrphanedUsers() {
-    Logger.verbose('Core', 1, 'Clearing reputation points of orphaned Steam users...');
+    Logger.verbose('Core', 2, 'Clearing reputation points of orphaned Steam users...');
     const profileStartTime = Date.now();
     const affectedRows = await sequelize.query(
       `UPDATE SteamUsers 
@@ -166,7 +166,7 @@ export default class Core {
   }
 
   static async updateReputationPoints() {
-    Logger.verbose('Core', 1, 'Updating reputation points of outdated Steam users...');
+    Logger.verbose('Core', 2, 'Updating reputation points of outdated Steam users...');
     const profileStartTime = Date.now();
     const affectedRows = await sequelize.query(
       `
@@ -328,7 +328,7 @@ export default class Core {
         listChangeCount[exportBan.ExportBanList.id].count < DISCORD_ALERT_CAP;
     Logger.verbose(
       'Core',
-      1,
+      2,
       `Step Done: Marking Bans for discord alerts after ${(
         (Date.now() - profileStartTime) /
         1000
@@ -339,7 +339,7 @@ export default class Core {
     for (const exportBan of exportBans) {
       Logger.verbose(
         'Core',
-        1,
+        2,
         `${exportBan.status === 'TO_BE_CREATED' ? 'Creat' : 'Delet'}ing export ban (ID: ${
           exportBan.id
         })...`
@@ -351,7 +351,7 @@ export default class Core {
       } catch (err) {
         Logger.verbose(
           'Core',
-          1,
+          2,
           `Failed to ${
             exportBan.status === 'TO_BE_CREATED' ? 'create' : 'delete'
           } export ban (ID: ${exportBan.id}): `,

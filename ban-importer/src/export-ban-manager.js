@@ -24,7 +24,7 @@ export default class ExportBanManager {
       const batch = users.splice(0, Math.min(UPDATE_BATCH_SIZE, users.length));
       Logger.verbose(
         'ExportBanManager',
-        1,
+        2,
         `Updating batch of ${batch.length} Steam users' export bans (${
           users.length
         } remaining)... Batch time: ${((Date.now() - currentRunTime) / 1000).toFixed(2)}s`
@@ -198,8 +198,8 @@ export default class ExportBanManager {
       );
       Logger.verbose(
         'ExportBanManager',
-        2,
-        `Finished Updating batch. Overall batch time: ${(
+        1,
+        `Finished Updating batch. (${users.length} remaining) Overall batch time: ${(
           (Date.now() - currentRunTime) /
           1000
         ).toFixed(2)}s`
