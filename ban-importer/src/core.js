@@ -137,10 +137,38 @@ export default class Core {
     );
   }
 
+  static async clearOrphanedUsers() {
+    Logger.verbose('Core', 1, 'Clearing reputation points of orphaned Steam users...');
+    const profileStartTime = Date.now();
+    const affectedRows = await sequelize.query(
+      `UPDATE "BANLIST"."SteamUsers" 
+      SET 
+      "reputationPoints" = '0', "reputationPointsMonthBefore" = '0', "lastRefreshedReputationPoints" = now(), "lastRefreshedReputationRank" = now(), "lastRefreshedExport" = now() 
+      WHERE 
+      "id" IN (
+        SELECT id FROM (
+          SELECT id FROM "BANLIST"."SteamUsers" where id NOT IN (
+            SELECT steamUser from "BANLIST"."Bans"
+            )
+             and reputationPoints > 0 and isSCBLUser is not null
+          ) as X
+        )`,
+      { type: sequelize.QueryTypes.BULKUPDATE }
+    );
+    Logger.verbose(
+      'Core',
+      1,
+      `Finished Updating reputation points of ${affectedRows} orphaned Steam users. Took ${(
+        (Date.now() - profileStartTime) /
+        1000
+      ).toFixed(2)}s`
+    );
+  }
+
   static async updateReputationPoints() {
     Logger.verbose('Core', 1, 'Updating reputation points of outdated Steam users...');
     const profileStartTime = Date.now();
-    const retVar = await sequelize.query(
+    const affectedRows = await sequelize.query(
       `
         UPDATE SteamUsers SU
         LEFT JOIN (
@@ -216,9 +244,10 @@ export default class Core {
     Logger.verbose(
       'Core',
       1,
-      `Finished Updating reputation points of ${JSON.stringify(
-        retVar
-      )} outdated Steam users. Took ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
+      `Finished Updating reputation points of ${affectedRows} outdated Steam users. Took ${(
+        (Date.now() - profileStartTime) /
+        1000
+      ).toFixed(2)}s`
     );
   }
 
@@ -238,18 +267,19 @@ export default class Core {
       FROM SteamUsers;
       `
     );
-    await sequelize.query(
+    const affectedRows = await sequelize.query(
       `
       UPDATE SteamUsers su
       JOIN Temp_RankedSteamUsers rr ON su.id = rr.id
       SET su.reputationRank = rr.reputationRank,
           su.lastRefreshedReputationRank = @Dt;
-      `
+      `,
+      { type: sequelize.QueryTypes.BULKUPDATE }
     );
     Logger.verbose(
       'Core',
       1,
-      `Finished Updating reputation rank of Steam users. Took ${(
+      `Finished Updating reputation rank of ${affectedRows} Steam users. Took ${(
         (Date.now() - profileStartTime) /
         1000
       ).toFixed(2)}s`
