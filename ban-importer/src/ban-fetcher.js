@@ -27,7 +27,7 @@ export default class BanFetcher {
     // Fetch ban data.
     Logger.verbose(
       'BanFetcher',
-      1,
+      2,
       `Fetching remote ban list data for ban list (ID: ${banList.id})...`
     );
     const { data } = await axios.get(banList.source);
@@ -77,7 +77,7 @@ export default class BanFetcher {
         // Get the ban page's data.
         Logger.verbose(
           'BanFetcher',
-          1,
+          2,
           `Fetching Battlemetrics ban list data for ban list (ID: ${banList.id})...`
         );
         const { data } = await battlemetrics('get', 'bans', params);
