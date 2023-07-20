@@ -32,7 +32,7 @@ async function main() {
   if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS) await Core.exportExportBans();
 
   await disconnect();
-  Logger.verbose(
+  await Logger.verbose(
     'Core',
     1,
     `Finished All Tasks. Complete CBL run Took ${((Date.now() - profileStartTime) / 1000).toFixed(
