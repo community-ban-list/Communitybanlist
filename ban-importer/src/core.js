@@ -349,7 +349,7 @@ export default class Core {
         if (exportBan.status === 'TO_BE_CREATED') await Core.createExportBan(exportBan);
         else await Core.deleteExportBan(exportBan);
       } catch (err) {
-        Logger.verbose(
+        await Logger.verbose(
           'Core',
           1,
           `Failed to ${
@@ -359,7 +359,11 @@ export default class Core {
         );
         if (err.response.status === 404 && exportBan.status !== 'TO_BE_CREATED') {
           await exportBan.destroy();
-          Logger.verbose('Core', 1, `Removed export ban (ID: ${exportBan.id}) from Lists instead.`);
+          await Logger.verbose(
+            'Core',
+            1,
+            `Removed export ban (ID: ${exportBan.id}) from Lists instead.`
+          );
         }
       }
     }
