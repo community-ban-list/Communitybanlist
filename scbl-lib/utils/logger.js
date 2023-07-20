@@ -14,10 +14,10 @@ class Logger {
     let colorFunc = chalk[this.colors[module] || 'white'];
     if (typeof colorFunc !== 'function') colorFunc = chalk.white;
 
-    if ((this.verboseness[module] || 1) >= verboseness) {
+    if ((this.verboseness[module] || 2) >= verboseness)
       console.log(`[${colorFunc(module)}][${verboseness}] ${message}`, ...extras);
-      this.discordHook.send(`[${module}][${verboseness}] ${message}`);
-    }
+
+    if (verboseness === 1) this.discordHook.send(`[${module}][${verboseness}] ${message}`);
   }
 
   setVerboseness(module, verboseness) {

@@ -58,7 +58,7 @@ export default class Core {
       while (!data && numAttempts < UPDATE_STEAM_USER_INFO_BATCH_RETRIES) {
         Logger.verbose(
           'Core',
-          1,
+          2,
           `Updating batch of ${batch.length} Steam users (${users.length} remaining)...`
         );
         try {
@@ -103,7 +103,7 @@ export default class Core {
 
       Logger.verbose(
         'Core',
-        1,
+        2,
         `Done fetching SteamUsers. Updating DB ${data.response.players
           .map((user) => user.steamid)
           .join(',')}`

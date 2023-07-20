@@ -95,7 +95,7 @@ export default class ExportBanManager {
 
       Logger.verbose(
         'ExportBanManager',
-        1,
+        2,
         `Saving ${generatedBans.length} export bans... Batch time: ${(
           (Date.now() - currentRunTime) /
           1000
@@ -106,7 +106,7 @@ export default class ExportBanManager {
       await ExportBan.bulkCreate(generatedBans, { ignoreDuplicates: true });
       Logger.verbose(
         'ExportBanManager',
-        1,
+        2,
         `Step Create ${generatedBans.length} new bans done. Batch time: ${(
           (Date.now() - currentRunTime) /
           1000
@@ -129,7 +129,7 @@ export default class ExportBanManager {
       );
       Logger.verbose(
         'ExportBanManager',
-        1,
+        2,
         `Step Cancel deletion of bans that should still be present done. Batch time: ${(
           (Date.now() - currentRunTime) /
           1000
@@ -155,7 +155,7 @@ export default class ExportBanManager {
       );
       Logger.verbose(
         'ExportBanManager',
-        1,
+        2,
         `Step Queue existing bans to be deleted done. Batch time: ${(
           (Date.now() - currentRunTime) /
           1000
@@ -176,7 +176,7 @@ export default class ExportBanManager {
       });
       Logger.verbose(
         'ExportBanManager',
-        1,
+        2,
         `Step Delete bans that have not yet been created done. Batch time: ${(
           (Date.now() - currentRunTime) /
           1000
@@ -198,7 +198,7 @@ export default class ExportBanManager {
       );
       Logger.verbose(
         'ExportBanManager',
-        1,
+        2,
         `Finished Updating batch. Overall batch time: ${(
           (Date.now() - currentRunTime) /
           1000

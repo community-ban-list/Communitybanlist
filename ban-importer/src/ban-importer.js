@@ -23,7 +23,7 @@ export default class BanImporter {
   }
 
   async queueBan(importedBans) {
-    Logger.verbose('BanImporter', 1, `Queueing batch of ${importedBans.length} raw bans...`);
+    Logger.verbose('BanImporter', 2, `Queueing batch of ${importedBans.length} raw bans...`);
     if (importedBans.length === 0) return;
     try {
       await SteamUser.bulkCreate(
@@ -70,7 +70,7 @@ export default class BanImporter {
       if (created || ban.expired !== importedBan.expired) {
         Logger.verbose(
           'BanImporter',
-          1,
+          2,
           `Found new or updated ban (ID: ${importedBan.id}) in ban list (ID: ${importedBan.banList.id}).`
         );
         await SteamUser.update(
@@ -125,10 +125,7 @@ export default class BanImporter {
 
     Logger.verbose('BanImporter', 1, 'Waiting for bans to be saved...');
     await this.saveBanQueue.drain(() => {
-      console.log(`Finished Drain after ${(
-        (Date.now() - profileStartTime) /
-        1000
-      ).toFixed(2)}s`);
+      console.log(`Finished Drain after ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`);
     });
 
     Logger.verbose('BanImporter', 1, 'Getting deleted bans...');
