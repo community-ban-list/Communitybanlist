@@ -7,7 +7,8 @@ function convertToBarChart(minValue = 0, maxValue = Infinity, barValue) {
   const scaleFactor = (chartWidth - 1) / (maxValue - minValue);
   const barSize = Math.max(Math.ceil((barValue - minValue) * scaleFactor), 1);
   const chart = `\`\`[${'#'.repeat(barSize)}${' '.repeat(chartWidth - barSize)}] ${(
-    barValue / maxValue
+    (barValue / maxValue) *
+    100
   ).toFixed(2)}%\`\``;
 
   return chart;
