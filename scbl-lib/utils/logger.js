@@ -39,7 +39,7 @@ class Logger {
     if (!discordMessage) {
       try {
         return await this.discordHook.send(
-          `[${module}] Progress on ${message}\n${convertToBarChart(min, max, barValue)}`
+          `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
         );
       } catch (e) {
         console.log('Error sending Discord progress bar.', e);
@@ -47,7 +47,7 @@ class Logger {
     } else {
       try {
         return await discordMessage.edit(
-          `[${module}] Progress on ${message}\n${convertToBarChart(min, max, barValue)}`
+          `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
         );
       } catch (e) {
         console.log('Error sending Discord progress bar.', e);
