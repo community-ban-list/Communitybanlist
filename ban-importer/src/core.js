@@ -352,6 +352,15 @@ export default class Core {
         1000
       ).toFixed(2)}s`
     );
+    const myProgressBar = await Logger.discordProgressBar(
+      'Core',
+      `Exporting ${exportBans.length} Bans...`,
+      null,
+      0,
+      exportBans.length,
+      0
+    );
+    let currentList = 0;
 
     // Update the export bans.
     for (const exportBan of exportBans) {
@@ -385,6 +394,15 @@ export default class Core {
           );
         }
       }
+      currentList++;
+      await Logger.discordProgressBar(
+        'BanImporter',
+        `Exporting ${exportBans.length} Bans...`,
+        myProgressBar,
+        0,
+        exportBans.length,
+        currentList
+      );
     }
     Logger.verbose(
       'Core',
