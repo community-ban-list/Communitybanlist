@@ -12,8 +12,8 @@ export default class ExportBanManager {
     const users = await SteamUser.findAll({ attributes: ['id'] });
     Logger.verbose(
       'ExportBanManager',
-      1,
-      `Fetched ${users.length} Steam users to update after ${(
+      2,
+      `Fetched ${users.length} Steam users to update. Took ${(
         (Date.now() - profileStartTime) /
         1000
       ).toFixed(2)}s`

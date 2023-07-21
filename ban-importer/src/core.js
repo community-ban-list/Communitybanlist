@@ -47,7 +47,7 @@ export default class Core {
       }
     });
 
-    Logger.verbose('Core', 1, `Updating ${users.length} Steam users...`);
+    Logger.verbose('Core', 2, `Updating ${users.length} Steam users...`);
     const startingLength = users.length;
     const myProgressBar = await Logger.discordProgressBar(
       'Core',
@@ -407,7 +407,7 @@ export default class Core {
 
       // Catch broken webhooks.
       try {
-        await hook.send(message.getJSON());
+        await hook.send(null, message.getJSON().embeds);
       } catch (err) {
         Logger.verbose('Core', 1, `Failed to send Discord Webhook: ${exportBanList.name}`, err);
       }
@@ -442,7 +442,7 @@ export default class Core {
 
     // Catch broken webhooks.
     try {
-      await hook.send(message.getJSON());
+      await hook.send(null, message.getJSON().embeds);
     } catch (err) {
       Logger.verbose(
         'Core',
@@ -475,7 +475,7 @@ export default class Core {
 
     // Catch broken webhooks.
     try {
-      await hook.send(message.getJSON());
+      await hook.send(null, message.getJSON().embeds);
     } catch (err) {
       Logger.verbose(
         'Core',

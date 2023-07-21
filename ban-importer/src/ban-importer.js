@@ -110,7 +110,7 @@ export default class BanImporter {
     const profileStartTime = Date.now();
     Logger.verbose('BanImporter', 2, 'Fetching ban lists to import...');
     const banLists = await BanList.findAll();
-    Logger.verbose('BanImporter', 1, `Fetched ${banLists.length} ban lists to import.`);
+    Logger.verbose('BanImporter', 2, `Fetched ${banLists.length} ban lists to import.`);
 
     const fetcher = new BanFetcher(this.queueBan);
 
@@ -123,7 +123,7 @@ export default class BanImporter {
       banLists.length,
       0
     );
-    console.log(JSON.stringify(myProgressBar.toString(), null, 2));
+
     let currentList = 0;
     for (const banList of banLists) {
       try {
