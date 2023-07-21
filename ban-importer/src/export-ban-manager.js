@@ -19,6 +19,16 @@ export default class ExportBanManager {
       ).toFixed(2)}s`
     );
     let currentRunTime = profileStartTime;
+
+    const startingLength = users.length;
+    const myProgressBar = Logger.discordProgressBar(
+      'Core',
+      `Updating ${startingLength} ExportBans...`,
+      null,
+      0,
+      startingLength,
+      0
+    );
     while (users.length > 0) {
       currentRunTime = Date.now();
       const batch = users.splice(0, Math.min(UPDATE_BATCH_SIZE, users.length));
@@ -203,6 +213,14 @@ export default class ExportBanManager {
           (Date.now() - currentRunTime) /
           1000
         ).toFixed(2)}s`
+      );
+      Logger.discordProgressBar(
+        'Core',
+        `Updating ${startingLength} ExportBans...`,
+        myProgressBar,
+        0,
+        startingLength,
+        startingLength - users.length
       );
     }
     Logger.verbose(

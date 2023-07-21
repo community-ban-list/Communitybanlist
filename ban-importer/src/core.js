@@ -48,6 +48,16 @@ export default class Core {
     });
 
     Logger.verbose('Core', 1, `Updating ${users.length} Steam users...`);
+    const startingLength = users.length;
+    const myProgressBar = Logger.discordProgressBar(
+      'Core',
+      `Updating ${users.length} Steam users...`,
+      null,
+      0,
+      startingLength,
+      0
+    );
+
     while (users.length > 0) {
       const batch = users.splice(0, Math.min(UPDATE_STEAM_USER_INFO_BATCH_SIZE, users.length));
 
@@ -128,6 +138,14 @@ export default class Core {
           continue;
         }
       }
+      Logger.discordProgressBar(
+        'Core',
+        `Updating ${startingLength} Steam users...`,
+        myProgressBar,
+        0,
+        startingLength,
+        startingLength - users.length
+      );
     }
 
     Logger.verbose(
@@ -389,7 +407,7 @@ export default class Core {
 
       // Catch broken webhooks.
       try {
-        await hook.send(message);
+        await hook.send(message.getJSON());
       } catch (err) {
         Logger.verbose('Core', 1, `Failed to send Discord Webhook: ${exportBanList.name}`, err);
       }
@@ -424,7 +442,7 @@ export default class Core {
 
     // Catch broken webhooks.
     try {
-      await hook.send(message);
+      await hook.send(message.getJSON());
     } catch (err) {
       Logger.verbose(
         'Core',
@@ -457,7 +475,7 @@ export default class Core {
 
     // Catch broken webhooks.
     try {
-      await hook.send(message);
+      await hook.send(message.getJSON());
     } catch (err) {
       Logger.verbose(
         'Core',
