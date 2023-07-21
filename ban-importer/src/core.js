@@ -429,7 +429,7 @@ export default class Core {
       Logger.verbose(
         'Core',
         1,
-        `Failed to send Discord Webhook: ${exportBan.ExportBanList.discordWebhook} for List "${exportBan.ExportBanList.name}" (ID: ${exportBan.id}).`,
+        `Failed to send Discord Webhook: ${exportBan.ExportBanList.discordWebhook} for ${exportBan.ExportBanList.server}'s List "${exportBan.ExportBanList.name}" (ID: ${exportBan.ExportBanList.id}).`,
         err
       );
     }
@@ -462,7 +462,7 @@ export default class Core {
       Logger.verbose(
         'Core',
         1,
-        `Failed to send Discord Webhook: ${exportBan.ExportBanList.discordWebhook} for List "${exportBan.ExportBanList.name}" (ID: ${exportBan.id}).`,
+        `Failed to send Discord Webhook: ${exportBan.ExportBanList.discordWebhook} for ${exportBan.ExportBanList.server}'s List "${exportBan.ExportBanList.name}" (ID: ${exportBan.ExportBanList.id}).`,
         err
       );
     }
