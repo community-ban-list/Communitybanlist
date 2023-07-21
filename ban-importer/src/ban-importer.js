@@ -115,7 +115,7 @@ export default class BanImporter {
     const fetcher = new BanFetcher(this.queueBan);
 
     Logger.verbose('BanImporter', 2, 'Fetching ban lists...');
-    const myProgressBar = Logger.discordProgressBar(
+    const myProgressBar = await Logger.discordProgressBar(
       'BanImporter',
       `Fetching ${banLists.length} Ban Lists...`,
       null,
@@ -132,7 +132,7 @@ export default class BanImporter {
         Logger.verbose('BanImporter', 1, `Failed to import ban list ${banList.id}: `, err);
       }
       currentList++;
-      Logger.discordProgressBar(
+      await Logger.discordProgressBar(
         'BanImporter',
         `Fetching ${banLists.length} Ban Lists...`,
         myProgressBar,
