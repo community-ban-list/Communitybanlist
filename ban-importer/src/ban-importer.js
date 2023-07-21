@@ -123,6 +123,7 @@ export default class BanImporter {
       banLists.length,
       0
     );
+    console.log(JSON.stringify(myProgressBar.toString(), null, 2));
     let currentList = 0;
     for (const banList of banLists) {
       try {
