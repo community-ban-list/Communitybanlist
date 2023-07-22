@@ -214,7 +214,7 @@ export default class ExportBanManager {
           1000
         ).toFixed(2)}s`
       );
-      await Logger.discordProgressBar(
+      Logger.discordProgressBar(
         'Core',
         `Updating ${startingLength} ExportBans...`,
         myProgressBar,

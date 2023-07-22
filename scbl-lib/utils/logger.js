@@ -30,6 +30,16 @@ class Logger {
       minTime: 200,
       maxConcurrent: 1
     });
+
+    this.rl.on('failed', async (error, jobInfo) => {
+      const id = jobInfo.options.id;
+      console.warn(`Job ${id} failed: ${error}`);
+
+      if (jobInfo.retryCount <= 5) {
+        console.log(`Retrying job ${id} in 250ms!`);
+        return 250;
+      }
+    });
   }
 
   async verbose(module, verboseness, message, ...extras) {

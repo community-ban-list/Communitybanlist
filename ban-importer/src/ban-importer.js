@@ -132,7 +132,7 @@ export default class BanImporter {
         Logger.verbose('BanImporter', 1, `Failed to import ban list ${banList.id}: `, err);
       }
       currentList++;
-      await Logger.discordProgressBar(
+      Logger.discordProgressBar(
         'BanImporter',
         `Fetching ${banLists.length} Ban Lists...`,
         myProgressBar,

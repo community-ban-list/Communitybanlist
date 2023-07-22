@@ -138,7 +138,7 @@ export default class Core {
           continue;
         }
       }
-      await Logger.discordProgressBar(
+      Logger.discordProgressBar(
         'Core',
         `Updating ${startingLength} Steam users...`,
         myProgressBar,
@@ -395,7 +395,7 @@ export default class Core {
         }
       }
       currentList++;
-      await Logger.discordProgressBar(
+      Logger.discordProgressBar(
         'BanImporter',
         `Exporting ${exportBans.length} Bans...`,
         myProgressBar,
