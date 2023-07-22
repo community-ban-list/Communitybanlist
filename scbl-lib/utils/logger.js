@@ -40,6 +40,7 @@ class Logger {
         return 1000;
       }
     });
+    this.rl.on('retry', (error, jobInfo) => console.log(`Now retrying ${jobInfo.options.id}`));
   }
 
   async verbose(module, verboseness, message, ...extras) {
