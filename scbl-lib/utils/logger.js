@@ -33,12 +33,12 @@ class Logger {
 
     this.rl.on('failed', async (error, jobInfo) => {
       const id = jobInfo.options.id;
-      console.warn(`Job ${id} failed: ${error}`);
+      console.warn(`Job ${id} failed`, error);
 
       if (jobInfo.retryCount <= 5) {
         console.log(`Retrying job ${id} in 1s!`);
         return 1000;
-      }
+      } else throw error;
     });
     this.rl.on('retry', (error, jobInfo) => console.log(`Now retrying ${jobInfo.options.id}`));
   }
