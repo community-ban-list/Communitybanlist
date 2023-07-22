@@ -5,9 +5,9 @@ import Bottleneck from 'bottleneck';
 function convertToBarChart(minValue = 0, maxValue = Infinity, barValue) {
   const chartWidth = 50;
   if (minValue === maxValue) minValue = 0;
-  const scaleFactor = (chartWidth - 1) / (maxValue - minValue);
+  const scaleFactor = chartWidth / (maxValue - minValue);
   const barSize = Math.max(Math.ceil((barValue - minValue) * scaleFactor), 1);
-  const chart = `\`\`[${'█'.repeat(barSize)}${' '.repeat(chartWidth - barSize - 1)}] ${(
+  const chart = `\`\`[${'█'.repeat(barSize)}${' '.repeat(chartWidth - barSize)}] ${(
     (barValue / maxValue) *
     100
   ).toFixed(2)}%\`\``;
@@ -35,7 +35,10 @@ class Logger {
   async verbose(module, verboseness, message, ...extras) {
     try {
       if (verboseness === 1)
-        this.rl.schedule(this.discordHook.send, `[${module}][${verboseness}] ${message}`);
+        this.rl.schedule(
+          this.discordHook.send.bind(this),
+          `[${module}][${verboseness}] ${message}`
+        );
     } catch (err) {
       console.error('Error sending Discord Log Message.', err, JSON.stringify(err));
     }
@@ -51,7 +54,7 @@ class Logger {
     if (!discordMessage) {
       try {
         return this.rl.schedule(
-          this.discordHook.send,
+          this.discordHook.send.bind(this),
           `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
         );
       } catch (err) {
@@ -60,7 +63,7 @@ class Logger {
     } else {
       try {
         return this.rl.schedule(
-          this.discordHook.edit,
+          this.discordHook.edit.bind(this),
           `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
         );
       } catch (err) {
