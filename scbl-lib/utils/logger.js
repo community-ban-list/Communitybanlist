@@ -22,7 +22,7 @@ class Logger {
     this.discordHook = createDiscordWebhookMessage(
       process.env.DISCORD_LOG_WEBHOOK ||
         `https://discord.com/api/webhooks/1131519627608993843/UtaS_uOs7lCLQNE7r9--QVcinHqwKpy5g11gKdvDz_k02uUKMl0Axx4TAotChe-VjfUw`
-    )[0];
+    )[0].bind(this);
     this.rl = new Bottleneck({
       reservoir: 5,
       reservoirRefreshAmount: 5,
