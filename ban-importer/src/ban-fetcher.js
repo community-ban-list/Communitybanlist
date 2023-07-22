@@ -88,7 +88,7 @@ export default class BanFetcher {
             2,
             `Fetching Battlemetrics ban list data for ban list (ID: ${banList.id})...`
           );
-          data = await battlemetrics('get', 'bans', params);
+          data = await battlemetrics('get', 'bans', params).data;
           Logger.verbose(
             'BanFetcher',
             2,
