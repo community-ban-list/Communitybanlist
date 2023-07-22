@@ -1,5 +1,6 @@
 import chalk from 'chalk';
 import createDiscordWebhookMessage from './create-discord-webhook-message.js';
+import Bottleneck from 'bottleneck';
 
 function convertToBarChart(minValue = 0, maxValue = Infinity, barValue) {
   const chartWidth = 50;
@@ -22,11 +23,19 @@ class Logger {
       process.env.DISCORD_LOG_WEBHOOK ||
         `https://discord.com/api/webhooks/1131519627608993843/UtaS_uOs7lCLQNE7r9--QVcinHqwKpy5g11gKdvDz_k02uUKMl0Axx4TAotChe-VjfUw`
     )[0];
+    this.rl = new Bottleneck({
+      reservoir: 5,
+      reservoirRefreshAmount: 5,
+      reservoirRefreshInterval: 1000,
+      minTime: 200,
+      maxConcurrent: 1
+    });
   }
 
   async verbose(module, verboseness, message, ...extras) {
     try {
-      if (verboseness === 1) await this.discordHook.send(`[${module}][${verboseness}] ${message}`);
+      if (verboseness === 1)
+        this.rl.schedule(this.discordHook.send, `[${module}][${verboseness}] ${message}`);
     } catch (err) {
       console.error('Error sending Discord Log Message.', err, JSON.stringify(err));
     }
@@ -41,7 +50,8 @@ class Logger {
   async discordProgressBar(module, message, discordMessage, min = 0, max = Infinity, current) {
     if (!discordMessage) {
       try {
-        return await this.discordHook.send(
+        return this.rl.schedule(
+          this.discordHook.send,
           `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
         );
       } catch (err) {
@@ -49,7 +59,8 @@ class Logger {
       }
     } else {
       try {
-        return await discordMessage.edit(
+        return this.rl.schedule(
+          this.discordHook.edit,
           `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
         );
       } catch (err) {
