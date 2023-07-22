@@ -34,7 +34,21 @@ export default class BanFetcher {
       2,
       `Fetching remote ban list data for ban list (ID: ${banList.id})...`
     );
-    const { data } = await axios.get(banList.source);
+    let data = null;
+    let retryCount = 0;
+    while (!data && retryCount < 5) {
+      try {
+        const myData = await axios.get(banList.source);
+        data = myData.data;
+      } catch (err) {
+        Logger.verbose('BanFetcher', 1, `Failed to fetch ban list (ID: ${banList.id}): `, err);
+        if (err.response && err.response.status === 404) {
+          break;
+        }
+        retryCount++;
+        await doSleep(1000);
+      }
+    }
 
     const bans = [];
 
