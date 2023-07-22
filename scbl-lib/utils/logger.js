@@ -27,7 +27,7 @@ class Logger {
       reservoir: 5,
       reservoirRefreshAmount: 5,
       reservoirRefreshInterval: 1000,
-      minTime: 200,
+      minTime: 201,
       maxConcurrent: 1
     });
 
@@ -36,8 +36,8 @@ class Logger {
       console.warn(`Job ${id} failed: ${error}`);
 
       if (jobInfo.retryCount <= 5) {
-        console.log(`Retrying job ${id} in 250ms!`);
-        return 250;
+        console.log(`Retrying job ${id} in 1s!`);
+        return 1000;
       }
     });
   }
