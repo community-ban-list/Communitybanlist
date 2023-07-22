@@ -6,6 +6,8 @@ import Core from './src/core.js';
 import BanImporter from './src/ban-importer.js';
 import ExportBanManager from './src/export-ban-manager.js';
 
+Error.stackTraceLimit = 255;
+
 const TASKS_TO_COMPLETE = {
   IMPORT_BANS: true,
   UPDATE_STEAM_USER_INFO: true, // TODO: This is causing random hangs; Try ading more debug code until we can find out what causes it.

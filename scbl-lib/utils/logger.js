@@ -27,8 +27,8 @@ class Logger {
   async verbose(module, verboseness, message, ...extras) {
     try {
       if (verboseness === 1) await this.discordHook.send(`[${module}][${verboseness}] ${message}`);
-    } catch (e) {
-      console.log('Error sending Discord Log Message.', e);
+    } catch (err) {
+      console.error('Error sending Discord Log Message.', err, JSON.stringify(err));
     }
 
     let colorFunc = chalk[this.colors[module] || 'white'];
@@ -44,16 +44,16 @@ class Logger {
         return await this.discordHook.send(
           `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
         );
-      } catch (e) {
-        console.log('Error sending Discord progress bar.', e);
+      } catch (err) {
+        console.error('Error sending Discord progress bar.', err, JSON.stringify(err));
       }
     } else {
       try {
         return await discordMessage.edit(
           `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
         );
-      } catch (e) {
-        console.log('Error sending Discord progress bar.', e);
+      } catch (err) {
+        console.error('Error sending Discord progress bar.', err, JSON.stringify(err));
       }
     }
   }
