@@ -8,7 +8,7 @@ function convertToBarChart(minValue = 0, maxValue = Infinity, barValue) {
   const scaleFactor = chartWidth / (maxValue - minValue);
   const barSize = Math.max(Math.ceil((barValue - minValue) * scaleFactor), 1);
   const chart = `\`\`[${'█'.repeat(barSize)}${' '.repeat(chartWidth - barSize)}] ${(
-    (barValue / maxValue) *
+    (barValue / (maxValue || 1)) *
     100
   ).toFixed(2)}%\`\``;
 
@@ -49,6 +49,27 @@ class Logger {
         await this.rl.schedule(async () => {
           await this.discordHook.send(`[${module}][${verboseness}] ${message}`);
         });
+      await this.rl.schedule(async () => {
+        await this.discordHook.send(`[${module}][${verboseness}] ${message}`);
+      });
+      await this.rl.schedule(async () => {
+        await this.discordHook.send(`[${module}][${verboseness}] ${message}`);
+      });
+      await this.rl.schedule(async () => {
+        await this.discordHook.send(`[${module}][${verboseness}] ${message}`);
+      });
+      await this.rl.schedule(async () => {
+        await this.discordHook.send(`[${module}][${verboseness}] ${message}`);
+      });
+      await this.rl.schedule(async () => {
+        await this.discordHook.send(`[${module}][${verboseness}] ${message}`);
+      });
+      await this.rl.schedule(async () => {
+        await this.discordHook.send(`[${module}][${verboseness}] ${message}`);
+      });
+      await this.rl.schedule(async () => {
+        await this.discordHook.send(`[${module}][${verboseness}] ${message}`);
+      });
     } catch (err) {
       console.error('Error sending Discord Log Message.', err, JSON.stringify(err));
     }
