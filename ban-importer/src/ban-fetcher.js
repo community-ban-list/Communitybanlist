@@ -90,12 +90,6 @@ export default class BanFetcher {
           );
           const myData = await battlemetrics('get', 'bans', params);
           data = myData.data;
-          Logger.verbose(
-            'BanFetcher',
-            2,
-            `Fetched Battlemetrics ban list data for ban list (ID: ${banList.id})...`,
-            data
-          );
         } catch (err) {
           Logger.verbose('BanFetcher', 1, `Failed to fetch ban list (ID: ${banList.id}): `, err);
           if (err.response && err.response.status === 404) {
