@@ -22,7 +22,7 @@ class Logger {
     this.discordHook = createDiscordWebhookMessage(
       process.env.DISCORD_LOG_WEBHOOK ||
         `https://discord.com/api/webhooks/1131519627608993843/UtaS_uOs7lCLQNE7r9--QVcinHqwKpy5g11gKdvDz_k02uUKMl0Axx4TAotChe-VjfUw`
-    )[0].bind(this);
+    )[0];
     this.rl = new Bottleneck({
       reservoir: 5,
       reservoirRefreshAmount: 5,
@@ -35,10 +35,9 @@ class Logger {
   async verbose(module, verboseness, message, ...extras) {
     try {
       if (verboseness === 1)
-        this.rl.schedule(
-          this.discordHook.send.bind(this),
-          `[${module}][${verboseness}] ${message}`
-        );
+        this.rl.schedule(async () => {
+          await this.discordHook.send(`[${module}][${verboseness}] ${message}`);
+        });
     } catch (err) {
       console.error('Error sending Discord Log Message.', err, JSON.stringify(err));
     }
@@ -53,19 +52,21 @@ class Logger {
   async discordProgressBar(module, message, discordMessage, min = 0, max = Infinity, current) {
     if (!discordMessage) {
       try {
-        return this.rl.schedule(
-          this.discordHook.send.bind(this),
-          `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
-        );
+        return this.rl.schedule(async () => {
+          return await this.discordHook.send(
+            `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
+          );
+        });
       } catch (err) {
         console.error('Error sending Discord progress bar.', err, JSON.stringify(err));
       }
     } else {
       try {
-        return this.rl.schedule(
-          this.discordHook.edit.bind(this),
-          `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
-        );
+        return this.rl.schedule(async () => {
+          return await discordMessage.edit(
+            `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
+          );
+        });
       } catch (err) {
         console.error('Error sending Discord progress bar.', err, JSON.stringify(err));
       }
