@@ -376,7 +376,7 @@ export default class Core {
         if (exportBan.status === 'TO_BE_CREATED') await Core.createExportBan(exportBan);
         else await Core.deleteExportBan(exportBan);
       } catch (err) {
-        if (err.response.status === 404 && exportBan.status !== 'TO_BE_CREATED') {
+        if (err.response && err.response.status === 404 && exportBan.status !== 'TO_BE_CREATED') {
           await exportBan.destroy();
           await Logger.verbose(
             'Core',

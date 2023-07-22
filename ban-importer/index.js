@@ -16,6 +16,9 @@ const TASKS_TO_COMPLETE = {
   UPDATE_EXPORT_BANS: true,
   EXPORT_EXPORT_BANS: true
 };
+async function doSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function main() {
   const profileStartTime = Date.now();
@@ -50,9 +53,17 @@ async function main() {
 }
 
 main()
-  .then(() => {
+  .then(async () => {
     console.log(`Done!`);
-    setTimeout(process.exit(0), 60000);
+    while (
+      Logger.getLogQueue().RECEIVED !== 0 ||
+      Logger.getLogQueue().QUEUED !== 0 ||
+      Logger.getLogQueue().RUNNING !== 0 ||
+      Logger.getLogQueue().EXECUTING !== 0
+    ) {
+      await doSleep(1000);
+    }
+    process.exit(0);
   })
   .catch((error) => {
     console.error(error);

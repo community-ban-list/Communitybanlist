@@ -84,6 +84,10 @@ class Logger {
     }
   }
 
+  getLogQueue() {
+    return this.rl.counts();
+  }
+
   setVerboseness(module, verboseness) {
     this.verboseness[module] = verboseness;
   }
@@ -92,5 +96,10 @@ class Logger {
     this.colors[module] = color;
   }
 }
+let thisLogger = null;
+function getLogger() {
+  if (!thisLogger) thisLogger = new Logger();
+  return thisLogger;
+}
 
-export default new Logger();
+export default getLogger();

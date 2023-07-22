@@ -4,6 +4,10 @@ import querystring from 'querystring';
 import { battlemetrics } from 'scbl-lib/apis';
 import { classifyBanReason, Logger } from 'scbl-lib/utils';
 
+async function doSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export default class BanFetcher {
   constructor(storeBanFunc) {
     this.storeBanFunc = storeBanFunc;
@@ -72,39 +76,68 @@ export default class BanFetcher {
     let params = { 'filter[banList]': banList.source, 'page[size]': 100 };
 
     // Loop until there's no more pages to fetch.
+
     while (true) {
-      try {
-        // Get the ban page's data.
-        Logger.verbose(
-          'BanFetcher',
-          2,
-          `Fetching Battlemetrics ban list data for ban list (ID: ${banList.id})...`
-        );
-        const { data } = await battlemetrics('get', 'bans', params);
+      let data = null;
+      let retryCount = 0;
+      while (!data && retryCount < 5) {
+        try {
+          // Get the ban page's data.
+          Logger.verbose(
+            'BanFetcher',
+            2,
+            `Fetching Battlemetrics ban list data for ban list (ID: ${banList.id})...`
+          );
+          data = await battlemetrics('get', 'bans', params).data;
+        } catch (err) {
+          Logger.verbose('BanFetcher', 1, `Failed to fetch ban list (ID: ${banList.id}): `, err);
+          if (err.response && err.response.status === 404) {
+            break;
+          }
 
-        const bans = [];
+          retryCount++;
+          await doSleep(1000);
+        }
+      }
+      const bans = [];
 
-        // Loop over each ban in the page's data.
-        for (const ban of data.data) {
+      // Loop over each ban in the page's data.
+      for (const ban of data.data) {
+        try {
           // Get the SteamID of the player banned.
           let steamUser;
           // Loop through identifiers to get steamID.
           for (const identifier of ban.attributes.identifiers) {
-            // Ignore none SteamID identifiers.
-            if (identifier.type !== 'steamID') continue;
+            try {
+              // Ignore none SteamID identifiers.
+              if (identifier.type !== 'steamID') continue;
 
-            // Some show steam url instead of usual format so handle that case.
-            if (identifier.identifier)
-              steamUser = identifier.identifier.replace('https://steamcommunity.com/profiles/', '');
-            else if (identifier.metadata) steamUser = identifier.metadata.profile.steamid;
-            else continue;
+              // Some show steam url instead of usual format so handle that case.
+              if (identifier.identifier)
+                steamUser = identifier.identifier.replace(
+                  'https://steamcommunity.com/profiles/',
+                  ''
+                );
+              else if (identifier.metadata) steamUser = identifier.metadata.profile.steamid;
+              else continue;
 
-            if (!steamUser.match(/[0-9]{17}/)) {
-              steamUser = null;
-              continue;
+              if (!steamUser.match(/[0-9]{17}/)) {
+                steamUser = null;
+                continue;
+              }
+
+              break;
+            } catch (err) {
+              Logger.verbose(
+                'BanFetcher',
+                1,
+                `Failed to fetch ban list (ID: ${banList.id}): `,
+                err
+              );
+              if (err.response && err.response.status === 404) {
+                break;
+              }
             }
-
-            break;
           }
 
           // Sometimes there is no SteamID in the response. If this is the case we ignore the ban.
@@ -130,8 +163,14 @@ export default class BanFetcher {
 
             banList: banList
           });
+        } catch (err) {
+          Logger.verbose('BanFetcher', 1, `Failed to fetch ban list (ID: ${banList.id}): `, err);
+          if (err.response && err.response.status === 404) {
+            break;
+          }
         }
-
+      }
+      try {
         this.storeBanFunc(bans);
 
         // If that is the last page then break out the loop.
@@ -143,7 +182,7 @@ export default class BanFetcher {
         });
       } catch (err) {
         Logger.verbose('BanFetcher', 1, `Failed to fetch ban list (ID: ${banList.id}): `, err);
-        if (err.response.status === 404) {
+        if (err.response && err.response.status === 404) {
           break;
         }
       }
