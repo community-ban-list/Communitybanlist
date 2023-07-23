@@ -6,9 +6,23 @@ import { STEAM_API_KEY } from '../config.js';
 
 if (!STEAM_API_KEY) throw new Error('Environmental variable STEAM_API_KEY must be provided.');
 const STEAM_API_RESERVIOR = 200;
-const STEAM_API_RETRIES = 3;
+const STEAM_API_RETRIES = 5;
+UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 5000;
 
-function newAbortSignal(timeout) {
+async function withTimeout(promise) {
+  const myError = new Error(`timeout`);
+  const timeout = new Promise(function timeoutClosure1(resolve, reject) {
+    setTimeout(reject(myError), UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT);
+  });
+
+  return Promise.race([promise, timeout, doTimeout(UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT + 50)]);
+}
+
+async function doTimeout(ms) {
+  return new Promise((resolve, reject) => setTimeout(reject, ms));
+}
+
+async function newAbortSignal(timeout) {
   const abortController = new AbortController();
   setTimeout(() => abortController.abort(), timeout || 0);
 
@@ -26,7 +40,7 @@ rl.on('failed', async (error, jobInfo) => {
   const id = jobInfo.options.id;
   console.warn(`Job ${id} failed`, error);
 
-  if (jobInfo.retryCount <= 5) {
+  if (jobInfo.retryCount <= STEAM_API_RETRIES) {
     console.log(`Retrying job ${id} in 1s!`);
     return 1000;
   } else throw error;
@@ -36,14 +50,16 @@ rl.on('retry', (error, jobInfo) => console.log(`Now retrying ${jobInfo.options.i
 
 const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
   console.log('starting steam axios request');
-  const retVar = await axios({
-    method: method,
-    timeout: 4000,
-    signal: newAbortSignal(5000),
-    url: 'https://api.steampowered.com/' + url,
-    params: { ...params, key: STEAM_API_KEY },
-    data
-  });
+  const retVar = await withTimeout(
+    await axios({
+      method: method,
+      timeout: 4000,
+      signal: newAbortSignal(5000),
+      url: 'https://api.steampowered.com/' + url,
+      params: { ...params, key: STEAM_API_KEY },
+      data
+    })
+  );
   console.log('done with steam axios request');
   return retVar;
 });
