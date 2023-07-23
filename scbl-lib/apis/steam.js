@@ -33,7 +33,7 @@ const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
     method: method,
     timeout: 4000,
     signal: AbortSignal.timeout(5000),
-    url: 'http://api.steampowered.com/' + url,
+    url: 'https://api.steampowered.com/' + url,
     params: { ...params, key: STEAM_API_KEY },
     data
   });
