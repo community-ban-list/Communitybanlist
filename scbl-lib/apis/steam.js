@@ -1,12 +1,19 @@
 import axios from 'axios';
 import Bottleneck from 'bottleneck';
-import { AbortSignal } from 'node-abort-controller';
+import { AbortSignal, AbortController } from 'node-abort-controller';
 
 import { STEAM_API_KEY } from '../config.js';
 
 if (!STEAM_API_KEY) throw new Error('Environmental variable STEAM_API_KEY must be provided.');
 const STEAM_API_RESERVIOR = 200;
 const STEAM_API_RETRIES = 3;
+
+function newAbortSignal(timeout) {
+  const abortController = new AbortController();
+  setTimeout(() => abortController.abort(), timeout || 0);
+
+  return abortController.signal;
+}
 
 const rl = new Bottleneck({
   reservoir: STEAM_API_RESERVIOR,
@@ -32,7 +39,7 @@ const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
   const retVar = await axios({
     method: method,
     timeout: 4000,
-    signal: AbortSignal.timeout(5000),
+    signal: newAbortSignal(5000),
     url: 'https://api.steampowered.com/' + url,
     params: { ...params, key: STEAM_API_KEY },
     data
