@@ -26,6 +26,16 @@ const makeRequest = new Bottleneck({
   console.log('done with steam axios request');
   return retVar;
 });
+makeRequest.on('failed', async (error, jobInfo) => {
+  const id = jobInfo.options.id;
+  console.warn(`Job ${id} failed`, error);
+
+  if (jobInfo.retryCount <= 5) {
+    console.log(`Retrying job ${id} in 1s!`);
+    return 1000;
+  } else throw error;
+});
+makeRequest.on('retry', (error, jobInfo) => console.log(`Now retrying ${jobInfo.options.id}`));
 
 export default async function (method, url, params, data = {}, priority = 5) {
   return await makeRequest.withOptions({ priority }, method, url, params, data);
