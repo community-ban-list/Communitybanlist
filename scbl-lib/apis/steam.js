@@ -9,13 +9,14 @@ const STEAM_TIMEOUT = 50000;
 
 async function withTimeout(promise) {
   const myError = new Error(`timeout`);
-  const timeout = new Promise((resolve, reject) => setTimeout(reject(myError), 50000));
+  const timeout = new Promise((resolve, reject) =>
+    setTimeout(() => {
+      console.log(`Rejecting after ${STEAM_TIMEOUT}`, myError);
+      reject(myError);
+    }, STEAM_TIMEOUT)
+  );
 
   return await Promise.race([promise, timeout]);
-}
-
-async function doTimeout(ms) {
-  return new Promise((resolve, reject) => setTimeout(reject, ms));
 }
 
 const rl = new Bottleneck({
