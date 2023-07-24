@@ -3,7 +3,7 @@ import Bottleneck from 'bottleneck';
 
 import { BATTLEMETRICS_API_KEY, BATTLEMETRICS_API_RESERVIOR } from '../config.js';
 
-const BATTLEMETRICS_TIMEOUT = 50000;
+const BATTLEMETRICS_TIMEOUT = 120000;
 const BATTLEMETRICS_API_RETRIES = 5;
 
 if (!BATTLEMETRICS_API_KEY)
