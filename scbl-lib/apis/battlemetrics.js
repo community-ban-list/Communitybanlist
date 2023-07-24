@@ -3,7 +3,7 @@ import Bottleneck from 'bottleneck';
 
 import { BATTLEMETRICS_API_KEY, BATTLEMETRICS_API_RESERVIOR } from '../config.js';
 
-const BATTLEMETRICS_TIMEOUT = 50000;
+const BATTLEMETRICS_TIMEOUT = 500000;
 const BATTLEMETRICS_API_RETRIES = 5;
 
 if (!BATTLEMETRICS_API_KEY)
@@ -11,8 +11,8 @@ if (!BATTLEMETRICS_API_KEY)
 
 async function withTimeout(promise) {
   const myError = new Error(`timeout`);
-  const timeout = new Promise(function timeoutClosure1(resolve, reject) {
-    setTimeout(reject(myError), 50000);
+  const timeout = new Promise((resolve, reject) => {
+    setTimeout(reject(myError), BATTLEMETRICS_TIMEOUT);
   });
 
   return Promise.race([promise, timeout]);
@@ -38,7 +38,7 @@ rl.on('failed', async (error, jobInfo) => {
 rl.on('retry', (error, jobInfo) => console.log(`Now retrying ${jobInfo.options.id}`));
 
 const makeRequest = rl.wrap(async (method, endpoint, params, data) => {
-  return await withTimeout(
+  const retVar = await withTimeout(
     axios({
       method,
       url: 'https://api.battlemetrics.com/' + endpoint,
@@ -47,6 +47,7 @@ const makeRequest = rl.wrap(async (method, endpoint, params, data) => {
       headers: { Authorization: `Bearer ${BATTLEMETRICS_API_KEY}` }
     })
   );
+  return retVar;
 });
 
 export default async function (method, url, params, data = {}, priority = 5) {

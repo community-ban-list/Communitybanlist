@@ -9,7 +9,7 @@ const STEAM_TIMEOUT = 50000;
 
 async function withTimeout(promise) {
   const myError = new Error(`timeout`);
-  const timeout = new Promise(function timeoutClosure1(resolve, reject) {
+  const timeout = new Promise((resolve, reject) => {
     setTimeout(reject(myError), 50000);
   });
 
