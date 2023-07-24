@@ -7,7 +7,7 @@ import { HOST } from 'scbl-lib/config';
 
 const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
 const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 50;
-const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 5000;
+const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 50000;
 const UPDATE_STEAM_USER_INFO_BATCH_RETRIES = 3;
 
 const DISCORD_ALERT_CAP = 50;
@@ -72,11 +72,9 @@ export default class Core {
           `Updating batch of ${batch.length} Steam users (${users.length} remaining)...`
         );
         try {
-          const myData = await withTimeout(
-            await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
-              steamids: batch.map((user) => user.id).join(',')
-            })
-          );
+          const myData = await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
+            steamids: batch.map((user) => user.id).join(',')
+          });
           data = myData.data;
         } catch (err) {
           if (err.message === 'timeout') {

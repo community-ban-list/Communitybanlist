@@ -7,7 +7,7 @@ import { STEAM_API_KEY } from '../config.js';
 if (!STEAM_API_KEY) throw new Error('Environmental variable STEAM_API_KEY must be provided.');
 const STEAM_API_RESERVIOR = 200;
 const STEAM_API_RETRIES = 5;
-const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 5000;
+const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 50000;
 
 async function withTimeout(promise) {
   const myError = new Error(`timeout`);
@@ -15,7 +15,7 @@ async function withTimeout(promise) {
     setTimeout(reject(myError), UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT);
   });
 
-  return Promise.race([promise, timeout, doTimeout(UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT + 50)]);
+  return Promise.race([promise, doTimeout(UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT + 50)]);
 }
 
 async function doTimeout(ms) {
@@ -53,8 +53,8 @@ const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
   const retVar = await withTimeout(
     axios({
       method: method,
-      timeout: 4000,
-      signal: newAbortSignal(5000),
+      timeout: UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT,
+      signal: newAbortSignal(UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT),
       url: 'https://api.steampowered.com/' + url,
       params: { ...params, key: STEAM_API_KEY },
       data
