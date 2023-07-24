@@ -46,7 +46,7 @@ class Logger {
   async verbose(module, verboseness, message, ...extras) {
     try {
       if (verboseness === 1)
-        this.rl.schedule({ id: 'DISCORD_SEND' }, async () => {
+        this.rl.schedule(async () => {
           await this.discordHook.send(`[${module}][${verboseness}] ${message}`);
         });
     } catch (err) {
@@ -63,7 +63,7 @@ class Logger {
   async discordProgressBar(module, message, discordMessage, min = 0, max = Infinity, current) {
     if (!discordMessage) {
       try {
-        return this.rl.schedule({ id: 'INIT_PROGRESSBAR' }, async () => {
+        return this.rl.schedule(async () => {
           return await this.discordHook.send(
             `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
           );
@@ -73,7 +73,7 @@ class Logger {
       }
     } else {
       try {
-        return this.rl.schedule({ id: 'RUN_PROGRESSBAR' }, async () => {
+        return this.rl.schedule(async () => {
           return await discordMessage.edit(
             `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
           );
