@@ -1,32 +1,23 @@
 import axios from 'axios';
 import Bottleneck from 'bottleneck';
-import { AbortSignal, AbortController } from 'node-abort-controller';
-
 import { STEAM_API_KEY } from '../config.js';
 
 if (!STEAM_API_KEY) throw new Error('Environmental variable STEAM_API_KEY must be provided.');
 const STEAM_API_RESERVIOR = 200;
 const STEAM_API_RETRIES = 5;
-const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 50000;
+const STEAM_TIMEOUT = 50000;
 
 async function withTimeout(promise) {
   const myError = new Error(`timeout`);
   const timeout = new Promise(function timeoutClosure1(resolve, reject) {
-    setTimeout(reject(myError), UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT);
+    setTimeout(reject(myError), STEAM_TIMEOUT);
   });
 
-  return Promise.race([promise, doTimeout(UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT + 50)]);
+  return Promise.race([promise, timeout]);
 }
 
 async function doTimeout(ms) {
   return new Promise((resolve, reject) => setTimeout(reject, ms));
-}
-
-async function newAbortSignal(timeout) {
-  const abortController = new AbortController();
-  setTimeout(() => abortController.abort(), timeout || 0);
-
-  return abortController.signal;
 }
 
 const rl = new Bottleneck({
@@ -53,8 +44,6 @@ const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
   const retVar = await withTimeout(
     axios({
       method: method,
-      timeout: UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT,
-      signal: newAbortSignal(UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT),
       url: 'https://api.steampowered.com/' + url,
       params: { ...params, key: STEAM_API_KEY },
       data
@@ -65,5 +54,11 @@ const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
 });
 
 export default async function (method, url, params, data = {}, priority = 5) {
-  return await makeRequest.withOptions({ priority }, method, url, params, data);
+  return await makeRequest.withOptions(
+    { priority, id: 'STEAM-API-CALL' },
+    method,
+    url,
+    params,
+    data
+  );
 }

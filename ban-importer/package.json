@@ -7,7 +7,6 @@
     "async": "^3.2.0",
     "axios": "^1.4.0",
     "scbl-lib": "1.0.0",
-    "node-abort-controller": "^3.1.1",
     "simple-discord-webhooks": "^2.1.0"
   }
 }
