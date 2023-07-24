@@ -12,10 +12,7 @@ if (!BATTLEMETRICS_API_KEY)
 async function withTimeout(promise) {
   const myError = new Error(`timeout`);
   const timeout = new Promise((resolve, reject) =>
-    setTimeout(() => {
-      console.log(`Rejecting after ${BATTLEMETRICS_TIMEOUT}`, myError);
-      reject(myError);
-    }, BATTLEMETRICS_TIMEOUT)
+    setTimeout(() => reject(myError), BATTLEMETRICS_TIMEOUT)
   );
 
   return await Promise.race([promise, timeout]);
