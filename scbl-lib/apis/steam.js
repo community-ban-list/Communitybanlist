@@ -51,7 +51,7 @@ rl.on('retry', (error, jobInfo) => console.log(`Now retrying ${jobInfo.options.i
 const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
   console.log('starting steam axios request');
   const retVar = await withTimeout(
-    await axios({
+    axios({
       method: method,
       timeout: 4000,
       signal: newAbortSignal(5000),
