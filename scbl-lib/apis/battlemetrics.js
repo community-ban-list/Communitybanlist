@@ -18,7 +18,7 @@ async function withTimeout(promise) {
     }, BATTLEMETRICS_TIMEOUT)
   );
 
-  return Promise.race([promise, timeout]);
+  return await Promise.race([promise, timeout]);
 }
 
 const rl = new Bottleneck({
