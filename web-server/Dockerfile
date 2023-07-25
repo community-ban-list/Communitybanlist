@@ -13,7 +13,8 @@ COPY web-server ./web-server
 COPY package.json .
 
 # Install dependencies
-RUN yarn install --production --ignore-engines
+# RUN yarn install --production --ignore-engines
+RUN yarn install --production
 
 # Install pm2
 RUN yarn global add pm2
