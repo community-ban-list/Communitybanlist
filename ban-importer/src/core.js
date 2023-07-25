@@ -7,14 +7,14 @@ import { HOST } from 'scbl-lib/config';
 
 const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
 const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 50;
-
+const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 50000;
 const DISCORD_ALERT_CAP = 50;
 
 async function withTimeout(promise) {
   const myError = new Error(`timeout`);
-  const timeout = new Promise((resolve, reject) => {
-    setTimeout(reject(myError), 50000);
-  });
+  const timeout = new Promise((resolve, reject) =>
+    setTimeout(() => reject(myError), UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT)
+  );
 
   return await Promise.race([promise, timeout]);
 }
