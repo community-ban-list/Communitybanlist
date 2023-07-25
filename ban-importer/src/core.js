@@ -57,8 +57,6 @@ export default class Core {
     while (users.length > 0) {
       const batch = users.splice(0, Math.min(UPDATE_STEAM_USER_INFO_BATCH_SIZE, users.length));
 
-      // WARNING!!: This is causing failures. Needs research on why.
-
       let data = null;
       let numAttempts = 0;
       while (!data && numAttempts < UPDATE_STEAM_USER_INFO_BATCH_RETRIES) {
@@ -115,7 +113,7 @@ export default class Core {
       for (const user of data.response.players) {
         try {
           await withTimeout(
-            await SteamUser.update(
+            SteamUser.update(
               {
                 name: user.personaname,
                 profileURL: user.profileurl,
