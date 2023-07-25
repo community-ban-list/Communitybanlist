@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import createDiscordWebhookMessage from './create-discord-webhook-message.js';
 import Bottleneck from 'bottleneck';
 
-function convertToBarChart(minValue = 0, maxValue = Infinity, barValue) {
+function convertToBarChart(minValue = 0, maxValue = 1, barValue) {
   const chartWidth = 50;
   if (minValue === maxValue) minValue = 0;
   const scaleFactor = chartWidth / ((maxValue || 1) - minValue);
