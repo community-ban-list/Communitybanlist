@@ -1,7 +1,7 @@
 import DiscordWebhookNode from 'discord-webhook-node';
 import SimpleDiscordWebhooks from 'simple-discord-webhooks';
 
-const { Webhook, Message } = SimpleDiscordWebhooks;
+const { Webhook } = SimpleDiscordWebhooks;
 const { MessageBuilder } = DiscordWebhookNode;
 
 export default function (url, options = {}) {

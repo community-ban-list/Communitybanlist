@@ -25,10 +25,6 @@ async function doSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function doTimeout(ms) {
-  return new Promise((resolve, reject) => setTimeout(reject, ms));
-}
-
 export default class Core {
   static async updateSteamUserInfo() {
     Logger.verbose('Core', 2, 'Fetching Steam users to update...');

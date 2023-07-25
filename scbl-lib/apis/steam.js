@@ -20,7 +20,7 @@ const rl = new Bottleneck({
   reservoir: STEAM_API_RESERVIOR,
   reservoirRefreshAmount: STEAM_API_RESERVIOR,
   reservoirRefreshInterval: 300000,
-  minTime: 1500 //300s per 200 requests as a rule of thumb to stop hitting burst rate limit on Steam
+  minTime: 1500 // 300s per 200 requests as a rule of thumb to stop hitting burst rate limit on Steam
 });
 
 rl.on('failed', async (error, jobInfo) => {
@@ -33,6 +33,7 @@ rl.on('failed', async (error, jobInfo) => {
   } else throw error;
 });
 
+// eslint-disable-next-line handle-callback-err
 rl.on('retry', (error, jobInfo) => console.log(`Now retrying ${jobInfo.options.id}`));
 
 const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
