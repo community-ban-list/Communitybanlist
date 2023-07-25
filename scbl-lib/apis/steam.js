@@ -4,7 +4,7 @@ import { STEAM_API_KEY } from '../config.js';
 
 if (!STEAM_API_KEY) throw new Error('Environmental variable STEAM_API_KEY must be provided.');
 const STEAM_API_RESERVIOR = 200;
-const STEAM_API_RETRIES = 5;
+const STEAM_API_RETRIES = 10;
 const STEAM_TIMEOUT = 50000;
 
 async function withTimeout(promise) {
