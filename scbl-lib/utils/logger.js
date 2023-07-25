@@ -9,10 +9,9 @@ function convertToBarChart(minValue = 0, maxValue = Infinity, barValue) {
   const barSize = Math.max(Math.ceil(((barValue || 1) - minValue) * scaleFactor), 1);
   const chart = `\`\`[${'█'.repeat(barSize)}${' '.repeat(
     chartWidth - barSize
-  )}] ${barValue}/${maxValue} (${(
-    ((barValue || (maxValue > 0 ? 0 : 1)) / (maxValue || 1)) *
-    100
-  ).toFixed(2)}%)\`\``;
+  )}] ${barValue}/${maxValue}\`\``;
+
+  // (${(((barValue || (maxValue > 0 ? 0 : 1)) / (maxValue || 1)) * 100).toFixed(2)}%)
 
   return chart;
 }

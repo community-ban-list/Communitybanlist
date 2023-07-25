@@ -7,18 +7,16 @@ import { HOST } from 'scbl-lib/config';
 
 const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
 const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 50;
-const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 50000;
-const UPDATE_STEAM_USER_INFO_BATCH_RETRIES = 3;
 
 const DISCORD_ALERT_CAP = 50;
 
 async function withTimeout(promise) {
   const myError = new Error(`timeout`);
   const timeout = new Promise((resolve, reject) => {
-    setTimeout(reject(myError), UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT);
+    setTimeout(reject(myError), 50000);
   });
 
-  return Promise.race([promise, timeout]);
+  return await Promise.race([promise, timeout]);
 }
 
 async function doSleep(ms) {
@@ -58,48 +56,25 @@ export default class Core {
       const batch = users.splice(0, Math.min(UPDATE_STEAM_USER_INFO_BATCH_SIZE, users.length));
 
       let data = null;
-      let numAttempts = 0;
-      while (!data && numAttempts < UPDATE_STEAM_USER_INFO_BATCH_RETRIES) {
-        Logger.verbose(
-          'Core',
-          2,
-          `Updating batch of ${batch.length} Steam users (${users.length} remaining)...`
-        );
-        try {
-          const myData = await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
-            steamids: batch.map((user) => user.id).join(',')
-          });
-          data = myData.data;
-        } catch (err) {
-          if (err.message === 'timeout') {
-            Logger.verbose(
-              'Core',
-              1,
-              `Failed to update batch of ${batch.length} Steam users. Retrying due to ${err.message}`
-            );
-            numAttempts++;
-            continue;
-          } else {
-            Logger.verbose(
-              'Core',
-              1,
-              `Failed to update batch of ${batch.length} Steam users due to Error: ${err.message}`,
-              err
-            );
-            numAttempts++;
-            await doSleep(5000);
-            continue;
-          }
-        }
-      }
-      if (!data) {
+
+      Logger.verbose(
+        'Core',
+        2,
+        `Updating batch of ${batch.length} Steam users (${users.length} remaining)...`
+      );
+      try {
+        const myData = await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
+          steamids: batch.map((user) => user.id).join(',')
+        });
+        data = myData.data;
+      } catch (err) {
         Logger.verbose(
           'Core',
           1,
-          `Failed to update batch of ${batch.length} Steam users: ran out of retries. ${batch
-            .map((user) => user.id)
-            .join(',')}`
+          `Failed to update batch of ${batch.length} Steam users due to Error: ${err.message}`,
+          err
         );
+        await doSleep(5000);
         continue;
       }
 
@@ -130,15 +105,15 @@ export default class Core {
           continue;
         }
       }
-      Logger.discordProgressBar(
-        'Core',
-        `Updating ${startingLength} Steam users...`,
-        myProgressBar,
-        0,
-        startingLength,
-        startingLength - users.length
-      );
     }
+    Logger.discordProgressBar(
+      'Core',
+      `Updating ${startingLength} Steam users...`,
+      myProgressBar,
+      0,
+      startingLength,
+      startingLength - users.length
+    );
 
     Logger.verbose(
       'Core',
