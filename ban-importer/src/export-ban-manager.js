@@ -58,19 +58,15 @@ export default class ExportBanManager {
                   EBL.id AS "exportBanList",
                   B.steamUser AS "steamUser",
                   EBL.threshold AS "threshold",
-                  IF (
-                    SUM(
-                      IF(
-                        B.expired,
-                        0,
-                        IFNULL(
-                          EBLC.activePoints,
-                          EBL.defaultActivePoints
-                        )
+                  MAX(
+                    IF(
+                      B.expired,
+                      0,
+                      IFNULL(
+                        EBLC.activePoints,
+                        EBL.defaultActivePoints
                       )
-                    ) > 0,
-                    3,
-                    0
+                    )
                   ) AS "activePoints",
                   SUM(
                     IF(
