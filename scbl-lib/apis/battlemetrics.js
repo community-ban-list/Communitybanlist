@@ -3,8 +3,8 @@ import Bottleneck from 'bottleneck';
 
 import { BATTLEMETRICS_API_KEY, BATTLEMETRICS_API_RESERVIOR } from '../config.js';
 
-const BATTLEMETRICS_TIMEOUT = 50000;
-const BATTLEMETRICS_API_RETRIES = 10;
+const BATTLEMETRICS_TIMEOUT = 60000;
+const BATTLEMETRICS_API_RETRIES = 20;
 
 if (!BATTLEMETRICS_API_KEY)
   throw new Error('Environmental variable BATTLEMETRICS_API_KEY must be provided.');
@@ -39,6 +39,8 @@ rl.on('failed', async (error, jobInfo) => {
 rl.on('retry', (error, jobInfo) => console.log(`Now retrying ${jobInfo.options.id}`));
 
 const makeRequest = rl.wrap(async (method, endpoint, params, data) => {
+  console.log('Starting BM axios request');
+  const profileStartTime = Date.now();
   const retVar = await withTimeout(
     axios({
       method,
@@ -47,6 +49,9 @@ const makeRequest = rl.wrap(async (method, endpoint, params, data) => {
       data,
       headers: { Authorization: `Bearer ${BATTLEMETRICS_API_KEY}` }
     })
+  );
+  console.log(
+    `Done with BM axios request after ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
   );
   return retVar;
 });

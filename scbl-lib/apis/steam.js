@@ -4,8 +4,8 @@ import { STEAM_API_KEY } from '../config.js';
 
 if (!STEAM_API_KEY) throw new Error('Environmental variable STEAM_API_KEY must be provided.');
 const STEAM_API_RESERVIOR = 200;
-const STEAM_API_RETRIES = 10;
-const STEAM_TIMEOUT = 50000;
+const STEAM_API_RETRIES = 30;
+const STEAM_TIMEOUT = 10000;
 
 async function withTimeout(promise) {
   const myError = new Error(`timeout`);
@@ -38,6 +38,7 @@ rl.on('retry', (error, jobInfo) => console.log(`Now retrying ${jobInfo.options.i
 
 const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
   console.log('starting steam axios request');
+  const profileStartTime = Date.now();
   const retVar = await withTimeout(
     axios({
       method: method,
@@ -46,7 +47,9 @@ const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
       data
     })
   );
-  console.log('done with steam axios request');
+  console.log(
+    `done with steam axios request after ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
+  );
   return retVar;
 });
 
