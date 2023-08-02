@@ -20,10 +20,7 @@ class Logger {
   constructor() {
     this.verboseness = {};
     this.colors = {};
-    this.discordHook = createDiscordWebhookMessage(
-      process.env.DISCORD_LOG_WEBHOOK ||
-        `https://discord.com/api/webhooks/1131519627608993843/UtaS_uOs7lCLQNE7r9--QVcinHqwKpy5g11gKdvDz_k02uUKMl0Axx4TAotChe-VjfUw`
-    )[0];
+    this.discordHook = createDiscordWebhookMessage(process.env.DISCORD_LOG_WEBHOOK)[0];
     this.rl = new Bottleneck({
       reservoir: 5,
       reservoirRefreshAmount: 5,
@@ -47,6 +44,9 @@ class Logger {
   }
 
   async verbose(module, verboseness, message, ...extras) {
+    if (extras[0] instanceof Error) {
+      message += extras[0].message;
+    }
     try {
       if (verboseness === 1)
         this.rl.schedule(async () => {

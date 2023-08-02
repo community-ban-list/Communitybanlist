@@ -40,7 +40,7 @@ export default class BanImporter {
       Logger.verbose(
         'BanImporter',
         1,
-        `Failed to queue batch of ${importedBans.length} raw bans: ${err.message}`,
+        `Failed to queue batch of ${importedBans.length} raw bans: `,
         err
       );
     }
@@ -100,7 +100,7 @@ export default class BanImporter {
       Logger.verbose(
         'BanImporter',
         1,
-        `Failed to save raw ban (ID: ${importedBan.id}) in ban list (ID: ${importedBan.banList.id}): ${err.message}`,
+        `Failed to save raw ban (ID: ${importedBan.id}) in ban list (ID: ${importedBan.banList.id}): `,
         err
       );
     }
@@ -129,7 +129,7 @@ export default class BanImporter {
       try {
         await fetcher.fetchBanList(banList);
       } catch (err) {
-        Logger.verbose('BanImporter', 1, `Failed to import ban list ${banList.id}: ${err.message}`, err);
+        Logger.verbose('BanImporter', 1, `Failed to import ban list ${banList.id}: `, err);
       }
       currentList++;
       Logger.discordProgressBar(
