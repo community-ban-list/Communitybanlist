@@ -47,7 +47,24 @@ export default class BanImporter {
   }
 
   async saveBan(importedBan) {
+    let expiresDate = null;
     try {
+      expiresDate = new Date(Date.parse(importedBan.expires));
+      if(expiresDate.getFullYear() > 9999) {
+        expiresDate = "NULL"
+      } else {
+        expiresDate = expiresDate.toISOString().slice(0, 19).replace('T', ' ');
+      }
+    } catch (err) {
+      Logger.verbose(
+        'BanImporter',
+        1,
+        `Failed to convert date for (ID: ${importedBan.id}) in ban list (ID: ${importedBan.banList.id}): `,
+        err
+      );
+    }
+
+    try{
       // Create or find the ban.
       const [ban, created] = await Ban.findOrCreate({
         where: {
@@ -56,7 +73,7 @@ export default class BanImporter {
         defaults: {
           id: importedBan.id,
           created: importedBan.created || Date.now(),
-          expires: importedBan.expires,
+          expires: expiresDate,
           expired: importedBan.expired,
           reason: importedBan.reason,
           rawReason: importedBan.rawReason,
