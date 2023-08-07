@@ -32,30 +32,6 @@ export default class BanImporter {
       );
 
       for (const importedBan of importedBans) {
-        let expiresDate = null;
-        if (importedBan.expires && typeof importedBan.expires !== 'object') {
-          try {
-            expiresDate = importedBan.expires.toString().split(/[- :.]/);
-            expiresDate[1]--;
-            expiresDate.pop();
-            expiresDate = new Date(Date.parse(expiresDate));
-
-            if (expiresDate.getFullYear() > 9999) {
-              importedBan.expires = null;
-            } else {
-              importedBan.expires = expiresDate;
-            }
-          } catch (err) {
-            Logger.verbose(
-              'BanImporter',
-              1,
-              `Failed to convert date for (ID: ${importedBan.id}) in ban list (ID: ${
-                importedBan.banList.id
-              }): ${importedBan.expires} ${typeof importedBan.expires} `,
-              err
-            );
-          }
-        }
         this.importedBanListIDs.add(importedBan.banList.id);
         this.importedBanIDs.push(importedBan.id);
         this.saveBanQueue.push(importedBan);

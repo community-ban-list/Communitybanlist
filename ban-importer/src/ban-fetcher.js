@@ -65,7 +65,7 @@ export default class BanFetcher {
       // Turn the expiry data into a date object or null for perm bans.
       expires = parseInt(expires);
       expires = expires ? new Date(expires * 1000) : null;
-
+      if (expires instanceof Date && expires.getFullYear() > 9999) expires = null;
       // Store the new ban.
       bans.push({
         id: `${banList.id},${steamUser},${expires ? expires.getTime() : 'null'}`,
