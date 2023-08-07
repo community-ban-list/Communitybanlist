@@ -41,9 +41,9 @@ export default class BanImporter {
             expiresDate = new Date(Date.parse(expiresDate));
 
             if (expiresDate.getFullYear() > 9999) {
-              importedBan.expires = 'NULL';
+              importedBan.expires = null;
             } else {
-              importedBan.expires = expiresDate.toISOString().slice(0, 19).replace('T', ' ');
+              importedBan.expires = expiresDate;
             }
           } catch (err) {
             Logger.verbose(
