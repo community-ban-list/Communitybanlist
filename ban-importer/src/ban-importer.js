@@ -32,6 +32,22 @@ export default class BanImporter {
       );
 
       for (const importedBan of importedBans) {
+        let expiresDate = null;
+        try {
+          expiresDate = new Date(Date.parse(importedBan.expires));
+          if(expiresDate.getFullYear() > 9999) {
+            importedBan.expires = "NULL"
+          } else {
+            importedBan.expires = expiresDate.toISOString().slice(0, 19).replace('T', ' ');
+          }
+        } catch (err) {
+          Logger.verbose(
+            'BanImporter',
+            1,
+            `Failed to convert date for (ID: ${importedBan.id}) in ban list (ID: ${importedBan.banList.id}): `,
+            err
+          );
+        }
         this.importedBanListIDs.add(importedBan.banList.id);
         this.importedBanIDs.push(importedBan.id);
         this.saveBanQueue.push(importedBan);
@@ -47,23 +63,6 @@ export default class BanImporter {
   }
 
   async saveBan(importedBan) {
-    let expiresDate = null;
-    try {
-      expiresDate = new Date(Date.parse(importedBan.expires));
-      if(expiresDate.getFullYear() > 9999) {
-        expiresDate = "NULL"
-      } else {
-        expiresDate = expiresDate.toISOString().slice(0, 19).replace('T', ' ');
-      }
-    } catch (err) {
-      Logger.verbose(
-        'BanImporter',
-        1,
-        `Failed to convert date for (ID: ${importedBan.id}) in ban list (ID: ${importedBan.banList.id}): `,
-        err
-      );
-    }
-
     try{
       // Create or find the ban.
       const [ban, created] = await Ban.findOrCreate({
@@ -73,7 +72,7 @@ export default class BanImporter {
         defaults: {
           id: importedBan.id,
           created: importedBan.created || Date.now(),
-          expires: expiresDate,
+          expires: importedBan.expires,
           expired: importedBan.expired,
           reason: importedBan.reason,
           rawReason: importedBan.rawReason,
