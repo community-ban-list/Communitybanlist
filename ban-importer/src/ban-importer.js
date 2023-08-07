@@ -49,7 +49,9 @@ export default class BanImporter {
             Logger.verbose(
               'BanImporter',
               1,
-              `Failed to convert date for (ID: ${importedBan.id}) in ban list (ID: ${importedBan.banList.id}): ${importedBan.expires}`,
+              `Failed to convert date for (ID: ${importedBan.id}) in ban list (ID: ${
+                importedBan.banList.id
+              }): ${importedBan.expires} ${typeof importedBan.expires} `,
               err
             );
           }
