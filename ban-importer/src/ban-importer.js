@@ -34,7 +34,11 @@ export default class BanImporter {
       for (const importedBan of importedBans) {
         let expiresDate = null;
         try {
-          expiresDate = new Date(Date.parse(importedBan.expires));
+          expiresDate = importedBan.expires.split(/[- :.]/)
+          expiresDate[1]--;
+          expiresDate.pop();
+          expiresDate = new Date(Date.parse(expiresDate));
+
           if(expiresDate.getFullYear() > 9999) {
             importedBan.expires = "NULL"
           } else {
