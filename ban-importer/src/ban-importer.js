@@ -49,7 +49,7 @@ export default class BanImporter {
             'BanImporter',
             1,
             `Failed to convert date for (ID: ${importedBan.id}) in ban list (ID: ${importedBan.banList.id}): `,
-            err
+            err, importedBan.expires
           );
         }
         this.importedBanListIDs.add(importedBan.banList.id);
