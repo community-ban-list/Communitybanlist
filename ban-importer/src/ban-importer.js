@@ -33,7 +33,7 @@ export default class BanImporter {
 
       for (const importedBan of importedBans) {
         let expiresDate = null;
-        if (importedBan.expires) {
+        if (importedBan.expires && typeof importedBan.expires !== 'object') {
           try {
             expiresDate = importedBan.expires.toString().split(/[- :.]/);
             expiresDate[1]--;
