@@ -31,10 +31,10 @@
     "husky": "^4.2.5",
     "lint-staged": "^10.2.11",
     "nodemon": "^2.0.4",
-    "prettier": "^2.0.5",
-    "simple-discord-webhooks": "^2.1.0"
+    "prettier": "^2.0.5"
   },
   "dependencies": {
-    "react-step-wizard": "^5.3.5"
+    "react-step-wizard": "^5.3.5",
+    "simple-discord-webhooks": "^2.1.0"
   }
 }
