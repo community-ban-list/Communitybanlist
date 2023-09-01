@@ -20,6 +20,5 @@
     "passport-steam": "^1.0.12"
   },
   "dev-dependencies": {
-    "@babel/plugin-proposal-private-property-in-object": "7.21.0-placeholder-for-preset-env.2"
   }
 }
