@@ -6,7 +6,6 @@
   "dependencies": {
     "async": "^3.2.0",
     "axios": "^1.4.0",
-    "scbl-lib": "1.0.0",
-    "simple-discord-webhooks": "^2.1.0"
+    "scbl-lib": "1.0.0"
   }
 }
