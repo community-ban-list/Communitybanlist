@@ -18,5 +18,8 @@
     "koa-views": "^6.2.1",
     "lodash": "^4.17.15",
     "passport-steam": "^1.0.12"
+  },
+  "dev-dependencies": {
+    "@babel/plugin-proposal-private-property-in-object": "7.21.0-placeholder-for-preset-env.2"
   }
 }
