@@ -4,19 +4,19 @@ import { Ban, BanList, Organisation, SteamUser } from 'scbl-lib/db/models';
 export default {
   Query: {
     organisations: (context) => {
-      context.checkTimeOut();
+      context.checkTimeout();
       return Organisation.findAll({
         order: [['name', 'ASC']]
       });
     },
     banLists: (context) => {
-      context.checkTimeOut();
+      context.checkTimeout();
       return BanList.findAll({
         order: [['name', 'ASC']]
       });
     },
     bans: (parent, filter, context) => {
-      context.checkTimeOut();
+      context.checkTimeout();
       return Ban.paginate({
         order: [[filter.orderBy || 'created', filter.orderDirection || 'DESC']],
         first: filter.first,

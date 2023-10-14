@@ -3,7 +3,7 @@ import { Organisation } from 'scbl-lib/db/models';
 export default {
   BanList: {
     organisation: (parent, context) => {
-      context.checkTimeOut();
+      context.checkTimeout();
       return Organisation.findByPk(parent.organisation);
     }
   }
