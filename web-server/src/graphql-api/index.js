@@ -14,22 +14,12 @@ const schema = makeExecutableSchema({ typeDefs, resolvers, schemaDirectives });
 export default new ApolloServer({
   schema,
   context: async ({ ctx }) => {
-    const startTime = Date.now();
-    const checkTimeout = () => {
-      const currentTime = Date.now();
-      if (currentTime - startTime > 5000) {
-        // 3 seconds
-        throw new Error('Operation took too long!');
-      }
-    };
     try {
       return {
-        user: jwt.verify(ctx.get('JWT'), JWT_AUTH.SECRET, { algorithms: [JWT_AUTH.ALGORITHM] })
-          .user,
-        checkTimeout
+        user: jwt.verify(ctx.get('JWT'), JWT_AUTH.SECRET, { algorithms: [JWT_AUTH.ALGORITHM] }).user
       };
     } catch (err) {
-      return { user: null, checkTimeout };
+      return { user: null };
     }
   }
 });
