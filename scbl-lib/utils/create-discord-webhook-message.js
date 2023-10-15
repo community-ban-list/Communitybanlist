@@ -9,7 +9,7 @@ export default function (url, options = {}) {
     new Webhook(
       url,
       'Community Ban List',
-      'https://raw.githubusercontent.com/CommunityBanList/Communitybanlist/v3/client/src/assets/img/brand/cbl-logo-square.png'
+      'https://github.com/community-ban-list/Communitybanlist/blob/master/client/src/assets/img/brand/cbl-logo-square.png?raw=true'
     ),
     new MessageBuilder()
       .setColor(options.color || '#ffc40b')
