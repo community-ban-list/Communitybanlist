@@ -3,17 +3,20 @@ import { Ban, BanList, Organisation, SteamUser } from 'scbl-lib/db/models';
 
 export default {
   Query: {
-    organisations: () => {
+    organisations: (parent, args, context) => {
+      context.checkTimeout();
       return Organisation.findAll({
         order: [['name', 'ASC']]
       });
     },
-    banLists: () => {
+    banLists: (parent, args, context) => {
+      context.checkTimeout();
       return BanList.findAll({
         order: [['name', 'ASC']]
       });
     },
-    bans: (parent, filter) => {
+    bans: (parent, filter, context) => {
+      context.checkTimeout();
       return Ban.paginate({
         order: [[filter.orderBy || 'created', filter.orderDirection || 'DESC']],
         first: filter.first,
@@ -22,7 +25,8 @@ export default {
         before: filter.before
       });
     },
-    steamUsers: (parent, filter) => {
+    steamUsers: (parent, filter, context) => {
+      context.checkTimeOut();
       const order = [[filter.orderBy || 'id', filter.orderDirection || 'DESC']];
 
       // Dirty temporary way to sort multiple fields for this query.
@@ -38,7 +42,8 @@ export default {
           filter.orderBy === 'reputationRank' ? { reputationRank: { [Op.ne]: null } } : undefined
       });
     },
-    steamUser: async (parent, filter) => {
+    steamUser: async (parent, filter, context) => {
+      context.checkTimeOut();
       const user = await SteamUser.findByPk(filter.id);
 
       if (user) {
@@ -49,6 +54,7 @@ export default {
       return user;
     },
     loggedInSteamUser: async (parent, filter, context) => {
+      context.checkTimeOut();
       return context.user ? SteamUser.findByPk(context.user.id) : null;
     }
   }

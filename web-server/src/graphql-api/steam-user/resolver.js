@@ -4,10 +4,12 @@ import { calculateRiskRating } from 'scbl-lib/utils';
 
 export default {
   SteamUser: {
-    riskRating: (parent) => {
+    riskRating: (parent, args, context) => {
+      context.checkTimeout();
       return calculateRiskRating(parent.reputationPoints);
     },
-    bans: (parent, filter) => {
+    bans: (parent, filter, context) => {
+      context.checkTimeout();
       return Ban.paginate({
         order: [[filter.orderBy || 'created', filter.orderDirection || 'DESC']],
         first: filter.first,
@@ -20,10 +22,12 @@ export default {
         }
       });
     },
-    exportBanList: (parent, filter) => {
+    exportBanList: (parent, filter, context) => {
+      context.checkTimeout();
       return ExportBanList.findByPk(filter.id);
     },
-    exportBanLists: (parent) => {
+    exportBanLists: (parent, args, context) => {
+      context.checkTimeout();
       return ExportBanList.findAll({ where: { owner: parent.id } });
     }
   }
