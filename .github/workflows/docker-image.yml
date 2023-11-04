@@ -19,3 +19,6 @@ jobs:
 
     - name: Build the Docker image for the ban importer
       run: docker build . --file ban-importer/Dockerfile --tag cblbanimporter:$(date +%s)
+
+    - name: Clean up Docker Images not in use
+      run: docker system prune --all --force
