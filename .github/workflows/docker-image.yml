@@ -10,7 +10,7 @@ jobs:
 
   build:
 
-    runs-on: self-hosted
+    runs-on: linux-1
 
     steps:
     - uses: actions/checkout@v3
