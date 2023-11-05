@@ -36,5 +36,3 @@ jobs:
           file: ban-importer/Dockerfile
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:latest
-    - name: Clean up Docker Images to save space
-      run: docker system prune --all --force
