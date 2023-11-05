@@ -76,7 +76,7 @@ export default function () {
                       </div>
                       <h6 className="text-primary text-uppercase">Explore</h6>
                       <p className="description mt-3">
-                        Explore our database containing over 47,000 bans and 34,000 banned players
+                        Explore our database containing over 90,000 bans and 84,000 banned players
                         from various popular Partner servers.
                       </p>
                       <div>
