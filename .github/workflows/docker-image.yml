@@ -13,6 +13,8 @@ jobs:
     runs-on: linux-1
 
     steps:
+    - name: Checkout
+      uses: actions/checkout@v4
     - name: Login to Docker Hub
       uses: docker/login-action@v3
       with:
@@ -42,5 +44,7 @@ jobs:
      runs-on: linux-1
 
      steps:
+     - name: Checkout
+       uses: actions/checkout@v4
      - name: Clean up Docker Images not in use
        run: docker system prune --all --force  
