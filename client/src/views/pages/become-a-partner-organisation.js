@@ -117,8 +117,8 @@ export default function () {
                     Battlemetrics ban list invite. Battlemetrics ban list invites can be obtained by
                     navigating to <a href="https://www.battlemetrics.com/rcon/ban-lists">here</a>,
                     clicking "Share" on the appropriate ban list and generating an invite using the
-                    default options. If your ban list uses a different format please state that here
-                    and we will request further information from you.
+                    default options. If your ban list uses a different format please state that in
+                    your request and we will request further information from you.
                   </li>
                 </ul>
               </p>
