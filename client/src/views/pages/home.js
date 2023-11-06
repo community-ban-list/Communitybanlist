@@ -76,7 +76,7 @@ export default function () {
                       </div>
                       <h6 className="text-primary text-uppercase">Explore</h6>
                       <p className="description mt-3">
-                        Explore our database containing over 47,000 bans and 34,000 banned players
+                        Explore our database containing over 90,000 bans and 84,000 banned players
                         from various popular Partner servers.
                       </p>
                       <div>
@@ -158,7 +158,7 @@ export default function () {
                 </div>
                 <h3>Explore</h3>
                 <p>
-                  Our database contains information on over 47,000 bans and 34,000 banned players
+                  Our database contains information on over 90,000 bans and 84,000 banned players
                   from various popular Partner Organisations. We regularly update the database to
                   allow you to proactively defend your server from harmful players.
                 </p>
@@ -470,7 +470,7 @@ export default function () {
               <p className="lead">
                 We have a small team of individuals who keep our systems running and help
                 orchestrate collaboration between partner organisations. You can find them on our
-                github
+                github.
               </p>
             </Col>
           </Row>
