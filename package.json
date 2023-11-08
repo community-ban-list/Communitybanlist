@@ -35,6 +35,8 @@
   },
   "dependencies": {
     "react-step-wizard": "^5.3.5",
-    "simple-discord-webhooks": "^2.1.0"
+    "simple-discord-webhooks": "^2.1.0",
+    "@pm2/io": "^5.0.0",
+    "pm2": "^5.1.0"
   }
 }
