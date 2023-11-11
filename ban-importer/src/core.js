@@ -421,7 +421,7 @@ export default class Core {
 
     message.setTitle(`${exportBan.SteamUser.name} has been added to your export ban list.`);
     message.setDescription(
-      `[${exportBan.SteamUser.name}](${HOST}/search/${exportBan.SteamUser.id}) [BM RCON Link](https://www.battlemetrics.com/rcon/players?filter[search]=${exportBan.SteamUser.id}&method=quick&redirect=1) has reached the threshold required to be added to your export ban list named "${exportBan.ExportBanList.name}".`
+      `[${exportBan.SteamUser.name}](${HOST}/search/${exportBan.SteamUser.id})  has reached the threshold required to be added to your export ban list named "${exportBan.ExportBanList.name}".\n\n* [BM RCON Link](https://www.battlemetrics.com/rcon/players?filter[search]=${exportBan.SteamUser.id}&method=quick&redirect=1)`
     );
     message.setThumbnail(exportBan.SteamUser.avatarMedium);
 
