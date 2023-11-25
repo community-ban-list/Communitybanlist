@@ -26,32 +26,32 @@ export default function () {
               <p>
                 Partner organisations are gaming communities that contribute ban information from
                 their server's ban lists to the CommunityBanList.com database. Any Gaming community
-                can become a partner organisation providing they apply and are accepted on our
+                can become a partner organization providing they apply and are accepted on our
                 discord.
               </p>
               <p>
-                Becoming a partner organisation requires very little effort. We request that you
-                submit an application on our discord to become a partner and aggre to the terms in
+                Becoming a partner organization requires very little effort. We request that you
+                submit an application on our discord to become a partner and agree to the terms in
                 that application. We primarily import bans from Battlemetrics and remote ban lists,
                 but can easily add support for custom formats on request. Once your community is
                 added to our system we will frequently automatically sync our database with your ban
                 list and require no further involvement from you. We will share information from
                 your ban list on this website and to Discord servers, however, this information is
                 limited to the Steam ID of the banned player, the period of their ban and a list of
-                categorised keywords found in their ban reason. We categorise ban reasons based on
+                categorized keywords found in their ban reason. We categorize ban reasons based on
                 keywords for consistency, to maintain professionalism and to allow you to keep
                 confidential notes in their ban lists private.
               </p>
               <p>
-                There are currently no benefits to being a partner organisation, however, everyone
-                benefits from our partner organisations as the more partner organisations that
+                There are currently no benefits to being a partner organization, however, everyone
+                benefits from our partner organizations as the more partner organizations that
                 contribute information on players the more effective CommunityBanList.com becomes in
                 protecting the integrity of our partner's communities so, please consider
                 contributing to thank others for their contributions.
               </p>
             </CardBody>
             <CardBody>
-              <h3>Partner Aggrement</h3>
+              <h3>Partner Agreement</h3>
               <p>
                 <h4>Ban Evidence</h4>
               </p>
@@ -108,8 +108,8 @@ export default function () {
                     The ban list name is intended for communities with multiple ban lists or who may
                     wish to share additional information on what their ban list contains, such as if
                     their ban list contains bans from multiple different games. In this case, ban
-                    lists should be named to communicate what the ban list contains, e.g. "Hate
-                    speech ban list". If this is not the case, you may leave the ban list name as
+                    lists should be named to communicate what the ban list contains, e.g. 
+                    "Hate speech ban list". If this is not the case, you may leave the ban list name as
                     "Public Server".
                   </li>
                   <li>
@@ -117,8 +117,8 @@ export default function () {
                     Battlemetrics ban list invite. Battlemetrics ban list invites can be obtained by
                     navigating to <a href="https://www.battlemetrics.com/rcon/ban-lists">here</a>,
                     clicking "Share" on the appropriate ban list and generating an invite using the
-                    default options. If your ban list uses a different format please state that here
-                    and we will request further information from you.
+                    default options. If your ban list uses a different format please state that in
+                    your request and we will request further information from you.
                   </li>
                 </ul>
               </p>

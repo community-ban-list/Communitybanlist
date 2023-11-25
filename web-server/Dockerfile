@@ -1,4 +1,4 @@
-FROM node:14.21.3
+FROM node:14.21.3-slim
 
 WORKDIR /usr/src/
 
@@ -13,6 +13,7 @@ COPY web-server ./web-server
 COPY package.json .
 
 # Install dependencies
+# RUN yarn install --production --ignore-engines
 RUN yarn install --production
 
 # Install pm2
@@ -24,5 +25,5 @@ RUN yarn build-web-server
 # Expose ports
 EXPOSE 80
 
-# Run service
+# Run service with pm2
 CMD [ "pm2-runtime", "web-server/index.js" ]

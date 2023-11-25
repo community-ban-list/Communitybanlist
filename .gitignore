@@ -10,3 +10,7 @@ yarn.lock
 .idea/
 .vs/
 .vscode/
+
+# yarn error log
+yarn-error.log
+.github/.DS_Store

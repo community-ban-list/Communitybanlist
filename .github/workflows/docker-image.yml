@@ -8,14 +8,31 @@ on:
 
 jobs:
 
-  build:
+  Build-and-Push:
 
-    runs-on: ubuntu-latest
+    runs-on: linux-1
 
     steps:
-    - uses: actions/checkout@v3
-    - name: Build the Docker image for the web server
-      run: docker build . --file web-server/Dockerfile --tag cblwebserver:$(date +%s)
-
-    - name: Build the Docker image for the ban importer
-      run: docker build . --file ban-importer/Dockerfile --tag cblbanimporter:$(date +%s)
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Build and push image for the web server
+      uses: docker/build-push-action@v5
+      with:
+          context: .
+          file: web-server/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:latest
+    - name: Build and push image for the ban importer
+      uses: docker/build-push-action@v5
+      with:
+          context: .
+          file: ban-importer/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:latest
