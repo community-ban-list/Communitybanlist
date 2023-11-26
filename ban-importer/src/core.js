@@ -421,7 +421,7 @@ export default class Core {
 
     message.setTitle(`${exportBan.SteamUser.name} has been added to your export ban list.`);
     message.setDescription(
-      `[${exportBan.SteamUser.name}](${HOST}/search/${exportBan.SteamUser.id}) has reached the threshold required to be added to your export ban list named "${exportBan.ExportBanList.name}."\n\n* [BM RCON Link](https://www.battlemetrics.com/rcon/players?filter[search]=${exportBan.SteamUser.id}&method=quick&redirect=1)\n* [SteamID.UK Profile](https://steamid.uk/profile/${exportBan.SteamUser.id})`
+      `[${exportBan.SteamUser.name}](${HOST}/search/${exportBan.SteamUser.id}) has reached the threshold required to be added to your export ban list named "${exportBan.ExportBanList.name}".\n\n* [BM RCON Link](https://www.battlemetrics.com/rcon/players?filter[search]=${exportBan.SteamUser.id}&method=quick&redirect=1)\n* [SteamID.UK Profile](https://steamid.uk/profile/${exportBan.SteamUser.id})`
     );
     message.setThumbnail(exportBan.SteamUser.avatarMedium);
 
@@ -454,7 +454,7 @@ export default class Core {
 
     message.setTitle(`${exportBan.SteamUser.name} has been removed from your export ban list.`);
     message.setDescription(
-      `[${exportBan.SteamUser.name}](${HOST}/search/${exportBan.SteamUser.id}) no longer meets the threshold required to be on your export ban list named "${exportBan.ExportBanList.name}" so has been removed.\n\n* [BM RCON Link](https://www.battlemetrics.com/rcon/players?filter[search]=${exportBan.SteamUser.id}&method=quick&redirect=1)`
+        `[${exportBan.SteamUser.name}](${HOST}/search/${exportBan.SteamUser.id}) no longer meets the threshold required to be on your export ban list named "${exportBan.ExportBanList.name}" so has been removed.\n\n* [BM RCON Link](https://www.battlemetrics.com/rcon/players?filter[search]=${exportBan.SteamUser.id}&method=quick&redirect=1)\n* [SteamID.UK Profile](https://steamid.uk/profile/${exportBan.SteamUser.id})`
     );
     message.setThumbnail(exportBan.SteamUser.avatarMedium);
 
