@@ -148,13 +148,12 @@ export default function (props) {
                       'Queued for refresh.'
                     )}
                   </small>
-                  <h5>
+                  <br />
                   <small>
                   <a href={`https://www.battlemetrics.com/rcon/players?filter[search]=${data.steamUser.id}&method=quick&redirect=1`}>
                     BM RCON LINK
                   </a>
                   </small>
-                  </h5>
                 </CardBody>
                 <CardBody className="text-center border-bottom">
                   <h4>Reputation</h4>
