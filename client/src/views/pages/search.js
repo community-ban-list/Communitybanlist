@@ -151,7 +151,7 @@ export default function (props) {
                   <br />
                   <small>
                   <a href={`https://www.battlemetrics.com/rcon/players?filter[search]=${data.steamUser.id}&method=quick&redirect=1`}>
-                    BM RCON LINK
+                    * BM RCON LINK
                   </a>
                   </small>
                 </CardBody>
