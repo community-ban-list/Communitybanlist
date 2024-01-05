@@ -11,7 +11,7 @@ async function main() {
     ban.reason = classifyBanReason(ban.rawReason, ban.rawNote);
     if (old !== ban.reason) {
       console.log(old, ban.reason);
-      console.log(`Updating Ban: ${ban.reason}`);
+      console.log(`[DEBUG] Updating Ban: ${ban.reason}`);
       await ban.save();
     }
   }
