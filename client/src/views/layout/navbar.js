@@ -173,7 +173,7 @@ class DemoNavbar extends React.Component {
                           <Media body className="ml-3">
                             <h6 className="heading text-info mb-md-1">Export Ban Lists</h6>
                             <p className="description d-none d-md-inline-block mb-0">
-                              Protect your Squad server with our configurable export ban lists that
+                              Protect your game server with our configurable export ban lists that
                               preemptively ban the most harmful players from your server before they
                               have the chance to cause any harm.
                             </p>
