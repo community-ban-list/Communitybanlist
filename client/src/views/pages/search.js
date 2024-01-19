@@ -149,20 +149,14 @@ export default function (props) {
                     )}
                   </small>
                   <br />
-                  <ul>
                     <small>
-                      <li>
                         <a
                           href={`https://www.battlemetrics.com/rcon/players?filter[search]=${data.steamUser.id}&method=quick&redirect=1`}
                         >
                           BM RCON LINK
                         </a>
-                      </li>
-                      <li>
                         <a href={`https://steamid.uk/profile/${data.steamUser.id}`}>SteamID.UK</a>
-                      </li>
                     </small>
-                  </ul>
                 </CardBody>
                 <CardBody className="text-center border-bottom">
                   <h4>Reputation</h4>
