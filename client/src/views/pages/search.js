@@ -149,15 +149,23 @@ export default function (props) {
                     )}
                   </small>
                   <br />
-                    <small>
-                        <a
-                          href={`https://www.battlemetrics.com/rcon/players?filter[search]=${data.steamUser.id}&method=quick&redirect=1`}
-                        >
-                          BM Rcon Link
-                        </a>
-                        <br />
-                        <a href={`https://steamid.uk/profile/${data.steamUser.id}`}>SteamID.UK</a>
-                    </small>
+                  <small>
+                    <a
+                      href={`https://www.battlemetrics.com/rcon/players?filter[search]=${data.steamUser.id}&method=quick&redirect=1`}
+                    >
+                      BM Rcon Link
+                    </a>
+                    <br />
+                    <a href={`https://steamid.uk/profile/${data.steamUser.id}`}>SteamID.UK</a>
+                    <br />
+                    <a href={`http://vacbanned.com/view/detail/id/${data.steamUser.id}`}>
+                      VACBanned
+                    </a>
+                    <br />
+                    <a href={`https://steamrep.com/search?q=${data.steamUser.id}`}>SteamRep</a>
+                    <br />
+                    <a href={`https://steamdb.info/calculator/${data.steamUser.id}`}>SteamDB</a>
+                  </small>
                 </CardBody>
                 <CardBody className="text-center border-bottom">
                   <h4>Reputation</h4>
