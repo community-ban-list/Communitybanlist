@@ -153,7 +153,7 @@ export default function (props) {
                         <a
                           href={`https://www.battlemetrics.com/rcon/players?filter[search]=${data.steamUser.id}&method=quick&redirect=1`}
                         >
-                          BM RCON LINK
+                          BM Rcon Link
                         </a>
                         <br />
                         <a href={`https://steamid.uk/profile/${data.steamUser.id}`}>SteamID.UK</a>
