@@ -155,6 +155,7 @@ export default function (props) {
                         >
                           BM RCON LINK
                         </a>
+                        <br />
                         <a href={`https://steamid.uk/profile/${data.steamUser.id}`}>SteamID.UK</a>
                     </small>
                 </CardBody>
