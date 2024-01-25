@@ -150,7 +150,7 @@ export default function (props) {
                   </small>
                   <br />
                   <div>{/* Start Community Tools Links */}</div>
-                  <h3>
+                  <h6>
                     <a
                       href={`https://www.battlemetrics.com/rcon/players?filter[search]=${data.steamUser.id}&method=quick&redirect=1`}
                     >
@@ -166,7 +166,7 @@ export default function (props) {
                     <a href={`https://steamrep.com/search?q=${data.steamUser.id}`}>SteamRep</a>
                     <br />
                     <a href={`https://steamdb.info/calculator/${data.steamUser.id}`}>SteamDB</a>
-                  </h3>
+                  </h6>
                   <div>{/* End Community Tools Links */}</div>
                 </CardBody>
                 <CardBody className="text-center border-bottom">
