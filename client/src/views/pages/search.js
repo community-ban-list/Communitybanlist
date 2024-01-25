@@ -151,6 +151,7 @@ export default function (props) {
                   <br />
                   <div>{/* Start Community Tools Links */}</div>
                   <h6>
+                    <p>Community Tools:</p>
                     <a
                       href={`https://www.battlemetrics.com/rcon/players?filter[search]=${data.steamUser.id}&method=quick&redirect=1`}
                     >
