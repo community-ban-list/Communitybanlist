@@ -154,22 +154,48 @@ export default function (props) {
                   <h6>
                     <a
                       href={`https://www.battlemetrics.com/rcon/players?filter[search]=${data.steamUser.id}&method=quick&redirect=1`}
+                      target="_blank"
+                      rel="noopener noreferrer"
                     >
                       BM Rcon Link
                     </a>
                     <br />
-                    <a href={`https://steamid.uk/profile/${data.steamUser.id}`}>SteamID.UK</a>
+                    <a
+                      href={`https://steamid.uk/profile/${data.steamUser.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      SteamID.UK
+                    </a>
                     <br />
-                    <a href={`http://vacbanned.com/view/detail/id/${data.steamUser.id}`}>
+                    <a
+                      href={`http://vacbanned.com/view/detail/id/${data.steamUser.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
                       VACBanned
                     </a>
                     <br />
-                    <a href={`https://steamrep.com/search?q=${data.steamUser.id}`}>SteamRep</a>
+                    <a
+                      href={`https://steamrep.com/search?q=${data.steamUser.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      SteamRep
+                    </a>
                     <br />
-                    <a href={`https://steamdb.info/calculator/${data.steamUser.id}`}>SteamDB</a>
+                    <a
+                      href={`https://steamdb.info/calculator/${data.steamUser.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      SteamDB
+                    </a>
                     <br />
                     <a
                       href={`https://www.etools.ch/searchSubmit.do?query=%22${data.steamUser.id}%22`}
+                      target="_blank"
+                      rel="noopener noreferrer"
                     >
                       etools.ch
                     </a>
