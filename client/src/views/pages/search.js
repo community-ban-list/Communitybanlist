@@ -111,7 +111,9 @@ export default function (props) {
                 <div className="btn-wrapper text-center">
                   <i className="fas fa-exclamation-triangle fa-4x" />
                 </div>
-                <div className="text-center mt-2 mb-2">Something went wrong. Sad times.</div>
+                <div className="text-center mt-2 mb-2">
+                  [ERR 1] Something went wrong. Sad times.
+                </div>
               </CardBody>
             )}
             {data && data.steamUser === null && (
@@ -136,7 +138,11 @@ export default function (props) {
                     className="rounded-circle mb-4"
                   />
                   <h5>
-                    <a href={`https://steamcommunity.com/profiles/${data.steamUser.id}`}>
+                    <a
+                      href={`https://steamcommunity.com/profiles/${data.steamUser.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer nofollow"
+                    >
                       {data.steamUser.name || data.steamUser.id}
                     </a>
                   </h5>
