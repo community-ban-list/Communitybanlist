@@ -167,6 +167,12 @@ export default function (props) {
                     <a href={`https://steamrep.com/search?q=${data.steamUser.id}`}>SteamRep</a>
                     <br />
                     <a href={`https://steamdb.info/calculator/${data.steamUser.id}`}>SteamDB</a>
+                    <br />
+                    <a
+                      href={`https://www.etools.ch/searchSubmit.do?query=%22${data.steamUser.id}%22`}
+                    >
+                      etools.ch
+                    </a>
                   </h6>
                   <div>{/* End Community Tools Links */}</div>
                 </CardBody>
