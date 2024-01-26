@@ -155,7 +155,7 @@ export default function (props) {
                     <a
                       href={`https://www.battlemetrics.com/rcon/players?filter[search]=${data.steamUser.id}&method=quick&redirect=1`}
                       target="_blank"
-                      rel="noopener noreferrer"
+                      rel="noopener noreferrer nofollow"
                     >
                       BM Rcon Link
                     </a>
@@ -163,7 +163,7 @@ export default function (props) {
                     <a
                       href={`https://steamid.uk/profile/${data.steamUser.id}`}
                       target="_blank"
-                      rel="noopener noreferrer"
+                      rel="noopener noreferrer nofollow"
                     >
                       SteamID.UK
                     </a>
@@ -171,7 +171,7 @@ export default function (props) {
                     <a
                       href={`http://vacbanned.com/view/detail/id/${data.steamUser.id}`}
                       target="_blank"
-                      rel="noopener noreferrer"
+                      rel="noopener noreferrer nofollow"
                     >
                       VACBanned
                     </a>
@@ -179,7 +179,7 @@ export default function (props) {
                     <a
                       href={`https://steamrep.com/search?q=${data.steamUser.id}`}
                       target="_blank"
-                      rel="noopener noreferrer"
+                      rel="noopener noreferrer nofollow"
                     >
                       SteamRep
                     </a>
@@ -187,7 +187,7 @@ export default function (props) {
                     <a
                       href={`https://steamdb.info/calculator/${data.steamUser.id}`}
                       target="_blank"
-                      rel="noopener noreferrer"
+                      rel="noopener noreferrer nofollow"
                     >
                       SteamDB
                     </a>
@@ -195,7 +195,7 @@ export default function (props) {
                     <a
                       href={`https://www.etools.ch/searchSubmit.do?query=%22${data.steamUser.id}%22`}
                       target="_blank"
-                      rel="noopener noreferrer"
+                      rel="noopener noreferrer nofollow"
                     >
                       etools.ch
                     </a>
