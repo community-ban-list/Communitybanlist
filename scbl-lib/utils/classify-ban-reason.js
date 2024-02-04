@@ -1,4 +1,5 @@
 const reasons = {
+// Need to organize
   Cheating: /cheat|hack|作弊|\bhile|trich|betr(ü|u)|Чітер|Софт|Чіти/i,
   Glitching: /glitch/i,
   Exploiting: /exploit|剝削|istismar|ausnutz/i,
