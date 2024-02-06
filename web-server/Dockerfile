@@ -1,6 +1,6 @@
 FROM node:14.21.3-slim
 
-WORKDIR /opt/CBLWebServer/
+WORKDIR /usr/src/
 
 # Copy shared libraries
 COPY scbl-lib ./scbl-lib
