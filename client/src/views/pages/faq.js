@@ -15,7 +15,7 @@ const sections = [
         question: 'What is the CommunityBanList.com?',
         answer: (
           <>
-            CommunityBanList.com is a community-led project that aims to protect the partner
+            CommunityBanList.com is a community-led project for Squad that aims to protect the partner
             communities through collaboration and information sharing. It does this by importing ban
             information from various popular servers, known as our partner organisations, into a
             database and providing functionality to search and export the data or aggregations of
