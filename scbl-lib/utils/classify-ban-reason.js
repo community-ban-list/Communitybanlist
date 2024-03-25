@@ -1,5 +1,6 @@
 const reasons = {
-  Cheating: /cheat|hack|作弊|\bhile|trich|betr(ü|u)/i,
+// Need to organize
+  Cheating: /cheat|hack|作弊|\bhile|trich|betr(ü|u)|Чітер|Софт|Чіти/i,
   Glitching: /glitch/i,
   Exploiting: /exploit|剝削|istismar|ausnutz/i,
 
@@ -40,7 +41,7 @@ const reasons = {
   Advertising: /advertising|werb(ung|en)/i,
   Ableism: /ableis(t|m)/i,
   'Ban Evasion': /(alt|ban) evasion/i,
-  'Current Events': /(current event|currentevent)/i,
+  'Current Events': /(current event|currentevent)/i
 };
 
 export default function (...reason) {

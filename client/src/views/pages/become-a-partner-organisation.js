@@ -108,8 +108,8 @@ export default function () {
                     The ban list name is intended for communities with multiple ban lists or who may
                     wish to share additional information on what their ban list contains, such as if
                     their ban list contains bans from multiple different games. In this case, ban
-                    lists should be named to communicate what the ban list contains, e.g. 
-                    "Hate speech ban list". If this is not the case, you may leave the ban list name as
+                    lists should be named to communicate what the ban list contains, e.g. "Hate
+                    speech ban list". If this is not the case, you may leave the ban list name as
                     "Public Server".
                   </li>
                   <li>

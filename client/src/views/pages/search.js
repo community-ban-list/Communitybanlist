@@ -93,7 +93,7 @@ export default function (props) {
               </div>
               <h6 className="text-primary text-uppercase">Search</h6>
               <p className="description mt-2">
-                Search our database containing over 47,000 bans and 34,000 players.
+                Search our database containing over 90,000 bans and 84,000 players.
               </p>
               <SteamUserSearchBox search={props.match.params.search} />
             </CardBody>
@@ -111,7 +111,9 @@ export default function (props) {
                 <div className="btn-wrapper text-center">
                   <i className="fas fa-exclamation-triangle fa-4x" />
                 </div>
-                <div className="text-center mt-2 mb-2">Something went wrong. Sad times.</div>
+                <div className="text-center mt-2 mb-2">
+                  [ERR 1] Something went wrong. Sad times.
+                </div>
               </CardBody>
             )}
             {data && data.steamUser === null && (
@@ -136,7 +138,11 @@ export default function (props) {
                     className="rounded-circle mb-4"
                   />
                   <h5>
-                    <a href={`https://steamcommunity.com/profiles/${data.steamUser.id}`}>
+                    <a
+                      href={`https://steamcommunity.com/profiles/${data.steamUser.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer nofollow"
+                    >
                       {data.steamUser.name || data.steamUser.id}
                     </a>
                   </h5>
@@ -148,6 +154,59 @@ export default function (props) {
                       'Queued for refresh.'
                     )}
                   </small>
+                  <br />
+                  <div>{/* Start Community Tools Links */}</div>
+                  <h4>Community Tools:</h4>
+                  <h6>
+                    <a
+                      href={`https://www.battlemetrics.com/rcon/players?filter[search]=${data.steamUser.id}&method=quick&redirect=1`}
+                      target="_blank"
+                      rel="noopener noreferrer nofollow"
+                    >
+                      BM Rcon Link
+                    </a>
+                    <br />
+                    <a
+                      href={`https://steamid.uk/profile/${data.steamUser.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer nofollow"
+                    >
+                      SteamID.UK
+                    </a>
+                    <br />
+                    <a
+                      href={`http://vacbanned.com/view/detail/id/${data.steamUser.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer nofollow"
+                    >
+                      VACBanned
+                    </a>
+                    <br />
+                    <a
+                      href={`https://steamrep.com/search?q=${data.steamUser.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer nofollow"
+                    >
+                      SteamRep
+                    </a>
+                    <br />
+                    <a
+                      href={`https://steamdb.info/calculator/${data.steamUser.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer nofollow"
+                    >
+                      SteamDB
+                    </a>
+                    <br />
+                    <a
+                      href={`https://www.etools.ch/searchSubmit.do?query=%22${data.steamUser.id}%22`}
+                      target="_blank"
+                      rel="noopener noreferrer nofollow"
+                    >
+                      etools.ch
+                    </a>
+                  </h6>
+                  <div>{/* End Community Tools Links */}</div>
                 </CardBody>
                 <CardBody className="text-center border-bottom">
                   <h4>Reputation</h4>

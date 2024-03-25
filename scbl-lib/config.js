@@ -1,6 +1,6 @@
 // Web
 const HOST = process.env.HOST || 'http://localhost';
-const LOCALSTORAGE_VERSION = 'v1.2'; // Change this to wipe clients local storage
+const LOCALSTORAGE_VERSION = 'v1.3.1'; // Change this to wipe clients local storage
 
 const JWT_AUTH = {
   // REPLACE KEY IN PRODUCTION!
@@ -19,7 +19,7 @@ const BATTLEMETRICS_ORGANIZATION = process.env.BATTLEMETRICS_ORGANIZATION || '56
 const STEAM_API_KEY = process.env.STEAM_API_KEY;
 
 // Other constants
-const DISCORD_INVITE = process.env.DISCORD_INVITE || 'https://discord.gg/etDkmPMJfB';
+const DISCORD_INVITE = process.env.DISCORD_INVITE || 'https://discord.gg/hZhc8fkw3a';
 
 export {
   HOST,

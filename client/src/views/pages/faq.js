@@ -84,7 +84,7 @@ const sections = [
             keywords/phrases found in the ban reasons assigned by our partner organisations. Our
             keywords and phrases are not perfect so there may be a small number of scenarios where
             ban reasons cannot be categorised so the reason is shown as "Unknown". This does
-            <strong>NOT</strong> mean a player was banned for no reason.
+            &nbsp;<strong>NOT</strong> mean a player was banned for no reason.
           </>
         )
       }
