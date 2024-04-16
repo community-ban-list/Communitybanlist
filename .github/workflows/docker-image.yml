@@ -10,7 +10,7 @@ jobs:
 
   Build-and-Push:
 
-    runs-on: linux-1
+    runs-on: chi-2
 
     steps:
     - name: Checkout
