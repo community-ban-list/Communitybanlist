@@ -10,7 +10,7 @@ jobs:
 
   Build-and-Push:
 
-    runs-on: chi-2
+    runs-on: dal-1
 
     steps:
     - name: Checkout
