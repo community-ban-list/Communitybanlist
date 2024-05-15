@@ -68,6 +68,15 @@ export default function () {
               <Nav className="nav-footer justify-content-end">
                 <NavItem>
                   <NavLink
+                    href="https://status.communitybanlist.com/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Status Page
+                  </NavLink>
+                </NavItem>
+                <NavItem>
+                  <NavLink
                     href="https://github.com/community-ban-list/Communitybanlist"
                     target="_blank"
                     rel="noopener noreferrer"
