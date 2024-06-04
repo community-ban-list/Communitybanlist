@@ -22,7 +22,7 @@ async function doSleep(ms) {
 
 async function main() {
   const profileStartTime = Date.now();
-  await Logger.verbose('Core', 1, `Starting new CBL Update run...`);
+  await Logger.verbose('Core', 1, `<@276137824460210178> Starting new CBL Update run...`);
   await connect();
 
   if (TASKS_TO_COMPLETE.IMPORT_BANS) {
