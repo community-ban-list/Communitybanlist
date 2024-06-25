@@ -1,6 +1,6 @@
 FROM node:14.21.3-slim
 
-WORKDIR /usr/src/
+WORKDIR /opt/workdir/
 
 # Copy shared libraries
 COPY scbl-lib ./scbl-lib
