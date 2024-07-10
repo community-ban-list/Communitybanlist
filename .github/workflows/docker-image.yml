@@ -24,6 +24,11 @@ jobs:
       uses: docker/setup-qemu-action@v3 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
+      with: 
+          version: "lab:latest"
+          driver: cloud
+          endpoint: ${{ secrets.DOCKER_CLOUD_USERNAME }}/${{ secrets.DOCKER_BUCKET }}
+          install: true
     - name: Build and push image for the web server
       uses: docker/build-push-action@v5
       with:
