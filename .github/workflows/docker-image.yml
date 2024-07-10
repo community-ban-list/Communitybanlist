@@ -27,7 +27,7 @@ jobs:
       with: 
           version: "lab:latest"
           driver: cloud
-          endpoint: ${{ secrets.DOCKER_CLOUD_USERNAME }}/${{ secrets.DOCKER_BUCKET }}
+          endpoint: ${{ secrets.DOCKER_CLOUD_USERNAME }}/${{ secrets.DOCKER_CLOUD_BUCKET }}
           install: true
     - name: Build and push image for the web server
       uses: docker/build-push-action@v5
