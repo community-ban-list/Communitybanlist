@@ -163,7 +163,7 @@ export default function (props) {
                       target="_blank"
                       rel="noopener noreferrer nofollow"
                     >
-                      BM Rcon Link
+                      BM RCON Link
                     </a>
                     <br />
                     <a
