@@ -3,7 +3,9 @@ import { ExportBan, SteamUser } from 'scbl-lib/db/models';
 import { Op, QueryTypes, Transaction } from 'scbl-lib/db/sequelize';
 import { Logger } from 'scbl-lib/utils';
 
-const UPDATE_BATCH_SIZE = process.env.UPDATE_EXPORT_BANS_BATCH_SIZE || 300;
+// Changed Below on the 14900k. Will need to monitor to make sure issues do not arise.
+// const UPDATE_BATCH_SIZE = process.env.UPDATE_EXPORT_BANS_BATCH_SIZE || 500;
+const UPDATE_BATCH_SIZE = process.env.UPDATE_EXPORT_BANS_BATCH_SIZE || 500;
 
 export default class ExportBanManager {
   static async updateExportBans() {
