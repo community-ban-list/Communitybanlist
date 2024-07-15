@@ -4,7 +4,7 @@ import { Op, QueryTypes, Transaction } from 'scbl-lib/db/sequelize';
 import { Logger } from 'scbl-lib/utils';
 
 // Changed Below on the 14900k. Will need to monitor to make sure issues do not arise.
-// const UPDATE_BATCH_SIZE = process.env.UPDATE_EXPORT_BANS_BATCH_SIZE || 500;
+// const UPDATE_BATCH_SIZE = process.env.UPDATE_EXPORT_BANS_BATCH_SIZE || 100;
 const UPDATE_BATCH_SIZE = process.env.UPDATE_EXPORT_BANS_BATCH_SIZE || 500;
 
 export default class ExportBanManager {
