@@ -39,7 +39,7 @@
     "react-google-maps": "^9.4.5",
     "react-hook-form": "^6.13.1",
     "react-router-dom": "^5.2.0",
-    "react-scripts": "^4.0.1",
+    "react-scripts": "4.0.1",
     "react-select": "^3.1.1",
     "react-step-wizard": "^5.3.5",
     "reactstrap": "^8.7.1",
