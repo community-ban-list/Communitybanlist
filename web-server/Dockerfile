@@ -1,5 +1,5 @@
 # FROM debian:bookworm
-FROM node:18.20.4-slim
+FROM node:14.21.3-slim
 
 WORKDIR /opt/workdir/
 
