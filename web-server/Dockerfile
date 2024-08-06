@@ -4,8 +4,8 @@ FROM node:14.21.3-slim
 WORKDIR /opt/workdir/
 
 # Test to make sure packages are up to date
-RUN apt update
-RUN apt upgrade -y
+# RUN apt update
+# RUN apt upgrade -y
 
 # Copy shared libraries
 COPY scbl-lib ./scbl-lib
