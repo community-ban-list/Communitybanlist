@@ -175,14 +175,6 @@ export default function (props) {
                     </a>
                     <br />
                     <a
-                      href={`http://vacbanned.com/view/detail/id/${data.steamUser.id}`}
-                      target="_blank"
-                      rel="noopener noreferrer nofollow"
-                    >
-                      VACBanned
-                    </a>
-                    <br />
-                    <a
                       href={`https://steamrep.com/search?q=${data.steamUser.id}`}
                       target="_blank"
                       rel="noopener noreferrer nofollow"
