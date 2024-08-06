@@ -7,6 +7,9 @@ WORKDIR /opt/workdir/
 RUN apt update
 RUN apt upgrade -y
 
+# Have the build always use proper paths
+RUN npm config set scripts-prepend-node-path auto
+
 # Copy shared libraries
 COPY scbl-lib ./scbl-lib
 

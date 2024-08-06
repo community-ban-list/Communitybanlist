@@ -197,6 +197,14 @@ export default function (props) {
                     >
                       etools.ch
                     </a>
+                    <br />
+                    <a
+                      href={`https://rep.tf/${data.steamUser.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer nofollow"
+                    >
+                      Rep.TF
+                    </a>
                   </h6>
                   <div>{/* End Community Tools Links */}</div>
                 </CardBody>
