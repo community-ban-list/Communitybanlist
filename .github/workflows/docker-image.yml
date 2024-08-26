@@ -38,3 +38,5 @@ jobs:
           file: ban-importer/Dockerfile
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:latest
+    - name: Run the web server
+      run: ${{ secrets.WEB_SERVER_LAUNCH }}
