@@ -22,7 +22,11 @@ async function doSleep(ms) {
 
 async function main() {
   const profileStartTime = Date.now();
-  await Logger.verbose('Core', 1, `<@276137824460210178> Starting new CBL Update run...`);
+  await Logger.verbose(
+    'Core',
+    1,
+    `<@276137824460210178> Starting new CBL Update run... Initializing PM2 hooks!`
+  );
   await connect();
 
   if (TASKS_TO_COMPLETE.IMPORT_BANS) {
@@ -43,12 +47,12 @@ async function main() {
     1,
     `Finished All Tasks. Complete CBL run Took ${((Date.now() - profileStartTime) / 1000).toFixed(
       2
-    )}s`
+    )}s. Discarding PM2 Hooks. Garbage Collection Completed`
   );
   console.log(
     `Finished All Tasks. Complete CBL run Took ${((Date.now() - profileStartTime) / 1000).toFixed(
       2
-    )}s`
+    )}s. Discarding PM2 Hooks. Garbage Collection Completed`
   );
 }
 
