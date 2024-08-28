@@ -47,7 +47,7 @@ async function main() {
     1,
     `Finished All Tasks. Complete CBL run Took ${((Date.now() - profileStartTime) / 1000).toFixed(
       2
-    )}s. Discarding PM2 Hooks. Garbage Collection Completed`
+    )}s. Discarding PM2 Hooks. Garbage Collection Completed.`
   );
   console.log(
     `Finished All Tasks. Complete CBL run Took ${((Date.now() - profileStartTime) / 1000).toFixed(
