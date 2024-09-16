@@ -9,7 +9,7 @@ import ExportBanManager from './src/export-ban-manager.js';
 Error.stackTraceLimit = 255;
 
 const TASKS_TO_COMPLETE = {
-  IMPORT_BANS: true,
+  IMPORT_BANS: false,
   UPDATE_STEAM_USER_INFO: true, // TODO: This is causing random hangs; Try ading more debug code until we can find out what causes it.
   UPDATE_REPUTATION_POINTS: true,
   UPDATE_REPUTATION_RANK: true,
