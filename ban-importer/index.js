@@ -13,7 +13,7 @@ const TASKS_TO_COMPLETE = {
   UPDATE_STEAM_USER_INFO: true, // TODO: This is causing random hangs; Try ading more debug code until we can find out what causes it.
   UPDATE_REPUTATION_POINTS: true,
   UPDATE_REPUTATION_RANK: true,
-  UPDATE_EXPORT_BANS: true,
+  UPDATE_EXPORT_BANS: false,
   EXPORT_EXPORT_BANS: true
 };
 async function doSleep(ms) {
