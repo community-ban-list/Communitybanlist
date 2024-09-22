@@ -1,6 +1,12 @@
 FROM node:14.21.3-slim
 
-WORKDIR /usr/src/
+WORKDIR /opt/workdir/
+
+# Test to make sure packages are up to date
+RUN apt update && apt upgrade -y
+
+# Have the build always use proper paths
+RUN npm config set scripts-prepend-node-path auto
 
 # Copy shared libraries
 COPY scbl-lib ./scbl-lib

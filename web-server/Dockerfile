@@ -4,8 +4,7 @@ FROM node:14.21.3-slim
 WORKDIR /opt/workdir/
 
 # Test to make sure packages are up to date
-RUN apt update
-RUN apt upgrade -y
+RUN apt update && apt upgrade -y
 
 # Have the build always use proper paths
 RUN npm config set scripts-prepend-node-path auto
