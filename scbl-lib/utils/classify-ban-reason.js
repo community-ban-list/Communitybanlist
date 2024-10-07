@@ -41,7 +41,8 @@ const reasons = {
   Advertising: /advertising|werb(ung|en)/i,
   Ableism: /ableis(t|m)/i,
   'Ban Evasion': /(alt|ban) evasion/i,
-  'Current Events': /(current event|currentevent)/i
+  'Current Events': /(current event|currentevent)/i,
+  Pedophilia: /pedoph(il)?(ia|e)|paedoph(il)?(ia|e)|child porn|kinderporn|csam/i
 };
 
 export default function (...reason) {
