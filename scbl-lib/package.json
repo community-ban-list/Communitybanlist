@@ -18,7 +18,7 @@
     "bottleneck": "^2.19.5",
     "chalk": "^4.1.0",
     "discord-webhook-node": "^1.1.8",
-    "mysql2": "^2.1.0",
+    "mysql2": "^3.11.3",
     "sequelize": "^6.3.4",
     "yup": "^0.32.8"
   }
