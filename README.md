@@ -7,7 +7,7 @@
 [![GitHub issues](https://img.shields.io/github/issues/community-ban-list/Communitybanlist.svg?style=flat-square)](https://github.com/community-ban-list/Communitybanlist/issues)
 [![GitHub pull requests](https://img.shields.io/github/issues-pr-raw/community-ban-list/Communitybanlist.svg?style=flat-square)](https://github.com/community-ban-list/Communitybanlist/pulls)
 ![GitHub contributors](https://img.shields.io/github/contributors/community-ban-list/Communitybanlist.svg?style=flat-square)
-[![Docker Image CI](https://github.com/community-ban-list/Communitybanlist/actions/workflows/docker-image.yml/badge.svg?branch=profilingTimers)](https://github.com/community-ban-list/Communitybanlist/actions/workflows/docker-image.yml)
+[![Docker Image CI](https://github.com/community-ban-list/Communitybanlist/actions/workflows/docker-image.yml/badge.svg?branch=master)](https://github.com/community-ban-list/Communitybanlist/actions/workflows/docker-image.yml)
 
 ##### [Community Ban List Website](https://communitybanlist.com/)
 
