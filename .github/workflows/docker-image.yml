@@ -1,5 +1,9 @@
 name: Docker Image CI
 
+concurrency:
+  group: "build"
+  cancel-in-progress: false
+
 on:
   push:
     branches: [ "master" ]

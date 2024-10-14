@@ -1,5 +1,9 @@
 name: Docker Image CI Dev Mode
 
+concurrency:
+  group: "build"
+  cancel-in-progress: false
+
 on:
   pull_request:
     branches: [ "master" ]
@@ -28,11 +32,11 @@ jobs:
           context: .
           file: web-server/Dockerfile
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:latest
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver-dev:latest
     - name: Build and push image for the ban importer
       uses: docker/build-push-action@v5
       with:
           context: .
           file: ban-importer/Dockerfile
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:latest
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter-dev:latest
