@@ -17,7 +17,7 @@
     "start-ban-importer": "node ban-importer/index.js",
     "build-web-server": "cd client && npm run build",
     "start-web-server": "cross-env NODE_ENV=production node web-server/index.js",
-    "dev-web-server": "conc \"nodemon --ignore './client/' web-server/index.js\" \"cd client && npm run start\"",
+    "dev-web-server": "set NODE_OPTIONS=--openssl-legacy-provider && conc \"nodemon --ignore './client/' web-server/index.js\" \"cd client && npm run start\"",
     "docker-build-web-server": "docker build -f ./web-server/Dockerfile . -t cblweb-dev",
     "docker-build-ban-importer": "docker build -f ./ban-importer/Dockerfile . -t cblimporter-dev",
     "prod-test": "conc \"yarn docker-build-web-server\" \"yarn docker-build-ban-importer\""
