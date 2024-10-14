@@ -31,6 +31,9 @@ jobs:
           file: web-server/Dockerfile
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:latest
+    - name: Update Web Server Deployment
+      continue-on-error: true
+      run: cd /opt/Communitybanlist && sh webstart-fromgit.sh
     - name: Build and push image for the ban importer
       uses: docker/build-push-action@v5
       with:
@@ -38,6 +41,3 @@ jobs:
           file: ban-importer/Dockerfile
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:latest
-    - name: Update Web Server Deployment
-      continue-on-error: true
-      run: cd /opt/Communitybanlist && sh startweb.sh
