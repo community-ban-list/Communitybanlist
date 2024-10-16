@@ -32,11 +32,11 @@ jobs:
           context: .
           file: web-server/Dockerfile
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver-dev:latest
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:dev
     - name: Build and push image for the ban importer on dev mode
       uses: docker/build-push-action@v5
       with:
           context: .
           file: ban-importer/Dockerfile
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter-dev:latest
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:dev
