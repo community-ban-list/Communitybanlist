@@ -6,7 +6,9 @@ import { Logger } from 'scbl-lib/utils';
 
 import BanFetcher from './ban-fetcher.js';
 
-const MAX_RETRIES = 3;
+// Thank god for this function.
+
+const MAX_RETRIES = 5;
 const RETRY_DELAY = 5000; // 5 seconds
 
 async function retryOperation(operation, retries = MAX_RETRIES) {
