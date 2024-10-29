@@ -20,7 +20,7 @@ async function retryOperation(operation, retries = MAX_RETRIES) {
       Logger.verbose(
         'BanImporter',
         1,
-        `Attempt ${attempt} failed. Retrying in ${RETRY_DELAY / 1000}s...`,
+        `Attempt ${attempt} failed. Retrying in ${RETRY_DELAY / 1000}s... `,
         err
       );
       await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY));
