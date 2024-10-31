@@ -31,7 +31,7 @@ async function retryOperation(operation, retries = MAX_RETRIES) {
 export default class BanImporter {
   constructor(options) {
     options = {
-      workers: 2,
+      workers: 1,
       ...options
     };
 
