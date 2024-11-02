@@ -4,7 +4,7 @@ const reasons = {
   Glitching: /glitch/i,
   Exploiting: /exploit|剝削|istismar|ausnutz/i,
 
-  Teamkilling: /team ?kill|\btk|ITK|[0-9]x?tk|int?tk|team(be|ab)schuss/i,
+  Teamkilling: /team-?kill|team ?kill|\btk|ITK|[0-9]x?tk|int?tk|team(be|ab)schuss/i,
 
   Trolling: /troll/i,
   Griefing: /gr(ie|ei)f/i,
@@ -38,7 +38,7 @@ const reasons = {
   Streamsniping: /streamsniping|yayinc(i|ı)/i,
   'Sharing team info':
     /shar(e|ing) (ticket|team|hab|fob|info|game|enemy)|ticket (count|sharing)|(info|intel) shar(e|ing)/i,
-  Advertising: /advertising|werb(ung|en)/i,
+  Advertising: /advertis(?:ing|ement)|werb(ung|en)/i,
   Ableism: /ableis(t|m)/i,
   'Ban Evasion': /(alt|ban) evasion/i,
   'Current Events': /(current event|currentevent)/i,
