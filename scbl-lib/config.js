@@ -19,7 +19,7 @@ const BATTLEMETRICS_ORGANIZATION = process.env.BATTLEMETRICS_ORGANIZATION || '56
 const STEAM_API_KEY = process.env.STEAM_API_KEY;
 
 // Other constants
-const DISCORD_INVITE = process.env.DISCORD_INVITE || 'https://discord.gg/BgPWUFwVk4';
+const DISCORD_INVITE = process.env.DISCORD_INVITE || 'https://discord.gg/CJNWZgACxQ';
 
 export {
   HOST,
