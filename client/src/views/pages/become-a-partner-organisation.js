@@ -2,8 +2,11 @@ import React from 'react';
 import { Card, CardBody, Container } from 'reactstrap';
 
 import { DISCORD_INVITE } from 'scbl-lib/config';
+import { INTAKE_FORM } from 'scbl-lib/config';
 
 import Layout from '../layout/layout.js';
+
+if (!INTAKE_FORM) throw new Error('Environmental variable INTAKE_FORM must be provided.');
 
 export default function () {
   return (
@@ -97,8 +100,10 @@ export default function () {
               </p>
               <h5>Form</h5>
               <p>
-                If you are interested in becoming a partner organisation, please follow the
-                instructions on our <a href={DISCORD_INVITE}>Discord</a>.
+                If you are interested in becoming a partner organisation after reading this
+                aggreement, please fill out the <a href={INTAKE_FORM}>form here</a>. If you
+                need support or have questions please don't hesitate to contact us at{' '}
+                <a href={DISCORD_INVITE}>Discord</a>.
               </p>
               <br />
               <h6>Notes</h6>
