@@ -6,8 +6,6 @@ import { INTAKE_FORM } from 'scbl-lib/config';
 
 import Layout from '../layout/layout.js';
 
-if (!INTAKE_FORM) throw new Error('Environmental variable INTAKE_FORM must be provided.');
-
 export default function () {
   return (
     <Layout>
