@@ -16,7 +16,7 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v3
 
     - name: Login to Docker Hub
       uses: docker/login-action@v3
@@ -80,6 +80,3 @@ jobs:
           file: ban-importer/Dockerfile
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:latest
-
-
-
