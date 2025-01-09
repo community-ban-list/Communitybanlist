@@ -16,7 +16,7 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v3
 
     - name: Login to Docker Hub
       uses: docker/login-action@v3
@@ -36,6 +36,7 @@ jobs:
           context: .
           file: web-server/Dockerfile
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:dev
+          provenance: true
 
     - name: Build Docker image for the ban importer
       uses: docker/build-push-action@v5
@@ -43,6 +44,7 @@ jobs:
           context: .
           file: ban-importer/Dockerfile
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:dev
+          provenance: true
 
     - name: Build and push image for the web server
       if: success()
@@ -52,6 +54,12 @@ jobs:
           file: web-server/Dockerfile
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:dev-latest
+          provenance: true
+
+    - name: Update Web Server Deployment
+      if: success()
+      continue-on-error: true
+      run: cd /opt/Communitybanlist && sh webstart-fromgit.sh
 
     - name: Build and push image for the ban importer
       if: success()
@@ -61,3 +69,4 @@ jobs:
           file: ban-importer/Dockerfile
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:dev-latest
+          provenance: true
