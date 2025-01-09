@@ -46,7 +46,7 @@ jobs:
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:dev
           provenance: true
 
-    - name: Build and push image for the web server
+    - name: Push image for the web server
       if: success()
       uses: docker/build-push-action@v5
       with:
@@ -61,7 +61,7 @@ jobs:
       continue-on-error: true
       run: cd /opt/Communitybanlist && sh webstart-fromgit.sh
 
-    - name: Build and push image for the ban importer
+    - name: Push image for the ban importer
       if: success()
       uses: docker/build-push-action@v5
       with:

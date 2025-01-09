@@ -1,5 +1,6 @@
 # Use multi-stage builds to reduce the final image size
 # Stage 1: Build
+ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
 FROM node:14.21.3-slim AS build
 
 WORKDIR /opt/workdir/
