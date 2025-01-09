@@ -45,14 +45,14 @@ jobs:
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:test
 
     - name: Scan Docker image for vulnerabilities (web server)
-      uses: aquasecurity/trivy-action@v0.28.0
+      uses: aquasecurity/trivy-action@0.28.0
       with:
           image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:test
           severity: HIGH,CRITICAL
           ignore-unfixed: true
 
     - name: Scan Docker image for vulnerabilities (ban importer)
-      uses: aquasecurity/trivy-action@v0.28.0
+      uses: aquasecurity/trivy-action@0.28.0
       with:
           image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:test
           severity: HIGH,CRITICAL
