@@ -7,6 +7,7 @@ WORKDIR /opt/workdir/
 
 # Test to make sure packages are up to date and install dependencies
 RUN apt update && apt upgrade -y && \
+    apt install -y curl && \
     npm config set scripts-prepend-node-path auto && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -28,8 +29,10 @@ WORKDIR /opt/workdir/
 # Copy only the necessary files from the build stage
 COPY --from=build /opt/workdir /opt/workdir
 
-# Install pm2
-RUN yarn global add pm2
+# Install pm2 and curl
+RUN yarn global add pm2 && \
+    apt update && apt install -y curl && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Add a non-root user and switch to it
 RUN useradd --user-group --create-home --shell /bin/false appuser
