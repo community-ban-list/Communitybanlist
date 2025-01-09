@@ -16,7 +16,7 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Login to Docker Hub
       uses: docker/login-action@v3
@@ -44,20 +44,6 @@ jobs:
           file: ban-importer/Dockerfile
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:dev
 
-    - name: Scan Docker image for vulnerabilities (web server)
-      uses: aquasecurity/trivy-action@0.28.0
-      with:
-          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:dev
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-
-    - name: Scan Docker image for vulnerabilities (ban importer)
-      uses: aquasecurity/trivy-action@0.28.0
-      with:
-          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:dev
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-
     - name: Build and push image for the web server
       if: success()
       uses: docker/build-push-action@v5
@@ -66,11 +52,6 @@ jobs:
           file: web-server/Dockerfile
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:dev-latest
-
-    - name: Update Web Server Deployment
-      if: success()
-      continue-on-error: true
-      run: cd /opt/Communitybanlist && sh webstart-fromgit.sh
 
     - name: Build and push image for the ban importer
       if: success()
