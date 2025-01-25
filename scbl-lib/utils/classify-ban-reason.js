@@ -3,7 +3,7 @@ const reasons = {
   Cheating: /cheat|hack|作弊|\bhile|trich|betr(ü|u)|Чітер|Софт|Чіти/i,
   Glitching: /glitch/i,
   Exploiting: /exploit|剝削|istismar|ausnutz/i,
-
+  AdminAbuse: /admin ?abuse|abus(?:ed|ing|e of) ?(?:admin)? ?(?:power)?/i,
   Teamkilling: /team-?kill|team ?kill|\btk|ITK|[0-9]x?tk|int?tk|team(be|ab)schuss/i,
 
   Trolling: /troll/i,
