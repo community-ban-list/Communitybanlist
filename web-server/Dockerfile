@@ -18,7 +18,7 @@ COPY web-server ./web-server
 COPY package.json .
 
 # Install dependencies and build client
-RUN yarn install --production && \
+RUN yarn install --production --ignore-engines && \
     yarn build-web-server
 
 # Stage 2: Runtime
