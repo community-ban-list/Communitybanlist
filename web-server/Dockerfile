@@ -30,7 +30,7 @@ WORKDIR /opt/workdir/
 COPY --from=build /opt/workdir /opt/workdir
 
 # Install pm2 and curl
-RUN yarn global add pm2 && \
+RUN yarn global add pm2 --ignore-engines && \
     apt update && apt install -y curl && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 

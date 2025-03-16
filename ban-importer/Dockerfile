@@ -27,7 +27,7 @@ WORKDIR /opt/workdir/
 COPY --from=build /opt/workdir /opt/workdir
 
 # Install pm2
-RUN yarn global add pm2
+RUN yarn global add pm2 --ignore-engines
 
 # Add a non-root user and switch to it
 RUN useradd --user-group --create-home --shell /bin/false appuser
