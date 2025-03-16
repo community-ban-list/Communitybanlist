@@ -1,6 +1,6 @@
 // Web
 const HOST = process.env.HOST || 'http://localhost';
-const LOCALSTORAGE_VERSION = 'v1.3.3'; // Change this to wipe clients local storage
+const LOCALSTORAGE_VERSION = 'v1.3.4'; // Change this to wipe clients local storage
 
 const JWT_AUTH = {
   // REPLACE KEY IN PRODUCTION!
