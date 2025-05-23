@@ -20,7 +20,7 @@ const STEAM_API_KEY = process.env.STEAM_API_KEY;
 
 // Other constants
 // TODO allow hard code via process envs
-const DISCORD_INVITE = process.env.DISCORD_INVITE || 'https://discord.gg/mV5BHfK8Fw';
+const DISCORD_INVITE = process.env.DISCORD_INVITE || 'https://discord.gg/bk4FGDsgfg';
 
 // Adding Dyno Form
 const INTAKE_FORM = process.env.INTAKE_FORM || 'https://dyno.gg/form/a379a03a';
