@@ -6,9 +6,10 @@ ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
 WORKDIR /opt/workdir/
 
 # Test to make sure packages are up to date and install dependencies
-RUN apt update && apt upgrade -y && \
-    npm config set scripts-prepend-node-path auto && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# RUN apt update && apt upgrade -y && \
+#     npm config set scripts-prepend-node-path auto && \
+RUN npm config set scripts-prepend-node-path auto
+#     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Copy shared libraries and service files
 COPY scbl-lib ./scbl-lib
