@@ -6,10 +6,13 @@ ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
 WORKDIR /opt/workdir/
 
 # Test to make sure packages are up to date and install dependencies
-RUN apt update && apt upgrade -y && \
-    apt install -y curl && \
-    npm config set scripts-prepend-node-path auto && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# Disabled these commands for now issues with the docker image.
+# RUN apt update && apt upgrade -y && \
+#     apt install -y curl && \
+#     npm config set scripts-prepend-node-path auto && \
+#     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN npm config set scripts-prepend-node-path auto 
 
 # Copy shared libraries and service files
 COPY scbl-lib ./scbl-lib
@@ -30,9 +33,10 @@ WORKDIR /opt/workdir/
 COPY --from=build /opt/workdir /opt/workdir
 
 # Install pm2 and curl
-RUN yarn global add pm2 --ignore-engines && \
-    apt update && apt install -y curl && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# RUN yarn global add pm2 --ignore-engines && \
+RUN yarn global add pm2 --ignore-engines
+#     apt update && apt install -y curl && \
+#     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Add a non-root user and switch to it
 RUN useradd --user-group --create-home --shell /bin/false appuser
