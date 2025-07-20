@@ -46,8 +46,8 @@ USER appuser
 EXPOSE 80
 
 # Add health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:80/health-check || exit 1
+# HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+#   CMD curl -f http://localhost:80/health-check || exit 1
 
 # Run service with pm2
 CMD [ "pm2-runtime", "web-server/index.js" ]
