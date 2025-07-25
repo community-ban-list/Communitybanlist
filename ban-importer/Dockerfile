@@ -16,15 +16,15 @@ RUN set -eux; \
     npm config set scripts-prepend-node-path auto && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-
+# Copy the rest of the source files
+# Keep these commands in this order to ensure dependencies are installed correctly.
+COPY scbl-lib ./scbl-lib
+COPY ban-importer ./ban-importer
 COPY package.json .
 
 # Install dependencies
 RUN yarn install --production --ignore-engines
 
-# Copy the rest of the source files
-COPY scbl-lib ./scbl-lib
-COPY ban-importer ./ban-importer
 
 # Stage 2: Runtime
 FROM node:14.21.3-slim
