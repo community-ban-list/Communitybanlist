@@ -44,4 +44,4 @@ RUN useradd --user-group --create-home --shell /bin/false appuser
 USER appuser
 
 # Run service
-CMD [ "pm2-runtime", "ban-importer/index.js", "--no-autorestart" ]
+CMD [ "ban-importer/index.js", "--no-autorestart" ]
