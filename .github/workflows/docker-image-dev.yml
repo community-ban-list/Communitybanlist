@@ -56,10 +56,10 @@ jobs:
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:dev-latest
           provenance: true
 
-    - name: Update Web Server Deployment
-      if: success()
-      continue-on-error: true
-      run: cd /opt/Communitybanlist && sh webstart-fromgit.sh
+  #   - name: Update Web Server Deployment
+  #     if: success()
+  #     continue-on-error: true
+  #     run: cd /opt/Communitybanlist && sh webstart-fromgit.sh
 
     - name: Push image for the ban importer
       if: success()
