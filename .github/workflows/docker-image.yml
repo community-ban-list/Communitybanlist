@@ -42,7 +42,7 @@ jobs:
     - name: Update Web Server Deployment
       if: success()
       continue-on-error: true
-      run: ${{ WEB_SERVER_LAUNCH }}
+      run: ${{ secrets.WEB_SERVER_LAUNCH }}
 
     - name: Build and push Docker image for the ban importer
       uses: docker/build-push-action@v6.11.0
