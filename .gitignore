@@ -16,3 +16,4 @@ yarn-error.log
 .github/.DS_Store
 *.env*
 *.sh
+.DS_Store

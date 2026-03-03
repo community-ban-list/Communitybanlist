@@ -63,7 +63,7 @@ export default class Core {
         `Updating batch of ${batch.length} Steam users (${users.length} remaining)...`
       );
       try {
-        const myData = await steam('get', 'ISteamUser/GetPlayerSummaries/v0002', {
+        const myData = await steam('get', 'ISteamUser/GetPlayerSummaries/v2', {
           steamids: batch.map((user) => user.id).join(',')
         });
         data = myData.data;
