@@ -1,6 +1,6 @@
 # Use multi-stage builds to reduce the final image size
 # Stage 1: Build
-FROM debian:13-slim AS build
+FROM node:14.21.3-slim AS build
 ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
 
 WORKDIR /opt/workdir/
@@ -8,17 +8,18 @@ WORKDIR /opt/workdir/
 # Set noninteractive mode for apt to avoid prompts
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install dependencies, Node.js 14.21.3, and Yarn
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    xz-utils \
-    && curl -fsSLO --compressed "https://nodejs.org/dist/v14.21.3/node-v14.21.3-linux-x64.tar.xz" \
-    && tar -xJf "node-v14.21.3-linux-x64.tar.xz" -C /usr/local --strip-components=1 --no-same-owner \
-    && rm "node-v14.21.3-linux-x64.tar.xz" \
-    && npm config set scripts-prepend-node-path auto \
-    && npm install -g yarn \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# Use archive.debian.org for EOL distros, but consider upgrading Node version!
+RUN set -eux; \
+    sed -i 's|deb.debian.org|archive.debian.org|g' /etc/apt/sources.list && \
+    apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends curl && \
+    npm config set scripts-prepend-node-path auto && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install dependencies
+RUN yarn install --production --ignore-engines
 
 # Copy the rest of the source files
 COPY scbl-lib ./scbl-lib
@@ -31,25 +32,21 @@ RUN yarn install --production --ignore-engines && \
     yarn build-web-server
 
 # Stage 2: Runtime
-FROM debian:13-slim
+FROM node:14.21.3-slim
 
 WORKDIR /opt/workdir/
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Node.js 14.21.3, pm2, and curl (for healthcheck)
-RUN apt-get update && apt-get upgrade\
-    && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    xz-utils \
-    && curl -fsSLO --compressed "https://nodejs.org/dist/v14.21.3/node-v14.21.3-linux-x64.tar.xz" \
-    && tar -xJf "node-v14.21.3-linux-x64.tar.xz" -C /usr/local --strip-components=1 --no-same-owner \
-    && rm "node-v14.21.3-linux-x64.tar.xz" \
-    && npm install -g yarn \
-    && yarn global add pm2 --ignore-engines \
-    && apt-get purge -y --auto-remove xz-utils \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# Use archive.debian.org for EOL distros, but consider upgrading Node version!
+RUN set -eux; \
+    sed -i 's|deb.debian.org|archive.debian.org|g' /etc/apt/sources.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install pm2 globally
+RUN yarn global add pm2 --ignore-engines
 
 # Copy only the necessary files from the build stage
 COPY --from=build /opt/workdir /opt/workdir
@@ -65,5 +62,5 @@ EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:80/health-check || exit 1
 
-# Run service
-CMD [ "node", "web-server/index.js" ]
+# Run service with pm2
+CMD [ "web-server/index.js" ]
