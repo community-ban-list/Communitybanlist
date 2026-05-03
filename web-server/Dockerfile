@@ -9,16 +9,19 @@ WORKDIR /opt/workdir/
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install dependencies, download Node.js 14.21.3, and set up yarn
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade \
+    && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     xz-utils \
     && curl -fsSLO --compressed "https://nodejs.org/dist/v14.21.3/node-v14.21.3-linux-x64.tar.xz" \
     && tar -xJf "node-v14.21.3-linux-x64.tar.xz" -C /usr/local --strip-components=1 --no-same-owner \
     && rm "node-v14.21.3-linux-x64.tar.xz" \
-    && npm config set scripts-prepend-node-path auto \
     && npm install -g yarn \
+    && yarn global add pm2 --ignore-engines \
+    && apt-get purge -y --auto-remove xz-utils \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 
 # Copy the rest of the source files
 # Keep these commands in this order to ensure dependencies are installed correctly.
@@ -38,7 +41,7 @@ WORKDIR /opt/workdir/
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Node.js 14.21.3 on the runtime image and install pm2 globally
-RUN apt-get update && apt-get upgrade
+RUN apt-get update && apt-get upgrade \
     && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
