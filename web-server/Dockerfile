@@ -9,8 +9,8 @@ WORKDIR /opt/workdir/
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install dependencies, Node.js 14.21.3, and Yarn
-RUN apt-get update && apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     xz-utils \
