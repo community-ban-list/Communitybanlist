@@ -56,6 +56,6 @@ const makeRequest = rl.wrap(async (method, endpoint, params, data) => {
   return retVar;
 });
 
-export default async function (method, url, params, data = {}, priority = 5) {
+export default async function (method, url, params, data, priority = 5) {
   return makeRequest.withOptions({ priority, id: 'BM-API-CALL' }, method, url, params, data);
 }
