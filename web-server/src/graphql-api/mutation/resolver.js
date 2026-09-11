@@ -77,19 +77,44 @@ export default {
     },
 
     deleteExportBanList: async (parent, args, context) => {
-      // Get the export ban list.
-      const exportBanList = await ExportBanList.findOne({
-        where: { id: args.id, owner: context.user.id }
-      });
+      let stage = 'authentication';
+      try {
+        if (!context.user) throw new Error('Please sign in again to delete an export ban list.');
 
-      // Check the export ban list exists.
-      if (!exportBanList) throw new Error('Export ban list does not exist!');
+        // Get the export ban list.
+        stage = 'lookup';
+        const exportBanList = await ExportBanList.findOne({
+          where: { id: args.id, owner: context.user.id }
+        });
 
-      // Delete the export ban list.
-      if (exportBanList.type === 'battlemetrics') await exportBanList.deleteBattlemetricsBanList();
-      await exportBanList.destroy();
+        // Check the export ban list exists.
+        if (!exportBanList) throw new Error('Export ban list does not exist!');
 
-      return exportBanList;
+        // Delete the export ban list.
+        if (exportBanList.type === 'battlemetrics') {
+          stage = 'battlemetrics';
+          await exportBanList.deleteBattlemetricsBanList();
+        }
+        stage = 'database deletion';
+        await exportBanList.destroy();
+
+        return exportBanList;
+      } catch (error) {
+        // Do not log the full Axios error: it includes the API authorization header.
+        const response = error.response;
+        const errors = response && response.data && response.data.errors;
+        console.error('Failed to delete export ban list:', {
+          exportBanListID: args.id,
+          stage,
+          name: error.name,
+          message: error.message,
+          status: response && response.status,
+          errors: Array.isArray(errors)
+            ? errors.map(({ code, title, detail }) => ({ code, title, detail }))
+            : undefined
+        });
+        throw error;
+      }
     },
 
     createExportBanListConfig: async (parent, args, context) => {
