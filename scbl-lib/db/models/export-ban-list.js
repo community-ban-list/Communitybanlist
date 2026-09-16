@@ -3,6 +3,7 @@ import Sequelize from 'sequelize';
 import sequelize from '../sequelize.js';
 
 import { battlemetrics } from '../../apis/index.js';
+import deleteBattlemetricsBanList from '../../apis/delete-battlemetrics-ban-list.js';
 import { Logger } from '../../utils/index.js';
 import { BATTLEMETRICS_ORGANIZATION } from '../../config.js';
 
@@ -92,10 +93,7 @@ class ExportBanList extends Sequelize.Model {
     }
 
     Logger.verbose('ExportBanList', 1, 'Deleting Battlemetrics ban list...');
-    await battlemetrics(
-      'delete',
-      `ban-lists/${this.battlemetricsID}/relationships/organizations/${BATTLEMETRICS_ORGANIZATION}`
-    );
+    await deleteBattlemetricsBanList(this.battlemetricsID);
 
     this.battlemetricsID = null;
     this.battlemetricsInvite = null;
