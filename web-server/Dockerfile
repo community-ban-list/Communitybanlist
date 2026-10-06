@@ -1,25 +1,16 @@
 # Use multi-stage builds to reduce the final image size
+# Both stages use Docker Hardened Images, which need a `docker login dhi.io` to pull.
+
 # Stage 1: Build
-FROM debian:13-slim AS build
+# The dev variant includes the shell and Yarn needed to install dependencies and build the client.
+FROM dhi.io/node:24-dev AS build
 ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
 
 WORKDIR /opt/workdir/
 
-# Set noninteractive mode for apt to avoid prompts
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install dependencies, Node.js 14.21.3, and Yarn
-RUN apt-get update && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    xz-utils \
-    && curl -fsSLO --compressed "https://nodejs.org/dist/v14.21.3/node-v14.21.3-linux-x64.tar.xz" \
-    && tar -xJf "node-v14.21.3-linux-x64.tar.xz" -C /usr/local --strip-components=1 --no-same-owner \
-    && rm "node-v14.21.3-linux-x64.tar.xz" \
-    && npm config set scripts-prepend-node-path auto \
-    && npm install -g yarn \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# The client is built with react-scripts 4 (webpack 4), which needs the legacy OpenSSL provider on
+# Node.js 17 and newer.
+ENV NODE_OPTIONS=--openssl-legacy-provider
 
 # Copy the rest of the source files
 COPY scbl-lib ./scbl-lib
@@ -32,38 +23,20 @@ RUN yarn install --production --ignore-engines && \
     yarn build-web-server
 
 # Stage 2: Runtime
-FROM debian:13-slim
+# The runtime variant has no shell or package manager and runs as the non-root node user.
+FROM dhi.io/node:24
 
 WORKDIR /opt/workdir/
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install Node.js 14.21.3, pm2, and curl (for healthcheck)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    xz-utils \
-    && curl -fsSLO --compressed "https://nodejs.org/dist/v14.21.3/node-v14.21.3-linux-x64.tar.xz" \
-    && tar -xJf "node-v14.21.3-linux-x64.tar.xz" -C /usr/local --strip-components=1 --no-same-owner \
-    && rm "node-v14.21.3-linux-x64.tar.xz" \
-    && npm install -g yarn \
-    && yarn global add pm2 --ignore-engines \
-    && apt-get purge -y --auto-remove xz-utils \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Copy only the necessary files from the build stage
 COPY --from=build /opt/workdir /opt/workdir
 
-# Add a non-root user and switch to it
-RUN useradd --user-group --create-home --shell /bin/false appuser
-USER appuser
-
 # Expose ports
 EXPOSE 80
 
-# Add health check
+# The runtime image has no shell or curl, so the check is a Node script.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:80/health-check || exit 1
+  CMD [ "node", "web-server/healthcheck.js" ]
 
 # Run service
 CMD [ "node", "web-server/index.js" ]
