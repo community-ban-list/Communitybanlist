@@ -50,7 +50,32 @@ jobs:
     - name: Update Web Server Deployment
       if: success()
       continue-on-error: true
-      run: ${{ secrets.WEB_SERVER_LAUNCH }}
+      env:
+        # The Portainer webhook URL that redeploys the web server.
+        WEBHOOK_URL: ${{ secrets.WEB_SERVER_LAUNCH }}
+      run: |
+        case "$WEBHOOK_URL" in
+          http://*|https://*) ;;
+          *) echo "::error::The WEB_SERVER_LAUNCH secret must be the Portainer webhook URL."; exit 1 ;;
+        esac
+
+        trigger() {
+          curl --fail --silent --show-error --max-time 60 --request POST "$@" "$WEBHOOK_URL"
+        }
+
+        status=0
+        trigger || status=$?
+
+        # Portainer's certificate can fail verification from the runner, e.g. when it has expired.
+        # Still trigger the deployment then, by retrying without checking the certificate.
+        case "$status" in
+          0) ;;
+          35|51|58|60|77|83|90|91)
+            echo "::warning title=Portainer certificate::The deployment webhook failed certificate verification (curl exit code $status), so it was retried without checking the certificate."
+            trigger --insecure
+            ;;
+          *) exit "$status" ;;
+        esac
 
     - name: Build and push Docker image for the ban importer
       uses: docker/build-push-action@v6.11.0
