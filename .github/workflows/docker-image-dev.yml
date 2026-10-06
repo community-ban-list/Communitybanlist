@@ -24,7 +24,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    # The Discord bot is built on Docker Hardened Images, which are pulled from dhi.io.
+    # The Discord bot and ban importer are built on Docker Hardened Images, which are pulled from dhi.io.
     - name: Login to Docker Hardened Images
       uses: docker/login-action@v4.2.2
       with:

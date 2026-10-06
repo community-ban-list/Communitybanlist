@@ -1,20 +1,12 @@
 # Use multi-stage builds to reduce the final image size
+# Both stages use Docker Hardened Images, which need a `docker login dhi.io` to pull.
+
 # Stage 1: Build
-FROM node:14.21.3-slim AS build
+# The dev variant includes the shell and Yarn needed to install dependencies.
+FROM dhi.io/node:24-dev AS build
 ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
 
 WORKDIR /opt/workdir/
-
-# Set noninteractive mode for apt to avoid prompts
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Use apt-get (recommended for scripts) and minimal install
-RUN set -eux; \
-    sed -i 's|deb.debian.org|archive.debian.org|g' /etc/apt/sources.list && \
-    apt-get update && \
-    apt-get upgrade -y && \
-    npm config set scripts-prepend-node-path auto && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Copy the rest of the source files
 # Keep these commands in this order to ensure dependencies are installed correctly.
@@ -27,21 +19,13 @@ RUN yarn install --production --ignore-engines
 
 
 # Stage 2: Runtime
-FROM node:14.21.3-slim
+# The runtime variant has no shell or package manager and runs as the non-root node user.
+FROM dhi.io/node:24
 
 WORKDIR /opt/workdir/
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install pm2 globally
-RUN yarn global add pm2 --ignore-engines
 
 # Copy only the necessary files from the build stage
 COPY --from=build /opt/workdir /opt/workdir
 
-# Add a non-root user and switch to it
-RUN useradd --user-group --create-home --shell /bin/false appuser
-USER appuser
-
 # Run service
-CMD [ "ban-importer/index.js", "--no-autorestart" ]
+CMD [ "node", "ban-importer/index.js" ]
