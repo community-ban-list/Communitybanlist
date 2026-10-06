@@ -24,6 +24,14 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+    # The Discord bot is built on Docker Hardened Images, which are pulled from dhi.io.
+    - name: Login to Docker Hardened Images
+      uses: docker/login-action@v4.2.2
+      with:
+          registry: dhi.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
     - name: Set up QEMU
       uses: docker/setup-qemu-action@v3.3.0
 
@@ -44,6 +52,14 @@ jobs:
           context: .
           file: ban-importer/Dockerfile
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:dev
+          provenance: true
+
+    - name: Build Docker image for the Discord bot
+      uses: docker/build-push-action@v6.11.0
+      with:
+          context: .
+          file: discord-bot/Dockerfile
+          tags: werewolfboy13/cbl-bot:dev
           provenance: true
 
     - name: Push image for the web server
@@ -69,4 +85,14 @@ jobs:
           file: ban-importer/Dockerfile
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:dev-latest
+          provenance: true
+
+    - name: Push image for the Discord bot
+      if: success()
+      uses: docker/build-push-action@v6.11.0
+      with:
+          context: .
+          file: discord-bot/Dockerfile
+          push: true
+          tags: werewolfboy13/cbl-bot:dev-latest
           provenance: true

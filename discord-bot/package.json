@@ -1,0 +1,11 @@
+{
+  "name": "discord-bot",
+  "description": "Discord bot for managing partner organisations and their ban lists.",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "axios": "^1.7.7",
+    "discord.js": "^14.27.0",
+    "scbl-lib": "1.0.0"
+  }
+}
