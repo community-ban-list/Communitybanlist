@@ -25,7 +25,7 @@ async function main() {
   await Logger.verbose(
     'Core',
     1,
-    `<@276137824460210178> Starting new CBL Update run... Initializing PM2 hooks!`
+    `<@276137824460210178> Starting new CBL Update run...`
   );
   await connect();
 
@@ -47,12 +47,12 @@ async function main() {
     1,
     `Finished All Tasks. Complete CBL run Took ${((Date.now() - profileStartTime) / 1000).toFixed(
       2
-    )}s. Discarding PM2 Hooks. Garbage Collection Completed.`
+    )}s. Garbage Collection Completed.`
   );
   console.log(
     `Finished All Tasks. Complete CBL run Took ${((Date.now() - profileStartTime) / 1000).toFixed(
       2
-    )}s. Discarding PM2 Hooks. Garbage Collection Completed.`
+    )}s. Garbage Collection Completed.`
   );
 }
 
