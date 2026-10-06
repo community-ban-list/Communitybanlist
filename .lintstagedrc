@@ -1,7 +1,7 @@
 {
-    "*.js": [
+    "*.{js,jsx}": [
       "eslint --fix .",
-      "prettier --write \"./**/*.js\"",
+      "prettier --write \"./**/*.{js,jsx}\"",
       "git add"
     ]
  }

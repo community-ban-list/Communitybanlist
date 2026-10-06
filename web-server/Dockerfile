@@ -8,10 +8,6 @@ ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
 
 WORKDIR /opt/workdir/
 
-# The client is built with react-scripts 4 (webpack 4), which needs the legacy OpenSSL provider on
-# Node.js 17 and newer.
-ENV NODE_OPTIONS=--openssl-legacy-provider
-
 # Copy the rest of the source files
 COPY scbl-lib ./scbl-lib
 COPY client ./client

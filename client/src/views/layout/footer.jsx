@@ -10,7 +10,7 @@ import {
   Col,
   UncontrolledTooltip
 } from 'reactstrap';
-import { DISCORD_INVITE } from 'scbl-lib/config.js';
+import { DISCORD_INVITE } from 'scbl-lib/config';
 
 export default function () {
   return (

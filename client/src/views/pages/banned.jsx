@@ -25,7 +25,7 @@ import { gql, useQuery } from '@apollo/client';
 
 import classnames from 'classnames';
 
-import { DISCORD_INVITE } from 'scbl-lib/config.js';
+import { DISCORD_INVITE } from 'scbl-lib/config';
 
 const GET_PLAYER = gql`
   query Search($id: String!) {
