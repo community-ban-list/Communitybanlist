@@ -28,5 +28,10 @@ WORKDIR /opt/workdir/
 # Copy only the necessary files from the build stage
 COPY --from=build /opt/workdir /opt/workdir
 
+# Report whether the bot is connected to Discord and the database. The runtime image has no shell
+# or curl, so the check is a Node script.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD [ "node", "discord-bot/healthcheck.js" ]
+
 # Run service
 CMD [ "node", "discord-bot/index.js" ]

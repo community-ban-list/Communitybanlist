@@ -1,6 +1,6 @@
 import { SlashCommandBuilder } from 'discord.js';
 
-import { BanList, Organisation } from 'scbl-lib/db/models';
+import { BanList } from 'scbl-lib/db/models';
 import { Op } from 'scbl-lib/db/sequelize';
 
 import {
@@ -8,43 +8,27 @@ import {
   audit,
   banListEmbed,
   banListOption,
+  banListSourceOption,
+  banListTypeOption,
   bold,
-  checkBanListSource,
+  checkBanListSourceOption,
+  checkBanListSourceUnused,
   confirm,
   deleteBanLists,
+  describeBanList,
   describeBanListDeletion,
   findBanList,
   findOrganisation,
+  formatBanListName,
   formatBanListType,
   organisationOption,
   parseBanListSource,
+  skipCheckOption,
   suggestBanLists,
   suggestOrganisations,
   summariseBanListDeletion,
   UserError
 } from '../utils/index.js';
-
-function typeOption(option) {
-  return option
-    .setName('type')
-    .setDescription('Where the bans are fetched from.')
-    .addChoices(
-      { name: 'Remote (link to a ban list file)', value: 'remote' },
-      { name: 'BattleMetrics', value: 'battlemetrics' }
-    );
-}
-
-function sourceOption(option) {
-  return option
-    .setName('source')
-    .setDescription('Remote: link to the ban list file. BattleMetrics: ID of the ban list.');
-}
-
-function skipCheckOption(option) {
-  return option
-    .setName('skip_check')
-    .setDescription('Save without test fetching the ban list first.');
-}
 
 const data = new SlashCommandBuilder()
   .setName('banlist')
@@ -65,8 +49,8 @@ const data = new SlashCommandBuilder()
           .setRequired(true)
           .setMaxLength(100)
       )
-      .addStringOption((option) => typeOption(option).setRequired(true))
-      .addStringOption((option) => sourceOption(option).setRequired(true))
+      .addStringOption((option) => banListTypeOption(option).setRequired(true))
+      .addStringOption((option) => banListSourceOption(option).setRequired(true))
       .addBooleanOption(skipCheckOption)
   )
   .addSubcommand((subcommand) =>
@@ -77,8 +61,8 @@ const data = new SlashCommandBuilder()
       .addStringOption((option) =>
         option.setName('name').setDescription('New name for the ban list.').setMaxLength(100)
       )
-      .addStringOption(typeOption)
-      .addStringOption(sourceOption)
+      .addStringOption(banListTypeOption)
+      .addStringOption(banListSourceOption)
       .addBooleanOption(skipCheckOption)
   )
   .addSubcommand((subcommand) =>
@@ -98,33 +82,6 @@ async function checkName(name, organisation, banList = null) {
     throw new UserError(`${bold(organisation.name)} already has a ban list called "${name}".`);
 }
 
-// Importing the same source twice would count each of its bans twice.
-async function checkSourceUnused(type, source, banList = null) {
-  const where = { type, source };
-  if (banList) where.id = { [Op.ne]: banList.id };
-
-  const existing = await BanList.findOne({ where, include: [Organisation] });
-  if (!existing) return;
-
-  const usedBy = formatBanListName(existing, existing.Organisation);
-  throw new UserError(`That source is already used by ${usedBy} (#${existing.id}).`);
-}
-
-async function checkSource(interaction, type, source) {
-  if (interaction.options.getBoolean('skip_check')) return 'Skipped checking the source.';
-  return checkBanListSource(type, source);
-}
-
-function formatBanListName(banList, organisation) {
-  return `${bold(organisation.name)} / ${bold(banList.name)}`;
-}
-
-// Describe the ban list for the audit log.
-function describeBanList(banList, organisation) {
-  const owner = `organisation "${organisation.name}" (ID: ${organisation.id})`;
-  return `ban list "${banList.name}" (ID: ${banList.id}) of ${owner}`;
-}
-
 async function add(interaction) {
   const organisation = await findOrganisation(interaction.options.getString('organisation', true));
   const name = interaction.options.getString('name', true).trim();
@@ -132,8 +89,8 @@ async function add(interaction) {
   const source = parseBanListSource(type, interaction.options.getString('source', true));
 
   await checkName(name, organisation);
-  await checkSourceUnused(type, source);
-  const check = await checkSource(interaction, type, source);
+  await checkBanListSourceUnused(type, source);
+  const check = await checkBanListSourceOption(interaction, type, source);
 
   const banList = await BanList.create({ name, type, source, organisation: organisation.id });
   const sourceDescription = `${formatBanListType(type)} source "${source}"`;
@@ -161,8 +118,8 @@ async function update(interaction) {
     source = parseBanListSource(type, sourceInput || banList.source);
 
     if (type !== banList.type || source !== banList.source) {
-      await checkSourceUnused(type, source, banList);
-      check = await checkSource(interaction, type, source);
+      await checkBanListSourceUnused(type, source, banList);
+      check = await checkBanListSourceOption(interaction, type, source);
     }
   }
 

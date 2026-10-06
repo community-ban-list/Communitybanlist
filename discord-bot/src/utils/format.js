@@ -20,6 +20,20 @@ export function plural(count, noun) {
   return `${count.toLocaleString('en-US')} ${noun}${count === 1 ? '' : 's'}`;
 }
 
+export function formatBanListName(banList, organisation) {
+  return `${bold(organisation.name)} / ${bold(banList.name)}`;
+}
+
+// Describe the organisation for the audit log.
+export function describeOrganisation(organisation) {
+  return `organisation "${organisation.name}" (ID: ${organisation.id})`;
+}
+
+// Describe the ban list for the audit log.
+export function describeBanList(banList, organisation) {
+  return `ban list "${banList.name}" (ID: ${banList.id}) of ${describeOrganisation(organisation)}`;
+}
+
 export function formatBanListType(type) {
   return BAN_LIST_TYPES[type] || type;
 }

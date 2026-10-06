@@ -4,6 +4,7 @@ import { connect, disconnect } from 'scbl-lib/db';
 import { Logger } from 'scbl-lib/utils';
 
 import commands from './src/commands/index.js';
+import startHealthCheckServer from './src/health-check-server.js';
 import { DISCORD_ADMIN_ROLE_IDS, DISCORD_BOT_TOKEN, DISCORD_GUILD_ID } from './src/config.js';
 import { UserError } from './src/utils/index.js';
 
@@ -123,6 +124,7 @@ process.on('SIGINT', () => shutdown());
 process.on('SIGTERM', () => shutdown());
 
 async function main() {
+  startHealthCheckServer(client);
   await connect();
   await client.login(DISCORD_BOT_TOKEN);
 }

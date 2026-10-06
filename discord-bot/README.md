@@ -6,12 +6,12 @@ Slash commands for managing partner organisations and their ban lists from the C
 
 | Command | What it does |
 | --- | --- |
-| `/org add name [discord]` | Add a partner organisation. |
+| `/org add name banlist_name type source [discord] [skip_check]` | Add a partner organisation along with its first ban list. Nothing is saved if the ban list's source fails its check. |
 | `/org update organisation [name] [discord]` | Rename an organisation or change its Discord link. Use `none` to remove the link. |
 | `/org remove organisation` | Remove an organisation, its ban lists and their bans, after a confirmation. |
 | `/org info organisation` | Show an organisation and its ban lists with their ban counts. |
 | `/org list` | List all organisations. |
-| `/banlist add organisation name type source [skip_check]` | Add a ban list to an organisation. |
+| `/banlist add organisation name type source [skip_check]` | Add another ban list to an organisation. |
 | `/banlist update banlist [name] [type] [source] [skip_check]` | Rename a ban list or change where its bans come from. |
 | `/banlist remove banlist` | Remove a ban list and its bans, after a confirmation. |
 
@@ -59,3 +59,13 @@ yarn start-discord-bot
 Or with Docker. CI pushes the image to the private `werewolfboy13/cbl-bot` repository, so the server needs a `docker login` with access to it, and it runs as the `bot` service in the CBL Docker stack. The image is based on [Docker Hardened Images](https://docs.docker.com/dhi/), so building it yourself needs a `docker login dhi.io` with a Docker Hub account first.
 
 The bot only makes outgoing connections, to Discord, BattleMetrics and remote ban lists, so it needs internet access as well as the database but no published ports.
+
+### Health
+
+The image has a Docker health check, so `docker ps` shows the bot as `healthy` once it is connected to both Discord and the database, and `unhealthy` if either connection is lost for about 90 seconds. To see which one failed:
+
+```bash
+docker inspect --format '{{json .State.Health}}' cbl-bot
+```
+
+Docker only reports the status. It does not restart unhealthy containers by itself.

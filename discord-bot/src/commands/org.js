@@ -1,21 +1,30 @@
 import { SlashCommandBuilder } from 'discord.js';
 
+import { sequelize } from 'scbl-lib/db';
 import { BanList, Organisation } from 'scbl-lib/db/models';
 import { Op } from 'scbl-lib/db/sequelize';
 
 import {
   applyChanges,
   audit,
+  banListSourceOption,
+  banListTypeOption,
   bold,
+  checkBanListSourceOption,
+  checkBanListSourceUnused,
   confirm,
   countBans,
   deleteBanLists,
   describeBanListDeletion,
+  describeOrganisation,
   findOrganisation,
+  formatBanListType,
   organisationEmbed,
   organisationOption,
   paginate,
+  parseBanListSource,
   plural,
+  skipCheckOption,
   suggestOrganisations,
   summariseBanListDeletion,
   UserError
@@ -29,7 +38,7 @@ const data = new SlashCommandBuilder()
   .addSubcommand((subcommand) =>
     subcommand
       .setName('add')
-      .setDescription('Add a partner organisation.')
+      .setDescription('Add a partner organisation along with its first ban list.')
       .addStringOption((option) =>
         option
           .setName('name')
@@ -38,8 +47,18 @@ const data = new SlashCommandBuilder()
           .setMaxLength(100)
       )
       .addStringOption((option) =>
+        option
+          .setName('banlist_name')
+          .setDescription('Name of its ban list, e.g. "Main".')
+          .setRequired(true)
+          .setMaxLength(100)
+      )
+      .addStringOption((option) => banListTypeOption(option).setRequired(true))
+      .addStringOption((option) => banListSourceOption(option).setRequired(true))
+      .addStringOption((option) =>
         option.setName('discord').setDescription("Invite link to the organisation's Discord.")
       )
+      .addBooleanOption(skipCheckOption)
   )
   .addSubcommand((subcommand) =>
     subcommand
@@ -97,7 +116,7 @@ async function getBanLists(organisation) {
   return BanList.findAll({ where: { organisation: organisation.id }, order: [['name', 'ASC']] });
 }
 
-async function describeOrganisation(organisation) {
+async function organisationDetails(organisation) {
   const banLists = await getBanLists(organisation);
   return organisationEmbed(organisation, banLists, await countBans(banLists));
 }
@@ -105,14 +124,37 @@ async function describeOrganisation(organisation) {
 async function add(interaction) {
   const name = interaction.options.getString('name', true).trim();
   const discord = parseDiscordLink(interaction.options.getString('discord'));
+  const banListName = interaction.options.getString('banlist_name', true).trim();
+  const type = interaction.options.getString('type', true);
+  const source = parseBanListSource(type, interaction.options.getString('source', true));
+
   await checkName(name);
+  if (!banListName) throw new UserError('The ban list name cannot be blank.');
+  await checkBanListSourceUnused(type, source);
+  const check = await checkBanListSourceOption(interaction, type, source);
 
-  const organisation = await Organisation.create({ name, discord: discord || null });
-  audit(interaction, `added organisation "${organisation.name}" (ID: ${organisation.id}).`);
+  // Create both or neither, so an organisation is never added without its ban list.
+  const { organisation, banList } = await sequelize.transaction(async (transaction) => {
+    const newOrganisation = await Organisation.create(
+      { name, discord: discord || null },
+      { transaction }
+    );
+    const newBanList = await BanList.create(
+      { name: banListName, type, source, organisation: newOrganisation.id },
+      { transaction }
+    );
+    return { organisation: newOrganisation, banList: newBanList };
+  });
 
+  const description = describeOrganisation(organisation);
+  const banListDescription = `ban list "${banList.name}" (ID: ${banList.id})`;
+  const sourceDescription = `${formatBanListType(type)} source "${source}"`;
+  audit(interaction, `added ${description} with ${banListDescription} and ${sourceDescription}.`);
+
+  const added = `Added ${bold(organisation.name)} with its ban list ${bold(banList.name)}.`;
   await interaction.editReply({
-    content: `Added ${bold(organisation.name)}. Add its ban lists with \`/banlist add\`.`,
-    embeds: [await describeOrganisation(organisation)]
+    content: `${added} ${check} Its bans are imported on the next ban importer run.`,
+    embeds: [await organisationDetails(organisation)]
   });
 }
 
@@ -122,20 +164,17 @@ async function update(interaction) {
   const discord = parseDiscordLink(interaction.options.getString('discord'));
   if (name !== undefined) await checkName(name, organisation);
 
-  const previousName = organisation.name;
+  const description = describeOrganisation(organisation);
   const changes = applyChanges(organisation, { name, discord });
   if (changes.length === 0)
     throw new UserError('Nothing to change. Give a new name or Discord link.');
 
   await organisation.save();
-  audit(
-    interaction,
-    `updated organisation "${previousName}" (ID: ${organisation.id}): ${changes.join(', ')}.`
-  );
+  audit(interaction, `updated ${description}: ${changes.join(', ')}.`);
 
   await interaction.editReply({
     content: `Updated ${bold(organisation.name)}.`,
-    embeds: [await describeOrganisation(organisation)]
+    embeds: [await organisationDetails(organisation)]
   });
 }
 
@@ -144,7 +183,7 @@ async function remove(interaction) {
   const banLists = await getBanLists(organisation);
   const banListIDs = banLists.map((banList) => banList.id);
   const name = bold(organisation.name);
-  const description = `organisation "${organisation.name}" (ID: ${organisation.id})`;
+  const description = describeOrganisation(organisation);
 
   let prompt = `Remove ${name}? It has no ban lists.`;
   let change = `removed ${description}.`;
@@ -168,7 +207,7 @@ async function remove(interaction) {
 
 async function info(interaction) {
   const organisation = await findOrganisation(interaction.options.getString('organisation', true));
-  await interaction.editReply({ embeds: [await describeOrganisation(organisation)] });
+  await interaction.editReply({ embeds: [await organisationDetails(organisation)] });
 }
 
 async function list(interaction) {

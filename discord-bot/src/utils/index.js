@@ -1,5 +1,12 @@
 import applyChanges from './apply-changes.js';
 import audit from './audit.js';
+import {
+  banListSourceOption,
+  banListTypeOption,
+  checkBanListSourceOption,
+  checkBanListSourceUnused,
+  skipCheckOption
+} from './ban-list-input.js';
 import { checkBanListSource, parseBanListSource } from './ban-list-source.js';
 import confirm from './confirm.js';
 import {
@@ -10,6 +17,9 @@ import {
 import {
   banListEmbed,
   bold,
+  describeBanList,
+  describeOrganisation,
+  formatBanListName,
   formatBanListType,
   organisationEmbed,
   plural,
@@ -32,20 +42,28 @@ export {
   audit,
   banListEmbed,
   banListOption,
+  banListSourceOption,
+  banListTypeOption,
   bold,
   checkBanListSource,
+  checkBanListSourceOption,
+  checkBanListSourceUnused,
   confirm,
   countBans,
   deleteBanLists,
+  describeBanList,
   describeBanListDeletion,
+  describeOrganisation,
   findBanList,
   findOrganisation,
+  formatBanListName,
   formatBanListType,
   organisationEmbed,
   organisationOption,
   paginate,
   parseBanListSource,
   plural,
+  skipCheckOption,
   suggestBanLists,
   suggestOrganisations,
   summariseBanListDeletion,
