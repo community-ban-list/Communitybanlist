@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import Koa from 'koa';
-import Router from 'koa-router';
+import Router from '@koa/router';
 import Helmet from 'koa-helmet';
 import Cors from '@koa/cors';
 import BodyParser from 'koa-bodyparser';
@@ -76,7 +76,7 @@ if (inProduction) {
     ctx.body = fs.readFileSync(path.resolve('./assets/cbl-logo-square.png'));
   });
 
-  router.get('*', async (ctx) => {
+  router.get('{/*path}', async (ctx) => {
     await ctx.render('index.html', {});
   });
 }

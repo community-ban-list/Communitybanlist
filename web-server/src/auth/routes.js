@@ -1,4 +1,4 @@
-import Router from 'koa-router';
+import Router from '@koa/router';
 import jwt from 'jsonwebtoken';
 
 import { JWT_AUTH } from 'scbl-lib/config';
