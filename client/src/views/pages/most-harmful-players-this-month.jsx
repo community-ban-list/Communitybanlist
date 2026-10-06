@@ -3,7 +3,7 @@ import { Button, Card, CardBody, Container, Table } from 'reactstrap';
 
 import { gql, useQuery } from '@apollo/client';
 
-import Layout from '../layout/layout.js';
+import Layout from '../layout/layout.jsx';
 
 import { DisplayRiskRating, SteamUser } from '../../components';
 

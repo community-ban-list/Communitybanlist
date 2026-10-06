@@ -3,7 +3,7 @@ import { Button, Card, CardBody, Container, Table, UncontrolledTooltip } from 'r
 
 import { gql, useQuery } from '@apollo/client';
 
-import Layout from '../layout/layout.js';
+import Layout from '../layout/layout.jsx';
 
 import { BanDates, SteamUser } from '../../components';
 

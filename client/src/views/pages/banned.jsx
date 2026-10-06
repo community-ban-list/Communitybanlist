@@ -19,7 +19,7 @@ import {
   Row
 } from 'reactstrap';
 
-import Layout from '../layout/layout.js';
+import Layout from '../layout/layout.jsx';
 
 import { gql, useQuery } from '@apollo/client';
 

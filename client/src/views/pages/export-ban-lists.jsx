@@ -14,7 +14,7 @@ import {
   Table
 } from 'reactstrap';
 
-import Layout from '../layout/layout.js';
+import Layout from '../layout/layout.jsx';
 
 import { AdvancedModal, DeleteExportBanList } from '../../components';
 

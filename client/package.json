@@ -57,7 +57,7 @@
     "overrides": [
       {
         "files": [
-          "**/**/*.js"
+          "**/*.{js,jsx}"
         ],
         "rules": {
           "import/no-anonymous-default-export": "off"

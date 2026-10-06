@@ -1,7 +1,7 @@
 import React from 'react';
 
-import Navbar from './navbar.js';
-import Footer from './footer.js';
+import Navbar from './navbar.jsx';
+import Footer from './footer.jsx';
 
 import background from '../../assets/img/backgrounds/background-1.jpg';
 

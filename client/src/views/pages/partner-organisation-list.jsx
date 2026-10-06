@@ -3,7 +3,7 @@ import { gql, useQuery } from '@apollo/client';
 
 import { Card, CardBody, Container, Modal, ModalBody, ModalHeader, Table } from 'reactstrap';
 
-import Layout from '../layout/layout.js';
+import Layout from '../layout/layout.jsx';
 import { AdvancedModal } from '../../components';
 
 const query = gql`

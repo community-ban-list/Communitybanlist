@@ -5,7 +5,7 @@ import { Card, CardBody, Container } from 'reactstrap';
 
 import { DISCORD_INVITE } from 'scbl-lib/config';
 
-import Layout from '../layout/layout.js';
+import Layout from '../layout/layout.jsx';
 
 const sections = [
   {

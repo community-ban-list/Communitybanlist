@@ -3,7 +3,7 @@ import { useParams } from 'react-router-dom';
 
 import { Card, CardBody, Container } from 'reactstrap';
 
-import Layout from '../layout/layout.js';
+import Layout from '../layout/layout.jsx';
 
 import { CreateExportBanList } from '../../components';
 

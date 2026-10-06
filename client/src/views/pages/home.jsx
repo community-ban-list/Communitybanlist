@@ -2,9 +2,9 @@ import React from 'react';
 
 import { Badge, Button, Card, CardBody, Container, Row, Col } from 'reactstrap';
 
-import Layout from '../layout/layout.js';
+import Layout from '../layout/layout.jsx';
 
-import SteamUserSearchBox from '../../components/steam-user-search-box.js';
+import SteamUserSearchBox from '../../components/steam-user-search-box.jsx';
 
 import background0 from '../../assets/img/backgrounds/background-0.jpg';
 import background1 from '../../assets/img/backgrounds/background-1.jpg';

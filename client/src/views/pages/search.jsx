@@ -5,9 +5,9 @@ import { Alert, Card, CardBody, Col, Container, Row, Table, UncontrolledTooltip 
 
 import { gql, useQuery } from '@apollo/client';
 
-import Layout from '../layout/layout.js';
+import Layout from '../layout/layout.jsx';
 
-import SteamUserSearchBox from '../../components/steam-user-search-box.js';
+import SteamUserSearchBox from '../../components/steam-user-search-box.jsx';
 
 import steamAvatar from '../../assets/img/misc/avatar.jpg';
 
