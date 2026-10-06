@@ -12,7 +12,7 @@ import mount from 'koa-mount';
 import views from 'koa-views';
 
 import { passport, routes as routesAuth } from './auth/index.js';
-import ApolloServer from './graphql-api/index.js';
+import GraphQL from './graphql-api/index.js';
 import ExportBanLists from './export-ban-lists.js';
 
 import { sequelize } from 'scbl-lib/db';
@@ -21,6 +21,17 @@ const inProduction = process.env.NODE_ENV;
 
 const app = new Koa();
 const router = new Router();
+
+// Koa 2 answered with 404 when a request failed because a file was missing. Koa 3 answers with 500,
+// so keep the old behaviour for the routes that read files.
+app.use(async (ctx, next) => {
+  try {
+    await next();
+  } catch (err) {
+    if (err.code === 'ENOENT') err.status = 404;
+    throw err;
+  }
+});
 
 app.use(Helmet());
 app.use(Cors());
@@ -31,7 +42,7 @@ app.use(
     strict: true,
     onerror: function (err, ctx) {
       if (err) console.log(err);
-      ctx.throw('body parse error', 422);
+      ctx.throw(422, 'body parse error');
     }
   })
 );
@@ -48,7 +59,7 @@ else app.use(serve(path.join(clientPath, '/main-site')));
 if (inProduction) app.use(views(path.join(clientPath, '/build')));
 
 router.use('/auth', routesAuth.routes(), routesAuth.allowedMethods());
-ApolloServer.applyMiddleware({ app });
+app.use(GraphQL);
 router.use('/export', ExportBanLists.routes(), ExportBanLists.allowedMethods());
 
 router.get('/health-check', async (ctx) => {
