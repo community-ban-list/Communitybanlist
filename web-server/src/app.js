@@ -9,7 +9,7 @@ import BodyParser from 'koa-bodyparser';
 import Logger from 'koa-logger';
 import serve from 'koa-static';
 import mount from 'koa-mount';
-import views from 'koa-views';
+import { send } from '@koa/send';
 
 import { passport, routes as routesAuth } from './auth/index.js';
 import GraphQL from './graphql-api/index.js';
@@ -56,8 +56,6 @@ const clientPath = './client';
 if (inProduction) app.use(mount('/static', serve(path.join(clientPath, '/build/static'))));
 else app.use(serve(path.join(clientPath, '/main-site')));
 
-if (inProduction) app.use(views(path.join(clientPath, '/build')));
-
 router.use('/auth', routesAuth.routes(), routesAuth.allowedMethods());
 app.use(GraphQL);
 router.use('/export', ExportBanLists.routes(), ExportBanLists.allowedMethods());
@@ -77,7 +75,7 @@ if (inProduction) {
   });
 
   router.get('{/*path}', async (ctx) => {
-    await ctx.render('index.html', {});
+    await send(ctx, 'index.html', { root: path.join(clientPath, '/build') });
   });
 }
 
