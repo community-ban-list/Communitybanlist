@@ -33,7 +33,22 @@ app.use(async (ctx, next) => {
   }
 });
 
-app.use(Helmet());
+app.use(
+  Helmet({
+    // The policy protects the client's pages, which are only served in production. In development
+    // Vite serves them, and the only page here is Apollo Sandbox, which loads from Apollo's CDN.
+    contentSecurityPolicy: inProduction
+      ? {
+          directives: {
+            // Steam avatars come from several Steam image hosts, which have changed over time.
+            imgSrc: ["'self'", 'data:', 'https:'],
+            // HSTS already keeps browsers on HTTPS, and upgrading would break plain HTTP access.
+            upgradeInsecureRequests: null
+          }
+        }
+      : false
+  })
+);
 app.use(Cors());
 app.use(
   BodyParser({
