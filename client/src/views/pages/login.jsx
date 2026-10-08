@@ -10,6 +10,16 @@ export default function () {
   const navigate = useNavigate();
 
   const urlParams = new URLSearchParams(window.location.search);
+  const signingIn = Auth.isLoggedIn === false && urlParams.get('openid.claimed_id') !== null;
+
+  // Hooks must run on every render, so the effect checks whether to sign in. Calling it only while
+  // signing in crashed the page once React Router 7's useNavigate added hooks of its own.
+  useEffect(() => {
+    if (!signingIn) return;
+    Auth.attemptAuth(window.location.search).then(() => {
+      navigate('/login', { replace: true });
+    });
+  });
 
   // Is fully logged in
   if (Auth.isLoggedIn && Auth.saveToken !== null) return <Navigate to="/" replace />;
@@ -61,13 +71,7 @@ export default function () {
     );
 
   // Not logged in, but has auth option
-  if (Auth.isLoggedIn === false && urlParams.get('openid.claimed_id') !== null) {
-    useEffect(() => {
-      Auth.attemptAuth(window.location.search).then(() => {
-        navigate('/login', { replace: true });
-      });
-    });
-
+  if (signingIn) {
     return (
       <Layout>
         <section className="section section-lg pt-lg-0 mt--100">
