@@ -13,8 +13,8 @@
     "web-server"
   ],
   "scripts": {
-    "lint": "eslint --fix . && prettier --write \"./**/*.{js,jsx}\"",
-    "prettier": "prettier --write \"./**/*.{js,jsx}\"",
+    "lint": "eslint --fix . && prettier --write \"./**/*.{js,jsx,mjs}\"",
+    "prettier": "prettier --write \"./**/*.{js,jsx,mjs}\"",
     "start-ban-importer": "node ban-importer/index.js",
     "start-discord-bot": "node discord-bot/index.js",
     "build-web-server": "cd client && npm run build",
@@ -36,7 +36,7 @@
     "lint-staged": "^10.2.11",
     "neostandard": "^0.13.0",
     "nodemon": "^2.0.4",
-    "prettier": "^2.0.5"
+    "prettier": "^3.9.9"
   },
   "dependencies": {
     "react-step-wizard": "^5.3.5",

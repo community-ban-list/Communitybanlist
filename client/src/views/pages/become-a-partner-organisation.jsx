@@ -99,8 +99,8 @@ export default function () {
               <h5>Form</h5>
               <p>
                 If you are interested in becoming a partner organisation after reading this
-                aggreement, please fill out the <a href={INTAKE_FORM}>form here</a>. If you
-                need support or have questions please don't hesitate to contact us at{' '}
+                aggreement, please fill out the <a href={INTAKE_FORM}>form here</a>. If you need
+                support or have questions please don't hesitate to contact us at{' '}
                 <a href={DISCORD_INVITE}>Discord</a>.
               </p>
               <br />

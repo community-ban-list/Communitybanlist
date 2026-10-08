@@ -50,9 +50,7 @@ export default function (props) {
   return (
     <>
       {loading && <LoadingModal />}
-      {error && (
-        <ErrorModal errors={error.graphQLErrors.length ? error.graphQLErrors : [error]} />
-      )}
+      {error && <ErrorModal errors={error.graphQLErrors.length ? error.graphQLErrors : [error]} />}
       <Button
         color="danger"
         size="sm"
