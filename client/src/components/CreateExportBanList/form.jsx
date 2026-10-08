@@ -87,7 +87,7 @@ export default function (props) {
                   Please select an export ban list type. Export ban lists can either be imported as
                   a remote ban list or shared with you via Battlemetrics.
                 </FormText>
-                <FormFeedback>{errors.server?.message}</FormFeedback>
+                <FormFeedback>{errors.type?.message}</FormFeedback>
               </FormGroup>
             </Col>
             <Col xs="12">
