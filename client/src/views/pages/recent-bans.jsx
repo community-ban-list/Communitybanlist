@@ -1,7 +1,8 @@
 import React from 'react';
 import { Button, Card, CardBody, Container, Table, UncontrolledTooltip } from 'reactstrap';
 
-import { gql, useQuery } from '@apollo/client';
+import { gql } from '@apollo/client';
+import { useQuery } from '@apollo/client/react';
 
 import Layout from '../layout/layout.jsx';
 

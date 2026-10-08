@@ -3,7 +3,8 @@ import { Link, useParams } from 'react-router';
 
 import { Alert, Card, CardBody, Col, Container, Row, Table, UncontrolledTooltip } from 'reactstrap';
 
-import { gql, useQuery } from '@apollo/client';
+import { gql } from '@apollo/client';
+import { useQuery } from '@apollo/client/react';
 
 import Layout from '../layout/layout.jsx';
 

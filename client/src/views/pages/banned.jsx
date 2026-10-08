@@ -21,7 +21,8 @@ import {
 
 import Layout from '../layout/layout.jsx';
 
-import { gql, useQuery } from '@apollo/client';
+import { gql } from '@apollo/client';
+import { useQuery } from '@apollo/client/react';
 
 import classnames from 'classnames';
 

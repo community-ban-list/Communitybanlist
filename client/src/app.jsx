@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 
-import { ApolloClient, ApolloProvider, createHttpLink, InMemoryCache } from '@apollo/client';
-import { setContext } from '@apollo/client/link/context';
+import { ApolloClient, HttpLink, InMemoryCache } from '@apollo/client';
+import { SetContextLink } from '@apollo/client/link/context';
+import { ApolloProvider } from '@apollo/client/react';
 import { relayStylePagination } from '@apollo/client/utilities';
 import { BrowserRouter, Route, Routes } from 'react-router';
 
@@ -9,9 +10,9 @@ import Auth from './utils/auth';
 
 import publicRoutes from './views';
 
-const httpLink = createHttpLink({ uri: '/graphql' });
+const httpLink = new HttpLink({ uri: '/graphql' });
 
-const authLink = setContext((_, { headers }) => {
+const authLink = new SetContextLink(({ headers }) => {
   return { headers: { ...headers, JWT: Auth.jwtToken } };
 });
 
@@ -30,7 +31,9 @@ const client = new ApolloClient({
   defaultOptions: {
     watchQuery: {
       fetchPolicy: 'cache-and-network',
-      errorPolicy: 'ignore'
+      errorPolicy: 'ignore',
+      // Apollo Client 4 defaults this to true, which would show loading states while Load more runs.
+      notifyOnNetworkStatusChange: false
     },
     query: {
       fetchPolicy: 'network-only',

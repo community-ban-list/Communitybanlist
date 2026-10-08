@@ -3,15 +3,13 @@ import react from '@vitejs/plugin-react';
 
 const WEB_SERVER = 'http://localhost:80';
 
-export default defineConfig(({ mode }) => ({
+export default defineConfig({
   plugins: [react()],
   // scbl-lib/config reads process.env, which Create React App defined in the browser. Defining it
   // as empty keeps the config's defaults, as before. Builds already do this, but the dev server
   // does not.
   define: {
-    'process.env': {},
-    // Apollo Client runs its development checks and logging unless __DEV__ is false.
-    'globalThis.__DEV__': JSON.stringify(mode !== 'production')
+    'process.env': {}
   },
   server: {
     port: 3000,
@@ -44,4 +42,4 @@ export default defineConfig(({ mode }) => ({
       }
     }
   }
-}));
+});

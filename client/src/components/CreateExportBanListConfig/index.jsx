@@ -1,5 +1,8 @@
 import React from 'react';
-import { gql, useMutation } from '@apollo/client';
+import { gql } from '@apollo/client';
+import { useMutation } from '@apollo/client/react';
+
+import graphQLErrors from '../../utils/graphql-errors.js';
 
 import { ErrorModal, LoadingModal } from '../';
 
@@ -71,7 +74,7 @@ export default function (props) {
   return (
     <>
       {loading && <LoadingModal />}
-      {error && <ErrorModal errors={error.graphQLErrors} />}
+      {error && <ErrorModal errors={graphQLErrors(error)} />}
       <Form
         {...props}
         onSubmit={async (data) => {

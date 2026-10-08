@@ -1,6 +1,8 @@
 import React from 'react';
 import { gql } from '@apollo/client';
-import { useMutation } from '@apollo/client';
+import { useMutation } from '@apollo/client/react';
+
+import graphQLErrors from '../../utils/graphql-errors.js';
 
 import { Button } from 'reactstrap';
 
@@ -50,7 +52,9 @@ export default function (props) {
   return (
     <>
       {loading && <LoadingModal />}
-      {error && <ErrorModal errors={error.graphQLErrors.length ? error.graphQLErrors : [error]} />}
+      {error && (
+        <ErrorModal errors={graphQLErrors(error).length ? graphQLErrors(error) : [error]} />
+      )}
       <Button
         color="danger"
         size="sm"
