@@ -27,8 +27,8 @@
     "prod-test": "conc \"yarn docker-build-web-server\" \"yarn docker-build-ban-importer\" \"yarn docker-build-discord-bot\""
   },
   "devDependencies": {
-    "concurrently": "^8.2.2",
-    "cross-env": "^7.0.2",
+    "concurrently": "^10.0.5",
+    "cross-env": "^10.1.0",
     "eslint": "^9.39.5",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-react-hooks": "^7.1.1",
@@ -36,7 +36,7 @@
     "husky": "^9.1.7",
     "lint-staged": "^17.6.0",
     "neostandard": "^0.13.0",
-    "nodemon": "^2.0.4",
+    "nodemon": "^3.1.14",
     "prettier": "^3.9.9"
   },
   "dependencies": {
