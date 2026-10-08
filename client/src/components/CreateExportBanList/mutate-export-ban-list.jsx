@@ -1,6 +1,6 @@
 import React from 'react';
 import { gql, useMutation } from '@apollo/client';
-import { Redirect } from 'react-router-dom';
+import { Navigate } from 'react-router';
 
 import { ErrorModal, LoadingModal } from '../';
 
@@ -121,9 +121,9 @@ export default function (props) {
     }
   );
 
-  if (!error && data && props.exportBanList) return <Redirect to="/export-ban-lists" />;
+  if (!error && data && props.exportBanList) return <Navigate to="/export-ban-lists" replace />;
   if (!error && data && !props.exportBanList)
-    return <Redirect to={`/export-ban-lists/${data.createExportBanList.id}`} />;
+    return <Navigate to={`/export-ban-lists/${data.createExportBanList.id}`} replace />;
 
   return (
     <>

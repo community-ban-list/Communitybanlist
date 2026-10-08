@@ -3,7 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { ApolloClient, ApolloProvider, createHttpLink, InMemoryCache } from '@apollo/client';
 import { setContext } from '@apollo/client/link/context';
 import { relayStylePagination } from '@apollo/client/utilities';
-import { BrowserRouter, Switch } from 'react-router-dom';
+import { BrowserRouter, Route, Routes } from 'react-router';
 
 import Auth from './utils/auth';
 
@@ -53,7 +53,11 @@ export default function () {
   return initialSetup ? (
     <ApolloProvider client={client}>
       <BrowserRouter>
-        <Switch>{publicRoutes}</Switch>
+        <Routes>
+          {publicRoutes}
+          {/* Unmatched paths render nothing, as with React Router 5, without a console warning. */}
+          <Route path="*" element={null} />
+        </Routes>
       </BrowserRouter>
     </ApolloProvider>
   ) : null;

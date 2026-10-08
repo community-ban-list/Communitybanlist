@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useParams } from 'react-router';
 
 import { Alert, Card, CardBody, Col, Container, Row, Table, UncontrolledTooltip } from 'reactstrap';
 
@@ -74,8 +74,8 @@ const GET_PLAYER = gql`
   }
 `;
 
-export default function (props) {
-  const search = props.match.params.search;
+export default function () {
+  const { search } = useParams();
   const isValidSteam64ID = search && search.match(/^[0-9]{17}$/);
 
   const { loading, error, data } = isValidSteam64ID
@@ -95,7 +95,7 @@ export default function (props) {
               <p className="description mt-2">
                 Search our database containing over 90,000 bans and 110,000 players.
               </p>
-              <SteamUserSearchBox search={props.match.params.search} />
+              <SteamUserSearchBox search={search} />
             </CardBody>
             {loading && (
               <CardBody>

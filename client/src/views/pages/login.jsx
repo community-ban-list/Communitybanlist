@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Redirect, useHistory } from 'react-router-dom';
+import { Navigate, useNavigate } from 'react-router';
 import { Button, Card, CardHeader, Container, Row, Col } from 'reactstrap';
 
 import Layout from '../layout/layout.jsx';
@@ -7,12 +7,12 @@ import Layout from '../layout/layout.jsx';
 import Auth from '../../utils/auth.js';
 
 export default function () {
-  const history = useHistory();
+  const navigate = useNavigate();
 
   const urlParams = new URLSearchParams(window.location.search);
 
   // Is fully logged in
-  if (Auth.isLoggedIn && Auth.saveToken !== null) return <Redirect to="/" />;
+  if (Auth.isLoggedIn && Auth.saveToken !== null) return <Navigate to="/" replace />;
 
   // Is logged in, but not selected remember me option
   if (Auth.isLoggedIn && Auth.saveToken === null)
@@ -32,7 +32,7 @@ export default function () {
                         color="default"
                         onClick={() => {
                           Auth.saveToken = false;
-                          history.push('/');
+                          navigate('/');
                         }}
                       >
                         <i className="fas fa-times mr-2" />
@@ -44,7 +44,7 @@ export default function () {
                           Auth.saveToken = true;
                           Auth.storeToken();
                           console.log(Auth);
-                          history.push('/');
+                          navigate('/');
                         }}
                       >
                         <i className="fas fa-check mr-2" />
@@ -64,7 +64,7 @@ export default function () {
   if (Auth.isLoggedIn === false && urlParams.get('openid.claimed_id') !== null) {
     useEffect(() => {
       Auth.attemptAuth(window.location.search).then(() => {
-        history.replace('/login');
+        navigate('/login', { replace: true });
       });
     });
 

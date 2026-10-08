@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useHistory, Link } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router';
 
 import StepWizard from 'react-step-wizard';
 
@@ -86,7 +86,7 @@ const GET_PLAYER = gql`
 
 function EnterSteamUser(props) {
   const [steamID, setSteamID] = useState('');
-  const history = useHistory();
+  const navigate = useNavigate();
 
   return (
     <>
@@ -137,7 +137,7 @@ function EnterSteamUser(props) {
         <Col className="text-right">
           <Button
             color="primary"
-            onClick={() => history.push(`/banned/${steamID}`)}
+            onClick={() => navigate(`/banned/${steamID}`)}
             disabled={!(steamID && steamID.match(/^[0-9]{17}$/))}
           >
             Next
@@ -458,8 +458,8 @@ function FurtherHelp(props) {
   );
 }
 
-export default function (props) {
-  const search = props.match.params.steamUser;
+export default function () {
+  const { steamUser: search } = useParams();
   const isValidSteam64ID = search && search.match(/^[0-9]{17}$/);
 
   const { loading, error, data } = isValidSteam64ID

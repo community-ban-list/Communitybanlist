@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useHistory } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import classnames from 'classnames';
 import {
   Button,
@@ -14,11 +14,11 @@ import {
 
 export default function (props) {
   const [search, updateSearch] = useState(props.search || '');
-  const history = useHistory();
+  const navigate = useNavigate();
 
   return (
     <div className={classnames(props.frontpageVersion ? 'shadow' : '', props.className)}>
-      <Form onSubmit={() => history.push(`/search/${search}`)}>
+      <Form onSubmit={() => navigate(`/search/${search}`)}>
         <FormGroup>
           <InputGroup
             className={classnames({
