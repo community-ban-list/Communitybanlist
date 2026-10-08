@@ -22,7 +22,12 @@ import { BanListSelector } from '../';
 const schema = yup.object().shape(Validators.ExportBanListConfig);
 
 export default function (props) {
-  const { register, handleSubmit, control, errors } = useForm({
+  const {
+    register,
+    handleSubmit,
+    control,
+    formState: { errors }
+  } = useForm({
     resolver: yupResolver(schema),
     defaultValues: {
       banList: null,
@@ -30,6 +35,12 @@ export default function (props) {
       expiredPoints: 1
     }
   });
+
+  // reactstrap's Input takes the ref as innerRef.
+  const registerInput = (name) => {
+    const { ref, ...rest } = register(name);
+    return { ...rest, innerRef: ref };
+  };
 
   return (
     <>
@@ -42,10 +53,10 @@ export default function (props) {
                 <Controller
                   name="banList"
                   control={control}
-                  render={(props) => (
+                  render={({ field }) => (
                     <BanListSelector
-                      onChange={(e) => props.onChange(e.target.value)}
-                      checked={props.value}
+                      onChange={(e) => field.onChange(e.target.value)}
+                      checked={field.value}
                       invalid={errors.banList?.message}
                     />
                   )}
@@ -59,8 +70,7 @@ export default function (props) {
                 <Label>Number of points for active bans</Label>
                 <Input
                   type="number"
-                  innerRef={register}
-                  name="activePoints"
+                  {...registerInput('activePoints')}
                   invalid={errors.activePoints?.message}
                 />
                 <FormText>
@@ -75,8 +85,7 @@ export default function (props) {
                 <Label>Number of points for expired bans</Label>
                 <Input
                   type="number"
-                  innerRef={register}
-                  name="expiredPoints"
+                  {...registerInput('expiredPoints')}
                   invalid={errors.expiredPoints?.message}
                 />
                 <FormText>

@@ -21,17 +21,37 @@ import { ExportBanListConfigs } from '../';
 
 const schema = yup.object().shape(Validators.ExportBanList);
 
+// Use only the form's own fields as defaults, so the submitted data does not carry the rest of the
+// export ban list. Missing values start as empty strings, as an empty input would give.
+function formValues(exportBanList) {
+  return Object.fromEntries(
+    Object.keys(Validators.ExportBanList).map((field) => [field, exportBanList[field] ?? ''])
+  );
+}
+
 export default function (props) {
-  const { register, handleSubmit, errors } = useForm({
+  const {
+    register,
+    handleSubmit,
+    formState: { errors }
+  } = useForm({
     resolver: yupResolver(schema),
-    defaultValues: props.exportBanList || {
-      type: 'remote',
-      threshold: 9,
-      defaultActivePoints: 3,
-      defaultExpiredPoints: 1,
-      maxBanAge: 0
-    }
+    defaultValues: props.exportBanList
+      ? formValues(props.exportBanList)
+      : {
+          type: 'remote',
+          threshold: 9,
+          defaultActivePoints: 3,
+          defaultExpiredPoints: 1,
+          maxBanAge: 0
+        }
   });
+
+  // reactstrap's Input takes the ref as innerRef.
+  const registerInput = (name) => {
+    const { ref, ...rest } = register(name);
+    return { ...rest, innerRef: ref };
+  };
 
   return (
     <>
@@ -41,12 +61,7 @@ export default function (props) {
             <Col xs="12">
               <FormGroup>
                 <Label>Name</Label>
-                <Input
-                  type="text"
-                  innerRef={register}
-                  name="name"
-                  invalid={!!errors.name?.message}
-                />
+                <Input type="text" {...registerInput('name')} invalid={!!errors.name?.message} />
                 <FormText>
                   Please provide a name for your export ban list so it can be identified in the
                   future.
@@ -59,8 +74,7 @@ export default function (props) {
                 <Label>Community/Server Name</Label>
                 <Input
                   type="text"
-                  innerRef={register}
-                  name="server"
+                  {...registerInput('server')}
                   invalid={!!errors.server?.message}
                 />
                 <FormText>
@@ -75,8 +89,7 @@ export default function (props) {
                 <Label>Type</Label>
                 <Input
                   type="select"
-                  innerRef={register}
-                  name="type"
+                  {...registerInput('type')}
                   invalid={errors.type?.message}
                   disabled={props.exportBanList}
                 >
@@ -95,8 +108,7 @@ export default function (props) {
                 <Label>Threshold</Label>
                 <Input
                   type="number"
-                  innerRef={register}
-                  name="threshold"
+                  {...registerInput('threshold')}
                   invalid={!!errors.threshold?.message}
                 />
                 <FormText>
@@ -112,8 +124,7 @@ export default function (props) {
                 <Label>Default number of points for active bans</Label>
                 <Input
                   type="number"
-                  innerRef={register}
-                  name="defaultActivePoints"
+                  {...registerInput('defaultActivePoints')}
                   invalid={!!errors.defaultActivePoints?.message}
                 />
                 <FormText>
@@ -127,8 +138,7 @@ export default function (props) {
                 <Label>Default number of points for expired bans</Label>
                 <Input
                   type="number"
-                  innerRef={register}
-                  name="defaultExpiredPoints"
+                  {...registerInput('defaultExpiredPoints')}
                   invalid={!!errors.defaultExpiredPoints?.message}
                 />
                 <FormText>
@@ -142,8 +152,7 @@ export default function (props) {
                 <Label>Max Ban Age (in Days)</Label>
                 <Input
                   type="text"
-                  innerRef={register}
-                  name="maxBanAge"
+                  {...registerInput('maxBanAge')}
                   invalid={!!errors.maxBanAge?.message}
                 />
                 <FormText>
@@ -158,8 +167,7 @@ export default function (props) {
                 <Label>Discord Webhook (Optional)</Label>
                 <Input
                   type="text"
-                  innerRef={register}
-                  name="discordWebhook"
+                  {...registerInput('discordWebhook')}
                   invalid={!!errors.discordWebhook?.message}
                 />
                 <FormText>
