@@ -35,7 +35,7 @@ rl.on('failed', async (error, jobInfo) => {
   } else throw error;
 });
 
-// eslint-disable-next-line handle-callback-err
+// eslint-disable-next-line n/handle-callback-err
 rl.on('retry', (error, jobInfo) => console.log(`Now retrying ${jobInfo.options.id}`));
 
 const makeRequest = rl.wrap(async (method, endpoint, params, data) => {
