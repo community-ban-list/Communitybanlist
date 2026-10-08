@@ -29,7 +29,7 @@ export default {
       if (filter.orderBy === 'reputationPointsMonthChange') order.push(['reputationRank', 'ASC']);
 
       return SteamUser.paginate({
-        order: order,
+        order,
         first: filter.first,
         after: filter.after,
         last: filter.last,

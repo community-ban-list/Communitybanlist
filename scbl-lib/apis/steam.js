@@ -41,7 +41,7 @@ const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
   const profileStartTime = Date.now();
   const retVar = await withTimeout(
     axios({
-      method: method,
+      method,
       // url: 'https://api.steampowered.com/' + url,
       url: 'https://partner.steam-api.com/' + url,
       params: { ...params, key: STEAM_API_KEY },

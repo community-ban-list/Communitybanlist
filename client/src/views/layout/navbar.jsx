@@ -31,7 +31,7 @@ import logoDark from '../../assets/img/brand/cbl-logo-dark.png';
 
 class DemoNavbar extends React.Component {
   componentDidMount() {
-    let headroom = new Headroom(document.getElementById('navbar-main'));
+    const headroom = new Headroom(document.getElementById('navbar-main'));
     headroom.init();
   }
   state = {

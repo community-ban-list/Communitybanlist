@@ -70,15 +70,15 @@ export default class BanFetcher {
       bans.push({
         id: `${banList.id},${steamUser},${expires ? expires.getTime() : 'null'}`,
 
-        steamUser: steamUser,
+        steamUser,
 
-        expires: expires,
+        expires,
         expired: !(expires === null || expires.getTime() > Date.now()),
 
         reason: classifyBanReason(reason),
         rawReason: reason,
 
-        banList: banList
+        banList
       });
     }
 
@@ -168,15 +168,15 @@ export default class BanFetcher {
 
             steamUser: steamUser.trim(),
 
-            created: created,
-            expires: expires,
+            created,
+            expires,
             expired: !(ban.attributes.expires === null || expires.getTime() > Date.now()),
 
             reason: classifyBanReason(ban.attributes.reason, ban.attributes.note),
             rawReason: ban.attributes.reason,
             rawNote: ban.attributes.note,
 
-            banList: banList
+            banList
           });
         } catch (err) {
           Logger.verbose('BanFetcher', 1, `Failed to fetch ban list (ID: ${banList.id}): `, err);

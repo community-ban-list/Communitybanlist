@@ -17,7 +17,7 @@ import homeImgCont from '../../assets/img/misc/home-3.png';
 
 export default function () {
   return (
-    <Layout homePage={true}>
+    <Layout homePage>
       <div className="position-relative">
         <section className="section section-lg section-shaped pb-250">
           <div
@@ -44,7 +44,7 @@ export default function () {
                     CommunityBanList.com aims to protect our Partner Organisations through
                     collaboration and information sharing.
                   </p>
-                  <SteamUserSearchBox className="mt-5" frontpageVersion={true} />
+                  <SteamUserSearchBox className="mt-5" frontpageVersion />
                 </Col>
               </Row>
             </div>

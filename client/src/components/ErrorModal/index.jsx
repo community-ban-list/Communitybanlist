@@ -6,7 +6,7 @@ import { AdvancedModal } from '../';
 
 export default function (props) {
   return (
-    <AdvancedModal isOpen={true}>
+    <AdvancedModal isOpen>
       {(modal) => (
         <Modal
           className="modal-dialog-centered modal-danger"
@@ -22,7 +22,7 @@ export default function (props) {
               type="button"
               onClick={modal.close}
             >
-              <span aria-hidden={true}>×</span>
+              <span aria-hidden>×</span>
             </button>
           </ModalHeader>
           <ModalBody>

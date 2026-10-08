@@ -7,7 +7,7 @@ export default function () {
     <Modal
       className="modal-dialog-centered modal-secondary"
       contentClassName="bg-gradient-secondary"
-      isOpen={true}
+      isOpen
     >
       <ModalBody>
         <div className="py-3 text-center">
