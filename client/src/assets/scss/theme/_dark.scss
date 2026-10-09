@@ -1,0 +1,139 @@
+@use 'sass:map';
+
+// Dark mode. Bootstrap switches its own colours when <html> has data-bs-theme="dark"; these rules do
+// the same for the theme's fixed colours.
+
+// The phone menu shows the dark logo in light mode and the light one in dark mode.
+.logo-for-dark-mode {
+  display: none;
+}
+
+@include color-mode(dark) {
+  .logo-for-light-mode {
+    display: none;
+  }
+
+  .logo-for-dark-mode {
+    display: inline;
+  }
+
+  // Panels sit a little lighter than the page.
+  .card {
+    --#{$prefix}card-bg: #{$dark-surface};
+    --#{$prefix}card-border-color: #{$dark-border};
+  }
+
+  .dropdown-menu {
+    --#{$prefix}dropdown-bg: #{$dark-surface};
+    --#{$prefix}dropdown-link-hover-bg: #{$dark-surface-alt};
+  }
+
+  .modal {
+    --#{$prefix}modal-bg: #{$dark-surface};
+  }
+
+  .table {
+    --#{$prefix}table-border-color: #{$dark-border};
+
+    .thead-light th {
+      background-color: $dark-surface-alt;
+      color: $gray-500;
+    }
+  }
+
+  --cbl-input-border-color: #{$dark-border};
+
+  // Icons in circles keep their colour bright on a faint tint.
+  @each $name in primary, info, success, warning, danger {
+    $value: map.get($theme-colors, $name);
+
+    .icon-shape-#{$name} {
+      background-color: rgba($value, 0.2);
+      color: $value;
+    }
+  }
+
+  .dropdown-media:hover {
+    .heading,
+    p {
+      color: $white !important;
+    }
+  }
+
+  .footer {
+    background: $dark-surface;
+
+    .nav .nav-link:hover {
+      color: $gray-400;
+    }
+  }
+
+  .footer.has-cards {
+    background: transparent;
+
+    &::before {
+      background: $dark-surface;
+    }
+  }
+
+  // The loading modal.
+  .bg-gradient-secondary {
+    background: linear-gradient(35deg, $dark-surface 0, $dark-surface-alt 100%) !important;
+  }
+
+  .modal-secondary {
+    .modal-content,
+    .heading {
+      color: $body-color-dark;
+    }
+  }
+
+  .btn-secondary {
+    @include button-variant($dark-surface-alt, $dark-border);
+  }
+
+  .btn-default {
+    @include button-variant(tint-color($default, 15%), tint-color($default, 15%));
+  }
+
+  // GitHub's near-black is lifted so it shows on the dark page.
+  .btn-github {
+    @include button-variant(#444c56, #444c56);
+  }
+
+  .bg-github {
+    background-color: #444c56 !important;
+  }
+
+  .text-github {
+    color: $gray-300 !important;
+  }
+
+  // The home page's illustrations have dark details, so they sit on a light panel.
+  .illustration {
+    background-color: $gray-100;
+    border-radius: $border-radius-lg;
+    padding: 1rem;
+  }
+
+  @include media-breakpoint-down(lg) {
+    .navbar-nav .nav-link {
+      color: $body-color-dark !important;
+    }
+
+    .navbar-collapse.collapsing,
+    .navbar-collapse.show {
+      background: $dark-surface;
+    }
+
+    .navbar-collapse {
+      .navbar-toggler span {
+        background: $body-color-dark;
+      }
+
+      .navbar-collapse-header {
+        border-bottom-color: $dark-border;
+      }
+    }
+  }
+}

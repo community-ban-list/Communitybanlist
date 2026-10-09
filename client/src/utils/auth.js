@@ -4,6 +4,8 @@ import httpClient from './http-client';
 
 import { LOCALSTORAGE_VERSION } from 'scbl-lib/config';
 
+import { COLOR_MODE_KEY } from './color-mode.js';
+
 class Auth {
   constructor() {
     this.flush();
@@ -27,7 +29,10 @@ class Auth {
 
   restoreAuth() {
     if (localStorage.getItem('LOCALSTORAGE_VERSION') !== LOCALSTORAGE_VERSION) {
+      // Keep the colour mode, which does not depend on the stored data's version.
+      const colorMode = localStorage.getItem(COLOR_MODE_KEY);
       localStorage.clear();
+      if (colorMode) localStorage.setItem(COLOR_MODE_KEY, colorMode);
       localStorage.setItem('LOCALSTORAGE_VERSION', LOCALSTORAGE_VERSION);
     }
 

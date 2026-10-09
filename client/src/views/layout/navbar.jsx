@@ -23,6 +23,7 @@ import {
 
 import { DISCORD_INVITE } from 'scbl-lib/config';
 
+import { ColorModeToggle } from '../../components';
 import Auth from '../../utils/auth.js';
 
 import logo from '../../assets/img/brand/cbl-logo.png';
@@ -78,7 +79,8 @@ class DemoNavbar extends React.Component {
                   <Row>
                     <Col className="collapse-brand" xs="6">
                       <Link to="/">
-                        <img alt="..." src={logoDark} />
+                        <img alt="CBL Logo" className="logo-for-light-mode" src={logoDark} />
+                        <img alt="CBL Logo" className="logo-for-dark-mode" src={logo} />
                       </Link>
                     </Col>
                     <Col className="collapse-close" xs="6">
@@ -253,6 +255,7 @@ class DemoNavbar extends React.Component {
                   </UncontrolledDropdown>
                 </Nav>
                 <Nav className="navbar-nav-hover align-items-lg-center ms-lg-auto" navbar>
+                  <ColorModeToggle />
                   <NavItem>
                     <NavLink
                       className="nav-link-icon"

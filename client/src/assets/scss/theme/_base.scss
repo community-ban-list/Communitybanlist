@@ -41,8 +41,9 @@ p {
   z-index: 100;
 }
 
-.fill-white {
-  fill: $white;
+// The slanted edge under a header image, in the page's background colour.
+.fill-body {
+  fill: var(--#{$prefix}body-bg);
 }
 
 // Pull a page's card up over the header image.

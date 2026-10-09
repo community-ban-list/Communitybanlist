@@ -10,7 +10,7 @@ export default [
     ignores: ['client/build/**', 'client/src/assets/vendor/**']
   }),
   {
-    files: ['client/src/**/*.{js,jsx}'],
+    files: ['client/src/**/*.{js,jsx}', 'client/public/**/*.js'],
     languageOptions: { globals: globals.browser },
     plugins: { 'react-hooks': reactHooks },
     rules: {

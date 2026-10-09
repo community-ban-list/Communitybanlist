@@ -44,6 +44,21 @@ $brand-colors: (
   'steam': $black
 );
 
+// Dark mode colours: a navy-tinted dark page, with lighter panels for cards, menus and modals.
+$dark-bg: #0e1525;
+$dark-surface: #172036;
+$dark-surface-alt: #1f2a44;
+$dark-border: #2b3858;
+
+$body-color-dark: #c3cbdc;
+$body-bg-dark: $dark-bg;
+$body-secondary-bg-dark: $dark-surface-alt;
+$body-tertiary-bg-dark: $dark-surface;
+$border-color-dark: $dark-border;
+$headings-color-dark: #eef1f7;
+$link-color-dark: $primary;
+$link-hover-color-dark: tint-color($primary, 30%);
+
 // Text on coloured backgrounds is navy or white, whichever has at least this contrast. This gives
 // navy text on the yellow, green and cyan buttons, and white text on the others.
 $min-contrast-ratio: 3;
@@ -115,11 +130,12 @@ $btn-font-weight: 600;
 $btn-box-shadow: 0 4px 6px rgba(50, 50, 93, 0.11), 0 1px 3px rgba(0, 0, 0, 0.08);
 $btn-active-box-shadow: none;
 
-$input-color: $gray-700;
-$input-border-color: #cad1d7;
+$input-color: var(--bs-body-color);
+// A CSS variable so dark mode can change it; theme/_forms.scss sets it.
+$input-border-color: var(--cbl-input-border-color);
 $input-box-shadow: none;
 $input-placeholder-color: $gray-500;
-$input-disabled-bg: $gray-200;
+$input-disabled-bg: var(--bs-secondary-bg);
 $form-label-font-size: $font-size-sm;
 $form-select-box-shadow: none;
 
@@ -135,9 +151,11 @@ $dropdown-border-width: 0;
 $dropdown-box-shadow: 0 50px 100px rgba(50, 50, 93, 0.1), 0 15px 35px rgba(50, 50, 93, 0.15), 0 5px 15px rgba(0, 0, 0, 0.1);
 $dropdown-item-padding-y: 1rem;
 $dropdown-item-padding-x: 1rem;
+$dropdown-link-active-color: $default;
 $table-cell-padding-y: 1rem;
 $table-cell-padding-x: 1rem;
 $table-color: var(--bs-body-color);
+$table-bg: transparent;
 $table-border-color: $gray-200;
 $table-th-font-weight: 600;
 $badge-font-size: 0.66rem;

@@ -93,7 +93,7 @@
 
       // The arrow pointing at the menu's link.
       &::before {
-        background: $dropdown-bg;
+        background: var(--#{$prefix}dropdown-bg);
         border-radius: $border-radius-sm;
         bottom: 100%;
         content: '';

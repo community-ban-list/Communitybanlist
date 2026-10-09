@@ -1,3 +1,7 @@
+:root {
+  --cbl-input-border-color: #cad1d7;
+}
+
 // An input group's icon sits inside the input's border, and the whole group gets the focus ring.
 .input-group {
   border-radius: $input-border-radius;

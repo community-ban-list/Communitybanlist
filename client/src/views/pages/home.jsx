@@ -58,7 +58,7 @@ export default function () {
               x="0"
               y="0"
             >
-              <polygon className="fill-white" points="2560,0 2560,100 0,100" />
+              <polygon className="fill-body" points="2560,0 2560,100 0,100" />
             </svg>
           </div>
         </section>
@@ -149,7 +149,7 @@ export default function () {
         <Container>
           <Row className="gy-5 align-items-center">
             <Col className="order-md-2" md="6">
-              <img alt="..." className="img-fluid" src={homeImgExp} />
+              <img alt="..." className="img-fluid illustration" src={homeImgExp} />
             </Col>
             <Col className="order-md-1" md="6">
               <div className="pe-md-5">
@@ -239,7 +239,7 @@ export default function () {
             x="0"
             y="0"
           >
-            <polygon className="fill-white" points="2560,0 2560,100 0,100" />
+            <polygon className="fill-body" points="2560,0 2560,100 0,100" />
           </svg>
         </div>
       </section>
@@ -247,7 +247,7 @@ export default function () {
         <Container>
           <Row className="gy-5 align-items-center">
             <Col md="6">
-              <img alt="..." className="img-fluid" src={homeImgBen} />
+              <img alt="..." className="img-fluid illustration" src={homeImgBen} />
             </Col>
             <Col md="6">
               <div className="pe-md-5">
@@ -327,7 +327,7 @@ export default function () {
             x="0"
             y="0"
           >
-            <polygon className="fill-white" points="0,0 0,100 2560,100" />
+            <polygon className="fill-body" points="0,0 0,100 2560,100" />
           </svg>
         </div>
       </section>
@@ -373,7 +373,7 @@ export default function () {
               </div>
             </Col>
             <Col md="6">
-              <img alt="..." className="img-fluid" src={homeImgCont} />
+              <img alt="..." className="img-fluid illustration" src={homeImgCont} />
             </Col>
           </Row>
         </Container>
@@ -412,7 +412,7 @@ export default function () {
             x="0"
             y="0"
           >
-            <polygon className="fill-white" points="2560,0 2560,100 0,100" />
+            <polygon className="fill-body" points="2560,0 2560,100 0,100" />
           </svg>
         </div>
       </section>
