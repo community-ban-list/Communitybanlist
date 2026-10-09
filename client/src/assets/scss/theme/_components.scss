@@ -19,6 +19,7 @@
   align-items: center;
   border-radius: 50%;
   display: inline-flex;
+  flex-shrink: 0;
   font-size: 0.875rem;
   height: 2rem;
   justify-content: center;
@@ -92,6 +93,8 @@
   align-items: center;
   border-radius: 50%;
   display: inline-flex;
+  // Stay round beside long text in the navbar menus.
+  flex-shrink: 0;
   justify-content: center;
   padding: 12px;
   text-align: center;
