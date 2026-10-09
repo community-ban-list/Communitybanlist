@@ -56,7 +56,7 @@ export default function () {
                 chance to cause any harm.
               </p>
             </CardBody>
-            <Table className="align-items-center table-flush" responsive>
+            <Table className="align-middle table-flush" responsive>
               <thead className="thead-light">
                 <tr>
                   <th>Name</th>

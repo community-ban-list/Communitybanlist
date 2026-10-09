@@ -1,0 +1,195 @@
+@use 'sass:color';
+@use 'sass:map';
+
+// Badges
+
+.badge {
+  text-transform: uppercase;
+}
+
+// Text on a solid badge contrasts with its colour, as on buttons.
+@each $name, $value in map.merge($theme-colors, $brand-colors) {
+  .badge.bg-#{$name} {
+    color: color-contrast($value);
+  }
+}
+
+// Round badges that hold an icon, used in the home page's lists.
+.badge-circle {
+  align-items: center;
+  border-radius: 50%;
+  display: inline-flex;
+  font-size: 0.875rem;
+  height: 2rem;
+  justify-content: center;
+  padding: 0;
+  width: 2rem;
+}
+
+// Alerts
+
+.alert {
+  font-size: $font-size-sm;
+}
+
+// Cards
+
+.card-lift--hover {
+  transition: $transition-base;
+
+  &:hover {
+    transform: translateY(-20px);
+  }
+}
+
+.shadow-lg--hover {
+  transition: box-shadow 0.15s ease;
+
+  &:hover {
+    box-shadow: $box-shadow-lg !important;
+  }
+}
+
+// Avatars
+
+.avatar {
+  align-items: center;
+  background-color: $gray-500;
+  border-radius: 50%;
+  color: $white;
+  display: inline-flex;
+  flex-shrink: 0;
+  font-size: 1rem;
+  height: 48px;
+  justify-content: center;
+  width: 48px;
+
+  img {
+    border-radius: 50%;
+    width: 100%;
+  }
+}
+
+.avatar-sm {
+  font-size: $font-size-sm;
+  height: 38px;
+  width: 38px;
+}
+
+// Icons in circles, used at the top of each page's card and in the navbar menus.
+
+.icon {
+  height: 3rem;
+  width: 3rem;
+}
+
+.icon-lg {
+  height: 4rem;
+  width: 4rem;
+}
+
+.icon-shape {
+  align-items: center;
+  border-radius: 50%;
+  display: inline-flex;
+  justify-content: center;
+  padding: 12px;
+  text-align: center;
+
+  i {
+    font-size: 1.25rem;
+  }
+
+  &.icon-lg i {
+    font-size: 1.625rem;
+  }
+}
+
+@each $name in primary, info, success, warning, danger {
+  $value: map.get($theme-colors, $name);
+
+  .icon-shape-#{$name} {
+    background-color: rgba(tint-color($value, 10%), 0.5);
+    color: shade-color($value, 10%);
+  }
+}
+
+// Gradient backgrounds, which shift the colour's hue a little.
+@each $name in info, success, warning, danger, secondary {
+  $value: map.get($theme-colors, $name);
+
+  .bg-gradient-#{$name} {
+    background: linear-gradient(35deg, $value 0, color.adjust($value, $hue: 25deg) 100%) !important;
+  }
+}
+
+.bg-gradient-primary {
+  background: linear-gradient(35deg, $primary 0, #fff700 100%) !important;
+}
+
+// Modals in a theme colour, used for the error and loading modals.
+
+@each $name in danger, secondary {
+  $value: map.get($theme-colors, $name);
+
+  .modal-#{$name} {
+    .modal-content,
+    .heading {
+      color: color-contrast($value);
+    }
+
+    .modal-header,
+    .modal-footer {
+      border-color: rgba(color-contrast($value), 0.075);
+    }
+  }
+}
+
+// Tables
+
+.table {
+  thead th {
+    font-size: 0.65rem;
+    letter-spacing: 1px;
+    padding-bottom: 0.75rem;
+    padding-top: 0.75rem;
+    text-transform: uppercase;
+  }
+
+  td,
+  th {
+    font-size: 0.8125rem;
+    white-space: nowrap;
+  }
+
+  .thead-light th {
+    background-color: $gray-100;
+    color: $gray-600;
+  }
+}
+
+// A table without outer borders, for tables inside cards.
+.table-flush {
+  td,
+  th {
+    border-left: 0;
+    border-right: 0;
+  }
+
+  tbody tr:last-child {
+    td,
+    th {
+      border-bottom: 0;
+    }
+  }
+}
+
+.card .table {
+  margin-bottom: 0;
+
+  td,
+  th {
+    padding-left: $card-spacer-x;
+    padding-right: $card-spacer-x;
+  }
+}

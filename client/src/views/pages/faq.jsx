@@ -152,12 +152,12 @@ export default function () {
                     <div key={questionKey}>
                       <a href={`#${hash}`}>
                         <h6 id={hash}>
-                          <span className="font-weight-bold">Q: </span>
+                          <span className="fw-bold">Q: </span>
                           {question.question}
                         </h6>
                       </a>
-                      <p className="ml-4">
-                        <span className="font-weight-bold">A: </span>
+                      <p className="ms-4">
+                        <span className="fw-bold">A: </span>
                         {question.answer}
                       </p>
                     </div>

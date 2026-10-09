@@ -49,7 +49,7 @@ export default function () {
                 Explore a list of the most harmful players in our database.
               </p>
             </CardBody>
-            <Table className="align-items-center table-flush" responsive>
+            <Table className="align-middle table-flush" responsive>
               <thead className="thead-light">
                 <tr>
                   <th>Players</th>
@@ -108,7 +108,7 @@ export default function () {
                             });
                           }}
                         >
-                          <i className="fa fa-angle-double-down mr-2" />
+                          <i className="fa fa-angle-double-down me-2" />
                           Load More
                         </Button>
                       </td>

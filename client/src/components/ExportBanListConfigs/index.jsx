@@ -38,7 +38,7 @@ export default function (props) {
 
   return (
     <>
-      <Table className="align-items-center table-flush" responsive>
+      <Table className="align-middle table-flush" responsive>
         <thead className="thead-light">
           <tr>
             <th>Ban List</th>

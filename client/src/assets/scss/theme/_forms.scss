@@ -1,0 +1,54 @@
+// An input group's icon sits inside the input's border, and the whole group gets the focus ring.
+.input-group {
+  border-radius: $input-border-radius;
+  transition: $input-transition;
+
+  > .input-group-text {
+    background-color: $input-bg;
+    border-right: 0;
+    color: $input-placeholder-color;
+  }
+
+  > .input-group-text + .form-control {
+    border-left: 0;
+    padding-left: 0;
+  }
+
+  // A button joined to an input stays flat.
+  > .btn,
+  > .btn:hover {
+    box-shadow: none;
+    margin-right: 0;
+    transform: none;
+  }
+
+  &:focus-within {
+    box-shadow: $input-focus-box-shadow;
+
+    > .form-control,
+    > .input-group-text {
+      border-color: $input-focus-border-color;
+    }
+
+    > .form-control:focus {
+      box-shadow: none;
+    }
+  }
+
+  &.is-invalid {
+    > .form-control,
+    > .input-group-text {
+      border-color: $form-feedback-invalid-color;
+    }
+  }
+}
+
+// A borderless input group with a shadow, used on the home page's header image.
+.input-group-alternative {
+  box-shadow: 0 1px 3px rgba(50, 50, 93, 0.15), 0 1px 0 rgba(0, 0, 0, 0.02);
+
+  > .form-control,
+  > .input-group-text {
+    border: 0;
+  }
+}

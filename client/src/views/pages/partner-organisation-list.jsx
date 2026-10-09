@@ -39,7 +39,7 @@ export default function () {
                 View a list of our partner organisations and their ban lists.
               </p>
             </CardBody>
-            <Table className="align-items-center table-flush" responsive>
+            <Table className="align-middle table-flush" responsive>
               <thead className="thead-light">
                 <tr>
                   <th>Organisation</th>

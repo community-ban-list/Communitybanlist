@@ -8,7 +8,6 @@ import {
   FormGroup,
   Input,
   InputGroup,
-  InputGroupAddon,
   InputGroupText
 } from 'reactstrap';
 
@@ -27,11 +26,9 @@ export default function (props) {
                 !props.frontpageVersion && search !== '' && !(search && search.match(/^[0-9]{17}$/))
             })}
           >
-            <InputGroupAddon addonType="prepend">
-              <InputGroupText>
-                <i className="fa fa-search" />
-              </InputGroupText>
-            </InputGroupAddon>
+            <InputGroupText>
+              <i className="fa fa-search" />
+            </InputGroupText>
 
             <Input
               type="text"
@@ -40,15 +37,12 @@ export default function (props) {
               onChange={(e) => updateSearch(e.target.value)}
             />
 
-            <InputGroupAddon addonType="prepend">
-              <Button
-                className="rounded-right shadow-none"
-                color="primary"
-                disabled={!props.frontpageVersion && !(search && search.match(/^[0-9]{17}$/))}
-              >
-                Search
-              </Button>
-            </InputGroupAddon>
+            <Button
+              color="primary"
+              disabled={!props.frontpageVersion && !(search && search.match(/^[0-9]{17}$/))}
+            >
+              Search
+            </Button>
           </InputGroup>
           <FormFeedback>A valid Steam 64 ID is a 17 digit number.</FormFeedback>
         </FormGroup>

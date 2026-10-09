@@ -32,7 +32,7 @@ export default function () {
               backgroundPosition: '50% 0%'
             }}
           />
-          <Container className="py-lg-md d-flex">
+          <Container className="d-flex">
             <div className="col px-0">
               <Row>
                 <Col lg="6">
@@ -67,7 +67,7 @@ export default function () {
         <Container>
           <Row className="justify-content-center">
             <Col lg="12">
-              <Row className="row-grid">
+              <Row className="gy-5">
                 <Col lg="4">
                   <Card className="card-lift--hover shadow border-0">
                     <CardBody className="py-5">
@@ -80,10 +80,10 @@ export default function () {
                         from various popular Partner servers.
                       </p>
                       <div>
-                        <Badge color="primary" pill className="mr-1">
+                        <Badge color="primary" pill className="me-1">
                           Search
                         </Badge>
-                        <Badge color="primary" pill className="mr-1">
+                        <Badge color="primary" pill className="me-1">
                           Recent Bans
                         </Badge>
                       </div>
@@ -105,7 +105,7 @@ export default function () {
                         harmful players.
                       </p>
                       <div>
-                        <Badge color="info" pill className="mr-1">
+                        <Badge color="info" pill className="me-1">
                           Export Ban Lists
                         </Badge>
                       </div>
@@ -127,10 +127,10 @@ export default function () {
                         against harmful players.
                       </p>
                       <div>
-                        <Badge color="success" pill className="mr-1">
+                        <Badge color="success" pill className="me-1">
                           Partner Organisations
                         </Badge>
-                        <Badge color="success" pill className="mr-1">
+                        <Badge color="success" pill className="me-1">
                           GitHub
                         </Badge>
                       </div>
@@ -147,12 +147,12 @@ export default function () {
       </section>
       <section className="section" id="explore">
         <Container>
-          <Row className="row-grid align-items-center">
+          <Row className="gy-5 align-items-center">
             <Col className="order-md-2" md="6">
               <img alt="..." className="img-fluid" src={homeImgExp} />
             </Col>
             <Col className="order-md-1" md="6">
-              <div className="pr-md-5">
+              <div className="pe-md-5">
                 <div className="icon icon-lg icon-shape icon-shape-primary shadow rounded-circle mb-5">
                   <i className="fa fa-search" />
                 </div>
@@ -166,7 +166,7 @@ export default function () {
                   <li className="py-2">
                     <div className="d-flex align-items-center">
                       <div>
-                        <Badge className="badge-circle mr-3" color="primary">
+                        <Badge className="badge-circle me-3" color="primary">
                           <i className="fa fa-search" />
                         </Badge>
                       </div>
@@ -178,7 +178,7 @@ export default function () {
                   <li className="py-2">
                     <div className="d-flex align-items-center">
                       <div>
-                        <Badge className="badge-circle mr-3" color="primary">
+                        <Badge className="badge-circle me-3" color="primary">
                           <i className="fa fa-clock" />
                         </Badge>
                       </div>
@@ -190,7 +190,7 @@ export default function () {
                   <li className="py-2">
                     <div className="d-flex align-items-center">
                       <div>
-                        <Badge className="badge-circle mr-3" color="primary">
+                        <Badge className="badge-circle me-3" color="primary">
                           <i className="fa fa-list" />
                         </Badge>
                       </div>
@@ -217,11 +217,11 @@ export default function () {
           }}
         />
         <Container>
-          <Row className="justify-content-end row-grid">
+          <Row className="justify-content-end gy-5">
             <Col lg="6">
               <Card className="shadow shadow-lg--hover my-5">
                 <CardBody>
-                  <blockquote className="blockquote font-italic mb-0">
+                  <blockquote className="blockquote fst-italic mb-0">
                     "CommunityBanList.com provides us with a valuable source of intel that allows us
                     to make more informed decisions when banning players from our server."
                   </blockquote>
@@ -245,12 +245,12 @@ export default function () {
       </section>
       <section className="section" id="benefit">
         <Container>
-          <Row className="row-grid align-items-center">
+          <Row className="gy-5 align-items-center">
             <Col md="6">
               <img alt="..." className="img-fluid" src={homeImgBen} />
             </Col>
             <Col md="6">
-              <div className="pr-md-5">
+              <div className="pe-md-5">
                 <div className="icon icon-lg icon-shape icon-shape-info shadow rounded-circle mb-5">
                   <i className="fa fa-angle-double-down" />
                 </div>
@@ -264,7 +264,7 @@ export default function () {
                   <li className="py-2">
                     <div className="d-flex align-items-center">
                       <div>
-                        <Badge className="badge-circle mr-3" color="info">
+                        <Badge className="badge-circle me-3" color="info">
                           <i className="fa fa-angle-double-down" />
                         </Badge>
                       </div>
@@ -276,7 +276,7 @@ export default function () {
                   <li className="py-2">
                     <div className="d-flex align-items-center">
                       <div>
-                        <Badge className="badge-circle mr-3" color="discord">
+                        <Badge className="badge-circle me-3" color="discord">
                           <i className="fab fa-discord" />
                         </Badge>
                       </div>
@@ -305,11 +305,11 @@ export default function () {
           }}
         />
         <Container>
-          <Row className="row-grid">
+          <Row className="gy-5">
             <Col lg="6">
               <Card className="shadow shadow-lg--hover my-5">
                 <CardBody>
-                  <blockquote className="blockquote font-italic mb-0">
+                  <blockquote className="blockquote fst-italic mb-0">
                     "Using CommunityBanList.com allows our admins to spend more time enjoying the
                     game and less time dealing with players trying to harm our server."
                   </blockquote>
@@ -333,9 +333,9 @@ export default function () {
       </section>
       <section className="section" id="contribute">
         <Container>
-          <Row className="row-grid align-items-center">
+          <Row className="gy-5 align-items-center">
             <Col md="6">
-              <div className="pr-md-5">
+              <div className="pe-md-5">
                 <div className="icon icon-lg icon-shape icon-shape-success shadow rounded-circle mb-5">
                   <i className="fa fa-angle-double-up" />
                 </div>
@@ -348,7 +348,7 @@ export default function () {
                   <li className="py-2">
                     <div className="d-flex align-items-center">
                       <div>
-                        <Badge className="badge-circle mr-3" color="success">
+                        <Badge className="badge-circle me-3" color="success">
                           <i className="fa fa-angle-double-up" />
                         </Badge>
                       </div>
@@ -360,7 +360,7 @@ export default function () {
                   <li className="py-2">
                     <div className="d-flex align-items-center">
                       <div>
-                        <Badge className="badge-circle mr-3" color="github">
+                        <Badge className="badge-circle me-3" color="github">
                           <i className="fab fa-github" />
                         </Badge>
                       </div>
@@ -390,11 +390,11 @@ export default function () {
           }}
         />
         <Container>
-          <Row className="justify-content-end row-grid">
+          <Row className="justify-content-end gy-5">
             <Col lg="6">
               <Card className="shadow shadow-lg--hover my-5">
                 <CardBody>
-                  <blockquote className="blockquote font-italic mb-0">
+                  <blockquote className="blockquote fst-italic mb-0">
                     "Contributing to CommunityBanList.com is easy and we're happy to know that our
                     contributions are helping to protect our Partners and their communities."
                   </blockquote>
@@ -428,7 +428,7 @@ export default function () {
               </p>
             </Col>
           </Row>
-          <Row className="row-grid mt-5">
+          <Row className="gy-5 pt-5">
             <Col lg="4">
               <div className="icon icon-lg icon-shape icon-shape-primary shadow rounded-circle">
                 <i className="fa fa-hands-helping" />

@@ -1,0 +1,59 @@
+// Typography and helpers carried over from the Argon theme.
+
+p {
+  font-weight: $font-weight-light;
+  line-height: 1.7;
+}
+
+.lead {
+  line-height: 1.7;
+  margin-top: 1.5rem;
+}
+
+// Short descriptions under card titles and in menus.
+.description {
+  font-size: $font-size-sm;
+}
+
+// Small uppercase titles, such as the ones in the navbar menus.
+.heading {
+  font-size: 0.95rem;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+}
+
+// A span in a display heading is a lighter first line.
+.display-1,
+.display-2,
+.display-3,
+.display-4 {
+  span {
+    display: block;
+    font-weight: $font-weight-light;
+  }
+}
+
+.text-sm {
+  font-size: $font-size-sm !important;
+}
+
+.zindex-100 {
+  z-index: 100;
+}
+
+.fill-white {
+  fill: $white;
+}
+
+// Pull a page's card up over the header image.
+.mt--100 {
+  margin-top: -100px !important;
+}
+
+.mt--200 {
+  margin-top: -200px !important;
+}
+
+.pb-250 {
+  padding-bottom: 250px !important;
+}

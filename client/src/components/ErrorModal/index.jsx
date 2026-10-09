@@ -14,17 +14,16 @@ export default function (props) {
           isOpen={modal.isOpen}
           toggle={modal.close}
         >
-          <ModalHeader>
-            <button
-              aria-label="Close"
-              className="close"
-              data-dismiss="modal"
-              type="button"
-              onClick={modal.close}
-            >
-              <span aria-hidden>×</span>
-            </button>
-          </ModalHeader>
+          <ModalHeader
+            close={
+              <button
+                aria-label="Close"
+                className="btn-close btn-close-white"
+                type="button"
+                onClick={modal.close}
+              />
+            }
+          />
           <ModalBody>
             <div className="py-3 text-center">
               <i className="fas fa-exclamation-triangle fa-4x" />
@@ -35,13 +34,7 @@ export default function (props) {
             </div>
           </ModalBody>
           <ModalFooter>
-            <Button
-              className="text-white ml-auto"
-              color="link"
-              data-dismiss="modal"
-              type="button"
-              onClick={modal.close}
-            >
+            <Button className="text-white ms-auto" color="link" type="button" onClick={modal.close}>
               Close
             </Button>
           </ModalFooter>

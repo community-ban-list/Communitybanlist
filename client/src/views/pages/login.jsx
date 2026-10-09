@@ -45,7 +45,7 @@ export default function () {
                           navigate('/');
                         }}
                       >
-                        <i className="fas fa-times mr-2" />
+                        <i className="fas fa-times me-2" />
                         No thanks!
                       </Button>
                       <Button
@@ -57,7 +57,7 @@ export default function () {
                           navigate('/');
                         }}
                       >
-                        <i className="fas fa-check mr-2" />
+                        <i className="fas fa-check me-2" />
                         Yes please!
                       </Button>
                     </div>

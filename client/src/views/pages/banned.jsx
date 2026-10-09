@@ -13,9 +13,7 @@ import {
   FormGroup,
   Input,
   InputGroup,
-  InputGroupAddon,
   InputGroupText,
-  Jumbotron,
   Row
 } from 'reactstrap';
 
@@ -108,11 +106,9 @@ function EnterSteamUser(props) {
                 'is-invalid': steamID !== '' && !(steamID && steamID.match(/^[0-9]{17}$/))
               })}
             >
-              <InputGroupAddon addonType="prepend">
-                <InputGroupText>
-                  <i className="fa fa-search" />
-                </InputGroupText>
-              </InputGroupAddon>
+              <InputGroupText>
+                <i className="fa fa-search" />
+              </InputGroupText>
 
               <Input
                 type="text"
@@ -126,23 +122,23 @@ function EnterSteamUser(props) {
         </Col>
       </Row>
       <Row className="mt-4">
-        <Col className="text-left">
+        <Col className="text-start">
           <Button color="default" disabled>
-            <i className="fa fa-arrow-left mr-2" />
+            <i className="fa fa-arrow-left me-2" />
             Back
           </Button>
         </Col>
         <Col className="text-center">
           <Button onClick={props.nextStep}>Skip</Button>
         </Col>
-        <Col className="text-right">
+        <Col className="text-end">
           <Button
             color="primary"
             onClick={() => navigate(`/banned/${steamID}`)}
             disabled={!(steamID && steamID.match(/^[0-9]{17}$/))}
           >
             Next
-            <i className="fa fa-arrow-right ml-2" />
+            <i className="fa fa-arrow-right ms-2" />
           </Button>
         </Col>
       </Row>
@@ -179,16 +175,16 @@ function Foreword(props) {
         </Col>
       </Row>
       <Row className="mt-4">
-        <Col className="text-left">
+        <Col className="text-start">
           <Button color="default" onClick={props.previousStep} disabled={props.isValidSteam64ID}>
-            <i className="fa fa-arrow-left mr-2" />
+            <i className="fa fa-arrow-left me-2" />
             Back
           </Button>
         </Col>
-        <Col className="text-right">
+        <Col className="text-end">
           <Button color="primary" onClick={props.nextStep}>
             Next
-            <i className="fa fa-arrow-right ml-2" />
+            <i className="fa fa-arrow-right ms-2" />
           </Button>
         </Col>
       </Row>
@@ -230,16 +226,16 @@ function WhatIsCommunityBanList(props) {
         </Col>
       </Row>
       <Row className="mt-4">
-        <Col className="text-left">
+        <Col className="text-start">
           <Button color="default" onClick={props.previousStep}>
-            <i className="fa fa-arrow-left mr-2" />
+            <i className="fa fa-arrow-left me-2" />
             Back
           </Button>
         </Col>
-        <Col className="text-right">
+        <Col className="text-end">
           <Button color="primary" onClick={props.nextStep}>
             Next
-            <i className="fa fa-arrow-right ml-2" />
+            <i className="fa fa-arrow-right ms-2" />
           </Button>
         </Col>
       </Row>
@@ -298,16 +294,16 @@ function GettingUnlistedFromCommunityBanList(props) {
         </Col>
       </Row>
       <Row className="mt-4">
-        <Col className="text-left">
+        <Col className="text-start">
           <Button color="default" onClick={props.previousStep}>
-            <i className="fa fa-arrow-left mr-2" />
+            <i className="fa fa-arrow-left me-2" />
             Back
           </Button>
         </Col>
-        <Col className="text-right">
+        <Col className="text-end">
           <Button color="primary" onClick={props.nextStep}>
             Next
-            <i className="fa fa-arrow-right ml-2" />
+            <i className="fa fa-arrow-right ms-2" />
           </Button>
         </Col>
       </Row>
@@ -345,7 +341,7 @@ function GettingUnbannedFromCommunityBanList(props) {
           </p>
           <h6>Getting Unbanned from CommunityBanList.com</h6>
           <p>There are a number of different ways of getting unbanned from CommunityBanList.com:</p>
-          <ul className="font-weight-light">
+          <ul className="fw-light">
             <li>
               Appeal the bans listed on our website so that you no longer meet the criteria of our
               export ban lists.
@@ -383,16 +379,16 @@ function GettingUnbannedFromCommunityBanList(props) {
         </Col>
       </Row>
       <Row className="mt-4">
-        <Col className="text-left">
+        <Col className="text-start">
           <Button color="default" onClick={props.previousStep}>
-            <i className="fa fa-arrow-left mr-2" />
+            <i className="fa fa-arrow-left me-2" />
             Back
           </Button>
         </Col>
-        <Col className="text-right">
+        <Col className="text-end">
           <Button color="primary" onClick={props.nextStep}>
             Next
-            <i className="fa fa-arrow-right ml-2" />
+            <i className="fa fa-arrow-right ms-2" />
           </Button>
         </Col>
       </Row>
@@ -416,16 +412,16 @@ function ReportPartnerOrganisations(props) {
         </Col>
       </Row>
       <Row className="mt-4">
-        <Col className="text-left">
+        <Col className="text-start">
           <Button color="default" onClick={props.previousStep}>
-            <i className="fa fa-arrow-left mr-2" />
+            <i className="fa fa-arrow-left me-2" />
             Back
           </Button>
         </Col>
-        <Col className="text-right">
+        <Col className="text-end">
           <Button color="primary" onClick={props.nextStep}>
             Next
-            <i className="fa fa-arrow-right ml-2" />
+            <i className="fa fa-arrow-right ms-2" />
           </Button>
         </Col>
       </Row>
@@ -448,9 +444,9 @@ function FurtherHelp(props) {
         </Col>
       </Row>
       <Row className="mt-4">
-        <Col className="text-left">
+        <Col className="text-start">
           <Button color="default" onClick={props.previousStep}>
-            <i className="fa fa-arrow-left mr-2" />
+            <i className="fa fa-arrow-left me-2" />
             Back
           </Button>
         </Col>
@@ -502,7 +498,7 @@ export default function () {
                 </>
               )}
               {!loading && !error && (
-                <Jumbotron className="mb-0 bg-white">
+                <div className="px-3 py-4 px-sm-4 py-sm-5">
                   <StepWizard>
                     {!isValidSteam64ID && <EnterSteamUser />}
                     <Foreword steamUser={data?.steamUser} isValidSteam64ID={isValidSteam64ID} />
@@ -512,7 +508,7 @@ export default function () {
                     <ReportPartnerOrganisations />
                     <FurtherHelp steamUser={data?.steamUser} />
                   </StepWizard>
-                </Jumbotron>
+                </div>
               )}
             </CardBody>
           </Card>

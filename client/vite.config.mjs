@@ -29,16 +29,9 @@ export default defineConfig({
   css: {
     preprocessorOptions: {
       scss: {
-        // The vendored Bootstrap 4 and Argon styles predate these Dart Sass deprecations, which
-        // would otherwise print hundreds of warnings on every build.
-        silenceDeprecations: [
-          'color-functions',
-          'function-units',
-          'global-builtin',
-          'if-function',
-          'import',
-          'slash-div'
-        ]
+        // Bootstrap 5's Sass predates these Dart Sass deprecations and has to be loaded with
+        // @import, so they would otherwise print hundreds of warnings on every build.
+        silenceDeprecations: ['color-functions', 'global-builtin', 'if-function', 'import']
       }
     }
   }

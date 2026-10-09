@@ -17,18 +17,18 @@ export default function () {
     <>
       <footer className="footer has-cards">
         <Container>
-          <Row className="row-grid align-items-center my-md">
+          <Row className="gy-5 align-items-center py-5">
             <Col lg="6">
-              <h4 className="text-primary font-weight-light mb-2">
+              <h4 className="text-primary fw-light mb-2">
                 Thanks for joining us in the fight against harmful players!
               </h4>
-              <h6 className="mb-0 font-weight-light">
+              <h6 className="mb-0 fw-light">
                 You can contact and keep in touch with us via Discord and GitHub.
               </h6>
             </Col>
             <Col className="text-lg-center btn-wrapper" lg="6">
               <Button
-                className="btn-icon-only rounded-circle ml-1"
+                className="btn-icon-only rounded-circle ms-1"
                 color="discord"
                 href={DISCORD_INVITE}
                 id="tooltip-footer-discord"
@@ -43,7 +43,7 @@ export default function () {
                 Join our Discord!
               </UncontrolledTooltip>
               <Button
-                className="btn-icon-only rounded-circle ml-1"
+                className="btn-icon-only rounded-circle ms-1"
                 color="github"
                 href="https://github.com/community-ban-list/Communitybanlist"
                 id="tooltip-footer-github"

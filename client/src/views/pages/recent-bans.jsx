@@ -60,19 +60,18 @@ export default function () {
                 View players recently banned on one of our many partner organisations.
               </p>
             </CardBody>
-            <Table className="align-items-center table-flush" responsive>
+            <Table className="align-middle table-flush" responsive>
               <thead className="thead-light">
                 <tr>
                   <th>Players</th>
                   <th>Ban List</th>
                   <th>
                     Reason
-                    <span id="tooltip-reason-recent-bans" data-placement="right">
-                      <i className="ml-2 fa fa-question-circle" />
+                    <span id="tooltip-reason-recent-bans">
+                      <i className="ms-2 fa fa-question-circle" />
                     </span>
                     <UncontrolledTooltip
                       boundariesElement="viewport"
-                      data-placement="right"
                       delay={0}
                       target="tooltip-reason-recent-bans"
                     >
@@ -84,12 +83,11 @@ export default function () {
                   </th>
                   <th>
                     Time{' '}
-                    <span id="tooltip-time-recent-bans" data-placement="right">
-                      <i className="ml-2 fa fa-question-circle" />
+                    <span id="tooltip-time-recent-bans">
+                      <i className="ms-2 fa fa-question-circle" />
                     </span>
                     <UncontrolledTooltip
                       boundariesElement="viewport"
-                      data-placement="right"
                       delay={0}
                       target="tooltip-time-recent-bans"
                     >
@@ -163,7 +161,7 @@ export default function () {
                             });
                           }}
                         >
-                          <i className="fa fa-angle-double-down mr-2" />
+                          <i className="fa fa-angle-double-down me-2" />
                           Load More
                         </Button>
                       </td>

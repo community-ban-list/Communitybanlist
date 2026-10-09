@@ -265,19 +265,18 @@ export default function () {
                     Active Bans ({data.steamUser.activeBans.edges.length})
                   </h4>
                 </CardBody>
-                <Table className="align-items-center table-flush" responsive>
+                <Table className="align-middle table-flush" responsive>
                   <thead className="thead-light">
                     <tr>
                       <th>Organisation</th>
                       <th>Ban List</th>
                       <th>
                         Reason{' '}
-                        <span id="tooltip-reason-active" data-placement="right">
-                          <i className="ml-2 fa fa-question-circle" />
+                        <span id="tooltip-reason-active">
+                          <i className="ms-2 fa fa-question-circle" />
                         </span>
                         <UncontrolledTooltip
                           boundariesElement="viewport"
-                          data-placement="right"
                           delay={0}
                           target="tooltip-reason-active"
                         >
@@ -289,12 +288,11 @@ export default function () {
                       </th>
                       <th>
                         Time{' '}
-                        <span id="tooltip-time-active" data-placement="right">
-                          <i className="ml-2 fa fa-question-circle" />
+                        <span id="tooltip-time-active">
+                          <i className="ms-2 fa fa-question-circle" />
                         </span>
                         <UncontrolledTooltip
                           boundariesElement="viewport"
-                          data-placement="right"
                           delay={0}
                           target="tooltip-time-active"
                         >
@@ -341,19 +339,18 @@ export default function () {
                     Expired Bans ({data.steamUser.expiredBans.edges.length})
                   </h4>
                 </CardBody>
-                <Table className="align-items-center table-flush" responsive>
+                <Table className="align-middle table-flush" responsive>
                   <thead className="thead-light">
                     <tr>
                       <th>Organisation</th>
                       <th>Ban List</th>
                       <th>
                         Reason
-                        <span id="tooltip-reason-expired" data-placement="right">
-                          <i className="ml-2 fa fa-question-circle" />
+                        <span id="tooltip-reason-expired">
+                          <i className="ms-2 fa fa-question-circle" />
                         </span>
                         <UncontrolledTooltip
                           boundariesElement="viewport"
-                          data-placement="right"
                           delay={0}
                           target="tooltip-reason-expired"
                         >
@@ -365,12 +362,11 @@ export default function () {
                       </th>
                       <th>
                         Time{' '}
-                        <span id="tooltip-time-expired" data-placement="right">
-                          <i className="ml-2 fa fa-question-circle" />
+                        <span id="tooltip-time-expired">
+                          <i className="ms-2 fa fa-question-circle" />
                         </span>
                         <UncontrolledTooltip
                           boundariesElement="viewport"
-                          data-placement="right"
                           delay={0}
                           target="tooltip-time-expired"
                         >
@@ -414,7 +410,7 @@ export default function () {
                 </Table>
                 <CardBody>
                   <Alert color="danger">
-                    <i className="fas fa-exclamation-circle mr-2" />
+                    <i className="fas fa-exclamation-circle me-2" />
                     <strong>Disclaimer</strong>
                     <br />
                     The ban information contained on this page has been imported from the ban lists
@@ -424,7 +420,7 @@ export default function () {
                     modified any of this information, other than where explicitly stated, or made
                     any judgement of the validity of the bans. For more information on how to get
                     unlisted from/unbanned by the Community Ban List, please see our{' '}
-                    <Link to={`/banned/${data.steamUser.id}`}>
+                    <Link className="alert-link" to={`/banned/${data.steamUser.id}`}>
                       "I'm banned, what now?" information page
                     </Link>
                     .
