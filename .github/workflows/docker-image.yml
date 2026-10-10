@@ -8,6 +8,10 @@ on:
   push:
     branches: [ "master" ]
 
+# The jobs only check out the code; the images are pushed with the Docker Hub secrets.
+permissions:
+  contents: read
+
 jobs:
 
   Build-and-Push:
@@ -16,30 +20,30 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v4.2.2
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Login to Docker Hub
-      uses: docker/login-action@v3.3.0
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
       with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
     # The web server, ban importer, and Discord bot are built on Docker Hardened Images, which are pulled from dhi.io.
     - name: Login to Docker Hardened Images
-      uses: docker/login-action@v3.3.0
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
       with:
           registry: dhi.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
     - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3.3.0
+      uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3.8.0
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
     - name: Build and push Docker image for the web server
-      uses: docker/build-push-action@v6.11.0
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
       with:
           context: .
           file: web-server/Dockerfile
@@ -47,11 +51,31 @@ jobs:
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:latest
           provenance: true
 
-    - name: Update Web Server Deployment
+    - name: Build and push Docker image for the ban importer
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+          context: .
+          file: ban-importer/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:latest
+          provenance: true
+
+    - name: Build and push Docker image for the Discord bot
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+          context: .
+          file: discord-bot/Dockerfile
+          push: true
+          tags: werewolfboy13/cbl-bot:latest
+          provenance: true
+
+    # The Portainer webhook redeploys the web server and the Discord bot, so it runs after all the
+    # images are pushed. Otherwise the bot is redeployed before its new image exists.
+    - name: Redeploy the web server and Discord bot
       if: success()
       continue-on-error: true
       env:
-        # The Portainer webhook URL that redeploys the web server.
+        # The Portainer webhook URL that redeploys the web server and the Discord bot.
         WEBHOOK_URL: ${{ secrets.WEB_SERVER_LAUNCH }}
       run: |
         case "$WEBHOOK_URL" in
@@ -76,21 +100,3 @@ jobs:
             ;;
           *) exit "$status" ;;
         esac
-
-    - name: Build and push Docker image for the ban importer
-      uses: docker/build-push-action@v6.11.0
-      with:
-          context: .
-          file: ban-importer/Dockerfile
-          push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:latest
-          provenance: true
-
-    - name: Build and push Docker image for the Discord bot
-      uses: docker/build-push-action@v6.11.0
-      with:
-          context: .
-          file: discord-bot/Dockerfile
-          push: true
-          tags: werewolfboy13/cbl-bot:latest
-          provenance: true
