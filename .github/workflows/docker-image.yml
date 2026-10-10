@@ -51,11 +51,31 @@ jobs:
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:latest
           provenance: true
 
-    - name: Update Web Server Deployment
+    - name: Build and push Docker image for the ban importer
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+          context: .
+          file: ban-importer/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:latest
+          provenance: true
+
+    - name: Build and push Docker image for the Discord bot
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+          context: .
+          file: discord-bot/Dockerfile
+          push: true
+          tags: werewolfboy13/cbl-bot:latest
+          provenance: true
+
+    # The Portainer webhook redeploys the web server and the Discord bot, so it runs after all the
+    # images are pushed. Otherwise the bot is redeployed before its new image exists.
+    - name: Redeploy the web server and Discord bot
       if: success()
       continue-on-error: true
       env:
-        # The Portainer webhook URL that redeploys the web server.
+        # The Portainer webhook URL that redeploys the web server and the Discord bot.
         WEBHOOK_URL: ${{ secrets.WEB_SERVER_LAUNCH }}
       run: |
         case "$WEBHOOK_URL" in
@@ -80,21 +100,3 @@ jobs:
             ;;
           *) exit "$status" ;;
         esac
-
-    - name: Build and push Docker image for the ban importer
-      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-      with:
-          context: .
-          file: ban-importer/Dockerfile
-          push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:latest
-          provenance: true
-
-    - name: Build and push Docker image for the Discord bot
-      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-      with:
-          context: .
-          file: discord-bot/Dockerfile
-          push: true
-          tags: werewolfboy13/cbl-bot:latest
-          provenance: true
