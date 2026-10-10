@@ -15,7 +15,7 @@ COPY ban-importer ./ban-importer
 COPY package.json .
 
 # Install dependencies
-RUN yarn install --production --ignore-engines
+RUN yarn install --production
 
 
 # Stage 2: Runtime
