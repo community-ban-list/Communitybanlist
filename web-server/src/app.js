@@ -81,16 +81,20 @@ router.get('/health-check', async (ctx) => {
 });
 
 if (inProduction) {
-  router.get('/manifest.json', async (ctx) => {
-    ctx.body = fs.readFileSync(path.join(clientPath, '/build/manifest.json'));
-  });
+  const buildPath = path.join(clientPath, '/build');
 
-  router.get('/favicon.png', async (ctx) => {
-    ctx.body = fs.readFileSync(path.resolve('./assets/cbl-logo-square.png'));
-  });
+  // Vite copies client/public (favicon, logos, manifest, robots.txt) to the root of the build, next
+  // to index.html. Serve those files by their exact path and answer every other path with
+  // index.html, so the client can route it.
+  const buildFiles = new Set(
+    fs
+      .readdirSync(buildPath, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => `/${entry.name}`)
+  );
 
   router.get('{/*path}', async (ctx) => {
-    await send(ctx, 'index.html', { root: path.join(clientPath, '/build') });
+    await send(ctx, buildFiles.has(ctx.path) ? ctx.path : 'index.html', { root: buildPath });
   });
 }
 
