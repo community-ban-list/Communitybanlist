@@ -1,0 +1,118 @@
+// Page sections, the header images with a skewed bottom edge, and the footer.
+
+.section {
+  padding-bottom: 4rem;
+  padding-top: 4rem;
+  position: relative;
+}
+
+.section-lg {
+  padding-bottom: 6rem;
+  padding-top: 6rem;
+}
+
+// A section with a background image (the shape) behind its content.
+.section-shaped {
+  overflow: hidden;
+  position: relative;
+
+  .shape {
+    height: 100%;
+    position: absolute;
+    top: 0;
+    width: 100%;
+    z-index: -1;
+
+    + .container {
+      height: 100%;
+      position: relative;
+    }
+  }
+}
+
+// An SVG along the bottom of a section that gives it a slanted edge.
+.separator {
+  height: 150px;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+  top: auto;
+  transform: translateZ(0);
+  width: 100%;
+
+  svg {
+    pointer-events: none;
+    position: absolute;
+  }
+}
+
+.separator-bottom {
+  bottom: 0;
+  top: auto;
+
+  svg {
+    bottom: 0;
+  }
+}
+
+.separator-skew {
+  height: 80px;
+}
+
+// Footer
+
+.footer {
+  background: $secondary;
+  padding: 1.5rem 0;
+
+  .nav .nav-link {
+    color: $gray-600;
+
+    &:hover {
+      color: $gray-700;
+    }
+  }
+
+  .copyright {
+    font-size: $font-size-sm;
+    padding-left: 0.75rem;
+  }
+}
+
+// The footer's grey background starts with a slant, below the cards that overlap it.
+.footer.has-cards {
+  background: transparent;
+  margin-top: -420px;
+  overflow: hidden;
+  padding-top: 400px;
+  pointer-events: none;
+  position: relative;
+
+  &::before {
+    background: $secondary;
+    content: '';
+    height: 2000px;
+    left: 0;
+    position: absolute;
+    right: 0;
+    top: 600px;
+    transform: skew(0, -8deg);
+  }
+
+  .container {
+    pointer-events: auto;
+    position: relative;
+  }
+}
+
+.nav-footer {
+  .nav-link {
+    font-size: $font-size-sm;
+  }
+
+  .nav-item:last-child .nav-link {
+    padding-right: 0.75rem;
+  }
+}

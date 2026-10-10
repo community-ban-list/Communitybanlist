@@ -1,18 +1,22 @@
 import graphql from 'graphql';
-import ApolloServerKoa from 'apollo-server-koa';
+import { getDirective, MapperKind, mapSchema } from '@graphql-tools/utils';
 
 const { defaultFieldResolver } = graphql;
-const { SchemaDirectiveVisitor } = ApolloServerKoa;
 
-class SystemAdminOnly extends SchemaDirectiveVisitor {
-  visitFieldDefinition(field) {
-    const { resolve = defaultFieldResolver } = field;
+// Fields marked @systemAdminOnly resolve to null unless the request comes from a system admin.
+export default function systemAdminOnly(schema) {
+  return mapSchema(schema, {
+    [MapperKind.OBJECT_FIELD]: (field) => {
+      if (!getDirective(schema, field, 'systemAdminOnly')?.[0]) return field;
 
-    field.resolve = async function (parent, args, context, info) {
-      if (context.isSystemAdmin) return resolve.apply(this, [parent, args, context, info]);
-      return null;
-    };
-  }
+      const { resolve = defaultFieldResolver } = field;
+
+      field.resolve = async function (parent, args, context, info) {
+        if (context.isSystemAdmin) return resolve.apply(this, [parent, args, context, info]);
+        return null;
+      };
+
+      return field;
+    }
+  });
 }
-
-export default SystemAdminOnly;

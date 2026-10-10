@@ -1,0 +1,283 @@
+// The site's navbar: transparent over the page header image, navy once the page is scrolled, and a
+// floating panel on small screens. Ported from the Argon theme.
+
+.navbar-brand img {
+  height: 60px;
+}
+
+.nav-link {
+  &:hover,
+  &.active {
+    background-color: rgba($black, 0.15);
+  }
+}
+
+.navbar-nav .nav-link {
+  border-radius: $border-radius;
+  font-size: 0.9rem;
+  transition: all 0.15s linear;
+}
+
+// Links in the navbar's menus: an icon in a circle beside a heading and a description.
+.dropdown-media {
+  align-items: center;
+  color: inherit;
+  display: flex;
+
+  &:not(:last-child) {
+    margin-bottom: 1.5rem;
+  }
+
+  p {
+    color: $gray-600;
+  }
+
+  &:hover {
+    margin-left: 2px;
+
+    .heading,
+    p {
+      color: $default !important;
+    }
+  }
+}
+
+.dropdown-menu-xl {
+  min-width: 450px;
+}
+
+.navbar-transparent {
+  background-color: transparent !important;
+  border: 0;
+  box-shadow: none;
+  position: absolute;
+  top: 0;
+  width: 100%;
+  z-index: 100;
+
+  --#{$prefix}navbar-brand-color: #{$white};
+  --#{$prefix}navbar-brand-hover-color: #{$white};
+  --#{$prefix}navbar-toggler-icon-bg: #{escape-svg($navbar-dark-toggler-icon-bg)};
+  --#{$prefix}navbar-toggler-border-color: transparent;
+}
+
+.navbar-collapse-header {
+  display: none;
+}
+
+@include media-breakpoint-up(lg) {
+  .navbar-transparent {
+    --#{$prefix}navbar-color: rgba(255, 255, 255, 0.95);
+    --#{$prefix}navbar-hover-color: rgba(255, 255, 255, 0.65);
+    --#{$prefix}navbar-active-color: #{$white};
+  }
+
+  .navbar-nav {
+    .nav-item {
+      margin-right: 0.5rem;
+    }
+
+    .nav-link {
+      padding-bottom: 1rem;
+      padding-top: 1rem;
+    }
+
+    .nav-link-icon {
+      font-size: 1rem;
+      padding-left: 0.5rem !important;
+      padding-right: 0.5rem !important;
+    }
+
+    .dropdown-menu {
+      margin: 0;
+
+      // The arrow pointing at the menu's link.
+      &::before {
+        background: var(--#{$prefix}dropdown-bg);
+        border-radius: $border-radius-sm;
+        bottom: 100%;
+        content: '';
+        display: block;
+        height: 16px;
+        left: 5px;
+        position: absolute;
+        transform: rotate(-45deg) translateY(1rem);
+        width: 16px;
+        z-index: -5;
+      }
+    }
+
+    .dropdown-menu-inner {
+      padding: 1rem;
+      position: relative;
+    }
+
+    // Menus open when their link is hovered as well as when it is clicked.
+    &.navbar-nav-hover {
+      .dropdown-menu {
+        display: block;
+        opacity: 0;
+        pointer-events: none;
+        transform: translate(0, 10px) perspective(200px) rotateX(-2deg);
+        transition:
+          visibility 0.25s,
+          opacity 0.25s,
+          transform 0.25s;
+      }
+
+      .nav-item.dropdown:hover > .dropdown-menu,
+      .dropdown-menu.show {
+        opacity: 1;
+        pointer-events: auto;
+        transform: translate(0, 0);
+        visibility: visible;
+      }
+    }
+  }
+}
+
+// On small screens the menu opens as a floating panel with dark links.
+@include media-breakpoint-down(lg) {
+  .navbar-nav {
+    .nav-link {
+      color: $default !important;
+      padding: 0.625rem 0;
+    }
+
+    .dropdown-menu {
+      box-shadow: none;
+      min-width: auto;
+    }
+
+    .dropdown-menu.show {
+      left: 0 !important;
+      position: static !important;
+      top: 100% !important;
+      transform: unset !important;
+      will-change: unset !important;
+    }
+  }
+
+  .navbar-collapse {
+    height: auto !important;
+    left: 0;
+    margin: 0.7rem;
+    opacity: 0;
+    overflow-y: auto;
+    position: absolute;
+    right: 0;
+    top: 0;
+    width: calc(100% - 1.4rem);
+    z-index: 1050;
+
+    // The panel's close button, drawn as an X.
+    .navbar-toggler {
+      border: 0;
+      cursor: pointer;
+      display: inline-block;
+      height: 20px;
+      padding: 0;
+      position: relative;
+      width: 20px;
+
+      span {
+        background: #283448;
+        border-radius: 2px;
+        display: block;
+        height: 2px;
+        opacity: 1;
+        position: absolute;
+        width: 100%;
+      }
+
+      :nth-child(1) {
+        transform: rotate(135deg);
+      }
+
+      :nth-child(2) {
+        transform: rotate(-135deg);
+      }
+    }
+
+    .navbar-collapse-header {
+      border-bottom: 1px solid rgba($black, 0.1);
+      display: block;
+      margin-bottom: 1rem;
+      padding-bottom: 1rem;
+    }
+
+    .collapse-brand img {
+      height: 36px;
+    }
+
+    .collapse-close {
+      text-align: right;
+    }
+  }
+
+  .navbar-collapse.collapsing,
+  .navbar-collapse.show {
+    animation: show-navbar-collapse 0.2s ease forwards;
+    background: $white;
+    border-radius: $border-radius;
+    box-shadow: $dropdown-box-shadow;
+    padding: 1.5rem;
+  }
+
+  .navbar-collapse.collapsing-out {
+    animation: hide-navbar-collapse 0.2s ease forwards;
+  }
+}
+
+.navbar .collapsing .navbar-toggler {
+  pointer-events: none;
+}
+
+@keyframes show-navbar-collapse {
+  0% {
+    opacity: 0;
+    transform: scale(0.95);
+    transform-origin: 100% 0;
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes hide-navbar-collapse {
+  from {
+    opacity: 1;
+    transform: scale(1);
+    transform-origin: 100% 0;
+  }
+
+  to {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+}
+
+// headroom.js classes: the navbar hides while scrolling down and comes back, navy, when scrolling up.
+.headroom {
+  transition: $transition-base;
+  will-change: transform;
+}
+
+.headroom--pinned {
+  position: fixed !important;
+  transform: translateY(0%);
+}
+
+.headroom--unpinned {
+  position: fixed !important;
+  transform: translateY(-100%);
+}
+
+.headroom--not-top {
+  background-color: $default !important;
+  box-shadow: 0 1px 10px rgba(130, 130, 134, 0.1);
+  padding-bottom: 0.5rem;
+  padding-top: 0.5rem;
+}

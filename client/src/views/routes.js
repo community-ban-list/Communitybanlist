@@ -1,20 +1,20 @@
-import Home from './pages/home.js';
+import Home from './pages/home.jsx';
 
-import Login from './pages/login.js';
+import Login from './pages/login.jsx';
 
-import Search from './pages/search.js';
-import RecentBans from './pages/recent-bans.js';
-import MostHarmfulPlayers from './pages/most-harmful-players.js';
-import MostHarmfulPlayersThisMonth from './pages/most-harmful-players-this-month.js';
+import Search from './pages/search.jsx';
+import RecentBans from './pages/recent-bans.jsx';
+import MostHarmfulPlayers from './pages/most-harmful-players.jsx';
+import MostHarmfulPlayersThisMonth from './pages/most-harmful-players-this-month.jsx';
 
-import EditExportBanList from './pages/create-export-ban-list.js';
-import ExportBanLists from './pages/export-ban-lists.js';
+import EditExportBanList from './pages/create-export-ban-list.jsx';
+import ExportBanLists from './pages/export-ban-lists.jsx';
 
-import BecomeAPartnerOrganisation from './pages/become-a-partner-organisation.js';
+import BecomeAPartnerOrganisation from './pages/become-a-partner-organisation.jsx';
 
-import FAQ from './pages/faq.js';
-import PartnerOrganisationList from './pages/partner-organisation-list.js';
-import Banned from './pages/banned.js';
+import FAQ from './pages/faq.jsx';
+import PartnerOrganisationList from './pages/partner-organisation-list.jsx';
+import Banned from './pages/banned.jsx';
 
 // import Auth from '../utils/auth.js';
 

@@ -1,0 +1,481 @@
+import React from 'react';
+
+import { Badge, Button, Card, CardBody, Container, Row, Col } from 'reactstrap';
+
+import Layout from '../layout/layout.jsx';
+
+import SteamUserSearchBox from '../../components/steam-user-search-box.jsx';
+
+import background0 from '../../assets/img/backgrounds/background-0.jpg';
+import background1 from '../../assets/img/backgrounds/background-1.jpg';
+import background2 from '../../assets/img/backgrounds/background-2.jpg';
+import background3 from '../../assets/img/backgrounds/background-3.jpg';
+
+import homeImgExp from '../../assets/img/misc/home-1.png';
+import homeImgBen from '../../assets/img/misc/home-2.png';
+import homeImgCont from '../../assets/img/misc/home-3.png';
+
+export default function () {
+  return (
+    <Layout homePage>
+      <div className="position-relative">
+        <section className="section section-lg section-shaped pb-250">
+          <div
+            className="shape"
+            style={{
+              backgroundImage:
+                'linear-gradient( rgba(0, 0, 0, 0.4), rgba(0, 0, 0, 0.4) ), url(' +
+                background1 +
+                ')',
+              backgroundRepeat: 'no-repeat',
+              backgroundSize: 'cover',
+              backgroundPosition: '50% 0%'
+            }}
+          />
+          <Container className="d-flex">
+            <div className="col px-0">
+              <Row>
+                <Col lg="6">
+                  <h1 className="display-3 text-white">
+                    <span>Join the fight against</span>
+                    harmful players.
+                  </h1>
+                  <p className="lead text-white">
+                    CommunityBanList.com aims to protect our Partner Organisations through
+                    collaboration and information sharing.
+                  </p>
+                  <SteamUserSearchBox className="mt-5" frontpageVersion />
+                </Col>
+              </Row>
+            </div>
+          </Container>
+          <div className="separator separator-bottom separator-skew">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              preserveAspectRatio="none"
+              version="1.1"
+              viewBox="0 0 2560 100"
+              x="0"
+              y="0"
+            >
+              <polygon className="fill-body" points="2560,0 2560,100 0,100" />
+            </svg>
+          </div>
+        </section>
+      </div>
+      <section className="section section-lg pt-lg-0 mt--200">
+        <Container>
+          <Row className="justify-content-center">
+            <Col lg="12">
+              <Row className="gy-5">
+                <Col lg="4">
+                  <Card className="card-lift--hover shadow border-0">
+                    <CardBody className="py-5">
+                      <div className="icon icon-shape icon-shape-primary rounded-circle mb-4">
+                        <i className="fa fa-search" />
+                      </div>
+                      <h6 className="text-primary text-uppercase">Explore</h6>
+                      <p className="description mt-3">
+                        Explore our database containing over 90,000 bans and 110,000 banned players
+                        from various popular Partner servers.
+                      </p>
+                      <div>
+                        <Badge color="primary" pill className="me-1">
+                          Search
+                        </Badge>
+                        <Badge color="primary" pill className="me-1">
+                          Recent Bans
+                        </Badge>
+                      </div>
+                      <Button className="mt-4" color="primary" href="#explore">
+                        Learn more
+                      </Button>
+                    </CardBody>
+                  </Card>
+                </Col>
+                <Col lg="4">
+                  <Card className="card-lift--hover shadow border-0">
+                    <CardBody className="py-5">
+                      <div className="icon icon-shape icon-shape-info rounded-circle mb-4">
+                        <i className="fa fa-angle-double-down" />
+                      </div>
+                      <h6 className="text-info text-uppercase">Benefit</h6>
+                      <p className="description mt-3">
+                        Benefit from our database by using it to protect your game server from
+                        harmful players.
+                      </p>
+                      <div>
+                        <Badge color="info" pill className="me-1">
+                          Export Ban Lists
+                        </Badge>
+                      </div>
+                      <Button className="mt-4" color="info" href="#benefit">
+                        Learn more
+                      </Button>
+                    </CardBody>
+                  </Card>
+                </Col>
+                <Col lg="4">
+                  <Card className="card-lift--hover shadow border-0">
+                    <CardBody className="py-5">
+                      <div className="icon icon-shape icon-shape-success rounded-circle mb-4">
+                        <i className="fa fa-angle-double-up" />
+                      </div>
+                      <h6 className="text-success text-uppercase">Contribute</h6>
+                      <p className="description mt-3">
+                        Contribute ban information from your game server to help us in the fight
+                        against harmful players.
+                      </p>
+                      <div>
+                        <Badge color="success" pill className="me-1">
+                          Partner Organisations
+                        </Badge>
+                        <Badge color="success" pill className="me-1">
+                          GitHub
+                        </Badge>
+                      </div>
+                      <Button className="mt-4" color="success" href="#contribute">
+                        Learn more
+                      </Button>
+                    </CardBody>
+                  </Card>
+                </Col>
+              </Row>
+            </Col>
+          </Row>
+        </Container>
+      </section>
+      <section className="section" id="explore">
+        <Container>
+          <Row className="gy-5 align-items-center">
+            <Col className="order-md-2" md="6">
+              <img alt="..." className="img-fluid illustration" src={homeImgExp} />
+            </Col>
+            <Col className="order-md-1" md="6">
+              <div className="pe-md-5">
+                <div className="icon icon-lg icon-shape icon-shape-primary shadow rounded-circle mb-5">
+                  <i className="fa fa-search" />
+                </div>
+                <h3>Explore</h3>
+                <p>
+                  Our database contains information on over 90,000 bans and 110,000 banned players
+                  from various popular Partner Organisations. We regularly update the database to
+                  allow you to proactively defend your server from harmful players.
+                </p>
+                <ul className="list-unstyled mt-5">
+                  <li className="py-2">
+                    <div className="d-flex align-items-center">
+                      <div>
+                        <Badge className="badge-circle me-3" color="primary">
+                          <i className="fa fa-search" />
+                        </Badge>
+                      </div>
+                      <div>
+                        <h6 className="mb-0">Search for the reputation of a player.</h6>
+                      </div>
+                    </div>
+                  </li>
+                  <li className="py-2">
+                    <div className="d-flex align-items-center">
+                      <div>
+                        <Badge className="badge-circle me-3" color="primary">
+                          <i className="fa fa-clock" />
+                        </Badge>
+                      </div>
+                      <div>
+                        <h6 className="mb-0">View a list of recent bans bans.</h6>
+                      </div>
+                    </div>
+                  </li>
+                  <li className="py-2">
+                    <div className="d-flex align-items-center">
+                      <div>
+                        <Badge className="badge-circle me-3" color="primary">
+                          <i className="fa fa-list" />
+                        </Badge>
+                      </div>
+                      <div>
+                        <h6 className="mb-0">Explore a list of the most harmful players.</h6>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            </Col>
+          </Row>
+        </Container>
+      </section>
+      <section className="section section-lg section-shaped">
+        <div
+          className="shape"
+          style={{
+            backgroundImage:
+              'linear-gradient( rgba(0, 0, 0, 0.4), rgba(0, 0, 0, 0.4) ), url(' + background0 + ')',
+            backgroundRepeat: 'no-repeat',
+            backgroundSize: 'cover',
+            backgroundPosition: '50% 50%'
+          }}
+        />
+        <Container>
+          <Row className="justify-content-end gy-5">
+            <Col lg="6">
+              <Card className="shadow shadow-lg--hover my-5">
+                <CardBody>
+                  <blockquote className="blockquote fst-italic mb-0">
+                    "CommunityBanList.com provides us with a valuable source of intel that allows us
+                    to make more informed decisions when banning players from our server."
+                  </blockquote>
+                </CardBody>
+              </Card>
+            </Col>
+          </Row>
+        </Container>
+        <div className="separator separator-bottom separator-skew zindex-100">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            preserveAspectRatio="none"
+            version="1.1"
+            viewBox="0 0 2560 100"
+            x="0"
+            y="0"
+          >
+            <polygon className="fill-body" points="2560,0 2560,100 0,100" />
+          </svg>
+        </div>
+      </section>
+      <section className="section" id="benefit">
+        <Container>
+          <Row className="gy-5 align-items-center">
+            <Col md="6">
+              <img alt="..." className="img-fluid illustration" src={homeImgBen} />
+            </Col>
+            <Col md="6">
+              <div className="pe-md-5">
+                <div className="icon icon-lg icon-shape icon-shape-info shadow rounded-circle mb-5">
+                  <i className="fa fa-angle-double-down" />
+                </div>
+                <h3>Benefit</h3>
+                <p>
+                  We provide access to the data within our database in various formats to assist
+                  server owners and community leaders in proactively defending their servers and
+                  communities from harmful players.
+                </p>
+                <ul className="list-unstyled mt-5">
+                  <li className="py-2">
+                    <div className="d-flex align-items-center">
+                      <div>
+                        <Badge className="badge-circle me-3" color="info">
+                          <i className="fa fa-angle-double-down" />
+                        </Badge>
+                      </div>
+                      <div>
+                        <h6 className="mb-0">Protect your server with our export ban lists.</h6>
+                      </div>
+                    </div>
+                  </li>
+                  <li className="py-2">
+                    <div className="d-flex align-items-center">
+                      <div>
+                        <Badge className="badge-circle me-3" color="discord">
+                          <i className="fab fa-discord" />
+                        </Badge>
+                      </div>
+                      <div>
+                        <h6 className="mb-0">
+                          Get Discord alerts with information relevant to you.
+                        </h6>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            </Col>
+          </Row>
+        </Container>
+      </section>
+      <section className="section section-lg section-shaped">
+        <div
+          className="shape"
+          style={{
+            backgroundImage:
+              'linear-gradient( rgba(0, 0, 0, 0.4), rgba(0, 0, 0, 0.4) ), url(' + background2 + ')',
+            backgroundRepeat: 'no-repeat',
+            backgroundSize: 'cover',
+            backgroundPosition: '50% 40%'
+          }}
+        />
+        <Container>
+          <Row className="gy-5">
+            <Col lg="6">
+              <Card className="shadow shadow-lg--hover my-5">
+                <CardBody>
+                  <blockquote className="blockquote fst-italic mb-0">
+                    "Using CommunityBanList.com allows our admins to spend more time enjoying the
+                    game and less time dealing with players trying to harm our server."
+                  </blockquote>
+                </CardBody>
+              </Card>
+            </Col>
+          </Row>
+        </Container>
+        <div className="separator separator-bottom separator-skew zindex-100">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            preserveAspectRatio="none"
+            version="1.1"
+            viewBox="0 0 2560 100"
+            x="0"
+            y="0"
+          >
+            <polygon className="fill-body" points="0,0 0,100 2560,100" />
+          </svg>
+        </div>
+      </section>
+      <section className="section" id="contribute">
+        <Container>
+          <Row className="gy-5 align-items-center">
+            <Col md="6">
+              <div className="pe-md-5">
+                <div className="icon icon-lg icon-shape icon-shape-success shadow rounded-circle mb-5">
+                  <i className="fa fa-angle-double-up" />
+                </div>
+                <h3>Contribute</h3>
+                <p>
+                  Our success depends on the collaboration and information sharing between various
+                  popular Partner Organisations. Join us in the fight against harmful players!
+                </p>
+                <ul className="list-unstyled mt-5">
+                  <li className="py-2">
+                    <div className="d-flex align-items-center">
+                      <div>
+                        <Badge className="badge-circle me-3" color="success">
+                          <i className="fa fa-angle-double-up" />
+                        </Badge>
+                      </div>
+                      <div>
+                        <h6 className="mb-0">Contribute information as a partner organisation.</h6>
+                      </div>
+                    </div>
+                  </li>
+                  <li className="py-2">
+                    <div className="d-flex align-items-center">
+                      <div>
+                        <Badge className="badge-circle me-3" color="github">
+                          <i className="fab fa-github" />
+                        </Badge>
+                      </div>
+                      <div>
+                        <h6 className="mb-0">Contribute to development via GitHub.</h6>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </div>
+            </Col>
+            <Col md="6">
+              <img alt="..." className="img-fluid illustration" src={homeImgCont} />
+            </Col>
+          </Row>
+        </Container>
+      </section>
+      <section className="section section-lg section-shaped">
+        <div
+          className="shape"
+          style={{
+            backgroundImage:
+              'linear-gradient( rgba(0, 0, 0, 0.4), rgba(0, 0, 0, 0.4) ), url(' + background3 + ')',
+            backgroundRepeat: 'no-repeat',
+            backgroundSize: 'cover',
+            backgroundPosition: '50% 90%'
+          }}
+        />
+        <Container>
+          <Row className="justify-content-end gy-5">
+            <Col lg="6">
+              <Card className="shadow shadow-lg--hover my-5">
+                <CardBody>
+                  <blockquote className="blockquote fst-italic mb-0">
+                    "Contributing to CommunityBanList.com is easy and we're happy to know that our
+                    contributions are helping to protect our Partners and their communities."
+                  </blockquote>
+                </CardBody>
+              </Card>
+            </Col>
+          </Row>
+        </Container>
+        <div className="separator separator-bottom separator-skew zindex-100">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            preserveAspectRatio="none"
+            version="1.1"
+            viewBox="0 0 2560 100"
+            x="0"
+            y="0"
+          >
+            <polygon className="fill-body" points="2560,0 2560,100 0,100" />
+          </svg>
+        </div>
+      </section>
+      <section className="section">
+        <Container>
+          <Row className="text-center justify-content-center">
+            <Col xs="12">
+              <h2 className="display-3">Our Principles</h2>
+              <p className="lead">
+                CommunityBanList.com List aims to protect Partner communities integrity through
+                collaboration and information sharing, however, whilst doing this we follow the
+                following principles.
+              </p>
+            </Col>
+          </Row>
+          <Row className="gy-5 pt-5">
+            <Col lg="4">
+              <div className="icon icon-lg icon-shape icon-shape-primary shadow rounded-circle">
+                <i className="fa fa-hands-helping" />
+              </div>
+              <h5 className="mt-3">Collaboration</h5>
+              <p className="mt-3">
+                We bring communities and individuals together to work towards the same goal, to
+                protect their communities.
+              </p>
+            </Col>
+            <Col lg="4">
+              <div className="icon icon-lg icon-shape icon-shape-primary shadow rounded-circle">
+                <i className="fa fa-balance-scale" />
+              </div>
+              <h5 className="mt-3">Unbiased</h5>
+              <p className="mt-3">
+                We do not decide who's good or bad. Instead, we provide information to allow others
+                to make their own informed decisions.
+              </p>
+            </Col>
+            <Col lg="4">
+              <div className="icon icon-lg icon-shape icon-shape-primary shadow rounded-circle">
+                <i className="fa fa-door-open" />
+              </div>
+              <h5 className="mt-3">Transparent</h5>
+              <p className="mt-3">
+                We are transparent about our decision making processes and are open to others about
+                how our systems work.
+              </p>
+            </Col>
+          </Row>
+        </Container>
+      </section>
+      <section className="section">
+        <Container>
+          <Row className="justify-content-center text-center">
+            <Col lg="8">
+              <h2 className="display-3">Our Team</h2>
+              <p className="lead">
+                We have a small team of individuals who keep our systems running and help
+                orchestrate collaboration between partner organisations. You can find them on our
+                github.
+              </p>
+            </Col>
+          </Row>
+        </Container>
+      </section>
+    </Layout>
+  );
+}

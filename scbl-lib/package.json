@@ -16,10 +16,10 @@
     "@thomas-smyth/sequelize-cursor-pagination": "^2.0.0",
     "axios": "^1.7.7",
     "bottleneck": "^2.19.5",
-    "chalk": "^4.1.0",
+    "chalk": "^6.0.1",
     "discord-webhook-node": "^1.1.8",
     "mysql2": "^3.11.3",
     "sequelize": "^6.3.4",
-    "yup": "^0.32.8"
+    "yup": "^1.7.1"
   }
 }

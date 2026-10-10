@@ -1,5 +1,4 @@
-import ApolloServerKoa from 'apollo-server-koa';
-const { gql } = ApolloServerKoa;
+import { gql } from 'graphql-tag';
 
 export default gql`
   type PageInfo {

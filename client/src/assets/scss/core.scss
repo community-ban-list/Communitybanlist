@@ -1,17 +1,44 @@
-// Bootstrap Functions
-@import "bootstrap/functions";
+// Community Ban List's theme: Bootstrap 5 in CBL's colours, with the parts of the Argon Design System
+// theme (used with Bootstrap 4) that the site still uses. Those parts are adapted from Argon Design
+// System React by Creative Tim (https://www.creative-tim.com), MIT License.
 
-// Custom Variables
-@import "custom/variables";
+@import 'bootstrap/scss/functions';
 
-// Bootstrap Core
-@import "bootstrap/bootstrap";
+@import 'variables';
 
-// Argon Core
-@import "argon-design-system/theme";
+@import 'bootstrap/scss/variables';
+@import 'bootstrap/scss/variables-dark';
+@import 'bootstrap/scss/maps';
+@import 'bootstrap/scss/mixins';
+@import 'bootstrap/scss/utilities';
 
-// Custom Core
-@import "custom/theme";
+// Only the Bootstrap components the site uses.
+@import 'bootstrap/scss/root';
+@import 'bootstrap/scss/reboot';
+@import 'bootstrap/scss/type';
+@import 'bootstrap/scss/images';
+@import 'bootstrap/scss/containers';
+@import 'bootstrap/scss/grid';
+@import 'bootstrap/scss/tables';
+@import 'bootstrap/scss/forms';
+@import 'bootstrap/scss/buttons';
+@import 'bootstrap/scss/transitions';
+@import 'bootstrap/scss/dropdown';
+@import 'bootstrap/scss/nav';
+@import 'bootstrap/scss/navbar';
+@import 'bootstrap/scss/card';
+@import 'bootstrap/scss/badge';
+@import 'bootstrap/scss/alert';
+@import 'bootstrap/scss/close';
+@import 'bootstrap/scss/modal';
+@import 'bootstrap/scss/tooltip';
+@import 'bootstrap/scss/helpers';
+@import 'bootstrap/scss/utilities/api';
 
-// React Differences
-@import "react/react-differences";
+@import 'theme/base';
+@import 'theme/buttons';
+@import 'theme/forms';
+@import 'theme/components';
+@import 'theme/navbar';
+@import 'theme/sections';
+@import 'theme/dark';

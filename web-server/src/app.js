@@ -2,17 +2,17 @@ import fs from 'fs';
 import path from 'path';
 
 import Koa from 'koa';
-import Router from 'koa-router';
+import Router from '@koa/router';
 import Helmet from 'koa-helmet';
 import Cors from '@koa/cors';
 import BodyParser from 'koa-bodyparser';
 import Logger from 'koa-logger';
 import serve from 'koa-static';
 import mount from 'koa-mount';
-import views from 'koa-views';
+import { send } from '@koa/send';
 
 import { passport, routes as routesAuth } from './auth/index.js';
-import ApolloServer from './graphql-api/index.js';
+import GraphQL from './graphql-api/index.js';
 import ExportBanLists from './export-ban-lists.js';
 
 import { sequelize } from 'scbl-lib/db';
@@ -22,7 +22,33 @@ const inProduction = process.env.NODE_ENV;
 const app = new Koa();
 const router = new Router();
 
-app.use(Helmet());
+// Koa 2 answered with 404 when a request failed because a file was missing. Koa 3 answers with 500,
+// so keep the old behaviour for the routes that read files.
+app.use(async (ctx, next) => {
+  try {
+    await next();
+  } catch (err) {
+    if (err.code === 'ENOENT') err.status = 404;
+    throw err;
+  }
+});
+
+app.use(
+  Helmet({
+    // The policy protects the client's pages, which are only served in production. In development
+    // Vite serves them, and the only page here is Apollo Sandbox, which loads from Apollo's CDN.
+    contentSecurityPolicy: inProduction
+      ? {
+          directives: {
+            // Steam avatars come from several Steam image hosts, which have changed over time.
+            imgSrc: ["'self'", 'data:', 'https:'],
+            // HSTS already keeps browsers on HTTPS, and upgrading would break plain HTTP access.
+            upgradeInsecureRequests: null
+          }
+        }
+      : false
+  })
+);
 app.use(Cors());
 app.use(
   BodyParser({
@@ -31,7 +57,7 @@ app.use(
     strict: true,
     onerror: function (err, ctx) {
       if (err) console.log(err);
-      ctx.throw('body parse error', 422);
+      ctx.throw(422, 'body parse error');
     }
   })
 );
@@ -45,10 +71,8 @@ const clientPath = './client';
 if (inProduction) app.use(mount('/static', serve(path.join(clientPath, '/build/static'))));
 else app.use(serve(path.join(clientPath, '/main-site')));
 
-if (inProduction) app.use(views(path.join(clientPath, '/build')));
-
 router.use('/auth', routesAuth.routes(), routesAuth.allowedMethods());
-ApolloServer.applyMiddleware({ app });
+app.use(GraphQL);
 router.use('/export', ExportBanLists.routes(), ExportBanLists.allowedMethods());
 
 router.get('/health-check', async (ctx) => {
@@ -57,16 +81,20 @@ router.get('/health-check', async (ctx) => {
 });
 
 if (inProduction) {
-  router.get('/manifest.json', async (ctx) => {
-    ctx.body = fs.readFileSync(path.join(clientPath, '/build/manifest.json'));
-  });
+  const buildPath = path.join(clientPath, '/build');
 
-  router.get('/favicon.png', async (ctx) => {
-    ctx.body = fs.readFileSync(path.resolve('./assets/cbl-logo-square.png'));
-  });
+  // Vite copies client/public (favicon, logos, manifest, robots.txt) to the root of the build, next
+  // to index.html. Serve those files by their exact path and answer every other path with
+  // index.html, so the client can route it.
+  const buildFiles = new Set(
+    fs
+      .readdirSync(buildPath, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => `/${entry.name}`)
+  );
 
-  router.get('*', async (ctx) => {
-    await ctx.render('index.html', {});
+  router.get('{/*path}', async (ctx) => {
+    await send(ctx, buildFiles.has(ctx.path) ? ctx.path : 'index.html', { root: buildPath });
   });
 }
 

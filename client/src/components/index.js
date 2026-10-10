@@ -1,6 +1,7 @@
 import AdvancedModal from './AdvancedModal';
 import BanDates from './BanDates';
 import BanListSelector from './BanListSelector';
+import ColorModeToggle from './ColorModeToggle';
 import CreateExportBanList from './CreateExportBanList';
 import CreateExportBanListConfig from './CreateExportBanListConfig';
 import DeleteExportBanList from './DeleteExportBanList';
@@ -17,6 +18,7 @@ export {
   AdvancedModal,
   BanDates,
   BanListSelector,
+  ColorModeToggle,
   CreateExportBanList,
   CreateExportBanListConfig,
   DeleteExportBanList,

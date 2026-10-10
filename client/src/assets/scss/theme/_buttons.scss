@@ -1,0 +1,44 @@
+// Buttons are uppercase and lift slightly on hover, as in the Argon theme.
+.btn {
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+
+  &:not(.btn-link):hover {
+    box-shadow: 0 7px 14px rgba(50, 50, 93, 0.1), 0 3px 6px rgba(0, 0, 0, 0.08);
+    transform: translateY(-1px);
+  }
+
+  // Space out buttons that sit next to each other.
+  &:not(:last-child) {
+    margin-right: 0.5rem;
+  }
+}
+
+.btn-link {
+  box-shadow: none;
+}
+
+// Round buttons that hold only an icon, such as the footer's Discord and GitHub buttons.
+.btn-icon-only {
+  align-items: center;
+  display: inline-flex;
+  height: 2.375rem;
+  justify-content: center;
+  padding: 0;
+  width: 2.375rem;
+}
+
+// Buttons, backgrounds and text in colours that are not Bootstrap theme colours.
+@each $name, $value in $brand-colors {
+  .btn-#{$name} {
+    @include button-variant($value, $value);
+  }
+
+  .bg-#{$name} {
+    background-color: $value !important;
+  }
+
+  .text-#{$name} {
+    color: $value !important;
+  }
+}

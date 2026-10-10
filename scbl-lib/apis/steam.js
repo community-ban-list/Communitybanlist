@@ -33,7 +33,7 @@ rl.on('failed', async (error, jobInfo) => {
   } else throw error;
 });
 
-// eslint-disable-next-line handle-callback-err
+// eslint-disable-next-line n/handle-callback-err
 rl.on('retry', (error, jobInfo) => console.log(`Now retrying ${jobInfo.options.id}`));
 
 const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
@@ -41,7 +41,7 @@ const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
   const profileStartTime = Date.now();
   const retVar = await withTimeout(
     axios({
-      method: method,
+      method,
       // url: 'https://api.steampowered.com/' + url,
       url: 'https://partner.steam-api.com/' + url,
       params: { ...params, key: STEAM_API_KEY },
