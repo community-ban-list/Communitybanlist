@@ -66,6 +66,7 @@ export default function () {
             </Col>
             <Col md="6">
               <Nav className="nav-footer justify-content-end">
+                {/* Hidden for now. Uncomment to show the status page link again.
                 <NavItem>
                   <NavLink
                     href="https://status.communitybanlist.com/"
@@ -75,6 +76,7 @@ export default function () {
                     Status Page
                   </NavLink>
                 </NavItem>
+                */}
                 <NavItem>
                   <NavLink
                     href="https://github.com/community-ban-list/Communitybanlist"
