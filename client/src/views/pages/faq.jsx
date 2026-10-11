@@ -38,10 +38,10 @@ const sections = [
         question: 'What are "reputation points"?',
         answer: (
           <>
-            "Points" is a term you will frequently hear in reference to the CommunityBanList.com.
-            Points are used to represent how bad a reputation a player has based on bans they have
-            on our partner organisation's ban lists. By default, active and expired bans will
-            contribute 3 and 1 points respectively. Only one active ban per ban list is counted.
+            "Points" is a term you will frequently hear in reference to CommunityBanList.com. Points
+            are used to represent how bad a reputation a player has based on bans they have on our
+            partner organisations' ban lists. By default, active and expired bans will contribute 3
+            and 1 points respectively. Only one active ban per ban list is counted.
           </>
         )
       },
@@ -49,9 +49,9 @@ const sections = [
         question: 'What is a "risk rating"?',
         answer: (
           <>
-            "Risk rating" is 0-10 rating used by our partner communities to approximate how harmful
-            a potential player may be. The algorithm used to calculate the "risk rating" is still
-            experimental and is subject to change.
+            "Risk rating" is a 0-10 rating used by our partner communities to approximate how
+            harmful a potential player may be. The algorithm used to calculate the "risk rating" is
+            still experimental and is subject to change.
           </>
         )
       },
@@ -60,8 +60,8 @@ const sections = [
         answer: (
           <>
             "Risk ranking" is a ranking of players most at risk of harming our Partner communities.
-            It is based on player's reputation points where rank #1 is the player with the most
-            reputation points and therefore the most likely to harm our Partner communities
+            It is based on players' reputation points where rank #1 is the player with the most
+            reputation points and therefore the most likely to harm our Partner communities.
           </>
         )
       },
@@ -69,7 +69,7 @@ const sections = [
         question: 'How are ban reasons assigned?',
         answer: (
           <>
-            CommunityBanList.com assigns ban reasons to one or more categorises based on
+            CommunityBanList.com assigns ban reasons to one or more categories based on
             keywords/phrases found in the ban reasons assigned by our partner organisations. We do
             this to ensure they are easily read and analysed, consistent, professional and to
             protect any confidential information. Our keywords and phrases are not perfect so there
@@ -81,10 +81,10 @@ const sections = [
         question: 'Why have I been banned for an "Unknown" reason?',
         answer: (
           <>
-            CommunityBanList.com List assigns ban reasons to one or more categorises based on
+            CommunityBanList.com assigns ban reasons to one or more categories based on
             keywords/phrases found in the ban reasons assigned by our partner organisations. Our
             keywords and phrases are not perfect so there may be a small number of scenarios where
-            ban reasons cannot be categorised so the reason is shown as "Unknown". This does &nbsp;
+            ban reasons cannot be categorised so the reason is shown as "Unknown". This does{' '}
             <strong>NOT</strong> mean a player was banned for no reason.
           </>
         )
@@ -168,7 +168,7 @@ const sections = [
           <>
             Export ban lists use a point system to calculate which players should be listed on the
             export ban list. Points are used to represent how bad a reputation a player has based on
-            bans they have on our partner organisation's ban lists. By default, active and expired
+            bans they have on our partner organisations' ban lists. By default, active and expired
             bans will contribute 3 and 1 points respectively, however, users can configure these
             values when creating their export ban lists. Furthermore, users can set these values
             individually for each of our partner organisations' ban lists. Only one active ban per
@@ -205,7 +205,7 @@ export default function () {
               </div>
               <h6 className="text-warning text-uppercase">Frequently Asked Questions</h6>
               <p className="description mt-2">
-                If you can't find what you search, please join our{' '}
+                If you can't find what you're looking for, please join our{' '}
                 <a href={DISCORD_INVITE} target="_blank" rel="noopener noreferrer">
                   Discord
                 </a>{' '}
