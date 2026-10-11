@@ -95,7 +95,7 @@ function EnterSteamUser(props) {
           <p>
             Please enter your Steam 64 ID in the form below so we can tailor the following
             information to you. You can find your Steam 64 ID{' '}
-            <a href="https://steamidfinder.com/lookup/" target="_blank" rel="noreferrer">
+            <a href="https://steamid.uk/" target="_blank" rel="noreferrer">
               here
             </a>
             . Once you have entered your Steam 64 ID click "Next".
