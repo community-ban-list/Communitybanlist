@@ -1,4 +1,5 @@
 import React from 'react';
+import { Link } from 'react-router';
 import md5 from 'md5';
 
 import { Card, CardBody, Container } from 'reactstrap';
@@ -91,6 +92,74 @@ const sections = [
     ]
   },
   {
+    name: 'Banned Players',
+    questions: [
+      {
+        question: "I'm banned, what should I do?",
+        answer: (
+          <>
+            CommunityBanList.com does not ban players. It only collects the bans issued by our
+            partner organisations, so you have to appeal with the organisation that banned you.
+            Enter your Steam 64 ID on our <Link to="/banned">banned players page</Link> to see which
+            partner organisations to contact and how to reach them. CommunityBanList.com cannot
+            appeal bans on your behalf. You can also read Offworld Industries'{' '}
+            <a
+              href="https://joinsquad.com/community-server-ban-faqs/"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Community Server Ban FAQ
+            </a>
+            .
+          </>
+        )
+      },
+      {
+        question: 'How do I find my Steam 64 ID?',
+        answer: (
+          <>
+            Your Steam 64 ID is the 17 digit number that identifies your Steam account. You can look
+            it up by entering your Steam profile's link on{' '}
+            <a href="https://steamid.io/" target="_blank" rel="noopener noreferrer">
+              steamid.io
+            </a>{' '}
+            or{' '}
+            <a href="https://steamidfinder.com/lookup/" target="_blank" rel="noopener noreferrer">
+              steamidfinder.com
+            </a>
+            .
+          </>
+        )
+      },
+      {
+        question: 'I have expired bans, how do I get rid of them?',
+        answer: (
+          <>
+            Expired bans stay on our partner organisations' ban lists as part of your ban history,
+            and by default each one still counts for 1 reputation point. Only the organisation that
+            issued a ban can remove it, so ask them in the same way as for an active ban. Our{' '}
+            <Link to="/banned">banned players page</Link> shows which partner organisations to
+            contact.
+          </>
+        )
+      },
+      {
+        question: 'My ban was removed, why does it still appear on CommunityBanList.com?',
+        answer: (
+          <>
+            CommunityBanList.com updates automatically every 6 hours, so it can take a few hours for
+            a removed ban to disappear from our website and from export ban lists. Please be
+            patient. If the ban is still listed after that, let us know on our{' '}
+            <a href={DISCORD_INVITE} target="_blank" rel="noopener noreferrer">
+              Discord
+            </a>
+            .
+          </>
+        )
+      }
+    ]
+  },
+  {
     name: 'Export Ban Lists',
     questions: [
       {
@@ -103,8 +172,9 @@ const sections = [
             bans will contribute 3 and 1 points respectively, however, users can configure these
             values when creating their export ban lists. Furthermore, users can set these values
             individually for each of our partner organisations' ban lists. Only one active ban per
-            ban list is counted. Once the number of points a player has exceeds the threshold set in
-            the export ban list's configuration they are added to the export ban list.
+            ban list is counted. Once the number of points a player has reaches the threshold set in
+            the export ban list's configuration, which is 9 points by default, they are added to the
+            export ban list.
           </>
         )
       },
