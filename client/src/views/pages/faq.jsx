@@ -119,13 +119,9 @@ const sections = [
         answer: (
           <>
             Your Steam 64 ID is the 17 digit number that identifies your Steam account. You can look
-            it up by entering your Steam profile's link on{' '}
-            <a href="https://steamid.io/" target="_blank" rel="noopener noreferrer">
-              steamid.io
-            </a>{' '}
-            or{' '}
-            <a href="https://steamidfinder.com/lookup/" target="_blank" rel="noopener noreferrer">
-              steamidfinder.com
+            it up by searching for your Steam profile on{' '}
+            <a href="https://steamid.uk/" target="_blank" rel="noopener noreferrer">
+              steamid.uk
             </a>
             .
           </>
