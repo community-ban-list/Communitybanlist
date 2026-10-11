@@ -16,18 +16,28 @@ import GraphQL from './graphql-api/index.js';
 import ExportBanLists from './export-ban-lists.js';
 
 import { sequelize } from 'scbl-lib/db';
+import { DATABASE_UNAVAILABLE_MESSAGE, isDatabaseUnavailable } from 'scbl-lib/db/sequelize';
 
 const inProduction = process.env.NODE_ENV;
 
 const app = new Koa();
 const router = new Router();
 
-// Koa 2 answered with 404 when a request failed because a file was missing. Koa 3 answers with 500,
-// so keep the old behaviour for the routes that read files.
 app.use(async (ctx, next) => {
   try {
     await next();
   } catch (err) {
+    // While the database cannot be reached, e.g. as it restarts, log one line rather than letting
+    // Koa log the stack trace for every request, such as each Docker health check.
+    if (isDatabaseUnavailable(err)) {
+      console.log(`Database unavailable for ${ctx.method} ${ctx.path}: ${err.message}`);
+      ctx.status = 503;
+      ctx.body = DATABASE_UNAVAILABLE_MESSAGE;
+      return;
+    }
+
+    // Koa 2 answered with 404 when a request failed because a file was missing. Koa 3 answers with
+    // 500, so keep the old behaviour for the routes that read files.
     if (err.code === 'ENOENT') err.status = 404;
     throw err;
   }

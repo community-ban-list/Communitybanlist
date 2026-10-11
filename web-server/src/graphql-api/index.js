@@ -1,10 +1,12 @@
 import { ApolloServer } from '@apollo/server';
+import { unwrapResolverError } from '@apollo/server/errors';
 import { ApolloServerPluginLandingPageDisabled } from '@apollo/server/plugin/disabled';
 import { koaMiddleware } from '@as-integrations/koa';
 import { makeExecutableSchema } from '@graphql-tools/schema';
 import jwt from 'jsonwebtoken';
 
 import { JWT_AUTH } from 'scbl-lib/config';
+import { DATABASE_UNAVAILABLE_MESSAGE, isDatabaseUnavailable } from 'scbl-lib/db/sequelize';
 
 import typeDefs from './typedefs.js';
 import resolvers from './resolvers.js';
@@ -17,6 +19,12 @@ const schema = Object.values(directives).reduce(
 
 const server = new ApolloServer({
   schema,
+  // While the database cannot be reached, e.g. as it restarts, show a general message rather than
+  // the database's own error.
+  formatError: (formattedError, error) =>
+    isDatabaseUnavailable(unwrapResolverError(error))
+      ? { ...formattedError, message: DATABASE_UNAVAILABLE_MESSAGE }
+      : formattedError,
   // Apollo Server 2 had no landing page in production, so GET /graphql without a query is still an
   // error there rather than a page that loads Apollo's scripts.
   plugins: process.env.NODE_ENV === 'production' ? [ApolloServerPluginLandingPageDisabled()] : []
