@@ -1,10 +1,9 @@
 # Use multi-stage builds to reduce the final image size
 # Both stages use Docker Hardened Images, which need a `docker login dhi.io` to pull.
-# discord.js needs a newer Node.js than the other services run on.
 
 # Stage 1: Build
 # The dev variant includes the shell and Yarn needed to install dependencies.
-FROM dhi.io/node:24-dev AS build
+FROM dhi.io/node:26-dev AS build
 ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
 
 WORKDIR /opt/workdir/
@@ -21,7 +20,7 @@ RUN yarn install --production
 
 # Stage 2: Runtime
 # The runtime variant has no shell or package manager and runs as the non-root node user.
-FROM dhi.io/node:24
+FROM dhi.io/node:26
 
 WORKDIR /opt/workdir/
 

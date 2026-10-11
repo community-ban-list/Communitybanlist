@@ -50,7 +50,7 @@ Changes take effect on the next ban importer run. When a ban list is removed, it
 
 ## Running
 
-The bot runs on Node.js 24, as discord.js needs a newer version than the other services use.
+The bot runs on Node.js 26, like the other services.
 
 ```bash
 yarn start-discord-bot
