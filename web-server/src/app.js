@@ -15,6 +15,7 @@ import { passport, routes as routesAuth } from './auth/index.js';
 import GraphQL from './graphql-api/index.js';
 import ExportBanLists from './export-ban-lists.js';
 
+import { DISCORD_INVITE, INTAKE_FORM } from 'scbl-lib/config';
 import { sequelize } from 'scbl-lib/db';
 import { DATABASE_UNAVAILABLE_MESSAGE, isDatabaseUnavailable } from 'scbl-lib/db/sequelize';
 
@@ -88,6 +89,21 @@ router.use('/export', ExportBanLists.routes(), ExportBanLists.allowedMethods());
 router.get('/health-check', async (ctx) => {
   await sequelize.authenticate();
   ctx.status = 200;
+});
+
+if (!DISCORD_INVITE)
+  console.warn('Warning: DISCORD_INVITE is not set, so the Discord links on the site do nothing.');
+if (!INTAKE_FORM)
+  console.warn(
+    'Warning: INTAKE_FORM is not set, so the partner organisation form link on the site does nothing.'
+  );
+
+// The client is built before the server runs, so it loads the links that can be set with
+// environment variables from here. Only add settings that are safe to make public.
+router.get('/config.js', (ctx) => {
+  ctx.type = 'application/javascript';
+  ctx.set('Cache-Control', 'no-cache');
+  ctx.body = `window.CBL_CONFIG = ${JSON.stringify({ DISCORD_INVITE, INTAKE_FORM })};\n`;
 });
 
 if (inProduction) {

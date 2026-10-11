@@ -18,7 +18,8 @@ export default defineConfig({
     proxy: {
       '/graphql': WEB_SERVER,
       '/auth/': WEB_SERVER,
-      '/export/': WEB_SERVER
+      '/export/': WEB_SERVER,
+      '/config.js': WEB_SERVER
     }
   },
   build: {
