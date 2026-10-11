@@ -10,6 +10,13 @@ const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 50;
 const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 50000;
 const DISCORD_ALERT_CAP = 50;
 
+// Discord error codes meaning an export ban list's webhook is gone for good: it was deleted (Unknown
+// Webhook) or its token no longer works (Invalid Webhook Token).
+const DELETED_WEBHOOK_CODES = [10015, 50027];
+
+// Webhooks Discord has reported as deleted during this run, so they are not tried again.
+const deletedWebhooks = new Set();
+
 async function withTimeout(promise) {
   const myError = new Error(`timeout`);
   const timeout = new Promise((resolve, reject) =>
@@ -390,18 +397,59 @@ export default class Core {
         `We've made some changes to who's on your export ban list named "${exportBanList.name}".\nSadly, there's too many changes for us to document them individually.`
       );
 
-      // Catch broken webhooks.
-      try {
-        await hook.send(null, message.getJSON().embeds);
-      } catch (err) {
-        Logger.verbose('Core', 1, `Failed to send Discord Webhook: ${exportBanList.name}`, err);
-      }
+      await Core.sendExportBanListAlert(exportBanList, hook, message);
     }
     Logger.verbose(
       'Core',
       1,
       `Finished Exporting Bans. Took ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
     );
+  }
+
+  // Send an alert to an export ban list's Discord webhook. If Discord says the webhook no longer
+  // exists, remove it from every export ban list using it so later runs stop trying it.
+  static async sendExportBanListAlert(exportBanList, hook, message) {
+    const { discordWebhook } = exportBanList;
+    if (deletedWebhooks.has(discordWebhook)) return;
+
+    // Name the list rather than the webhook, as anyone with its URL can post to the channel.
+    const list = `${exportBanList.server}'s List "${exportBanList.name}" (ID: ${exportBanList.id})`;
+
+    let reason;
+    try {
+      await hook.send(null, message.getJSON().embeds);
+      return;
+    } catch (err) {
+      if (!DELETED_WEBHOOK_CODES.includes(err.code)) {
+        Logger.verbose('Core', 1, `Failed to send Discord Webhook for ${list}: ${err.message}`);
+        return;
+      }
+      reason = err.message;
+    }
+
+    deletedWebhooks.add(discordWebhook);
+
+    try {
+      // Matching on the webhook leaves lists alone whose owners have set a new one since the run
+      // started.
+      const [count] = await ExportBanList.update(
+        { discordWebhook: null },
+        { where: { discordWebhook } }
+      );
+      const others =
+        count > 1 ? ` and ${count - 1} other export ban list${count > 2 ? 's' : ''}` : '';
+      Logger.verbose(
+        'Core',
+        1,
+        `Removed the Discord Webhook from ${list}${others}, as Discord says it no longer exists (${reason}).`
+      );
+    } catch (err) {
+      Logger.verbose(
+        'Core',
+        1,
+        `Failed to remove the deleted Discord Webhook from ${list}: ${err.message}`
+      );
+    }
   }
 
   static async createExportBan(exportBan) {
@@ -425,17 +473,7 @@ export default class Core {
     );
     message.setThumbnail(exportBan.SteamUser.avatarMedium);
 
-    // Catch broken webhooks.
-    try {
-      await hook.send(null, message.getJSON().embeds);
-    } catch (err) {
-      Logger.verbose(
-        'Core',
-        1,
-        `Failed to send Discord Webhook: ${exportBan.ExportBanList.discordWebhook} for ${exportBan.ExportBanList.server}'s List "${exportBan.ExportBanList.name}" (ID: ${exportBan.ExportBanList.id}).`,
-        err
-      );
-    }
+    await Core.sendExportBanListAlert(exportBan.ExportBanList, hook, message);
   }
 
   static async deleteExportBan(exportBan) {
@@ -458,16 +496,6 @@ export default class Core {
     );
     message.setThumbnail(exportBan.SteamUser.avatarMedium);
 
-    // Catch broken webhooks.
-    try {
-      await hook.send(null, message.getJSON().embeds);
-    } catch (err) {
-      Logger.verbose(
-        'Core',
-        1,
-        `Failed to send Discord Webhook: ${exportBan.ExportBanList.discordWebhook} for ${exportBan.ExportBanList.server}'s List "${exportBan.ExportBanList.name}" (ID: ${exportBan.ExportBanList.id}).`,
-        err
-      );
-    }
+    await Core.sendExportBanListAlert(exportBan.ExportBanList, hook, message);
   }
 }
