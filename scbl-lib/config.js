@@ -18,12 +18,15 @@ const BATTLEMETRICS_ORGANIZATION = process.env.BATTLEMETRICS_ORGANIZATION || '56
 
 const STEAM_API_KEY = process.env.STEAM_API_KEY;
 
-// Other constants
-// TODO allow hard code via process envs
-const DISCORD_INVITE = process.env.DISCORD_INVITE || 'https://discord.gg/UPDDaTjVMC';
+// Links shown by the client. It is built before the web server runs, so in the browser they come from
+// /config.js, which the web server fills in from these environment variables. If one is not set,
+// its links do nothing when clicked, and the web server warns about it when it starts.
+const CLIENT_CONFIG = globalThis.CBL_CONFIG || {};
 
-// Adding Dyno Form
-const INTAKE_FORM = process.env.INTAKE_FORM || 'https://dyno.gg/form/a379a03a';
+const DISCORD_INVITE = CLIENT_CONFIG.DISCORD_INVITE || process.env.DISCORD_INVITE;
+
+// Form for communities applying to become partner organisations.
+const INTAKE_FORM = CLIENT_CONFIG.INTAKE_FORM || process.env.INTAKE_FORM;
 
 export {
   HOST,
