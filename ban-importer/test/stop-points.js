@@ -604,14 +604,21 @@ async function loadCore(models, steam = () => {}) {
   });
 }
 
-// Export bans with the given statuses that record their BattleMetrics requests and saves, and call
-// onRequest(id) during each request. Their ids start at 1.
+// Export bans with the given statuses that record their BattleMetrics requests and the database
+// writes that record them, which the model makes after each request, and call onRequest(id) during
+// each request. Their ids start at 1.
 function exportBans(
   events,
   onRequest = () => {},
   statuses = ['TO_BE_CREATED', 'TO_BE_CREATED', 'TO_BE_DELETED']
 ) {
-  const list = { id: 1, type: 'battlemetrics', name: 'List', discordWebhook: null };
+  const list = {
+    id: 1,
+    type: 'battlemetrics',
+    battlemetricsID: 'bm-1',
+    name: 'List',
+    discordWebhook: null
+  };
   return statuses.map((status, index) => {
     const id = index + 1;
     return {
@@ -622,20 +629,24 @@ function exportBans(
       async createBattlemetricsBan() {
         events.push(`create ${id} on BattleMetrics`);
         onRequest(id);
+        events.push(`save ${id}`);
+        return 'created';
       },
       async deleteBattlemetricsBan() {
         events.push(`delete ${id} on BattleMetrics`);
         onRequest(id);
-      },
-      async save() {
-        events.push(`save ${id}`);
-      },
-      async destroy() {
         events.push(`destroy ${id}`);
+        return 'deleted';
       }
     };
   });
 }
+
+// The ExportBan model for the given export bans, which reads each of them again as it is.
+const exportBanModel = (rows) => ({
+  findAll: async () => rows,
+  findOne: async ({ where }) => rows.find((row) => row.id === where.id)
+});
 
 // Exports stop between export bans: one whose BattleMetrics request is under way when the run is
 // asked to stop is still saved, and the next one is not started.
@@ -644,7 +655,7 @@ function exportBans(
   const rows = exportBans(events, (id) => {
     if (id === 1) core.control.requestStop('it received SIGTERM');
   });
-  const core = await loadCore({ ExportBan: { findAll: async () => rows } });
+  const core = await loadCore({ ExportBan: exportBanModel(rows) });
   core.control.setRunLock(heldLock);
   const error = await ended(core.exports.exportExportBans(), 'the export');
   assert.strictEqual(error.name, 'RunStopped');
@@ -662,7 +673,7 @@ function exportBans(
     },
     ['TO_BE_CREATED', 'TO_BE_CREATED', 'TO_BE_DELETED', 'TO_BE_CREATED']
   );
-  const core = await loadCore({ ExportBan: { findAll: async () => rows } });
+  const core = await loadCore({ ExportBan: exportBanModel(rows) });
   core.control.setRunLock(heldLock);
   const error = await ended(core.exports.exportExportBans(), 'the export');
   assert.strictEqual(error.name, 'RunStopped');
@@ -680,7 +691,7 @@ function exportBans(
 // took it.
 for (const lock of [lostLock, null]) {
   const events = [];
-  const core = await loadCore({ ExportBan: { findAll: async () => exportBans(events) } });
+  const core = await loadCore({ ExportBan: exportBanModel(exportBans(events)) });
   if (lock) core.control.setRunLock(lock);
   const error = await ended(core.exports.exportExportBans(), 'the export');
   assert.strictEqual(error.reason, core.control.LOCK_LOST);
@@ -690,7 +701,7 @@ for (const lock of [lostLock, null]) {
 // With the lock, every export ban is pushed.
 {
   const pushed = [];
-  const core = await loadCore({ ExportBan: { findAll: async () => exportBans(pushed) } });
+  const core = await loadCore({ ExportBan: exportBanModel(exportBans(pushed)) });
   core.control.setRunLock(heldLock);
   assert.strictEqual(await ended(core.exports.exportExportBans(), 'the export'), undefined);
   assert.deepStrictEqual(pushed, [
@@ -731,10 +742,11 @@ for (const lock of [lostLock, null]) {
     'scbl-lib/db': {
       sequelize: {
         transaction: async (options, work) => work({}),
-        query: async () => {
+        query: async (sql) => {
+          if (sql.trim().startsWith('UPDATE')) return events.push('create again');
           events.push('generate');
           manager.control.requestStop('it received SIGTERM');
-          return [];
+          return [{ id: '0,1', status: 'TO_BE_CREATED', steamUser: '0', exportBanList: 1 }];
         }
       }
     },
@@ -750,8 +762,8 @@ for (const lock of [lostLock, null]) {
       }
     },
     'scbl-lib/db/sequelize': {
-      Op: { in: 'in', notIn: 'notIn' },
-      QueryTypes: { SELECT: 'SELECT' },
+      Op: { in: 'in', notIn: 'notIn', not: 'not' },
+      QueryTypes: { SELECT: 'SELECT', BULKUPDATE: 'BULKUPDATE' },
       Transaction: { ISOLATION_LEVELS: { SERIALIZABLE: 'SERIALIZABLE' } }
     },
     'scbl-lib/utils': { Logger }
@@ -761,6 +773,8 @@ for (const lock of [lostLock, null]) {
   assert.deepStrictEqual(events, [
     'generate',
     'create',
+    'create again',
+    'update',
     'update',
     'update',
     'destroy',
