@@ -5,6 +5,7 @@ import { Op } from 'scbl-lib/db/sequelize';
 import { Logger } from 'scbl-lib/utils';
 
 import BanFetcher from './ban-fetcher.js';
+import { checkRunLock, isStopping, stopIfRequested } from './run-control.js';
 
 // Thank god for this function.
 
@@ -42,6 +43,21 @@ export default class BanImporter {
 
     this.importedBanListIDs = new Set();
     this.importedBanIDs = [];
+
+    // Set when the run is stopping, after which no more bans are queued to be saved.
+    this.stopping = false;
+  }
+
+  // Called between ban lists and before the sweep, to end the import there if the run was asked to
+  // stop. Bans that were fetched but not saved yet are dropped, as the next run fetches them again,
+  // and the bans being saved are finished first, so none is left half-saved.
+  async checkForStop() {
+    if (!isStopping()) return;
+    this.stopping = true;
+    this.saveBanQueue.kill();
+    while (this.saveBanQueue.running() > 0)
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    stopIfRequested();
   }
 
   async queueBan(importedBans) {
@@ -54,6 +70,7 @@ export default class BanImporter {
           { updateOnDuplicate: ['id'] }
         )
       );
+      if (this.stopping) return;
 
       for (const importedBan of importedBans) {
         this.importedBanListIDs.add(importedBan.banList.id);
@@ -154,6 +171,7 @@ export default class BanImporter {
 
     let currentList = 0;
     for (const banList of banLists) {
+      await this.checkForStop();
       try {
         await retryOperation(() => fetcher.fetchBanList(banList));
       } catch (err) {
@@ -174,6 +192,11 @@ export default class BanImporter {
     await this.saveBanQueue.drain(() => {
       console.log(`Finished Drain after ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`);
     });
+
+    // The sweep deletes every ban of the fetched lists that was not seen in this run, so it must not
+    // run when the run is stopping, nor in two runs at once.
+    await this.checkForStop();
+    await checkRunLock();
 
     Logger.verbose('BanImporter', 2, 'Getting deleted bans...');
     const deletedBans = await retryOperation(() =>
