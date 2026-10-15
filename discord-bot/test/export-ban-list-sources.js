@@ -232,6 +232,11 @@ for (const skipCheck of [true, null]) {
     }),
     refusedAsExport(14)
   );
+  // skip_check only skips the test fetch, so a source another ban list uses is still refused.
+  await assert.rejects(
+    run('banlist', 'add', { ...options, organisation: '3', name: 'New', source: PARTNER_ID }),
+    /already used by \*\*Partner Org\*\* \/ \*\*Main\*\* \(#5\)/
+  );
 }
 assert.deepStrictEqual(writes, []);
 assert.deepStrictEqual(requests, []);
