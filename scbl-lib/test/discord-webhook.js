@@ -90,18 +90,24 @@ async function load(path) {
   return module.namespace;
 }
 
-const { default: send, editDiscordWebhookMessage: edit } = await load(
-  '../utils/discord-webhook.js'
-);
+const {
+  default: send,
+  editDiscordWebhookMessage: edit,
+  DELETED_WEBHOOK_CODES
+} = await load('../utils/discord-webhook.js');
 const { default: testWebhook } = await load('../utils/test-discord-webhook.js');
 const webhook = 'https://discord.com/api/webhooks/1/secret-token';
+// The same webhook on version 10 of Discord's API, which every request uses.
+const v10 = 'https://discord.com/api/v10/webhooks/1/secret-token';
 
-// A message is posted as CBL, to the webhook with wait=true, with a timeout and no redirects.
+// A message is posted as CBL, to the webhook on version 10 of Discord's API with wait=true, with a
+// timeout and no redirects. Addresses without a version are answered by Discord's old default
+// version, which may give retry_after in milliseconds rather than seconds.
 reply = () => ({ status: 200, data: { id: 'message' } });
 assert.strictEqual((await send(webhook, { embeds: ['embed'] })).id, 'message');
 const [request] = requests;
 assert.strictEqual(request.method, 'post');
-assert.strictEqual(request.url, `${webhook}?wait=true`);
+assert.strictEqual(request.url, `${v10}?wait=true`);
 assert.strictEqual(request.body.username, 'Community Ban List');
 assert.strictEqual(request.body.content, null);
 assert.deepStrictEqual([...request.body.embeds], ['embed']);
@@ -115,38 +121,66 @@ assert.ok(request.options.validateStatus(500));
 await send('https://discord.com/api/webhooks/1/token/?thread_id=42');
 assert.strictEqual(
   requests[1].url,
-  'https://discord.com/api/webhooks/1/token?thread_id=42&wait=true'
+  'https://discord.com/api/v10/webhooks/1/token?thread_id=42&wait=true'
 );
 
+// An address with another version is sent to version 10 too, on the host it names.
+for (const [address, expected] of [
+  ['https://discord.com/api/v9/webhooks/1/token', 'https://discord.com/api/v10/webhooks/1/token'],
+  ['https://discord.com/api/v10/webhooks/1/token', 'https://discord.com/api/v10/webhooks/1/token'],
+  [
+    'https://canary.discordapp.com/api/v6/webhooks/1/token/',
+    'https://canary.discordapp.com/api/v10/webhooks/1/token'
+  ]
+]) {
+  requests.length = 0;
+  await send(address);
+  assert.strictEqual(requests[0].url, `${expected}?wait=true`);
+}
+
 // Discord's error code reaches the caller, so deleted webhooks can be recognised, and the
-// webhook's address never appears in the error.
+// webhook's address never appears in the error. The importer and the logger share the codes that
+// mean a webhook is gone.
+assert.deepStrictEqual([...DELETED_WEBHOOK_CODES], [10015, 50027]);
 reply = () => ({ status: 404, data: { message: 'Unknown Webhook', code: 10015 } });
 await assert.rejects(send(webhook), (err) => {
   assert.strictEqual(err.name, 'DiscordWebhookError');
   assert.strictEqual(err.status, 404);
   assert.strictEqual(err.code, 10015);
   assert.strictEqual(err.message, 'Discord answered HTTP 404: Unknown Webhook (code 10015)');
+  assert.strictEqual(err.network, false);
   return true;
 });
 reply = () => ({ status: 502, data: '<html>Bad gateway</html>' });
-await assert.rejects(send(webhook), /^DiscordWebhookError: Discord answered HTTP 502$/);
+await assert.rejects(send(webhook), (err) => {
+  assert.strictEqual(String(err), 'DiscordWebhookError: Discord answered HTTP 502');
+  assert.strictEqual(err.network, false);
+  return true;
+});
 // A webhook that never answers is cut off by the abort signal, which axios reports as canceled.
+// Errors where Discord never answered are marked, as the request may be worth trying again.
 for (const code of ['ERR_CANCELED', 'ECONNABORTED']) {
   reply = () => {
     throw Object.assign(new Error(`canceled ${webhook}`), { code });
   };
-  await assert.rejects(send(webhook), /^DiscordWebhookError: Discord did not answer in time$/);
+  await assert.rejects(send(webhook), (err) => {
+    assert.strictEqual(String(err), 'DiscordWebhookError: Discord did not answer in time');
+    assert.strictEqual(err.network, true);
+    assert.strictEqual(err.status, undefined);
+    return true;
+  });
 }
 reply = () => {
   throw Object.assign(new Error(`connect ECONNREFUSED for ${webhook}`), { code: 'ECONNREFUSED' });
 };
-await assert.rejects(
-  send(webhook),
-  /^DiscordWebhookError: Could not reach Discord \(ECONNREFUSED\)$/
-);
+await assert.rejects(send(webhook), (err) => {
+  assert.strictEqual(String(err), 'DiscordWebhookError: Could not reach Discord (ECONNREFUSED)');
+  assert.strictEqual(err.network, true);
+  return true;
+});
 
 // When Discord rate limits a request, the error says how many seconds it asked to wait, from its
-// answer or else from the Retry-After header.
+// answer or else from the Retry-After header. Version 10 of Discord's API gives both in seconds.
 reply = () => ({
   status: 429,
   data: { message: 'You are being rate limited.', retry_after: 1.5, global: false },
@@ -173,7 +207,7 @@ requests.length = 0;
 reply = () => ({ status: 200, data: { id: '123' } });
 assert.strictEqual((await edit(webhook, '123', { content: 'Updated' })).id, '123');
 assert.strictEqual(requests[0].method, 'patch');
-assert.strictEqual(requests[0].url, `${webhook}/messages/123`);
+assert.strictEqual(requests[0].url, `${v10}/messages/123`);
 assert.strictEqual(requests[0].body.content, 'Updated');
 assert.deepStrictEqual([...requests[0].body.embeds], []);
 assert.deepStrictEqual([...requests[0].body.allowed_mentions.parse], []);
@@ -182,12 +216,15 @@ assert.strictEqual(requests[0].options.maxRedirects, 0);
 assert.ok(requests[0].options.signal instanceof AbortSignal);
 assert.ok(requests[0].options.validateStatus(500));
 
-// The thread a message was posted in is kept.
+// The thread a message was posted in is kept, and an address with another version is edited on
+// version 10 too.
 await edit('https://discord.com/api/webhooks/1/token/?thread_id=42', '123', { content: 'x' });
 assert.strictEqual(
   requests[1].url,
-  'https://discord.com/api/webhooks/1/token/messages/123?thread_id=42'
+  'https://discord.com/api/v10/webhooks/1/token/messages/123?thread_id=42'
 );
+await edit('https://discord.com/api/v9/webhooks/1/token', '123', { content: 'x' });
+assert.strictEqual(requests[2].url, 'https://discord.com/api/v10/webhooks/1/token/messages/123');
 
 // Edits fail like sends, with Discord's error and how long to wait.
 reply = () => ({ status: 429, data: { message: 'Slow down', retry_after: 0.25 } });
@@ -199,8 +236,13 @@ await assert.rejects(
 );
 
 // Anything else is refused before a request is made, so an edit cannot reach another endpoint.
+// These errors are not marked as network errors, so they are never tried again.
 requests.length = 0;
-await assert.rejects(send('https://evil.example/api/webhooks/1/token'), /Invalid Discord webhook/);
+await assert.rejects(send('https://evil.example/api/webhooks/1/token'), (err) => {
+  assert.strictEqual(String(err), 'DiscordWebhookError: Invalid Discord webhook');
+  assert.strictEqual(err.network, false);
+  return true;
+});
 await assert.rejects(testWebhook('http://127.0.0.1/hook'), /^Error: Invalid Discord Webhook$/);
 await assert.rejects(
   edit('https://evil.example/api/webhooks/1/token', '1'),

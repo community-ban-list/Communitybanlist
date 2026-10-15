@@ -10,21 +10,27 @@ const DISCORD_WEBHOOK_DEADLINE = 15 * 1000;
 // axios's error codes for a request that ran out of time.
 const TIMEOUT_CODES = ['ECONNABORTED', 'ETIMEDOUT', 'ERR_CANCELED'];
 
+// Discord's error codes meaning a webhook is gone for good: it was deleted (Unknown Webhook) or its
+// token no longer works (Invalid Webhook Token).
+export const DELETED_WEBHOOK_CODES = [10015, 50027];
+
 const USERNAME = 'Community Ban List';
 const AVATAR_URL =
   'https://github.com/community-ban-list/Communitybanlist/blob/master/client/src/assets/img/brand/cbl-logo-square.png?raw=true';
 
 // Why a message was not posted to a webhook, with Discord's HTTP status and error code when it
 // answered, and, when it rate limited the request, how many seconds it asked to wait before trying
-// again. The message never includes the webhook's address, as anyone with it can post to the
-// channel.
+// again. network is true when Discord could not be reached or did not answer in time, so the
+// message may or may not have been posted. The message never includes the webhook's address, as
+// anyone with it can post to the channel.
 export class DiscordWebhookError extends Error {
-  constructor(message, { status, code, retryAfter } = {}) {
+  constructor(message, { status, code, retryAfter, network = false } = {}) {
     super(message);
     this.name = 'DiscordWebhookError';
     this.status = status;
     this.code = code;
     this.retryAfter = retryAfter;
+    this.network = network;
   }
 }
 
@@ -35,6 +41,16 @@ function getRetryAfter(data, headers) {
     const seconds = typeof value === 'number' ? value : parseFloat(value);
     if (Number.isFinite(seconds) && seconds >= 0) return seconds;
   }
+}
+
+// A webhook's address on version 10 of Discord's API, without a trailing slash and keeping its
+// thread_id query. The addresses Discord gives out have no version, and Discord documents those as
+// answered by its old default version, where retry_after and Retry-After may be in milliseconds.
+// Version 10 gives them in seconds.
+function webhookAddress(webhook) {
+  const url = new URL(webhook);
+  url.pathname = url.pathname.replace(/^\/api(?:\/v\d+)?\//, '/api/v10/').replace(/\/$/, '');
+  return url;
 }
 
 // Make a request to a webhook address. Redirects are not followed, and the request gives up when
@@ -50,8 +66,10 @@ async function request(method, url, body) {
     });
   } catch (err) {
     if (TIMEOUT_CODES.includes(err.code))
-      throw new DiscordWebhookError('Discord did not answer in time');
-    throw new DiscordWebhookError(`Could not reach Discord (${err.code || err.message})`);
+      throw new DiscordWebhookError('Discord did not answer in time', { network: true });
+    throw new DiscordWebhookError(`Could not reach Discord (${err.code || err.message})`, {
+      network: true
+    });
   }
 
   if (response.status >= 200 && response.status < 300) return response.data;
@@ -73,8 +91,7 @@ export default async function sendDiscordWebhook(webhook, { content = null, embe
   if (!isDiscordWebhookUrl(webhook)) throw new DiscordWebhookError('Invalid Discord webhook');
 
   // Build the address rather than appending to it, as it may already have a thread_id query.
-  const url = new URL(webhook);
-  url.pathname = url.pathname.replace(/\/$/, '');
+  const url = webhookAddress(webhook);
   url.searchParams.set('wait', 'true');
 
   return request('post', url, {
@@ -99,8 +116,8 @@ export async function editDiscordWebhookMessage(
 
   // The message is found under the webhook. A message in a thread also needs the webhook's
   // thread_id query, which is kept.
-  const url = new URL(webhook);
-  url.pathname = `${url.pathname.replace(/\/$/, '')}/messages/${messageID}`;
+  const url = webhookAddress(webhook);
+  url.pathname += `/messages/${messageID}`;
 
   return request('patch', url, { content, embeds, allowed_mentions: { parse: [] } });
 }

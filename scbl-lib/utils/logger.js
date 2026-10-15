@@ -1,18 +1,25 @@
 import chalk from 'chalk';
 import Bottleneck from 'bottleneck';
 
-import describeError from './describe-error.js';
-import sendDiscordWebhook, { editDiscordWebhookMessage } from './discord-webhook.js';
+import describeError, { stackTrace } from './describe-error.js';
+import sendDiscordWebhook, {
+  DELETED_WEBHOOK_CODES,
+  editDiscordWebhookMessage
+} from './discord-webhook.js';
 import isDiscordWebhookUrl from './discord-webhook-url.js';
 
-// Messages to the log channel are sent one at a time, at most one every 400 ms, which keeps within
-// Discord's limit for a webhook of about 5 every 2 seconds.
+// Messages to the log channel are sent one at a time, at most one every 400 ms. That is right at
+// Discord's limit for a webhook of 5 every 2 seconds, so a burst can still be rate limited now and
+// then, as can a request when another service posts to the same webhook. Such a request is tried
+// again after the wait Discord asks for.
 const MIN_TIME = 400;
 
 // At most 200 messages, or 80 seconds of them, wait to be sent. When more arrive, the least
-// important are dropped first: progress bars, then other messages, then errors. Bottleneck sends
-// the lowest numbers first.
+// important are dropped first: progress bars, then other messages, then errors. A run's own lines,
+// such as its start, failure and summary, go ahead of all of these and are never dropped for them.
+// Bottleneck sends the lowest numbers first.
 const MAX_QUEUED = 200;
+const RUN_PRIORITY = 2;
 const ERROR_PRIORITY = 4;
 const MESSAGE_PRIORITY = 5;
 const PROGRESS_PRIORITY = 9;
@@ -21,6 +28,10 @@ const PROGRESS_PRIORITY = 9;
 // Discord asked for, but never more than 10 seconds, or after 1 second when it did not say.
 const MAX_RETRY_WAIT = 10 * 1000;
 const DEFAULT_RETRY_WAIT = 1000;
+
+// A message Discord could not be reached for, or did not answer in time, is tried twice more,
+// after 1 and then 3 seconds, so a network blip of a few seconds loses nothing.
+const NETWORK_RETRY_WAITS = [1000, 3000];
 
 // Discord allows 2,000 characters a message.
 const MAX_MESSAGE_LENGTH = 1900;
@@ -57,16 +68,6 @@ function truncate(content) {
 // instances of Error.
 function isError(value) {
   return typeof value?.message === 'string';
-}
-
-// The lines of an error's stack trace that say where it was thrown. They hold only function and
-// file names, so they are safe to print.
-function stackTrace(err) {
-  const lines = typeof err.stack === 'string' ? err.stack.split('\n') : [];
-  return lines
-    .filter((line) => /^\s+at /.test(line))
-    .map((line) => `\n${line}`)
-    .join('');
 }
 
 // A progress bar in the log channel, which discordProgressBar returns at once. It is posted in the
@@ -118,6 +119,8 @@ class ProgressBar {
 
   // Send the latest value, once the last one has been sent and 15 seconds have passed since.
   sendLatest() {
+    // Stop once Discord logging is off, as it is when its webhook turns out to be gone.
+    if (!this.logger.discordWebhook) this.stop();
     if (this.stopped || this.sending || this.timer || this.waiting === null) return;
 
     const due = this.flushing ? 0 : this.sentAt + PROGRESS_BAR_INTERVAL - Date.now();
@@ -139,12 +142,16 @@ class ProgressBar {
 
   send(content) {
     this.sending = true;
-    const webhook = this.logger.discordWebhook;
     this.logger.queue(
       PROGRESS_PRIORITY,
       async () => {
         try {
-          if (this.messageID) {
+          // The webhook is read only now, as Discord logging is turned off if it turns out to be
+          // gone, maybe while this waited.
+          const webhook = this.logger.discordWebhook;
+          if (!webhook) {
+            this.stop();
+          } else if (this.messageID) {
             await this.logger.withRetry(() =>
               editDiscordWebhookMessage(webhook, this.messageID, { content: truncate(content) })
             );
@@ -156,9 +163,10 @@ class ProgressBar {
             this.messageID = message.id;
           }
         } catch (err) {
-          console.warn(
-            `Could not ${this.messageID ? 'update' : 'post'} a progress bar in the Discord log: ${describeError(err)}`
-          );
+          if (!this.logger.webhookGone(err))
+            console.warn(
+              `Could not ${this.messageID ? 'update' : 'post'} a progress bar in the Discord log: ${describeError(err)}`
+            );
           this.failed(content, err?.status);
         }
         this.done();
@@ -219,6 +227,18 @@ class Logger {
   }
 
   verbose(module, verboseness, message, ...extras) {
+    this.log(module, verboseness, message, extras);
+  }
+
+  // Log a level 1 line about a whole run, such as its start, failure or summary. In the log channel
+  // it goes ahead of other messages and is not dropped for them, so the run's outcome is not lost
+  // when many per-item errors are waiting to be sent.
+  important(module, message, ...extras) {
+    this.log(module, 1, message, extras, RUN_PRIORITY);
+  }
+
+  // Print a line for verbose or important, and send level 1 lines to the log channel.
+  log(module, verboseness, message, extras, priority) {
     // Errors are described in a line rather than logged whole, as errors from API clients hold
     // their request, with its keys and tokens.
     const errors = extras.filter(isError);
@@ -229,7 +249,7 @@ class Logger {
     if (verboseness === 1)
       this.sendMessage(
         `[${module}][${verboseness}] ${text}`,
-        errors.length > 0 ? ERROR_PRIORITY : MESSAGE_PRIORITY
+        priority ?? (errors.length > 0 ? ERROR_PRIORITY : MESSAGE_PRIORITY)
       );
 
     let colorFunc = chalk[this.colors[module] || 'white'];
@@ -263,14 +283,34 @@ class Logger {
   sendMessage(content, priority) {
     if (!this.discordWebhook) return;
     this.queue(priority, async () => {
+      // Discord logging may have been turned off while this waited, as its webhook is gone.
+      if (!this.discordWebhook) return;
       try {
-        await this.withRetry(() =>
-          sendDiscordWebhook(this.discordWebhook, { content: truncate(content) })
+        await this.withRetry(
+          () => sendDiscordWebhook(this.discordWebhook, { content: truncate(content) }),
+          { retryNetwork: true }
         );
       } catch (err) {
-        console.warn(`Could not send a message to the Discord log: ${describeError(err)}`);
+        if (!this.webhookGone(err))
+          console.warn(`Could not send a message to the Discord log: ${describeError(err)}`);
       }
     });
+  }
+
+  // Whether an error says the log webhook is gone for good: it was deleted, or its token no longer
+  // works. Discord asks that such a webhook is not used again, so Discord logging is then turned
+  // off, with one warning, and nothing more is sent. Other errors leave it on, including the one
+  // for editing a progress bar whose message was deleted.
+  webhookGone(err) {
+    if (!DELETED_WEBHOOK_CODES.includes(err?.code)) return false;
+    if (this.discordWebhook) {
+      this.discordWebhook = null;
+      console.warn(
+        `Warning: Discord logging is off, as Discord says the DISCORD_LOG_WEBHOOK webhook no longer exists: ${describeError(err)}`
+      );
+      for (const progressBar of [...this.waitingProgressBars]) progressBar.stop();
+    }
+    return true;
   }
 
   // Queue a request to the log webhook. Jobs handle their own errors, so the queue only rejects one
@@ -299,23 +339,40 @@ class Logger {
   }
 
   // Make a request to the log webhook, and try once more if Discord rate limited it or failed
-  // (HTTP 429 or 5xx), after the wait Discord asked for, up to 10 seconds.
-  async withRetry(request) {
-    try {
-      return await request();
-    } catch (err) {
-      const retryable = err.status === 429 || err.status >= 500;
-      if (!retryable) throw err;
-      const wait = err.retryAfter === undefined ? DEFAULT_RETRY_WAIT : err.retryAfter * 1000;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(wait, MAX_RETRY_WAIT)));
-      return await request();
+  // (HTTP 429 or 5xx), after the wait Discord asked for, up to 10 seconds. With retryNetwork, a
+  // request Discord could not be reached for, or did not answer in time, is also tried twice more,
+  // after 1 and then 3 seconds. Discord may have posted a message it did not answer for in time,
+  // but a rare duplicate line in the log is better than a lost one. Progress bars do not use it: a
+  // posted bar's value is sent again with its next one, and one that was never posted stays quiet.
+  async withRetry(request, { retryNetwork = false } = {}) {
+    // The tries left: one after a 429 or 5xx, and one for each wait after a network error.
+    const networkWaits = retryNetwork ? [...NETWORK_RETRY_WAITS] : [];
+    let failureRetries = 1;
+    for (;;) {
+      try {
+        return await request();
+      } catch (err) {
+        let wait;
+        if ((err.status === 429 || err.status >= 500) && failureRetries > 0) {
+          failureRetries--;
+          wait = err.retryAfter === undefined ? DEFAULT_RETRY_WAIT : err.retryAfter * 1000;
+        } else if (err.network && networkWaits.length > 0) {
+          wait = networkWaits.shift();
+        } else {
+          throw err;
+        }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(wait, MAX_RETRY_WAIT)));
+      }
     }
   }
 
   // How many messages for the log channel have been received, are queued, or are being sent.
-  // Progress bars' latest values count as queued while they wait to be due.
+  // Progress bars' latest values count as queued while they wait to be due. Once Discord logging is
+  // off, nothing more will be sent, so nothing is counted.
   getLogQueue() {
     const counts = this.rl.counts();
+    if (!this.discordWebhook)
+      return Object.fromEntries(Object.keys(counts).map((status) => [status, 0]));
     return { ...counts, QUEUED: counts.QUEUED + this.waitingProgressBars.size };
   }
 

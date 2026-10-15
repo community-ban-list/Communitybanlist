@@ -1,7 +1,7 @@
 import { Client, Events, GatewayIntentBits, MessageFlags } from 'discord.js';
 
 import { connect, disconnect } from 'scbl-lib/db';
-import { describeError, Logger } from 'scbl-lib/utils';
+import { describeError, Logger, stackTrace } from 'scbl-lib/utils';
 
 import commands from './src/commands/index.js';
 import startHealthCheckServer from './src/health-check-server.js';
@@ -117,10 +117,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 client.on(Events.Error, (err) => console.error('Discord client error:', err));
 
-// Keep running if a promise fails with nothing to handle it. Only a summary is printed, as errors
-// from API clients hold their keys.
+// Keep running if a promise fails with nothing to handle it. Only the error's name, message and
+// where it was thrown are printed, as errors from API clients also hold their keys.
 process.on('unhandledRejection', (err) =>
-  console.error(`Unhandled promise rejection: ${describeError(err)}`)
+  console.error(`Unhandled promise rejection: ${describeError(err)}${stackTrace(err)}`)
 );
 
 process.on('SIGINT', () => shutdown());

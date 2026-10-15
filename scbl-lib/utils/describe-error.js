@@ -22,3 +22,14 @@ export default function describeError(err) {
   if (status && !message.includes(String(status))) description += ` (HTTP ${status})`;
   return description;
 }
+
+// The lines of an error's stack trace that say where it was thrown, each on a new line, to print
+// after describeError's line. They hold only function and file names, so they are safe to print.
+// The first line is left out, as it repeats the message. Anything without a stack gives nothing.
+export function stackTrace(err) {
+  const lines = typeof err?.stack === 'string' ? err.stack.split('\n') : [];
+  return lines
+    .filter((line) => /^\s+at /.test(line))
+    .map((line) => `\n${line}`)
+    .join('');
+}

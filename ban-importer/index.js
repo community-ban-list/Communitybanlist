@@ -1,5 +1,5 @@
 import { connect, disconnect } from 'scbl-lib/db';
-import { describeError, Logger } from 'scbl-lib/utils';
+import { describeError, Logger, stackTrace } from 'scbl-lib/utils';
 
 import Core from './src/core.js';
 
@@ -34,15 +34,18 @@ async function flushLogs() {
 }
 
 // A promise that fails with nothing to handle it must not stop the run part-way, but the run is
-// then reported as failed. Only a summary is printed, as errors from API clients hold their keys.
+// then reported as failed. Only the error's name, message and where it was thrown are printed, as
+// errors from API clients also hold their keys.
 process.on('unhandledRejection', (reason) => {
-  console.error(`Unhandled promise rejection: ${describeError(reason)}`);
+  console.error(`Unhandled promise rejection: ${describeError(reason)}${stackTrace(reason)}`);
   process.exitCode = 1;
 });
 
+// The run's start, summary and failure are logged as important, so they reach the log channel even
+// when the run's other messages fill its queue.
 async function main() {
   const profileStartTime = Date.now();
-  await Logger.verbose('Core', 1, `<@276137824460210178> Starting new CBL Update run...`);
+  Logger.important('Core', `<@276137824460210178> Starting new CBL Update run...`);
   await connect();
 
   if (TASKS_TO_COMPLETE.IMPORT_BANS) {
@@ -58,9 +61,8 @@ async function main() {
   if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS) await Core.exportExportBans();
 
   await disconnect();
-  await Logger.verbose(
+  Logger.important(
     'Core',
-    1,
     `Finished All Tasks. Complete CBL run Took ${((Date.now() - profileStartTime) / 1000).toFixed(
       2
     )}s. Garbage Collection Completed.`
@@ -76,7 +78,7 @@ main()
   .then(() => console.log(`Done!`))
   .catch((error) => {
     process.exitCode = 1;
-    Logger.verbose('Core', 1, 'The CBL update run failed: ', error);
+    Logger.important('Core', 'The CBL update run failed: ', error);
   })
   .then(flushLogs)
   // Exit with process.exitCode, which is 1 if anything above failed.

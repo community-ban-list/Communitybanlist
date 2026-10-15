@@ -1,16 +1,16 @@
 import { JWT_AUTH } from 'scbl-lib/config';
 import { connect } from 'scbl-lib/db';
-import { describeError } from 'scbl-lib/utils';
+import { describeError, stackTrace } from 'scbl-lib/utils';
 
 import server from './src/app.js';
 import checkJwtSecret from './src/jwt-secret.js';
 
 const PORT = process.env.PORT || 80;
 
-// Keep serving if a promise fails with nothing to handle it. Only a summary is printed, as errors
-// from API clients hold their keys.
+// Keep serving if a promise fails with nothing to handle it. Only the error's name, message and
+// where it was thrown are printed, as errors from API clients also hold their keys.
 process.on('unhandledRejection', (reason) =>
-  console.error(`Unhandled promise rejection: ${describeError(reason)}`)
+  console.error(`Unhandled promise rejection: ${describeError(reason)}${stackTrace(reason)}`)
 );
 
 // Anyone who knows the secret that signs sign-in tokens can sign in as anyone, so refuse to start

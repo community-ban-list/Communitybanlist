@@ -4,7 +4,7 @@ import { createRequire } from 'module';
 import { format } from 'util';
 import vm from 'vm';
 
-import describeError from '../utils/describe-error.js';
+import describeError, { stackTrace } from '../utils/describe-error.js';
 
 const Bottleneck = createRequire(import.meta.url)('bottleneck');
 
@@ -30,8 +30,8 @@ const pause = () => new Promise((resolve) => setTimeout(resolve, 20));
 
 // Load the logger with a stand-in for the Discord sender, a console that records what is printed,
 // and a clock that only moves when the test moves it. The real limiter is used, without its 400 ms
-// spacing so the test runs quickly.
-async function loadLogger(env = { DISCORD_LOG_WEBHOOK: webhook }) {
+// spacing so the test runs quickly, and with a shorter queue when highWater is given.
+async function loadLogger(env = { DISCORD_LOG_WEBHOOK: webhook }, { highWater } = {}) {
   const discord = { requests: [], reply: async () => ({ id: '1' }) };
   const output = [];
   const limiters = [];
@@ -41,7 +41,7 @@ async function loadLogger(env = { DISCORD_LOG_WEBHOOK: webhook }) {
   class FastLimiter extends Bottleneck {
     constructor(options) {
       limiters.push(options);
-      super({ ...options, minTime: 0 });
+      super({ ...options, minTime: 0, highWater: highWater ?? options.highWater });
     }
   }
 
@@ -49,6 +49,7 @@ async function loadLogger(env = { DISCORD_LOG_WEBHOOK: webhook }) {
     chalk: { default: { white: (text) => text } },
     bottleneck: { default: FastLimiter },
     './discord-webhook.js': {
+      DELETED_WEBHOOK_CODES: [10015, 50027],
       default: async (url, { content }) => {
         const request = { type: 'send', url, content };
         discord.requests.push(request);
@@ -165,6 +166,27 @@ assert.strictEqual(describeError(Symbol('reason')), 'Symbol(reason)');
 assert.strictEqual(describeError(new URL(webhook)), '[object URL]');
 assert.strictEqual(describeError({ config: { url: webhook } }), '[object Object]');
 
+// The services' handlers for unhandled rejections, and the console, also print where an error was
+// thrown: the lines of its stack trace, which hold only function and file names. The first line is
+// left out, as it repeats the message, and anything without a stack gives nothing.
+function whereThrown() {
+  return new TypeError(`Cannot read properties of ${webhook}`);
+}
+const thrown = whereThrown();
+const trace = stackTrace(thrown);
+assert.match(trace, /^\n {4}at whereThrown \(.*test\/logger\.js:\d+:\d+\)\n {4}at /);
+assert.strictEqual(
+  trace,
+  thrown.stack
+    .split('\n')
+    .slice(1)
+    .map((line) => `\n${line}`)
+    .join('')
+);
+assert.ok(!trace.includes('Cannot read') && !trace.includes('secret-token'));
+for (const reason of [undefined, null, 'Something broke', 42, { code: 1 }, { stack: 42 }])
+  assert.strictEqual(stackTrace(reason), '');
+
 // Without a webhook, or with one that is not a Discord webhook, Discord logging is off, with one
 // warning that never shows the address. Messages still go to the console, and progress bars do
 // nothing.
@@ -267,33 +289,76 @@ const logged = [...output, ...discord.requests.map(({ content }) => content)].jo
 for (const secret of ['steam-api-key', 'battlemetrics-token', 'Authorization', 'steampowered'])
   assert.ok(!logged.includes(secret), `Logged ${secret}`);
 
+// Errors as the Discord sender throws them.
+const discordError = (message, fields) =>
+  Object.assign(new Error(message), { name: 'DiscordWebhookError', network: false, ...fields });
+const networkError = (message) => discordError(message, { network: true });
+
 // A failed send is reported in the console, without the webhook's address, and is not tried again
-// unless Discord was rate limiting or failing. Nothing is left unhandled.
+// unless Discord was rate limiting or failing, or could not be reached. An error without an HTTP
+// status, such as for a webhook the sender refused, is only tried again when it is marked as a
+// network error. Nothing is left unhandled.
 discord.requests.length = 0;
 output.length = 0;
 discord.reply = async () => {
-  throw Object.assign(new Error('Discord answered HTTP 404: Unknown Webhook (code 10015)'), {
-    name: 'DiscordWebhookError',
-    status: 404,
-    code: 10015
+  throw discordError('Discord answered HTTP 400: Invalid Form Body (code 50035)', {
+    status: 400,
+    code: 50035
   });
 };
 logger.verbose('Test', 1, 'Lost');
 await idle();
 discord.reply = async () => {
-  throw Object.assign(new Error('Discord did not answer in time'), { name: 'DiscordWebhookError' });
+  throw discordError('Invalid Discord webhook');
 };
-logger.verbose('Test', 1, 'Slow');
+logger.verbose('Test', 1, 'Refused');
 await idle();
 assert.strictEqual(discord.requests.length, 2);
 assert.deepStrictEqual(
   output.filter((line) => line.startsWith('Could not')),
   [
-    'Could not send a message to the Discord log: DiscordWebhookError: Discord answered HTTP 404: Unknown Webhook (code 10015)',
-    'Could not send a message to the Discord log: DiscordWebhookError: Discord did not answer in time'
+    'Could not send a message to the Discord log: DiscordWebhookError: Discord answered HTTP 400: Invalid Form Body (code 50035)',
+    'Could not send a message to the Discord log: DiscordWebhookError: Invalid Discord webhook'
   ]
 );
 assert.ok(!output.join('\n').includes('secret-token'));
+assert.strictEqual(logger.discordWebhook, webhook);
+
+// A message Discord could not be reached for, or did not answer in time, is tried twice more,
+// after 1 and then 3 seconds, so a network blip of a few seconds loses nothing.
+for (const [message, failures, attempts] of [
+  ['Could not reach Discord (ECONNRESET)', 2, 3],
+  ['Discord did not answer in time', 1, 2],
+  // It gives up after the third attempt.
+  ['Could not reach Discord (EAI_AGAIN)', 3, 3]
+]) {
+  discord.requests.length = 0;
+  output.length = 0;
+  let left = failures;
+  discord.reply = async () => {
+    if (left-- > 0) throw networkError(message);
+    return { id: '1' };
+  };
+  logger.verbose('Test', 1, 'Blip');
+  for (const [tries, wait] of [
+    [1, 1000],
+    [2, 3000]
+  ].slice(0, attempts - 1)) {
+    await until(() => discord.requests.length === tries && timers.size === 1, 'the wait to retry');
+    advance(wait - 1);
+    await pause();
+    assert.strictEqual(discord.requests.length, tries, `Retried too soon after ${message}`);
+    advance(1);
+  }
+  await idle();
+  assert.strictEqual(discord.requests.length, attempts);
+  assert.deepStrictEqual(
+    output.filter((line) => line.startsWith('Could not')),
+    failures < attempts
+      ? []
+      : [`Could not send a message to the Discord log: DiscordWebhookError: ${message}`]
+  );
+}
 
 // A message Discord rate limited is sent once more, after the wait Discord asked for, which is
 // capped at 10 seconds, or after 1 second when Discord failed without saying.
@@ -397,7 +462,11 @@ await settled();
 // The edit was tried twice, and its value waits to be sent with the next one.
 assert.strictEqual(discord.requests.length, 2);
 assert.deepStrictEqual({ ...logger.getLogQueue() }, { ...emptyQueue, QUEUED: 1 });
-editError = Object.assign(new Error('Discord answered HTTP 404: Unknown Message'), { status: 404 });
+// A deleted message stops only its bar, and Discord logging stays on.
+editError = discordError('Discord answered HTTP 404: Unknown Message (code 10008)', {
+  status: 404,
+  code: 10008
+});
 advance(15000);
 await idle();
 assert.strictEqual(discord.requests.length, 3);
@@ -408,16 +477,22 @@ advance(60000);
 await idle();
 assert.strictEqual(discord.requests.length, 3);
 assert.deepStrictEqual({ ...logger.getLogQueue() }, emptyQueue);
+assert.strictEqual(logger.discordWebhook, webhook);
+logger.verbose('Test', 1, 'Still logging');
+await idle();
+assert.strictEqual(discord.requests.length, 4);
+assert.strictEqual(discord.requests[3].content, '[Test][1] Still logging');
 
 // If a bar's first message could not be posted, updating it does nothing, rather than posting new
-// messages.
+// messages. Unlike other messages, it is not tried again after a network error.
 discord.requests.length = 0;
 output.length = 0;
 discord.reply = async () => {
-  throw Object.assign(new Error('Discord did not answer in time'), { name: 'DiscordWebhookError' });
+  throw networkError('Discord did not answer in time');
 };
 const lostBar = exportProgress(null, 0);
 await idle();
+assert.strictEqual(timers.size, 0);
 discord.reply = async () => ({ id: '333' });
 for (let current = 1; current <= 10; current++) exportProgress(lostBar, current);
 logger.flush();
@@ -486,9 +561,206 @@ assert.strictEqual(sent[101], '[Test][1] Message 101');
 assert.strictEqual(sent[200], '[Test][1] Message 200');
 assert.ok(!sent.some((content) => content.includes('Waiting')));
 
+// A run's own lines, such as its failure and summary, go ahead of every waiting message, and push
+// out the oldest of the least important, so they still reach the log channel when per-item errors
+// fill the queue, which still holds no more than its limit. These checks use a queue of 10 rather
+// than 200, so they run quickly.
+const busy = await loadLogger(undefined, { highWater: 10 });
+let releaseBusy;
+const busyBlocked = new Promise((resolve) => (releaseBusy = resolve));
+busy.discord.reply = async () => {
+  if (busy.discord.requests.length === 1) await busyBlocked;
+  return { id: '1' };
+};
+busy.logger.verbose('Test', 1, 'First');
+await until(() => busy.discord.requests.length === 1, 'the first message to be sent');
+for (let i = 1; i <= 15; i++) busy.logger.verbose('Test', 1, `Error ${i}: `, new Error('Failed'));
+assert.strictEqual(
+  busy.logger.important('Test', 'The run failed: ', new Error('Broken')),
+  undefined
+);
+busy.logger.important('Test', 'Finished');
+await until(() => busy.logger.getLogQueue().RECEIVED === 0, 'the messages to be queued');
+assert.deepStrictEqual(
+  { ...busy.logger.getLogQueue() },
+  { ...emptyQueue, QUEUED: 10, EXECUTING: 1 }
+);
+releaseBusy();
+await busy.idle();
+assert.deepStrictEqual(
+  busy.discord.requests.map(({ content }) => content),
+  [
+    '[Test][1] First',
+    '[Test][1] The run failed: Error: Broken',
+    '[Test][1] Finished',
+    ...[3, 4, 5, 6, 7, 8, 9, 10].map((i) => `[Test][1] Error ${i}: Error: Failed`)
+  ]
+);
+// In the console they are level 1 lines like any other, with the error's stack trace.
+assert.match(
+  busy.output.find((line) => line.includes('The run failed')),
+  /^\[Test\]\[1\] The run failed: Error: Broken\n {4}at /
+);
+
+// A posted bar whose edit is dropped while the queue is full is not left stuck: its value waits
+// again, and the latest value is sent when the next one is due.
+const stuck = await loadLogger(undefined, { highWater: 10 });
+let releaseStuck;
+const stuckBlocked = new Promise((resolve) => (releaseStuck = resolve));
+stuck.discord.reply = async ({ type, id, content }) => {
+  if (content.includes('Blocker')) await stuckBlocked;
+  return { id: type === 'send' ? '1' : id };
+};
+const stuckBar = stuck.logger.discordProgressBar('Test', 'Edit', null, 0, 10, 0);
+await stuck.idle();
+stuck.logger.verbose('Test', 1, 'Blocker');
+await until(() => stuck.discord.requests.length === 2, 'the blocker to be sent');
+stuck.logger.discordProgressBar('Test', 'Edit', stuckBar, 0, 10, 5);
+stuck.advance(15000);
+await pause();
+// The edit now waits behind the blocker, and is pushed out by the 10th message. The bar's value
+// then waits again, beside the 10 messages.
+for (let i = 1; i <= 15; i++) stuck.logger.verbose('Test', 1, `Message ${i}`);
+await until(() => stuck.logger.getLogQueue().RECEIVED === 0, 'the messages to be queued');
+assert.strictEqual(stuckBar.sending, false);
+assert.deepStrictEqual(
+  { ...stuck.logger.getLogQueue() },
+  { ...emptyQueue, QUEUED: 11, EXECUTING: 1 }
+);
+stuck.logger.discordProgressBar('Test', 'Edit', stuckBar, 0, 10, 7);
+releaseStuck();
+await stuck.settled();
+stuck.advance(15000);
+await stuck.idle();
+const stuckEdits = stuck.discord.requests.filter(({ type }) => type === 'edit');
+assert.strictEqual(stuckEdits.length, 1);
+assert.match(stuckEdits[0].content, /] 7\/10``$/);
+assert.deepStrictEqual({ ...stuck.logger.getLogQueue() }, emptyQueue);
+assert.strictEqual(stuck.timers.size, 0);
+
+// A bar flushed while its last value is still being sent sends the newer value as soon as that send
+// finishes, without waiting 15 seconds.
+const held = await loadLogger();
+let releaseHeld;
+const holding = new Promise((resolve) => (releaseHeld = resolve));
+held.discord.reply = async ({ type, id }) => {
+  if (held.discord.requests.length === 1) await holding;
+  return { id: type === 'send' ? '444' : id };
+};
+const heldBar = held.logger.discordProgressBar('Test', 'Holding...', null, 0, 10, 0);
+await until(() => held.discord.requests.length === 1, 'the bar to be posted');
+held.logger.discordProgressBar('Test', 'Holding...', heldBar, 0, 10, 10);
+held.logger.flush();
+releaseHeld();
+await held.idle();
+assert.deepStrictEqual(
+  held.discord.requests.map(({ type, id }) => [type, id]),
+  [
+    ['send', undefined],
+    ['edit', '444']
+  ]
+);
+assert.match(held.discord.requests[1].content, / 10\/10``$/);
+assert.strictEqual(held.timers.size, 0);
+
+// A bar Discord posted without saying which message it is stops, rather than posting a new message
+// for every update.
+const noID = await loadLogger();
+noID.discord.reply = async () => ({});
+const noIDBar = noID.logger.discordProgressBar('Test', 'No ID...', null, 0, 10, 0);
+await noID.idle();
+for (let current = 1; current <= 10; current++)
+  noID.logger.discordProgressBar('Test', 'No ID...', noIDBar, 0, 10, current);
+noID.logger.flush();
+noID.advance(60000);
+await noID.idle();
+assert.strictEqual(noID.discord.requests.length, 1);
+assert.deepStrictEqual(noID.output, [
+  'Could not post a progress bar in the Discord log: Error: Discord did not say which message it posted'
+]);
+
+// When Discord says the log webhook is gone, because it was deleted or its token was reset, Discord
+// logging is turned off with one warning, as Discord asks that such a webhook is not used again.
+// Nothing more is sent: not the messages and progress bars already waiting, nor new ones.
+const warnings = (output) => output.filter((line) => /^(Warning|Could not)/.test(line));
+const goneWarning = (reason) =>
+  `Warning: Discord logging is off, as Discord says the DISCORD_LOG_WEBHOOK webhook no longer exists: DiscordWebhookError: ${reason}`;
+const gone = await loadLogger();
+gone.discord.reply = async ({ type, id }) => ({ id: type === 'send' ? '555' : id });
+const goneBar = gone.logger.discordProgressBar('Test', 'Gone...', null, 0, 10, 0);
+// A bar that has nothing waiting to be sent when the webhook is found to be gone.
+const idleBar = gone.logger.discordProgressBar('Test', 'Idle...', null, 0, 10, 0);
+await gone.idle();
+gone.discord.requests.length = 0;
+gone.discord.reply = async () => {
+  throw discordError('Discord answered HTTP 404: Unknown Webhook (code 10015)', {
+    status: 404,
+    code: 10015
+  });
+};
+gone.logger.discordProgressBar('Test', 'Gone...', goneBar, 0, 10, 5);
+for (let i = 1; i <= 3; i++) gone.logger.verbose('Test', 1, `Line ${i}`);
+const newBar = gone.logger.discordProgressBar('Test', 'New...', null, 0, 10, 0);
+await gone.settled();
+assert.strictEqual(gone.discord.requests.length, 1);
+assert.strictEqual(gone.logger.discordWebhook, null);
+assert.deepStrictEqual({ ...gone.logger.getLogQueue() }, emptyQueue);
+assert.strictEqual(gone.timers.size, 0);
+gone.logger.verbose('Test', 1, 'Later');
+gone.logger.discordProgressBar('Test', 'Gone...', goneBar, 0, 10, 10);
+gone.logger.discordProgressBar('Test', 'Idle...', idleBar, 0, 10, 10);
+gone.logger.discordProgressBar('Test', 'New...', newBar, 0, 10, 10);
+gone.logger.discordProgressBar('Test', 'Another...', null, 0, 10, 0);
+// Updates stop the bars at once, rather than leaving values to wait.
+assert.strictEqual(gone.timers.size, 0);
+assert.strictEqual(gone.logger.waitingProgressBars.size, 0);
+gone.logger.flush();
+gone.advance(60000);
+await gone.settled();
+assert.strictEqual(gone.discord.requests.length, 1);
+assert.deepStrictEqual(warnings(gone.output), [
+  goneWarning('Discord answered HTTP 404: Unknown Webhook (code 10015)')
+]);
+// Jobs still in the limiter make no requests, so they are not counted, and services that wait for
+// the log queue before exiting do not wait for them.
+let finishJob;
+gone.logger.rl.schedule(() => new Promise((resolve) => (finishJob = resolve)));
+await until(() => gone.logger.rl.counts().EXECUTING === 1, 'the job to start');
+assert.deepStrictEqual({ ...gone.logger.getLogQueue() }, emptyQueue);
+finishJob();
+await gone.settled();
+
+// The same happens when a progress bar's edit is the first to find a webhook whose token was reset.
+const revoked = await loadLogger();
+revoked.discord.reply = async ({ type, id }) => ({ id: type === 'send' ? '666' : id });
+const revokedBar = revoked.logger.discordProgressBar('Test', 'Revoked...', null, 0, 10, 0);
+await revoked.idle();
+revoked.discord.reply = async ({ type }) => {
+  if (type === 'edit') {
+    throw discordError('Discord answered HTTP 401: Invalid Webhook Token (code 50027)', {
+      status: 401,
+      code: 50027
+    });
+  }
+  return { id: '667' };
+};
+revoked.logger.discordProgressBar('Test', 'Revoked...', revokedBar, 0, 10, 5);
+revoked.logger.flush();
+await revoked.settled();
+revoked.logger.verbose('Test', 1, 'Later');
+await revoked.settled();
+assert.deepStrictEqual(
+  revoked.discord.requests.map(({ type }) => type),
+  ['send', 'edit']
+);
+assert.strictEqual(revoked.logger.discordWebhook, null);
+assert.deepStrictEqual(warnings(revoked.output), [
+  goneWarning('Discord answered HTTP 401: Invalid Webhook Token (code 50027)')
+]);
+
 await pause();
 assert.deepStrictEqual(unhandled, []);
 
 console.log(
-  'Logger checks passed: Discord off, failed sends, retries, long messages, errors, progress bars and the queue limit.'
+  'Logger checks passed: Discord off, failed sends, retries, long messages, errors, stack traces, progress bars, the queue limit, run lines and gone webhooks.'
 );
