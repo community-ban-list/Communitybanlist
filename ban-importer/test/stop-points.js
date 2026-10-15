@@ -1,7 +1,8 @@
 import assert from 'assert';
-import async from 'async';
 import { readFile } from 'fs/promises';
 import vm from 'vm';
+
+import describeError from '../../scbl-lib/utils/describe-error.js';
 
 // Check where the importer's steps stop when the run is asked to, and that they check the run lock
 // before deleting or exporting bans, without a database or network requests.
@@ -14,7 +15,8 @@ async function until(condition, what) {
   }
 }
 
-// Wait for a step to end, so a broken one fails the test rather than hanging it.
+// Wait for a step to end, so a broken one fails the test rather than hanging it. Resolves with what
+// the step returned, or the error it threw.
 function ended(promise, what) {
   let timer;
   const timeout = new Promise((resolve, reject) => {
@@ -23,10 +25,11 @@ function ended(promise, what) {
   return Promise.race([promise.catch((err) => err), timeout]).finally(() => clearTimeout(timer));
 }
 
-const Logger = { verbose() {}, discordProgressBar: () => ({}) };
+const Logger = { verbose() {}, important() {}, discordProgressBar: () => ({}) };
 
-// Load a module of the importer with stand-ins for its dependencies, and the real run-control.js.
-async function load(path, dependencies) {
+// Load a module of the importer with stand-ins for its dependencies, the real run-control.js, and
+// any other globals it needs.
+async function load(path, dependencies, globals = {}) {
   const context = vm.createContext({
     console: { log() {} },
     process: { env: {} },
@@ -35,7 +38,9 @@ async function load(path, dependencies) {
       const timer = setTimeout(callback, ms);
       if (ms > 1000) timer.unref();
       return timer;
-    }
+    },
+    clearTimeout,
+    ...globals
   });
   const url = new URL(path, import.meta.url);
   const module = new vm.SourceTextModule(await readFile(url, 'utf8'), {
@@ -68,272 +73,295 @@ async function load(path, dependencies) {
 const heldLock = { isHeld: async () => true };
 const lostLock = { isHeld: async () => false };
 
-// Load ban-importer.js with stand-ins for the database and the fetcher, which calls
-// fetch(banList, storeBans, control) for each list. Saving bans waits for saves.gate, and adding
-// their players for saves.playersGate.
-async function loadBanImporter({ fetch }) {
-  const events = [];
-  const saves = { gate: null, playersGate: null };
-  const banLists = [{ id: 1 }, { id: 2 }];
-  class BanFetcher {
-    constructor(storeBans) {
-      this.storeBans = storeBans;
-    }
+const steamID = (n) => `7656119800${String(n).padStart(7, '0')}`;
 
+// Load ban-importer.js with stand-ins for the database and the fetcher. lists gives each ban
+// list's stored bans and the bans the fetcher returns for it, as numbers. The fetcher calls
+// onFetch(banList, control) before it returns, each ban's save calls hooks.onSave(id) and then
+// waits for its gate in saves.gates, if it has one, and each chunk of bans removed calls
+// hooks.onRemove().
+async function loadBanImporter(lists, { onFetch = () => {}, options } = {}) {
+  const events = [];
+  const lines = [];
+  const saves = { gates: {} };
+  const hooks = { onSave() {}, onRemove() {} };
+  class BanFetcher {
     async fetchBanList(banList) {
       events.push(`fetch ${banList.id}`);
-      await fetch(banList, this.storeBans, imported.control);
+      await onFetch(banList, imported.control);
+      const bans = lists[banList.id].fetched.map((n) => ({
+        id: `${banList.id},${n}`,
+        steamUser: steamID(n),
+        expired: false,
+        banList
+      }));
+      return { bans, rawCount: bans.length, firstMetaTotal: null };
     }
   }
   const imported = await load('../src/ban-importer.js', {
-    async: { default: async },
-    'scbl-lib/db/models': {
-      BanList: { findAll: async () => banLists },
-      SteamUser: {
-        bulkCreate: async () => {
-          events.push('add Steam users');
-          await saves.playersGate;
+    'scbl-lib/db': {
+      sequelize: {
+        query: async (sql, { replacements: [id] }) => {
+          events.push(`read stored bans of ${id}`);
+          return lists[id].stored.map((n) => ({ id: `${id},${n}`, steamUser: steamID(n) }));
         },
+        transaction: async (work) => {
+          events.push('begin');
+          const value = await work({});
+          events.push('commit');
+          return value;
+        }
+      }
+    },
+    'scbl-lib/db/models': {
+      BanList: {
+        findAll: async () => Object.keys(lists).map((id) => ({ id: Number(id) })),
+        findByPk: async (id) => {
+          events.push(`read list ${id}`);
+          return { id, type: 'battlemetrics', source: `bm-${id}` };
+        }
+      },
+      SteamUser: {
+        bulkCreate: async () => events.push('add Steam users'),
         update: async () => events.push('reset Steam users')
       },
       Ban: {
         findOrCreate: async ({ where }) => {
           events.push(`save ${where.id}`);
-          await saves.gate;
+          hooks.onSave(where.id);
+          await saves.gates[where.id];
           events.push(`saved ${where.id}`);
           return [{}, true];
         },
-        findAll: async () => {
-          events.push('find deleted bans');
-          return [];
-        },
-        destroy: async () => events.push('delete bans')
+        destroy: async ({ where }) => {
+          events.push(`remove ${where.id.length} bans`);
+          await hooks.onRemove();
+        }
       }
     },
-    'scbl-lib/db/sequelize': { Op: { in: 'in', notIn: 'notIn' } },
-    'scbl-lib/utils': { Logger },
+    'scbl-lib/db/sequelize': {
+      ForeignKeyConstraintError: class ForeignKeyConstraintError extends Error {},
+      QueryTypes: { SELECT: 'SELECT' },
+      ValidationError: class ValidationError extends Error {},
+      isDatabaseUnavailable: () => false
+    },
+    'scbl-lib/utils': {
+      describeError,
+      Logger: {
+        verbose: (module, level, message) => lines.push({ level, message }),
+        important: (module, message) => lines.push({ level: 1, message, important: true }),
+        discordProgressBar: () => ({})
+      }
+    },
     './ban-fetcher.js': { default: BanFetcher }
   });
-  return { ...imported, events, saves };
+  const BanImporter = imported.exports;
+  return {
+    importer: new BanImporter(options),
+    control: imported.control,
+    events,
+    lines,
+    saves,
+    hooks
+  };
 }
 
-const bans = (banList, count) =>
-  Array.from({ length: count }, (_, index) => ({
-    id: `${banList.id},${index}`,
-    steamUser: `7656119800000000${index}`,
-    banList
-  }));
-
-// The import stops between ban lists. The bans being saved are finished, those still waiting are
-// dropped, and the sweep that deletes the bans not seen in the run never runs.
+// The import stops between ban lists. A stop requested while a list's missing bans are being
+// removed lets the removal finish, chunk by chunk, and the next list is not started.
 {
-  let openGate;
-  const {
-    exports: BanImporter,
-    control,
-    events,
-    saves
-  } = await loadBanImporter({
-    fetch: async (banList, storeBans, { requestStop }) => {
-      // Two bans start saving and wait, and three more wait to be saved.
-      saves.gate = new Promise((resolve) => {
-        openGate = resolve;
-      });
-      await storeBans(bans(banList, 5));
-      requestStop('it received SIGTERM');
-    }
-  });
-  control.setRunLock(heldLock);
-  const importer = new BanImporter();
-  const result = ended(
-    importer.importBans().finally(() => events.push('stopped')),
-    'the import'
+  const stored = Array.from({ length: 2500 }, (_, n) => n);
+  const { importer, control, events, hooks } = await loadBanImporter(
+    { 1: { stored, fetched: [0] }, 2: { stored: [], fetched: [0] } },
+    { options: { allowMassRemoval: '1' } }
   );
-  await until(() => events.includes('save 1,1'), 'the first saves');
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.ok(!events.includes('stopped'));
-  openGate();
-
-  // The import ends once both saves have finished, including resetting their players.
-  const error = await result;
+  control.setRunLock(heldLock);
+  hooks.onRemove = () => control.requestStop('it received SIGTERM');
+  const error = await ended(importer.importBans(), 'the import');
   assert.strictEqual(error.name, 'RunStopped');
-  assert.deepStrictEqual(events.slice(0, 4), [
-    'fetch 1',
-    'add Steam users',
-    'save 1,0',
-    'save 1,1'
-  ]);
-  assert.deepStrictEqual(events.slice(4, -1).sort(), [
-    'reset Steam users',
-    'reset Steam users',
-    'saved 1,0',
-    'saved 1,1'
-  ]);
-  assert.strictEqual(events.at(-1), 'stopped');
-
-  // Bans fetched as the run stops are not queued to be saved.
-  await importer.queueBan(bans({ id: 1 }, 2));
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.strictEqual(events.filter((event) => event.startsWith('save ')).length, 2);
+  assert.deepStrictEqual(
+    events.filter((event) => event.startsWith('remove')),
+    ['remove 1000 bans', 'remove 1000 bans', 'remove 499 bans']
+  );
+  assert.strictEqual(events.at(-1), 'commit');
+  assert.ok(!events.includes('read list 2'));
 }
 
-// A run asked to stop while the last list is fetched skips the sweep too.
+// A run asked to stop while a list's bans are being saved finishes the saves under way, each with
+// its player's update, and starts no more. The import ends only once all of them have finished,
+// and none of the list's bans are removed, as the bans it did not save would look removed. The
+// next list is not started.
 {
-  const {
-    exports: BanImporter,
-    control,
-    events
-  } = await loadBanImporter({
-    fetch: async (banList, storeBans, { requestStop }) => {
-      if (banList.id === 2) requestStop('it took longer than 18000s');
-    }
+  const open = {};
+  const { importer, control, events, saves } = await loadBanImporter({
+    1: { stored: [7, 8], fetched: [0, 1, 2, 3, 4] },
+    2: { stored: [], fetched: [0] }
   });
   control.setRunLock(heldLock);
-  const error = await ended(new BanImporter().importBans(), 'the import');
-  assert.strictEqual(error.name, 'RunStopped');
-  assert.deepStrictEqual(events, ['fetch 1', 'fetch 2']);
-}
-
-// The sweep only runs while the run holds the run lock.
-for (const [lock, sweeps] of [
-  [heldLock, true],
-  [lostLock, false]
-]) {
-  const {
-    exports: BanImporter,
-    control,
-    events
-  } = await loadBanImporter({ fetch: async () => {} });
-  control.setRunLock(lock);
-  const error = await ended(new BanImporter().importBans(), 'the import');
-  assert.strictEqual(events.includes('find deleted bans'), sweeps);
-  assert.strictEqual(events.includes('delete bans'), sweeps);
-  if (sweeps) assert.strictEqual(error, undefined);
-  else assert.strictEqual(error.reason, control.LOCK_LOST);
-}
-
-// The import waits for every ban to be saved before the sweep, and so never ends with saves still
-// running, which a run that stops after the import would cut off.
-{
-  let openGate;
-  const {
-    exports: BanImporter,
-    control,
-    events,
-    saves
-  } = await loadBanImporter({
-    fetch: async (banList, storeBans) => {
-      if (banList.id !== 2) return;
-      // Two bans start saving and wait, and one more waits to be saved.
-      saves.gate = new Promise((resolve) => {
-        openGate = resolve;
-      });
-      await storeBans(bans(banList, 3));
-    }
-  });
-  control.setRunLock(heldLock);
-  const importer = new BanImporter();
+  for (const id of ['1,0', '1,1'])
+    saves.gates[id] = new Promise((resolve) => {
+      open[id] = resolve;
+    });
   const result = ended(
     importer.importBans().finally(() => events.push('ended')),
     'the import'
   );
-  await until(() => events.includes('save 2,1'), 'the first saves');
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  assert.ok(!events.includes('find deleted bans'));
-  assert.ok(!events.includes('ended'));
-  openGate();
-
-  assert.strictEqual(await result, undefined);
-  assert.ok(importer.saveBanQueue.idle());
-  // Every ban was saved before the sweep began.
-  const sweep = events.indexOf('find deleted bans');
-  assert.deepStrictEqual(
-    events.slice(0, sweep).filter((event) => event.startsWith('saved ')),
-    ['saved 2,0', 'saved 2,1', 'saved 2,2']
-  );
-  assert.deepStrictEqual(events.slice(sweep), [
-    'find deleted bans',
-    'reset Steam users',
-    'delete bans',
-    'ended'
-  ]);
-}
-
-// It also waits for a batch of bans the fetcher did not wait for, which is still adding its
-// players when the last list has been fetched.
-{
-  let addPlayers;
-  const {
-    exports: BanImporter,
-    control,
-    events,
-    saves
-  } = await loadBanImporter({
-    fetch: async (banList, storeBans) => {
-      if (banList.id !== 2) return;
-      saves.playersGate = new Promise((resolve) => {
-        addPlayers = resolve;
-      });
-      storeBans(bans(banList, 1));
-    }
-  });
-  control.setRunLock(heldLock);
-  const result = ended(
-    new BanImporter().importBans().finally(() => events.push('ended')),
-    'the import'
-  );
-  await until(() => events.includes('add Steam users'), 'the batch');
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  assert.ok(!events.includes('find deleted bans'));
-  addPlayers();
-
-  assert.strictEqual(await result, undefined);
-  assert.deepStrictEqual(events, [
-    'fetch 1',
-    'fetch 2',
-    'add Steam users',
-    'save 2,0',
-    'saved 2,0',
-    'reset Steam users',
-    'find deleted bans',
-    'reset Steam users',
-    'delete bans',
-    'ended'
-  ]);
-}
-
-// A run asked to stop while the import waits for its saves stops once the saves under way have
-// finished. The bans still waiting to be saved are dropped, and nothing is swept.
-{
-  let openGate;
-  const {
-    exports: BanImporter,
-    control,
-    events,
-    saves
-  } = await loadBanImporter({
-    fetch: async (banList, storeBans) => {
-      if (banList.id !== 2) return;
-      saves.gate = new Promise((resolve) => {
-        openGate = resolve;
-      });
-      await storeBans(bans(banList, 5));
-    }
-  });
-  control.setRunLock(heldLock);
-  const result = ended(new BanImporter().importBans(), 'the import');
-  await until(() => events.includes('save 2,1'), 'the first saves');
+  await until(() => events.includes('save 1,1'), 'the first saves');
   control.requestStop('it received SIGTERM');
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  openGate();
+
+  // One save finishes and no other starts, but the import waits for the second.
+  open['1,0']();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepStrictEqual(events.slice(3), [
+    'save 1,0',
+    'save 1,1',
+    'saved 1,0',
+    'reset Steam users'
+  ]);
+  open['1,1']();
 
   const error = await result;
   assert.strictEqual(error.name, 'RunStopped');
-  assert.deepStrictEqual(
-    events.filter((event) => event.startsWith('save')),
-    ['save 2,0', 'save 2,1', 'saved 2,0', 'saved 2,1']
+  assert.deepStrictEqual(events, [
+    'read list 1',
+    'fetch 1',
+    'add Steam users',
+    'save 1,0',
+    'save 1,1',
+    'saved 1,0',
+    'reset Steam users',
+    'saved 1,1',
+    'reset Steam users',
+    'ended'
+  ]);
+}
+
+// A run asked to stop while a list is fetched stops once it is fetched, before saving any of it,
+// even its players.
+{
+  const { importer, control, events } = await loadBanImporter(
+    { 1: { stored: [5], fetched: [0, 1] }, 2: { stored: [], fetched: [0] } },
+    { onFetch: (banList, control) => control.requestStop('it took longer than 18000s') }
   );
-  assert.ok(!events.includes('find deleted bans'));
+  control.setRunLock(heldLock);
+  const error = await ended(importer.importBans(), 'the import');
+  assert.strictEqual(error.name, 'RunStopped');
+  assert.strictEqual(error.reason, 'it took longer than 18000s');
+  assert.deepStrictEqual(events, ['read list 1', 'fetch 1']);
+}
+
+// Bans are removed only while the run holds the run lock: not once it has lost it, nor if it never
+// took it. The bans fetched are still saved, but without the lock the next list is not started.
+for (const [lock, sweeps] of [
+  [heldLock, true],
+  [lostLock, false],
+  [null, false]
+]) {
+  const { importer, control, events } = await loadBanImporter({
+    1: { stored: [0, 9], fetched: [0] },
+    2: { stored: [], fetched: [0] }
+  });
+  if (lock) control.setRunLock(lock);
+  const outcome = await ended(importer.importBans(), 'the import');
+  assert.ok(events.includes('saved 1,0'));
+  assert.strictEqual(events.includes('remove 1 bans'), sweeps);
+  assert.strictEqual(events.includes('read list 2'), sweeps);
+  if (sweeps) assert.ok(Array.isArray(outcome));
+  else {
+    assert.strictEqual(outcome.reason, control.LOCK_LOST);
+    assert.ok(!events.includes('begin'));
+  }
+}
+
+// A stop requested while the run checks its lock before removing bans is honoured before any are
+// removed.
+{
+  const { importer, control, events } = await loadBanImporter({
+    1: { stored: [0, 9], fetched: [0] },
+    2: { stored: [], fetched: [0] }
+  });
+  control.setRunLock({
+    isHeld: async () => {
+      control.requestStop('it received SIGTERM');
+      return true;
+    }
+  });
+  const error = await ended(importer.importBans(), 'the import');
+  assert.strictEqual(error.name, 'RunStopped');
+  assert.strictEqual(error.reason, 'it received SIGTERM');
+  assert.ok(events.includes('saved 1,0'));
+  assert.ok(!events.includes('begin'));
+}
+
+// Load ban-fetcher.js with stand-ins for BattleMetrics and axios, which are given the run control
+// with each request. The waits between attempts are skipped.
+async function loadBanFetcher({ battlemetrics, get }) {
+  const imported = await load(
+    '../src/ban-fetcher.js',
+    {
+      axios: { default: { get: async (url) => get(url, imported.control) } },
+      'scbl-lib/apis': {
+        battlemetrics: async (method, endpoint, params) => battlemetrics(params, imported.control)
+      },
+      'scbl-lib/utils': { classifyBanReason: () => 'Cheating', Logger }
+    },
+    { URL, AbortSignal, setTimeout: (callback) => setImmediate(callback) }
+  );
+  const BanFetcher = imported.exports;
+  return new BanFetcher();
+}
+
+// The fetcher stops between the pages of a BattleMetrics list, as the largest take over a minute
+// to read. Nothing of the list is returned, so nothing of it is saved.
+{
+  const pages = [];
+  const fetcher = await loadBanFetcher({
+    battlemetrics: (params, control) => {
+      const page = Number(params['page[key]'] || 1);
+      pages.push(page);
+      if (page === 2) control.requestStop('it received SIGTERM');
+      const ban = {
+        attributes: {
+          uid: `u${page}`,
+          timestamp: '2026-01-01T00:00:00.000Z',
+          identifiers: [{ type: 'steamID', identifier: steamID(page) }]
+        }
+      };
+      return {
+        data: {
+          data: [ban],
+          links: {
+            next: `https://api.battlemetrics.com/bans?filter[banList]=bm-1&page[key]=${page + 1}&page[size]=100`
+          }
+        }
+      };
+    }
+  });
+  const error = await ended(
+    fetcher.fetchBanList({ id: 1, type: 'battlemetrics', source: 'bm-1' }),
+    'the fetch'
+  );
+  assert.strictEqual(error.name, 'RunStopped');
+  assert.deepStrictEqual(pages, [1, 2]);
+}
+
+// It also stops before another attempt at a remote list.
+{
+  const requests = [];
+  const fetcher = await loadBanFetcher({
+    get: (url, control) => {
+      requests.push(url);
+      control.requestStop('it received SIGTERM');
+      throw Object.assign(new Error('Request failed with status code 503'), {
+        response: { status: 503 }
+      });
+    }
+  });
+  const error = await ended(
+    fetcher.fetchBanList({ id: 2, type: 'remote', source: 'https://bans.example/2.txt' }),
+    'the fetch'
+  );
+  assert.strictEqual(error.name, 'RunStopped');
+  assert.deepStrictEqual(requests, ['https://bans.example/2.txt']);
 }
 
 // Load core.js with stand-ins for the models and the Steam client.
@@ -519,5 +547,5 @@ for (const lock of [lostLock, null]) {
 }
 
 console.log(
-  'Importer safe point checks passed: ban lists, waiting for saves, the sweep, export bans and the batched steps.'
+  'Importer safe point checks passed: ban lists, pages, saves, the sweep, export bans and the batched steps.'
 );
