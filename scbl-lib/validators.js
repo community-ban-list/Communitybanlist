@@ -1,5 +1,7 @@
 import * as yup from 'yup';
 
+import isDiscordWebhookUrl from './utils/discord-webhook-url.js';
+
 export default {
   ExportBanList: {
     name: yup
@@ -26,8 +28,11 @@ export default {
     maxBanAge: yup.number().min(0, 'The max ban age must be a positive integer or zero.'),
     discordWebhook: yup
       .string()
-      .url('Invalid Discord Webhook')
-      .matches(/^$|^https:\/\/discord(?:app)?.com\/api\/webhooks\//, 'Invalid Discord Webhook')
+      .test(
+        'discord-webhook',
+        'Invalid Discord Webhook',
+        (value) => !value || isDiscordWebhookUrl(value)
+      )
   },
   ExportBanListConfig: {
     banList: yup.number().required('A ban list must be specified.'),
