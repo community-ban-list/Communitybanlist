@@ -9,7 +9,13 @@ import {
 import { describeError, Logger } from 'scbl-lib/utils';
 
 import BanFetcher from './ban-fetcher.js';
-import { checkRunLock, isStopping, RunStopped, stopIfRequested } from './run-control.js';
+import {
+  checkRunLock,
+  isStopping,
+  RunStopped,
+  stopIfRequested,
+  stopRequest
+} from './run-control.js';
 
 // Thank god for this function.
 
@@ -54,18 +60,49 @@ async function retryOperation(operation, retries = MAX_RETRIES) {
 // Steam users are added, and bans removed, this many at a time.
 const CHUNK_SIZE = 1000;
 
-// Removing at least this many of a list's bans in one run, and at least this share of them, could
-// mean the list broke rather than lifted them, so it waits until IMPORTER_ALLOW_MASS_REMOVAL names
-// the list.
+// Removing at least this many of a list's bans in one run, and at least this share of the bans it
+// had before the run, could mean the list broke rather than lifted them, as could a list returning
+// no bans at all. Either waits until IMPORTER_ALLOW_MASS_REMOVAL names the list.
 const MASS_REMOVAL_BANS = 25;
 const MASS_REMOVAL_SHARE = 0.1;
+
+// A list that could not be fetched is tried again once the others are done, after this wait, so a
+// short outage of its source has time to pass. A run that is asked to stop does not wait.
+const SECOND_ATTEMPT_DELAY = 60 * 1000;
 
 // Marks a list that was removed while its bans were being saved.
 const LIST_REMOVED = Symbol('ban list removed');
 
+// Wait, but no longer than until the run is asked to stop.
+function pause(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    stopRequest.then(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+// A count written with thousands separators, e.g. 86,919.
+function formatCount(count) {
+  return count.toLocaleString('en-US');
+}
+
+function plural(count, noun) {
+  return `${formatCount(count)} ${noun}${count === 1 ? '' : 's'}`;
+}
+
 // Whether a ban could not be saved because its ban list was not in the database.
 function isMissingBanList(err) {
   return err instanceof ForeignKeyConstraintError && (err.fields || []).includes('banList');
+}
+
+// Whether a list's source refused it, e.g. as the list was deleted or CBL lost access to it, so it
+// would only be refused again later in the run. A timeout (408) or rate limit (429) can pass.
+function isRefused(err) {
+  const status = err.status ?? err.response?.status;
+  return status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
 
 export default class BanImporter {
@@ -110,31 +147,61 @@ export default class BanImporter {
       0
     );
 
-    // Each list is fetched, saved and checked for removed bans before the next one is started.
+    // Each list is fetched, saved and checked for removed bans before the next one is started. A
+    // run that is asked to stop does so between ban lists, after summing up the lists it imported.
     const results = [];
-    let currentList = 0;
-    for (const banList of banLists) {
-      // A run that is asked to stop does so between ban lists.
-      stopIfRequested();
-      results.push(await this.importBanList(banList.id));
-      currentList++;
-      Logger.discordProgressBar(
-        'BanImporter',
-        `Fetching ${banLists.length} Ban Lists...`,
-        myProgressBar,
-        0,
-        banLists.length,
-        currentList
-      );
+    try {
+      let currentList = 0;
+      for (const banList of banLists) {
+        stopIfRequested();
+        results.push(await this.importBanList(banList.id));
+        currentList++;
+        Logger.discordProgressBar(
+          'BanImporter',
+          `Fetching ${banLists.length} Ban Lists...`,
+          myProgressBar,
+          0,
+          banLists.length,
+          currentList
+        );
+      }
+
+      // A list that could not be fetched, e.g. during a short BattleMetrics outage, is tried once
+      // more after the others. Not when every list failed that way, as their sources are then down.
+      // A run that is asked to stop, before or during the wait, tries no list again.
+      const retries = results.filter((result) => result.retry);
+      if (retries.length > 0 && results.some((result) => !result.gone && !result.retry)) {
+        stopIfRequested();
+        await pause(SECOND_ATTEMPT_DELAY);
+        for (const failed of retries) {
+          stopIfRequested();
+          results[results.indexOf(failed)] = await this.importBanList(failed.id, 2);
+        }
+      }
+    } catch (err) {
+      if (err instanceof RunStopped)
+        this.logSummary(results, { stopped: true, listCount: banLists.length });
+      throw err;
     }
+
+    this.logSummary(results);
     return results;
   }
 
   // Fetch all of a ban list, save its bans, then remove the bans it no longer has. A list that
   // cannot be fetched or saved keeps all of its stored bans, as does a list whose import is stopped
   // part-way because the run was asked to stop, which then throws RunStopped.
-  async importBanList(id) {
-    const result = { id, fetched: 0, created: 0, updated: 0, failed: 0, removed: 0, held: 0 };
+  async importBanList(id, attempt = 1) {
+    const result = {
+      id,
+      attempt,
+      fetched: 0,
+      created: 0,
+      updated: 0,
+      failed: 0,
+      removed: 0,
+      held: 0
+    };
     let stage = 'reading it';
     try {
       // Read the list again, as it may have been changed or removed since the run started.
@@ -150,6 +217,16 @@ export default class BanImporter {
       const { bans, rawCount, firstMetaTotal } = await this.fetcher.fetchBanList(banList);
       Object.assign(result, { fetched: bans.length, rawCount, firstMetaTotal });
       stopIfRequested();
+
+      // The bans the list had before this run, which is what its losses are measured against.
+      stage = 'reading its stored bans';
+      const stored = await retryOperation(() =>
+        sequelize.query('SELECT id, steamUser FROM Bans WHERE banList = ?', {
+          replacements: [banList.id],
+          type: QueryTypes.SELECT
+        })
+      );
+      result.stored = stored.length;
 
       stage = 'saving its Steam users';
       await this.saveSteamUsers(bans);
@@ -167,7 +244,7 @@ export default class BanImporter {
       await checkRunLock();
       stopIfRequested();
       stage = 'removing the bans it no longer has';
-      await this.removeMissingBans(banList, bans, result);
+      await this.removeMissingBans(banList, bans, stored, result);
       return result;
     } catch (err) {
       result.stage = stage;
@@ -176,6 +253,8 @@ export default class BanImporter {
         throw err;
       }
       result.error = describeError(err);
+      // A list whose source failed in a way that can pass is tried again after the other lists.
+      result.retry = stage === 'fetching it' && attempt === 1 && !isRefused(err);
       return result;
     } finally {
       this.logResult(result);
@@ -312,24 +391,17 @@ export default class BanImporter {
     result.updated++;
   }
 
-  // Remove the stored bans that the list no longer has, a chunk at a time, each chunk in one
-  // transaction that also queues its players for an update. Nothing is removed if the list returned
-  // no bans, as it may be broken, or if it would lose many of its bans at once, unless
+  // Remove the bans the list had before this run that it no longer has, a chunk at a time, each
+  // chunk in one transaction that also queues its players for an update. Nothing is removed if the
+  // list returned no bans, as it may be broken, or if it would lose many of its bans at once, unless
   // IMPORTER_ALLOW_MASS_REMOVAL names the list.
-  async removeMissingBans(banList, bans, result) {
+  async removeMissingBans(banList, bans, stored, result) {
     const fetched = new Set(bans.map((ban) => ban.id));
-    const stored = await retryOperation(() =>
-      sequelize.query('SELECT id, steamUser FROM Bans WHERE banList = ?', {
-        replacements: [banList.id],
-        type: QueryTypes.SELECT
-      })
-    );
-    result.stored = stored.length;
-
     const missing = stored.filter((ban) => !fetched.has(ban.id));
-    if (missing.length === 0 || bans.length === 0) return;
+    if (missing.length === 0) return;
 
     result.massRemoval =
+      bans.length === 0 ||
       missing.length >= Math.max(MASS_REMOVAL_BANS, stored.length * MASS_REMOVAL_SHARE);
     if (result.massRemoval && !this.allowMassRemoval.has(String(banList.id))) {
       result.held = missing.length;
@@ -362,7 +434,8 @@ export default class BanImporter {
 
   // Log one line about the list. A line about a list that needs looking at is logged as important,
   // so it reaches the log channel ahead of other messages and is never dropped for them. The others
-  // only go to the console.
+  // only go to the console. A second attempt at a list is always logged as important, as its first
+  // one was.
   logResult(result) {
     const list = `ban list (ID: ${result.id})`;
     if (result.gone) {
@@ -370,6 +443,8 @@ export default class BanImporter {
       return;
     }
 
+    const again = result.attempt > 1;
+    const imported = `Imported ${list}${again ? ' at the second attempt' : ''}`;
     const counts = [
       `${result.fetched} bans fetched`,
       `${result.created} new`,
@@ -380,10 +455,11 @@ export default class BanImporter {
     const progress = result.fetched > 0 ? ` (${counts.join(', ')})` : '';
 
     if (result.stopped) {
-      // This says what the list saved before the run stopped. The next run imports it again.
+      // The import's summary leaves the list out, so this says what it saved before the run
+      // stopped. The next run imports it again.
       Logger.important(
         'BanImporter',
-        `Stopped importing ${list} while ${result.stage}, as the run is stopping, so none of its bans were removed${progress}.`
+        `Stopped importing ${list}${again ? ' at the second attempt' : ''} while ${result.stage}, as the run is stopping, so none of its bans were removed${progress}.`
       );
     } else if (result.error) {
       const removed =
@@ -392,28 +468,54 @@ export default class BanImporter {
           : 'so none of its bans were removed';
       Logger.important(
         'BanImporter',
-        `Failed to import ${list} while ${result.stage}, ${removed}${progress}. ${result.error}`
+        `Failed to import ${list}${again ? ' again' : ''} while ${result.stage}, ${removed}${progress}. ${result.error}`
       );
-    } else if (result.fetched === 0 && result.stored > 0) {
+    } else if (result.fetched === 0 && result.removed === 0 && result.stored > 0) {
       const none = result.rawCount > 0 ? 'no bans with a SteamID' : 'no bans';
       Logger.important(
         'BanImporter',
-        `Imported ${list}: it returned ${none}, so its ${result.stored} stored bans were kept in case the list is broken.`
+        `${imported}: it returned ${none}, so its ${result.stored} stored bans were kept in case the list is broken. If the list really is empty, set IMPORTER_ALLOW_MASS_REMOVAL=${result.id} for one run.`
       );
     } else if (result.held > 0) {
       Logger.important(
         'BanImporter',
-        `Imported ${list}: ${counts.join(', ')}. Kept the ${result.held} of its ${result.stored} stored bans that it no longer has, as removing at least ${MASS_REMOVAL_BANS} bans and ${MASS_REMOVAL_SHARE * 100}% of a list at once needs confirming. If the list really dropped them, set IMPORTER_ALLOW_MASS_REMOVAL=${result.id} for one run.`
+        `${imported}: ${counts.join(', ')}. Kept the ${result.held} of its ${result.stored} stored bans that it no longer has, as removing at least ${MASS_REMOVAL_BANS} bans and ${MASS_REMOVAL_SHARE * 100}% of a list at once needs confirming. If the list really dropped them, set IMPORTER_ALLOW_MASS_REMOVAL=${result.id} for one run.`
       );
     } else if (result.massRemoval) {
       Logger.important(
         'BanImporter',
-        `Imported ${list}: ${counts.join(', ')}, as IMPORTER_ALLOW_MASS_REMOVAL names the list. Remove it from the setting once the removal is done.`
+        `${imported}: ${counts.join(', ')}, as IMPORTER_ALLOW_MASS_REMOVAL names the list. Remove it from the setting once the removal is done.`
       );
-    } else if (result.failed > 0) {
-      Logger.important('BanImporter', `Imported ${list}: ${counts.join(', ')}.`);
+    } else if (result.failed > 0 || again) {
+      Logger.important('BanImporter', `${imported}: ${counts.join(', ')}.`);
     } else {
-      Logger.verbose('BanImporter', 2, `Imported ${list}: ${counts.join(', ')}.`);
+      Logger.verbose('BanImporter', 2, `${imported}: ${counts.join(', ')}.`);
     }
+  }
+
+  // Log one line for the whole import, which is posted to Discord on every run, as important, so it
+  // is never dropped for other messages. Bans that were kept as their removal needs confirming are
+  // counted as held, not removed. When the run stopped part-way, the line sums up the lists imported
+  // before it stopped, out of the listCount lists of the run, and leaves out a list it stopped in
+  // the middle of, which has a line of its own.
+  logSummary(results, { stopped = false, listCount = results.length } = {}) {
+    const total = (field) => results.reduce((sum, result) => sum + result[field], 0);
+    const removed = total('removed');
+    const totals = [
+      `${plural(total('fetched'), 'ban')} fetched`,
+      `${formatCount(total('created'))} new`,
+      `${formatCount(total('updated'))} updated`,
+      `${formatCount(removed)} removed`,
+      `${formatCount(total('held'))} held`,
+      `${plural(results.filter((result) => result.error).length, 'list')} failed`
+    ];
+    const lists =
+      results.length < listCount
+        ? `${formatCount(results.length)} of ${plural(listCount, 'ban list')}`
+        : plural(results.length, 'ban list');
+    Logger.important(
+      'BanImporter',
+      `Got ${plural(removed, 'deleted ban')}. Imported ${lists}${stopped ? ' before the run stopped' : ''}: ${totals.join(', ')}.`
+    );
   }
 }

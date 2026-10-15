@@ -16,9 +16,9 @@ const REMOTE_RETRY_DELAY = 2000; // doubled after each failed attempt
 const BATTLEMETRICS_BANS = new URL('https://api.battlemetrics.com/bans');
 const BATTLEMETRICS_PAGE_SIZE = 100;
 
-// A BattleMetrics list is read for at most the pages its ban count needs, plus these, in case bans
-// are added while it is read. Without a count, at most BATTLEMETRICS_MAX_PAGES pages are read.
-const BATTLEMETRICS_EXTRA_PAGES = 50;
+// A BattleMetrics list is read for at most this many pages, in case its links never end. The
+// largest lists need about 120. BattleMetrics' count of a list's bans does not lower the limit, as
+// it is not known yet whether the count includes expired bans.
 const BATTLEMETRICS_MAX_PAGES = 2000;
 
 async function doSleep(ms) {
@@ -123,8 +123,12 @@ export default class BanFetcher {
         break;
       } catch (err) {
         const problem = describeRemoteError(err);
-        if (attempt >= REMOTE_ATTEMPTS || !isRetryableRemoteError(err))
-          throw new Error(`Could not fetch the remote ban list: ${problem}.`);
+        if (attempt >= REMOTE_ATTEMPTS || !isRetryableRemoteError(err)) {
+          // The status tells the importer whether the list is worth fetching again later.
+          const error = new Error(`Could not fetch the remote ban list: ${problem}.`);
+          error.status = err.response?.status;
+          throw error;
+        }
 
         const delay = REMOTE_RETRY_DELAY * 2 ** (attempt - 1);
         Logger.verbose(
@@ -184,7 +188,6 @@ export default class BanFetcher {
     // Setup the initial parameters for the first fetch.
     let params = { 'filter[banList]': banList.source, 'page[size]': BATTLEMETRICS_PAGE_SIZE };
     const visited = new Set([pageAddress(params)]);
-    let maxPages = BATTLEMETRICS_MAX_PAGES;
     let firstMetaTotal = null;
     let rawCount = 0;
     const bans = [];
@@ -206,12 +209,9 @@ export default class BanFetcher {
       if (!data || !Array.isArray(data.data) || !data.links)
         throw new Error('BattleMetrics returned an invalid page of bans.');
 
-      // The list's ban count, if BattleMetrics gives one, limits how many pages are followed.
+      // The list's ban count, if BattleMetrics gives one, is returned with its bans.
       const total = data.meta && data.meta.total;
-      if (page === 1 && Number.isInteger(total) && total >= 0) {
-        firstMetaTotal = total;
-        maxPages = Math.ceil(total / BATTLEMETRICS_PAGE_SIZE) + BATTLEMETRICS_EXTRA_PAGES;
-      }
+      if (page === 1 && Number.isInteger(total) && total >= 0) firstMetaTotal = total;
 
       // Loop over each ban in the page's data.
       rawCount += data.data.length;
@@ -251,8 +251,10 @@ export default class BanFetcher {
       // If that is the last page then break out the loop.
       const next = data.links.next;
       if (!next) break;
-      if (page >= maxPages)
-        throw new Error(`BattleMetrics gave more than ${maxPages} pages of bans for the list.`);
+      if (page >= BATTLEMETRICS_MAX_PAGES)
+        throw new Error(
+          `BattleMetrics gave more than ${BATTLEMETRICS_MAX_PAGES} pages of bans for the list.`
+        );
 
       // Store the parameters for the next page fetch. The link must stay on the list's bans and
       // must not lead back to a page already fetched.

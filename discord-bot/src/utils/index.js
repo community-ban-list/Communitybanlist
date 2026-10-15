@@ -11,7 +11,9 @@ import { checkBanListSource, parseBanListSource } from './ban-list-source.js';
 import confirm from './confirm.js';
 import {
   deleteBanLists,
+  deleteBansOfBanLists,
   describeBanListDeletion,
+  summariseBanListBans,
   summariseBanListDeletion
 } from './delete-ban-lists.js';
 import {
@@ -51,6 +53,7 @@ export {
   confirm,
   countBans,
   deleteBanLists,
+  deleteBansOfBanLists,
   describeBanList,
   describeBanListDeletion,
   describeOrganisation,
@@ -66,6 +69,7 @@ export {
   skipCheckOption,
   suggestBanLists,
   suggestOrganisations,
+  summariseBanListBans,
   summariseBanListDeletion,
   truncate,
   UserError

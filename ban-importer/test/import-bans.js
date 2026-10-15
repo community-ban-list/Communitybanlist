@@ -154,16 +154,17 @@ const sequelize = {
   }
 };
 
-// BattleMetrics lists, by source: each page is a list of [uid, SteamID] pairs, or an error.
+// BattleMetrics lists, by source: each page is a list of [uid, SteamID, reason] entries, an error,
+// or a function that returns either when the page is fetched.
 const battlemetricsLists = new Map();
 const battlemetricsRequests = [];
-const record = ([uid, steamUser]) => ({
+const record = ([uid, steamUser, reason = 'Cheating']) => ({
   type: 'ban',
   attributes: {
     uid,
     timestamp: '2026-01-01T00:00:00.000Z',
     expires: null,
-    reason: 'Cheating',
+    reason,
     note: null,
     identifiers: [{ type: 'steamID', identifier: steamUser }]
   }
@@ -180,8 +181,19 @@ async function battlemetrics(method, endpoint, params) {
       : null;
   return { data: { data: page.map(record), links: { next } } };
 }
+const httpError = (status) =>
+  Object.assign(new Error(`Request failed with status code ${status}`), { response: { status } });
+// A page that fails the first time it is fetched, and returns the entries after that.
+const failsOnce = (entries, error = httpError(502)) => {
+  let fetched = false;
+  return () => {
+    if (fetched) return entries;
+    fetched = true;
+    return error;
+  };
+};
 
-// Remote lists, by URL: the body of the file.
+// Remote lists, by URL: the body of the file, or an error.
 const remoteLists = new Map();
 const remoteRequests = [];
 
@@ -191,7 +203,9 @@ const dependencies = {
     default: {
       async get(url) {
         remoteRequests.push(url);
-        return { status: 200, data: remoteLists.get(url) };
+        const body = remoteLists.get(url);
+        if (body instanceof Error) throw body;
+        return { status: 200, data: body };
       }
     }
   },
@@ -225,7 +239,8 @@ const context = vm.createContext({
   setTimeout: (callback, ms) => {
     delays.push(ms);
     setImmediate(callback);
-  }
+  },
+  clearTimeout: () => {}
 });
 const load = async (path) =>
   new vm.SourceTextModule(await readFile(new URL(path, import.meta.url), 'utf8'), { context });
@@ -292,6 +307,25 @@ function battlemetricsList(id, stored, pages) {
   }
   battlemetricsLists.set(`bm-${id}`, pages);
 }
+// Add a remote ban list with a stored ban for each of the players, and the body it will return.
+function remoteList(id, players, body) {
+  const source = `https://bans.example/${id}.txt`;
+  banLists.set(id, { id, type: 'remote', source });
+  remoteLists.set(source, body);
+  for (const n of players) {
+    steamUsers.set(steamID(n), user(steamID(n)));
+    bans.set(`${id},${steamID(n)},null`, {
+      id: `${id},${steamID(n)},null`,
+      expires: null,
+      expired: false,
+      reason: classifyBanReason('Cheating'),
+      rawReason: 'Cheating',
+      rawNote: null,
+      steamUser: steamID(n),
+      banList: id
+    });
+  }
+}
 const pairs = (prefix, from, to) =>
   Array.from({ length: to - from }, (_, i) => [`${prefix}${from + i}`, steamID(from + i)]);
 const storedIDs = (list) =>
@@ -299,6 +333,19 @@ const storedIDs = (list) =>
 const logged = (level, pattern) =>
   logs.filter((log) => log.level === level && pattern.test(log.message));
 const run = (options) => new BanImporter(options).importBans();
+
+// Each run ends with one important level-1 line, posted to Discord, that sums up the import. Other
+// level-1 lines are about lists that need looking at.
+const SUMMARY =
+  /^Got [\d,]+ deleted bans?\. Imported [\d,]+ (of [\d,]+ )?ban lists?( before the run stopped)?: /;
+const warnings = () => logs.filter((log) => log.level === 1 && !SUMMARY.test(log.message));
+function summary() {
+  const lines = logs.filter((log) => SUMMARY.test(log.message));
+  assert.strictEqual(lines.length, 1, 'One summary line per run');
+  assert.strictEqual(lines[0].level, 1);
+  assert.ok(lines[0].important);
+  return lines[0].message;
+}
 
 // A list that fails part-way through keeps every stored ban, and none of its bans are saved, while
 // a complete list in the same run loses exactly the bans it no longer has.
@@ -322,6 +369,17 @@ assert.strictEqual(
   ).length,
   1
 );
+// It is tried again after the other list, a minute later, and fails the same way.
+assert.deepStrictEqual(battlemetricsRequests, ['bm-1', 'bm-1', 'bm-2', 'bm-2', 'bm-1', 'bm-1']);
+assert.deepStrictEqual(delays, [60 * 1000]);
+assert.strictEqual(results[0].attempt, 2);
+assert.strictEqual(
+  logged(
+    1,
+    /^Failed to import ban list \(ID: 1\) again while fetching it, so none of its bans were removed\. Error: Request failed with status code 500$/
+  ).length,
+  1
+);
 assert.deepStrictEqual(storedIDs(2), ['2,b0', '2,b1', '2,b3', '2,b9']);
 const destroyed = events.filter(([type]) => type === 'destroy');
 assert.strictEqual(destroyed.length, 1);
@@ -329,7 +387,7 @@ assert.deepStrictEqual(destroyed[0][2], ['2,b2']);
 // The players who lost a ban are queued for an update in the same transaction as the removal.
 const sweep = events.slice(events.findIndex(([type]) => type === 'begin'));
 assert.deepStrictEqual(
-  sweep.map(([type]) => type),
+  sweep.slice(0, 4).map(([type]) => type),
   ['begin', 'flags', 'destroy', 'commit']
 );
 assert.strictEqual(sweep[1][1], sweep[0][1]);
@@ -357,8 +415,13 @@ assert.deepStrictEqual(
     [2, 4, 1, 1]
   ]
 );
+assert.strictEqual(
+  summary(),
+  'Got 1 deleted ban. Imported 2 ban lists: 4 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 1 list failed.'
+);
 
-// Every save has finished before the list's stored bans are compared with what it returned.
+// Every save has finished before any of the list's bans are removed. The bans it had are read
+// before its bans are saved, so what it lost is measured against the bans it had before the run.
 reset();
 battlemetricsList(3, pairs('c', 0, 6), [
   pairs('c', 0, 3),
@@ -368,47 +431,106 @@ slowSaves.add('3,c7');
 slowSaves.add('3,c0');
 await run();
 const select = events.findIndex(([type, list]) => type === 'select' && list === 3);
-assert.ok(select > events.findLastIndex(([type, id]) => type === 'saved' && id.startsWith('3,')));
-assert.ok(select > events.findIndex(([type, id]) => type === 'create' && id === '3,c7'));
+assert.ok(select >= 0 && select < events.findIndex(([type]) => type === 'saved'));
+const begin = events.findIndex(([type]) => type === 'begin');
+assert.ok(begin > events.findLastIndex(([type, id]) => type === 'saved' && id.startsWith('3,')));
+assert.ok(begin > events.findIndex(([type, id]) => type === 'create' && id === '3,c7'));
 assert.strictEqual(pendingSaves, 0);
 assert.deepStrictEqual(storedIDs(3), ['3,c0', '3,c1', '3,c2', '3,c4', '3,c5', '3,c7']);
 
-// A list that returns no bans keeps its stored bans, with a warning.
+// A list that returns no bans keeps its stored bans, with a warning that says how to remove them.
 reset();
 battlemetricsList(4, pairs('d', 0, 5), [[]]);
 await run();
 assert.strictEqual(storedIDs(4).length, 5);
 assert.ok(!events.some(([type]) => type === 'destroy'));
 assert.strictEqual(
-  logged(1, /^Imported ban list \(ID: 4\): it returned no bans, so its 5 stored bans were kept/)
-    .length,
+  logged(
+    1,
+    /^Imported ban list \(ID: 4\): it returned no bans, so its 5 stored bans were kept in case the list is broken\. If the list really is empty, set IMPORTER_ALLOW_MASS_REMOVAL=4 for one run\.$/
+  ).length,
   1
 );
+assert.strictEqual(
+  summary(),
+  'Got 0 deleted bans. Imported 1 ban list: 0 bans fetched, 0 new, 0 updated, 0 removed, 5 held, 0 lists failed.'
+);
 
-// Removing at least 25 bans and 10% of a list waits for IMPORTER_ALLOW_MASS_REMOVAL.
-for (const [stored, kept, held] of [
-  [30, 4, true],
-  [30, 6, false],
-  [300, 270, true],
-  [300, 271, false]
+// Once IMPORTER_ALLOW_MASS_REMOVAL names it, an empty list loses all its bans.
+reset();
+battlemetricsList(4, pairs('d', 0, 5), [[]]);
+env.IMPORTER_ALLOW_MASS_REMOVAL = '4';
+await run();
+assert.deepStrictEqual(storedIDs(4), []);
+assert.strictEqual(
+  logged(
+    1,
+    /^Imported ban list \(ID: 4\): 0 bans fetched, 0 new, 0 updated, 5 removed, as IMPORTER_ALLOW_MASS_REMOVAL names the list\. Remove it from the setting once the removal is done\.$/
+  ).length,
+  1
+);
+assert.strictEqual(warnings().length, 1);
+assert.strictEqual(
+  summary(),
+  'Got 5 deleted bans. Imported 1 ban list: 0 bans fetched, 0 new, 0 updated, 5 removed, 0 held, 0 lists failed.'
+);
+
+// Removing at least 25 bans and 10% of the bans a list had before the run waits for
+// IMPORTER_ALLOW_MASS_REMOVAL, however many bans it gained. A list that now returns only other
+// bans, as when its source was changed to a bigger list, keeps all its old ones.
+for (const [stored, kept, added, held] of [
+  [30, 4, 0, true],
+  [30, 6, 0, false],
+  [300, 270, 0, true],
+  [300, 271, 0, false],
+  [300, 270, 5, true],
+  [300, 271, 5, false],
+  [30, 0, 400, true]
 ]) {
   reset();
-  battlemetricsList(5, pairs('e', 0, stored), [pairs('e', 0, kept)]);
-  await run();
-  assert.strictEqual(storedIDs(5).length, held ? stored : kept, `${stored} stored, ${kept} kept`);
+  battlemetricsList(5, pairs('e', 0, stored), [
+    [...pairs('e', 0, kept), ...pairs('n', 1000, 1000 + added)]
+  ]);
+  const [result] = await run();
+  const label = `${stored} stored, ${kept} kept, ${added} added`;
+  assert.strictEqual(storedIDs(5).length, (held ? stored : kept) + added, label);
   assert.strictEqual(
     events.some(([type]) => type === 'destroy'),
-    !held
+    !held,
+    label
+  );
+  assert.deepStrictEqual(
+    [result.stored, result.held, result.removed],
+    held ? [stored, stored - kept, 0] : [stored, 0, stored - kept],
+    label
   );
   const holds = logged(
     1,
     new RegExp(
-      `^Imported ban list \\(ID: 5\\): ${kept} bans fetched, 0 new, 0 updated\\. Kept the ${stored - kept} of its ${stored} stored bans that it no longer has, .* set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run\\.$`
+      `^Imported ban list \\(ID: 5\\): ${kept + added} bans fetched, ${added} new, 0 updated\\. Kept the ${stored - kept} of its ${stored} stored bans that it no longer has, .* set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run\\.$`
     )
   );
-  assert.strictEqual(holds.length, held ? 1 : 0);
-  assert.strictEqual(logs.filter((log) => log.level === 1).length, held ? 1 : 0);
+  assert.strictEqual(holds.length, held ? 1 : 0, label);
+  assert.strictEqual(warnings().length, held ? 1 : 0, label);
+  assert.match(
+    summary(),
+    new RegExp(`, ${held ? 0 : stored - kept} removed, ${held ? stored - kept : 0} held, `),
+    label
+  );
 }
+
+// Named in IMPORTER_ALLOW_MASS_REMOVAL, the list that now returns only other bans loses its old ones.
+reset();
+battlemetricsList(5, pairs('e', 0, 30), [pairs('n', 1000, 1400)]);
+env.IMPORTER_ALLOW_MASS_REMOVAL = '5';
+await run();
+assert.strictEqual(storedIDs(5).length, 400);
+assert.ok(!storedIDs(5).some((id) => id.startsWith('5,e')));
+assert.strictEqual(
+  logged(1, /^Imported ban list \(ID: 5\): 400 bans fetched, 400 new, 0 updated, 30 removed, as/)
+    .length,
+  1
+);
 
 reset();
 battlemetricsList(5, pairs('e', 0, 2600), [pairs('e', 0, 50)]);
@@ -436,31 +558,22 @@ assert.strictEqual(
   1
 );
 assert.strictEqual(logged(1, /IMPORTER_ALLOW_MASS_REMOVAL=6 for one run/).length, 1);
+assert.strictEqual(
+  summary(),
+  'Got 2,550 deleted bans. Imported 2 ban lists: 52 bans fetched, 0 new, 0 updated, 2,550 removed, 28 held, 0 lists failed.'
+);
 
 // Remote lists: an empty file keeps the list's bans, after a single request, and an error page
-// fails the list.
+// fails the list, which is tried once more after the other list.
 reset();
-for (const [id, body] of [
-  [7, ''],
-  [8, '<html><body>Please sign in</body></html>']
-]) {
-  const source = `https://bans.example/${id}.txt`;
-  banLists.set(id, { id, type: 'remote', source });
-  remoteLists.set(source, body);
-  steamUsers.set(steamID(id), user(steamID(id)));
-  bans.set(`${id},${steamID(id)},null`, {
-    id: `${id},${steamID(id)},null`,
-    expires: null,
-    expired: false,
-    reason: classifyBanReason('Cheating'),
-    rawReason: 'Cheating',
-    rawNote: null,
-    steamUser: steamID(id),
-    banList: id
-  });
-}
+remoteList(7, [7], '');
+remoteList(8, [8], '<html><body>Please sign in</body></html>');
 await run();
-assert.strictEqual(remoteRequests.length, 2);
+assert.deepStrictEqual(remoteRequests, [
+  'https://bans.example/7.txt',
+  'https://bans.example/8.txt',
+  'https://bans.example/8.txt'
+]);
 assert.strictEqual(storedIDs(7).length, 1);
 assert.strictEqual(storedIDs(8).length, 1);
 assert.strictEqual(logged(1, /^Imported ban list \(ID: 7\): it returned no bans/).length, 1);
@@ -468,28 +581,15 @@ assert.strictEqual(
   logged(1, /^Failed to import ban list \(ID: 8\) while fetching it, .*error page/).length,
   1
 );
+assert.strictEqual(
+  logged(1, /^Failed to import ban list \(ID: 8\) again while fetching it, .*error page/).length,
+  1
+);
 
 // An unchanged remote ban has no note, which matches the NULL stored for it, so it is not saved
 // again. A changed one is.
 reset();
-banLists.set(9, { id: 9, type: 'remote', source: 'https://bans.example/9.txt' });
-remoteLists.set(
-  'https://bans.example/9.txt',
-  `${steamID(1)}:0 //Cheating\n${steamID(2)}:0 //Teamkilling`
-);
-for (const n of [1, 2]) {
-  steamUsers.set(steamID(n), user(steamID(n)));
-  bans.set(`9,${steamID(n)},null`, {
-    id: `9,${steamID(n)},null`,
-    expires: null,
-    expired: false,
-    reason: classifyBanReason('Cheating'),
-    rawReason: 'Cheating',
-    rawNote: null,
-    steamUser: steamID(n),
-    banList: 9
-  });
-}
+remoteList(9, [1, 2], `${steamID(1)}:0 //Cheating\n${steamID(2)}:0 //Teamkilling`);
 await run();
 assert.deepStrictEqual(
   events.filter(([type]) => type === 'update'),
@@ -557,13 +657,14 @@ battlemetricsList(11, pairs('h', 0, 3), [
 battlemetricsList(12, [], [pairs('i', 0, 2)]);
 await run();
 assert.strictEqual(findOrCreateCalls.filter((id) => id.startsWith('11,')).length, 2);
-assert.ok(!events.some(([type, list]) => type === 'select' && list === 11));
+assert.ok(!events.some(([type]) => type === 'begin' || type === 'destroy'));
 assert.strictEqual(
   logged(2, /^Skipped ban list \(ID: 11\), as it was removed during the run\.$/).length,
   1
 );
-assert.strictEqual(logs.filter((log) => log.level === 1).length, 0);
+assert.strictEqual(warnings().length, 0);
 assert.deepStrictEqual(storedIDs(12), ['12,i0', '12,i1']);
+assert.deepStrictEqual(delays, []);
 
 // A list removed before it is read is skipped without being fetched.
 reset();
@@ -582,9 +683,10 @@ assert.deepStrictEqual(battlemetricsRequests, ['bm-14']);
 assert.strictEqual(logged(2, /^Skipped ban list \(ID: 13\)/).length, 1);
 
 // A list whose bans cannot be saved because the database stays unavailable stops after the
-// retries, and keeps its stored bans.
+// retries, and keeps its stored bans. It is not fetched again later in the run.
 reset();
 battlemetricsList(15, pairs('l', 0, 4), [pairs('l', 0, 3)]);
+battlemetricsList(16, [], [[]]);
 for (const id of ['15,l0', '15,l1', '15,l2'])
   saveErrors.set(
     id,
@@ -596,7 +698,7 @@ assert.deepStrictEqual([...findOrCreateCalls].sort(), [
   ...Array(5).fill('15,l1')
 ]);
 assert.deepStrictEqual(storedIDs(15), ['15,l0', '15,l1', '15,l2', '15,l3']);
-assert.ok(!events.some(([type]) => type === 'select'));
+assert.ok(!events.some(([type]) => type === 'begin' || type === 'destroy'));
 assert.strictEqual(
   logged(
     1,
@@ -604,12 +706,118 @@ assert.strictEqual(
   ).length,
   1
 );
+assert.deepStrictEqual(battlemetricsRequests, ['bm-15', 'bm-16']);
+assert.ok(!delays.includes(60 * 1000));
+
+// A list that could not be fetched, e.g. during a short BattleMetrics outage, is tried again a
+// minute after the other lists, and its second attempt is imported as usual.
+reset();
+battlemetricsList(17, pairs('m', 0, 3), [
+  pairs('m', 0, 1),
+  failsOnce([...pairs('m', 2, 3), ['m5', steamID(5)]])
+]);
+battlemetricsList(18, pairs('o', 0, 2), [pairs('o', 0, 2)]);
+results = await run();
+assert.deepStrictEqual(battlemetricsRequests, ['bm-17', 'bm-17', 'bm-18', 'bm-17', 'bm-17']);
+assert.deepStrictEqual(delays, [60 * 1000]);
+assert.deepStrictEqual(storedIDs(17), ['17,m0', '17,m2', '17,m5']);
+assert.deepStrictEqual(
+  Array.from(results, ({ id, attempt, error }) => [id, attempt, error]),
+  [
+    [17, 2, undefined],
+    [18, 1, undefined]
+  ]
+);
+assert.deepStrictEqual(
+  warnings().map((log) => log.message),
+  [
+    'Failed to import ban list (ID: 17) while fetching it, so none of its bans were removed. Error: Request failed with status code 502',
+    'Imported ban list (ID: 17) at the second attempt: 3 bans fetched, 1 new, 0 updated, 1 removed.'
+  ]
+);
+assert.strictEqual(
+  summary(),
+  'Got 1 deleted ban. Imported 2 ban lists: 5 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed.'
+);
+
+// When no list could be fetched, the source is down, so nothing is tried again.
+reset();
+battlemetricsList(17, pairs('m', 0, 3), [httpError(502)]);
+battlemetricsList(18, pairs('o', 0, 2), [new Error('timeout')]);
+await run();
+assert.deepStrictEqual(battlemetricsRequests, ['bm-17', 'bm-18']);
+assert.deepStrictEqual(delays, []);
+assert.strictEqual(warnings().length, 2);
+assert.strictEqual(
+  summary(),
+  'Got 0 deleted bans. Imported 2 ban lists: 0 bans fetched, 0 new, 0 updated, 0 removed, 0 held, 2 lists failed.'
+);
+
+// Nor is a list its source refused, e.g. as it was deleted, as that would happen again.
+reset();
+battlemetricsList(17, pairs('m', 0, 3), [httpError(404)]);
+remoteList(19, [1], new Error('getaddrinfo ENOTFOUND bans.example'));
+remoteList(20, [2], Object.assign(httpError(403), { code: 'ERR_BAD_REQUEST' }));
+battlemetricsList(18, pairs('o', 0, 2), [pairs('o', 0, 2)]);
+results = await run();
+assert.deepStrictEqual(battlemetricsRequests, ['bm-17', 'bm-18']);
+// The remote list that could not be reached is tried 3 times, and 3 more after the other lists.
+assert.deepStrictEqual(remoteRequests, [
+  ...Array(3).fill('https://bans.example/19.txt'),
+  'https://bans.example/20.txt',
+  ...Array(3).fill('https://bans.example/19.txt')
+]);
+assert.deepStrictEqual(
+  Array.from(results, ({ id, attempt, error }) => [id, attempt, Boolean(error)]),
+  [
+    [17, 1, true],
+    [19, 2, true],
+    [20, 1, true],
+    [18, 1, false]
+  ]
+);
+assert.strictEqual(
+  summary(),
+  'Got 0 deleted bans. Imported 4 ban lists: 2 bans fetched, 0 new, 0 updated, 0 removed, 0 held, 3 lists failed.'
+);
+
+// One line sums up the run, however each list went, and lists without problems are only logged
+// to the console.
+reset();
+battlemetricsList(21, pairs('p', 0, 10), [
+  [
+    ...pairs('p', 0, 4),
+    ['p4', steamID(4), 'Teamkilling'],
+    ...pairs('p', 5, 9),
+    ['p20', steamID(20)],
+    ['p21', steamID(21)]
+  ]
+]);
+battlemetricsList(22, pairs('q', 0, 30), [pairs('q', 0, 2)]);
+battlemetricsList(23, pairs('r', 0, 2), [httpError(404)]);
+battlemetricsList(24, pairs('s', 0, 3), [[]]);
+await run();
+assert.strictEqual(
+  logged(2, /^Imported ban list \(ID: 21\): 11 bans fetched, 2 new, 1 updated, 1 removed\.$/)
+    .length,
+  1
+);
+assert.deepStrictEqual(
+  warnings().map((log) => Number(log.message.match(/ban list \(ID: (\d+)\)/)[1])),
+  [22, 23, 24]
+);
+assert.strictEqual(logged(1, /^Failed to import ban list \(ID: 23\) while fetching it/).length, 1);
+assert.strictEqual(
+  summary(),
+  'Got 1 deleted ban. Imported 4 ban lists: 13 bans fetched, 2 new, 1 updated, 1 removed, 31 held, 1 list failed.'
+);
 
 // A run asked to stop while a list's bans are being saved finishes the saves under way, each with
 // its player's update, and starts no more. None of the list's bans are removed, as the bans it did
-// not save would look removed, and no other list is imported. This stops the importer's run
-// control, so it comes last.
+// not save would look removed, and no other list is imported. The summary counts the lists
+// imported before the run stopped. This stops the importer's run control, so it comes last.
 reset();
+battlemetricsList(29, pairs('r', 0, 2), [pairs('r', 0, 1)]);
 battlemetricsList(30, pairs('s', 0, 4), [pairs('s', 2, 10)]);
 battlemetricsList(31, pairs('t', 0, 2), [pairs('t', 0, 2)]);
 onSave = (id) => {
@@ -618,17 +826,21 @@ onSave = (id) => {
 const stopped = await run().catch((err) => err);
 assert.strictEqual(stopped.name, 'RunStopped');
 assert.strictEqual(stopped.reason, 'it received SIGTERM');
-assert.deepStrictEqual(findOrCreateCalls, ['30,s2', '30,s3', '30,s4', '30,s5']);
+assert.deepStrictEqual(findOrCreateCalls, ['29,r0', '30,s2', '30,s3', '30,s4', '30,s5']);
 assert.strictEqual(pendingSaves, 0);
+assert.deepStrictEqual(storedIDs(29), ['29,r0']);
 assert.deepStrictEqual(storedIDs(30), ['30,s0', '30,s1', '30,s2', '30,s3', '30,s4', '30,s5']);
 assert.strictEqual(steamUsers.get(steamID(5)).lastRefreshedExport, null);
 assert.strictEqual(steamUsers.get(steamID(6)).lastRefreshedExport, FRESH);
-assert.ok(!events.some(([type]) => type === 'begin' || type === 'destroy'));
-assert.ok(!events.some(([type, id]) => type === 'read list' && id === 31));
-assert.deepStrictEqual(battlemetricsRequests, ['bm-30']);
-// The list's line says what it saved.
 assert.deepStrictEqual(
-  logs.filter(({ level }) => level === 1).map(({ message, important }) => [message, important]),
+  events.filter(([type]) => type === 'destroy').map(([, , ids]) => ids),
+  [['29,r1']]
+);
+assert.ok(!events.some(([type, id]) => type === 'read list' && id === 31));
+assert.deepStrictEqual(battlemetricsRequests, ['bm-29', 'bm-30']);
+// The list it stopped in the middle of has a line of its own, which says what it saved.
+assert.deepStrictEqual(
+  warnings().map(({ message, important }) => [message, important]),
   [
     [
       'Stopped importing ban list (ID: 30) while saving its bans, as the run is stopping, so none of its bans were removed (8 bans fetched, 2 new, 0 updated).',
@@ -636,9 +848,13 @@ assert.deepStrictEqual(
     ]
   ]
 );
+assert.strictEqual(
+  summary(),
+  'Got 1 deleted ban. Imported 1 of 3 ban lists before the run stopped: 1 ban fetched, 0 new, 0 updated, 1 removed, 0 held, 0 lists failed.'
+);
 
 assert.strictEqual(verboseLevelOneLines, 0, 'Lines for the log channel are logged as important');
 
 console.log(
-  'Ban import checks passed: complete lists only, awaited saves, holds, empty lists, retries and stops.'
+  'Ban import checks passed: complete lists only, awaited saves, holds, empty lists, second attempts, retries, stops and the run summary.'
 );

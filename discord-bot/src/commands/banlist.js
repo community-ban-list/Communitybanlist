@@ -1,5 +1,6 @@
 import { SlashCommandBuilder } from 'discord.js';
 
+import { sequelize } from 'scbl-lib/db';
 import { BanList } from 'scbl-lib/db/models';
 import { Op } from 'scbl-lib/db/sequelize';
 
@@ -15,6 +16,7 @@ import {
   checkBanListSourceUnused,
   confirm,
   deleteBanLists,
+  deleteBansOfBanLists,
   describeBanList,
   describeBanListDeletion,
   findBanList,
@@ -26,6 +28,7 @@ import {
   skipCheckOption,
   suggestBanLists,
   suggestOrganisations,
+  summariseBanListBans,
   summariseBanListDeletion,
   UserError
 } from '../utils/index.js';
@@ -124,12 +127,34 @@ async function update(interaction) {
   }
 
   const description = describeBanList(banList, organisation);
+  const currentName = formatBanListName(banList, organisation);
   const changes = applyChanges(banList, { name, type, source });
   if (changes.length === 0)
     throw new UserError('Nothing to change. Give a new name, type or source.');
 
-  await banList.save();
-  audit(interaction, `updated ${description}: ${changes.join(', ')}.`);
+  // The list's bans came from its old source, so a new type or source deletes them, and the new
+  // source's bans are imported on the next ban importer run. Left to the importer, most of them
+  // would be kept, as it holds back removing many of a list's bans at once.
+  let deletion = null;
+  if (check !== undefined) {
+    const bans = await summariseBanListBans([banList.id]);
+    if (bans.bans > 0) {
+      deletion = describeBanListDeletion(bans);
+      const confirmed = await confirm(
+        interaction,
+        `Change the source of ${currentName}? This deletes its ${deletion}, and the new source's bans are imported on the next ban importer run.`,
+        'Change source'
+      );
+      if (!confirmed) return;
+    }
+  }
+
+  await sequelize.transaction(async (transaction) => {
+    if (deletion) await deleteBansOfBanLists([banList.id], transaction);
+    await banList.save({ transaction });
+  });
+  const deleted = deletion ? `, deleting ${deletion}` : '';
+  audit(interaction, `updated ${description}: ${changes.join(', ')}${deleted}.`);
 
   const listName = formatBanListName(banList, organisation);
   await interaction.editReply({

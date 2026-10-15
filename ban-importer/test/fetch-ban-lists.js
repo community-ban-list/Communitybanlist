@@ -140,34 +140,53 @@ assert.deepStrictEqual(ids(list.bans), ['7,76561198000000001,null']);
 assert.strictEqual(remoteRequests.length, 3);
 assert.deepStrictEqual(delays, [2000, 4000]);
 
+// The error of a list that could not be fetched carries the server's last status, if it answered,
+// so the importer can tell a list it refused from a passing problem.
 reset();
 answers(
   networkError('ECONNABORTED', 'timeout of 30000ms exceeded'),
   networkError('ERR_CANCELED', 'canceled'),
   httpError(429)
 );
-await assert.rejects(
-  fetcher.fetchBanList(remoteList),
-  /^Error: Could not fetch the remote ban list: the server answered HTTP 429\.$/
-);
+await assert.rejects(fetcher.fetchBanList(remoteList), (err) => {
+  assert.strictEqual(
+    err.message,
+    'Could not fetch the remote ban list: the server answered HTTP 429.'
+  );
+  assert.strictEqual(err.status, 429);
+  return true;
+});
 assert.strictEqual(remoteRequests.length, 3);
 
 reset();
 answers(networkError('ERR_CANCELED', 'canceled'), networkError('ERR_CANCELED'), httpError(500));
 await assert.rejects(fetcher.fetchBanList(remoteList), /HTTP 500/);
 
+reset();
+answers(networkError('ECONNRESET'), networkError('ECONNRESET'), networkError('ECONNREFUSED'));
+await assert.rejects(fetcher.fetchBanList(remoteList), (err) => {
+  assert.match(err.message, /ECONNREFUSED\.$/);
+  assert.strictEqual(err.status, undefined);
+  return true;
+});
+
 // Other answers, and lists over the size limit, fail at once.
-for (const [error, message] of [
-  [httpError(404), /the server answered HTTP 404\.$/],
-  [httpError(403), /the server answered HTTP 403\.$/],
+for (const [error, message, status] of [
+  [httpError(404), /the server answered HTTP 404\.$/, 404],
+  [httpError(403), /the server answered HTTP 403\.$/, 403],
   [
     networkError('ERR_BAD_RESPONSE', 'maxContentLength size of 20971520 exceeded'),
-    /the list is over 20 MB\.$/
+    /the list is over 20 MB\.$/,
+    undefined
   ]
 ]) {
   reset();
   answers(error);
-  await assert.rejects(fetcher.fetchBanList(remoteList), message);
+  await assert.rejects(fetcher.fetchBanList(remoteList), (err) => {
+    assert.match(err.message, message);
+    assert.strictEqual(err.status, status);
+    return true;
+  });
   assert.strictEqual(remoteRequests.length, 1);
 }
 
@@ -310,22 +329,40 @@ book({
 });
 assert.deepStrictEqual(ids((await fetcher.fetchBanList(banList)).bans), ['3,a', '3,b']);
 
-// Links that never end stop at the pages the list's ban count needs plus 50, or at 2,000 pages
-// without a count.
+// BattleMetrics' count of the list's bans is returned, but does not limit the pages read: a list
+// with many more bans than its count, e.g. as the count leaves out its expired bans, is still read
+// in full.
+reset();
+book(
+  Object.fromEntries(
+    Array.from({ length: 120 }, (_, page) => [
+      page === 0 ? 'first' : `page${page}`,
+      {
+        meta: page === 0 ? { active: 1, total: 1 } : undefined,
+        data: [ban(`v${page}`, steam(page))],
+        links: { next: page < 119 ? link(`page${page + 1}`) : null }
+      }
+    ])
+  )
+);
+list = await fetcher.fetchBanList(banList);
+assert.strictEqual(list.bans.length, 120);
+assert.deepStrictEqual(ids(list.bans).slice(-2), ['3,v118', '3,v119']);
+assert.strictEqual(list.firstMetaTotal, 1);
+assert.strictEqual(battlemetricsRequests.length, 120);
+
+// Links that never end stop at 2,000 pages, whatever the list's ban count.
 let pageNumber = 0;
 const endless = (meta) => () => ({
   meta,
   data: [ban(`u${++pageNumber}`, steam(1))],
   links: { next: link(`page${pageNumber}`) }
 });
-for (const [meta, pages] of [
-  [{ total: 150 }, 52],
-  [undefined, 2000]
-]) {
+for (const meta of [{ total: 150 }, undefined]) {
   reset();
   book(new Proxy({}, { get: endless(meta) }));
-  await assert.rejects(fetcher.fetchBanList(banList), new RegExp(`more than ${pages} pages`));
-  assert.strictEqual(battlemetricsRequests.length, pages);
+  await assert.rejects(fetcher.fetchBanList(banList), /more than 2000 pages/);
+  assert.strictEqual(battlemetricsRequests.length, 2000);
 }
 
 await assert.rejects(
