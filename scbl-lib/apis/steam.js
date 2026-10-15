@@ -54,9 +54,14 @@ const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
   return retVar;
 });
 
+// Each request gets a job ID of its own. Bottleneck rejects a job while another with the same ID is
+// waiting or running.
+let jobCount = 0;
+
 export default async function (method, url, params, data = {}, priority = 5) {
+  jobCount++;
   return await makeRequest.withOptions(
-    { priority, id: 'STEAM-API-CALL' },
+    { priority, id: `STEAM-${jobCount}` },
     method,
     url,
     params,

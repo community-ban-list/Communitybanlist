@@ -32,7 +32,11 @@ const dependencies = {
     }
   },
   bottleneck: { default: Bottleneck },
-  '../config.js': { BATTLEMETRICS_API_KEY: 'test-token', BATTLEMETRICS_API_RESERVIOR: 10 }
+  '../config.js': {
+    BATTLEMETRICS_API_KEY: 'test-token',
+    BATTLEMETRICS_API_RESERVOIR: '10',
+    BATTLEMETRICS_API_RESERVOIR_VARIABLE: 'BATTLEMETRICS_API_RESERVOIR'
+  }
 };
 
 const source = await readFile(new URL('../apis/battlemetrics.js', import.meta.url), 'utf8');
@@ -73,5 +77,8 @@ for (const method of ['post', 'patch']) {
   assert.strictEqual(requests[requests.length - 1].data, payload);
   assert.strictEqual(jobs[jobs.length - 1].priority, 2);
 }
+
+// Every request has its own job ID, so requests made at the same time are not rejected.
+assert.strictEqual(new Set(jobs.map((job) => job.id)).size, jobs.length);
 
 console.log('BattleMetrics request regression checks passed (5 requests).');
