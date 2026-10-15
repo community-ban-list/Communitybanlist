@@ -1,8 +1,21 @@
+import { JWT_AUTH } from 'scbl-lib/config';
 import { connect } from 'scbl-lib/db';
 
 import server from './src/app.js';
+import checkJwtSecret from './src/jwt-secret.js';
 
 const PORT = process.env.PORT || 80;
+
+// Anyone who knows the secret that signs sign-in tokens can sign in as anyone, so refuse to start
+// without a private one.
+const jwtSecretProblem = checkJwtSecret(JWT_AUTH.SECRET);
+if (jwtSecretProblem?.fatal) {
+  console.error(
+    `The web server cannot start: ${jwtSecretProblem.message} Set it to a long random value, e.g. from \`openssl rand -base64 48\`.`
+  );
+  process.exit(1);
+}
+if (jwtSecretProblem) console.warn(`Warning: ${jwtSecretProblem.message}`);
 
 connect()
   .then(() => {
