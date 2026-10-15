@@ -36,37 +36,90 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+    # Each image is also tagged with the commit it was built from, e.g. sha-1a2b3c4, so a service can
+    # be pinned to a known build and rolled back by running the previous tag.
+    - name: Name the commit's image tag
+      id: commit
+      run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
     - name: Set up QEMU
       uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-    - name: Build and push Docker image for the web server
+    # Build and test all three images before pushing any, so a failing test in one image cannot leave
+    # the others pushed for a commit that failed. The push steps reuse the builds from the cache.
+    - name: Build and test the Docker image for the web server
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+          context: .
+          file: web-server/Dockerfile
+          push: false
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:${{ steps.commit.outputs.tag }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          provenance: true
+
+    - name: Build and test the Docker image for the ban importer
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+          context: .
+          file: ban-importer/Dockerfile
+          push: false
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:${{ steps.commit.outputs.tag }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          provenance: true
+
+    - name: Build and test the Docker image for the Discord bot
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+          context: .
+          file: discord-bot/Dockerfile
+          push: false
+          tags: |
+            werewolfboy13/cbl-bot:latest
+            werewolfboy13/cbl-bot:${{ steps.commit.outputs.tag }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          provenance: true
+
+    - name: Push the Docker image for the web server
       uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
       with:
           context: .
           file: web-server/Dockerfile
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:latest
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:${{ steps.commit.outputs.tag }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
           provenance: true
 
-    - name: Build and push Docker image for the ban importer
+    - name: Push the Docker image for the ban importer
       uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
       with:
           context: .
           file: ban-importer/Dockerfile
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:latest
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:${{ steps.commit.outputs.tag }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
           provenance: true
 
-    - name: Build and push Docker image for the Discord bot
+    - name: Push the Docker image for the Discord bot
       uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
       with:
           context: .
           file: discord-bot/Dockerfile
           push: true
-          tags: werewolfboy13/cbl-bot:latest
+          tags: |
+            werewolfboy13/cbl-bot:latest
+            werewolfboy13/cbl-bot:${{ steps.commit.outputs.tag }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
           provenance: true
 
     # The Portainer webhook redeploys the web server and the Discord bot, so it runs after all the

@@ -17,6 +17,12 @@ COPY package.json .
 # Install dependencies
 RUN yarn install --production
 
+# Run the tests, so an image that fails them is never built or pushed.
+RUN for test in scbl-lib/test/*.js ban-importer/test/*.js; do \
+      [ -e "$test" ] || continue; \
+      node --experimental-vm-modules "$test" || exit 1; \
+    done
+
 
 # Stage 2: Runtime
 # The runtime variant has no shell or package manager and runs as the non-root node user.
