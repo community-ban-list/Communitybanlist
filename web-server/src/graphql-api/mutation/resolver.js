@@ -1,5 +1,6 @@
 import { BanList, ExportBanList, ExportBanListConfig } from 'scbl-lib/db/models';
-import { testDiscordWebhook } from 'scbl-lib/utils';
+
+import testWebhook from './test-webhook.js';
 
 export default {
   Mutation: {
@@ -13,7 +14,7 @@ export default {
         throw new Error('Invalid export ban list type.');
       if (args.maxBanAge !== undefined && args.maxBanAge < 0)
         throw new Error('The max ban age must be a positive integer or zero.');
-      if (args.discordWebhook) await testDiscordWebhook(args.discordWebhook);
+      if (args.discordWebhook) await testWebhook(context, args.discordWebhook);
 
       // Create export ban list.
       const exportBanLsit = await ExportBanList.create({
@@ -46,7 +47,7 @@ export default {
       if (args.maxBanAge !== undefined && args.maxBanAge < 0)
         throw new Error('The max ban age must be a positive integer or zero.');
       if (args.discordWebhook && args.discordWebhook !== exportBanList.discordWebhook)
-        await testDiscordWebhook(args.discordWebhook);
+        await testWebhook(context, args.discordWebhook);
 
       // Check whether the ban list needs generating.
       if (

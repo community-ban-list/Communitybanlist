@@ -20,14 +20,22 @@ const dependencies = {
       }
     }
   },
-  'scbl-lib/utils': { testDiscordWebhook() {} }
+  'scbl-lib/utils': { isDiscordWebhookUrl() {}, testDiscordWebhook() {} }
 };
-const source = await readFile(
-  new URL('../src/graphql-api/mutation/resolver.js', import.meta.url),
-  'utf8'
-);
-const module = new vm.SourceTextModule(source, { context });
-await module.link((specifier) => {
+const url = new URL('../src/graphql-api/mutation/resolver.js', import.meta.url);
+const module = new vm.SourceTextModule(await readFile(url, 'utf8'), {
+  context,
+  identifier: url.href
+});
+await module.link(async (specifier, referencingModule) => {
+  // Relative imports load the real files.
+  if (specifier.startsWith('.')) {
+    const dependency = new URL(specifier, referencingModule.identifier);
+    return new vm.SourceTextModule(await readFile(dependency, 'utf8'), {
+      context,
+      identifier: dependency.href
+    });
+  }
   const exports = dependencies[specifier];
   assert.ok(exports, `Unexpected dependency: ${specifier}`);
   return new vm.SyntheticModule(
