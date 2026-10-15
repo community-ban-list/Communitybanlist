@@ -2,12 +2,11 @@
 const HOST = process.env.HOST || 'http://localhost';
 const LOCALSTORAGE_VERSION = 'v1.3.4'; // Change this to wipe clients local storage
 
+// Signs the web server's sign-in tokens. There is no default, as anyone who knows the secret can
+// sign in as anyone; the web server refuses to start without one.
 const JWT_AUTH = {
-  // REPLACE KEY IN PRODUCTION!
   ALGORITHM: process.env.JWT_AUTH_ALGORITHM || 'HS256',
-  SECRET:
-    process.env.JWT_AUTH_SECRET ||
-    'Pnc56tlFrlsahFsGt1efxepEZ1xSOBPIcDUZiEhv-UidVDA4Upg7Ao1t8DJFtMo3U-R7hx_rX_okBQBPfthwS428PlQUZmHQgdEMuXb8yktxDhFhzJNzA-hL1mdyJoqhIEUwrL_QtVGrUlrgWpA84fGiGZwubPQYpF1zAD_nHjLkjffxTCidWXJnZNV8IHmju2ZJzKvO6tvbZNrAN6IFWAOtnVYTBiI21vIuC-tpz57x5mS_5XNuiprre0kM4TahVNbc1fhFyvOacaUkbPW82Kj9vgGYzuVBeNnEZYC4zd4UWGJNnLYGKH1yoiHP6QdDgFhqMH4EljZhTvK-NSHOtw'
+  SECRET: process.env.JWT_AUTH_SECRET
 };
 
 // APIs

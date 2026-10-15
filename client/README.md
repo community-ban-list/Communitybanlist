@@ -8,7 +8,7 @@ In the project directory, you can run:
 
 Runs the app in development mode on [http://localhost:3000](http://localhost:3000). The page reloads when you make edits.
 
-Requests to `/graphql`, `/auth/` and `/export/` are proxied to the web server on [http://localhost:80](http://localhost:80). Run `yarn dev-web-server` from the repository root to start both together.
+Requests to `/graphql`, `/auth/` and `/export/` are proxied to the web server on [http://localhost:80](http://localhost:80). Run `yarn dev-web-server` from the repository root to start both together. The web server needs a MySQL database and the environment variables `DATABASE_URI`, `BATTLEMETRICS_API_KEY`, `STEAM_API_KEY` and `JWT_AUTH_SECRET`; it refuses to start without a JWT secret, so set one with e.g. `export JWT_AUTH_SECRET=$(openssl rand -base64 48)`.
 
 ### `yarn build`
 
