@@ -1,4 +1,4 @@
-import { describeError } from 'scbl-lib/utils';
+import { describeError, stackTrace } from 'scbl-lib/utils';
 
 import Core from './src/core.js';
 
@@ -18,9 +18,10 @@ const TASKS_TO_COMPLETE = {
 };
 
 // A promise that fails with nothing to handle it must not stop the run part-way, but the run is
-// then reported as failed. Only a summary is printed, as errors from API clients hold their keys.
+// then reported as failed. Only the error's name, message and where it was thrown are printed, as
+// errors from API clients also hold their keys.
 process.on('unhandledRejection', (reason) => {
-  console.error(`Unhandled promise rejection: ${describeError(reason)}`);
+  console.error(`Unhandled promise rejection: ${describeError(reason)}${stackTrace(reason)}`);
   process.exitCode = EXIT_CODES.FAILED;
 });
 
@@ -37,11 +38,28 @@ if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_RANK) steps.push(() => Core.updateReputa
 if (TASKS_TO_COMPLETE.UPDATE_EXPORT_BANS) steps.push(() => ExportBanManager.updateExportBans());
 if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS) steps.push(() => Core.exportExportBans());
 
+// Set once the run has ended, as the importer exits with the run's code.
+let ended = false;
+
+// Node exits by itself, with code 0, once nothing is left to wait for. Before the run has ended,
+// that means the run was left waiting for something that can never happen, such as an answer on a
+// connection that is gone, so the run failed.
+process.on('beforeExit', () => {
+  if (ended) return;
+  console.error(
+    'The CBL update run failed, as it was left waiting for something that can never happen.'
+  );
+  process.exit(EXIT_CODES.FAILED);
+});
+
 // Exit with the run's code: 0 finished, 1 failed, 3 stopped part-way by a signal or the time limit,
 // or 75 skipped as another run is active. A run that finished exits 1 after an unhandled rejection.
 run(steps)
   .catch((err) => {
-    console.error(`The CBL update run failed: ${describeError(err)}`);
+    console.error(`The CBL update run failed: ${describeError(err)}${stackTrace(err)}`);
     return EXIT_CODES.FAILED;
   })
-  .then((exitCode) => process.exit(exitCode || process.exitCode));
+  .then((exitCode) => {
+    ended = true;
+    process.exit(exitCode || process.exitCode);
+  });

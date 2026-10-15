@@ -31,9 +31,18 @@ function deferred() {
 // The database is unavailable, e.g. while it restarts.
 const unavailable = () => Object.assign(new Error('connect ECONNREFUSED'), { unavailable: true });
 
+// A logged line as the log channel would show it.
+const describeLine = (message, extras) => `${message}${extras.map(describeError).join('')}`;
+
 // Load run.js with stand-ins for the database, the run lock, the logger and the process, and a
-// clock that only moves when the test moves it.
-async function loadRun({ env = {}, authenticate = async () => {}, lockFree = true } = {}) {
+// clock that only moves when the test moves it. takeRunLockError, when given, is what taking the
+// lock fails with.
+async function loadRun({
+  env = {},
+  authenticate = async () => {},
+  lockFree = true,
+  takeRunLockError = null
+} = {}) {
   const events = [];
   const output = [];
   const discord = [];
@@ -78,6 +87,7 @@ async function loadRun({ env = {}, authenticate = async () => {}, lockFree = tru
       },
       takeRunLock: async ({ onLost }) => {
         events.push('takeRunLock');
+        if (takeRunLockError) throw takeRunLockError;
         if (!lockFree) return null;
         lock.onLost = onLost;
         return lock;
@@ -86,11 +96,18 @@ async function loadRun({ env = {}, authenticate = async () => {}, lockFree = tru
     'scbl-lib/db/sequelize': { isDatabaseUnavailable: (err) => err.unavailable === true },
     'scbl-lib/utils': {
       describeError,
+      // Level 1 lines and important ones go to the log channel. Important lines are the run's own,
+      // which go ahead of its other messages.
       Logger: {
         verbose: (module, verboseness, message, ...extras) => {
-          const text = `${message}${extras.map(describeError).join('')}`;
+          const text = describeLine(message, extras);
           events.push(`verbose ${text}`);
           if (verboseness === 1) discord.push(text);
+        },
+        important: (module, message, ...extras) => {
+          const text = describeLine(message, extras);
+          events.push(`important ${text}`);
+          discord.push(text);
         },
         flush: () => events.push('flush'),
         getLogQueue: () => emptyQueue
@@ -149,6 +166,9 @@ async function loadRun({ env = {}, authenticate = async () => {}, lockFree = tru
     events,
     output,
     discord,
+    // The lines logged as important.
+    important: () =>
+      events.filter((event) => event.startsWith('important ')).map((event) => event.slice(10)),
     timers,
     process: fakeProcess,
     // Move the clock on, running the timers that fall due, in order.
@@ -183,7 +203,8 @@ function gatedStep(events, name) {
 
 // A run that finishes: it waits for the database, takes the lock before anything is posted to
 // Discord, runs the steps in order and exits 0, after sending its log messages and releasing the
-// lock. The start message names the commit and the time limit, and mentions nobody.
+// lock. The start message names the commit and the time limit, and mentions nobody. The run's own
+// lines are logged as important, so they are not the ones dropped when Discord falls behind.
 {
   const importer = await loadRun({ env: { GIT_SHA: 'abc1234' } });
   const step = (name) => async () => importer.events.push(name);
@@ -194,14 +215,15 @@ function gatedStep(events, name) {
   assert.deepStrictEqual(importer.events.slice(0, 7), [
     'authenticate',
     'takeRunLock',
-    'verbose Starting new CBL Update run (commit abc1234, time limit 18000s)...',
+    'important Starting new CBL Update run (commit abc1234, time limit 18000s)...',
     'connect',
     'import',
     'export',
     'disconnect'
   ]);
   assert.deepStrictEqual(importer.events.slice(-2), ['flush', 'release']);
-  assert.match(importer.discord.at(-1), /^Finished All Tasks/);
+  assert.match(importer.important().at(-1), /^Finished All Tasks/);
+  assert.deepStrictEqual(importer.discord, importer.important());
   assert.ok(!importer.discord.some((message) => message.includes('<@')));
 
   // The signal handlers and timers are gone once the run has ended.
@@ -223,6 +245,21 @@ function gatedStep(events, name) {
   assert.deepStrictEqual(importer.discord, []);
 }
 
+// A run that cannot take the lock failed, rather than being skipped: it exits 1, not 75, and unlike
+// a skipped run it posts the failure, and sends it before it ends.
+{
+  const importer = await loadRun({ takeRunLockError: new Error('ER_LOCK_DEADLOCK') });
+  const exitCode = await importer.run([() => importer.events.push('import')]);
+  assert.strictEqual(exitCode, 1);
+  assert.deepStrictEqual(importer.events, [
+    'authenticate',
+    'takeRunLock',
+    'important The CBL update run failed: Error: ER_LOCK_DEADLOCK',
+    'flush'
+  ]);
+  assert.deepStrictEqual(importer.discord, ['The CBL update run failed: Error: ER_LOCK_DEADLOCK']);
+}
+
 // A step that fails ends the run with exit code 1. The failure is posted to Discord, the later
 // steps are skipped and the lock is released.
 {
@@ -236,7 +273,10 @@ function gatedStep(events, name) {
   assert.strictEqual(exitCode, 1);
   assert.ok(!importer.events.includes('export'));
   assert.ok(!importer.events.includes('disconnect'));
-  assert.strictEqual(importer.discord.at(-1), 'The CBL update run failed: Error: Deadlock found');
+  assert.strictEqual(
+    importer.important().at(-1),
+    'The CBL update run failed: Error: Deadlock found'
+  );
   assert.deepStrictEqual(importer.events.slice(-2), ['flush', 'release']);
 }
 
@@ -269,12 +309,16 @@ function gatedStep(events, name) {
     await importer.waitForTimer(delay);
     importer.advance(delay);
   }
-  // It gives up with exit code 1, before the lock is taken or anything is posted to Discord.
+  // It gives up with exit code 1, before the lock is taken. The failure is posted all the same, as
+  // the run would otherwise fail unseen, and sent before the run ends.
   assert.strictEqual(await run, 1);
   assert.strictEqual(importer.events.filter((event) => event === 'authenticate').length, 6);
   assert.ok(!importer.events.includes('takeRunLock'));
-  assert.deepStrictEqual(importer.discord, []);
-  assert.match(importer.output.at(-1), /^The CBL update run failed, as it could not reach/);
+  assert.deepStrictEqual(importer.discord, [
+    'The CBL update run failed, as it could not reach the database: Error: connect ECONNREFUSED'
+  ]);
+  assert.deepStrictEqual(importer.important(), importer.discord);
+  assert.strictEqual(importer.events.at(-1), 'flush');
 }
 {
   // Other errors are not waited out.
@@ -284,7 +328,11 @@ function gatedStep(events, name) {
     }
   });
   assert.strictEqual(await importer.run([]), 1);
-  assert.deepStrictEqual(importer.events, ['authenticate']);
+  assert.deepStrictEqual(importer.events, [
+    'authenticate',
+    "important The CBL update run failed, as it could not reach the database: Error: Access denied for user 'cbl'",
+    'flush'
+  ]);
 }
 
 // SIGTERM or SIGINT asks the run to stop at its next safe point: the step in progress finishes, the
@@ -295,13 +343,16 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
   const run = importer.run([first.step, () => importer.events.push('export')]);
   await first.started;
   importer.process.emit(signal, signal);
-  assert.match(importer.discord.at(-1), new RegExp(`^Received ${signal}, so the run will stop`));
+  assert.match(
+    importer.important().at(-1),
+    new RegExp(`^Received ${signal}, so the run will stop`)
+  );
   first.finish();
 
   assert.strictEqual(await run, 3);
   assert.ok(!importer.events.includes('export'));
   assert.strictEqual(
-    importer.discord.at(-1),
+    importer.important().at(-1),
     `The CBL update run stopped before it finished, as it received ${signal}.`
   );
   assert.deepStrictEqual(importer.events.slice(-2), ['flush', 'release']);
@@ -317,7 +368,7 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
   importer.process.emit('SIGTERM', 'SIGTERM');
   last.finish();
   assert.strictEqual(await run, 0);
-  assert.match(importer.discord.at(-1), /^Finished All Tasks/);
+  assert.match(importer.important().at(-1), /^Finished All Tasks/);
 }
 
 // The steps' own safe points, such as between export bans, stop the run too.
@@ -374,12 +425,15 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
   assert.strictEqual(importer.control.isStopping(), false);
   importer.advance(1000);
   assert.strictEqual(importer.control.isStopping(), true);
-  assert.match(importer.discord.at(-1), /^The run has taken longer than 600s/);
+  assert.match(importer.important().at(-1), /^The run has taken longer than 600s/);
   first.finish();
 
   assert.strictEqual(await run, 3);
   assert.ok(!importer.events.includes('export'));
-  assert.match(importer.discord.at(-1), /stopped before it finished, as it took longer than 600s/);
+  assert.match(
+    importer.important().at(-1),
+    /stopped before it finished, as it took longer than 600s/
+  );
   // It ended in time, so it is not made to exit.
   assert.strictEqual(importer.timers.size, 0);
   assert.deepStrictEqual(importer.process.exits, []);
@@ -439,13 +493,13 @@ for (const [value, seconds, warning] of [
   const run = importer.run([first.step, () => importer.events.push('export')]);
   await first.started;
   importer.lock.onLost('Connection lost: The server closed the connection.');
-  assert.match(importer.discord.at(-1), /^The run lost its run lock \(Connection lost/);
+  assert.match(importer.important().at(-1), /^The run lost its run lock \(Connection lost/);
   first.finish();
 
   assert.strictEqual(await run, 1);
   assert.ok(!importer.events.includes('export'));
   assert.strictEqual(
-    importer.discord.at(-1),
+    importer.important().at(-1),
     'The CBL update run stopped before it finished, as it lost its run lock.'
   );
   assert.deepStrictEqual(importer.events.slice(-2), ['flush', 'release']);
@@ -462,7 +516,7 @@ for (const [value, seconds, warning] of [
   importer.process.emit('SIGTERM', 'SIGTERM');
   first.finish();
   assert.strictEqual(await run, 1);
-  assert.match(importer.discord.at(-1), /as it lost its run lock\.$/);
+  assert.match(importer.important().at(-1), /as it lost its run lock\.$/);
 }
 
 // Steps that delete or export bans check the lock first, and end the run with exit code 1 if it is
@@ -481,6 +535,20 @@ for (const [value, seconds, warning] of [
   assert.ok(importer.lock.released);
 }
 
+// While the run still holds the lock, the steps that check it carry on, as the run gives them the
+// lock it took.
+{
+  const importer = await loadRun();
+  const run = importer.run([
+    async () => {
+      await importer.control.checkRunLock();
+      importer.events.push('export');
+    }
+  ]);
+  assert.strictEqual(await run, 0);
+  assert.ok(importer.events.includes('export'));
+}
+
 console.log(
-  'Importer run checks passed: exit codes, the run lock, signals, the time limit and the database wait.'
+  'Importer run checks passed: exit codes, the run lock, signals, the time limit, the database wait and posted lines.'
 );

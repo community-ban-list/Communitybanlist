@@ -38,12 +38,23 @@ function withTimeout(promise, ms) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+// Close a connection at once, without telling MySQL, which frees the lock if it holds it. mysql2's
+// own destroy() only half-closes the socket and then ignores it closing, so queries still waiting
+// on the connection would never settle. Destroying the socket makes mysql2 fail them, and report
+// the connection as lost, which must not crash the importer when nothing else is listening.
+function drop(connection) {
+  connection.on('error', () => {});
+  const socket = connection.connection?.stream;
+  if (typeof socket?.destroy === 'function') socket.destroy();
+  else connection.destroy();
+}
+
 // Close a connection, telling MySQL first, or at once if that takes too long.
 async function close(connection) {
   try {
     await withTimeout(connection.end(), RELEASE_TIMEOUT);
   } catch {
-    connection.destroy();
+    drop(connection);
   }
 }
 
@@ -66,8 +77,11 @@ class RunLock {
     this.keepAlive.unref();
   }
 
+  // Run a query on the lock's connection, giving up after timeout milliseconds. mysql2's own
+  // timeout only starts once a query reaches the front of the connection's queue, so a query
+  // waiting behind one that never gets an answer would otherwise wait forever.
   query(sql, values, timeout = QUERY_TIMEOUT) {
-    return this.connection.query({ sql, timeout }, values);
+    return withTimeout(this.connection.query({ sql, timeout }, values), timeout);
   }
 
   markLost(reason) {
@@ -75,7 +89,7 @@ class RunLock {
     this.lost = true;
     clearInterval(this.keepAlive);
     // Close the connection, in case it still holds the lock but has stopped answering.
-    this.connection.destroy();
+    drop(this.connection);
     if (this.onLost) this.onLost(reason);
   }
 
@@ -107,7 +121,7 @@ class RunLock {
     try {
       await this.query('SELECT RELEASE_LOCK(?)', [this.name], RELEASE_TIMEOUT);
     } catch {
-      this.connection.destroy();
+      drop(this.connection);
       return;
     }
     await close(this.connection);
@@ -118,7 +132,7 @@ class RunLock {
     if (this.released) return;
     this.released = true;
     clearInterval(this.keepAlive);
-    this.connection.destroy();
+    drop(this.connection);
   }
 }
 
@@ -144,7 +158,7 @@ export default async function takeRunLock({ onLost } = {}) {
       timeout: QUERY_TIMEOUT
     });
   } catch (err) {
-    connection.destroy();
+    drop(connection);
     throw new Error(`Could not take the run lock: ${describeError(err)}`);
   }
 

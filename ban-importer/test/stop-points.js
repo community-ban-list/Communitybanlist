@@ -69,10 +69,11 @@ const heldLock = { isHeld: async () => true };
 const lostLock = { isHeld: async () => false };
 
 // Load ban-importer.js with stand-ins for the database and the fetcher, which calls
-// fetch(banList, storeBans, control) for each list.
+// fetch(banList, storeBans, control) for each list. Saving bans waits for saves.gate, and adding
+// their players for saves.playersGate.
 async function loadBanImporter({ fetch }) {
   const events = [];
-  const saves = { gate: null };
+  const saves = { gate: null, playersGate: null };
   const banLists = [{ id: 1 }, { id: 2 }];
   class BanFetcher {
     constructor(storeBans) {
@@ -89,7 +90,10 @@ async function loadBanImporter({ fetch }) {
     'scbl-lib/db/models': {
       BanList: { findAll: async () => banLists },
       SteamUser: {
-        bulkCreate: async () => events.push('add Steam users'),
+        bulkCreate: async () => {
+          events.push('add Steam users');
+          await saves.playersGate;
+        },
         update: async () => events.push('reset Steam users')
       },
       Ban: {
@@ -208,6 +212,130 @@ for (const [lock, sweeps] of [
   else assert.strictEqual(error.reason, control.LOCK_LOST);
 }
 
+// The import waits for every ban to be saved before the sweep, and so never ends with saves still
+// running, which a run that stops after the import would cut off.
+{
+  let openGate;
+  const {
+    exports: BanImporter,
+    control,
+    events,
+    saves
+  } = await loadBanImporter({
+    fetch: async (banList, storeBans) => {
+      if (banList.id !== 2) return;
+      // Two bans start saving and wait, and one more waits to be saved.
+      saves.gate = new Promise((resolve) => {
+        openGate = resolve;
+      });
+      await storeBans(bans(banList, 3));
+    }
+  });
+  control.setRunLock(heldLock);
+  const importer = new BanImporter();
+  const result = ended(
+    importer.importBans().finally(() => events.push('ended')),
+    'the import'
+  );
+  await until(() => events.includes('save 2,1'), 'the first saves');
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.ok(!events.includes('find deleted bans'));
+  assert.ok(!events.includes('ended'));
+  openGate();
+
+  assert.strictEqual(await result, undefined);
+  assert.ok(importer.saveBanQueue.idle());
+  // Every ban was saved before the sweep began.
+  const sweep = events.indexOf('find deleted bans');
+  assert.deepStrictEqual(
+    events.slice(0, sweep).filter((event) => event.startsWith('saved ')),
+    ['saved 2,0', 'saved 2,1', 'saved 2,2']
+  );
+  assert.deepStrictEqual(events.slice(sweep), [
+    'find deleted bans',
+    'reset Steam users',
+    'delete bans',
+    'ended'
+  ]);
+}
+
+// It also waits for a batch of bans the fetcher did not wait for, which is still adding its
+// players when the last list has been fetched.
+{
+  let addPlayers;
+  const {
+    exports: BanImporter,
+    control,
+    events,
+    saves
+  } = await loadBanImporter({
+    fetch: async (banList, storeBans) => {
+      if (banList.id !== 2) return;
+      saves.playersGate = new Promise((resolve) => {
+        addPlayers = resolve;
+      });
+      storeBans(bans(banList, 1));
+    }
+  });
+  control.setRunLock(heldLock);
+  const result = ended(
+    new BanImporter().importBans().finally(() => events.push('ended')),
+    'the import'
+  );
+  await until(() => events.includes('add Steam users'), 'the batch');
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.ok(!events.includes('find deleted bans'));
+  addPlayers();
+
+  assert.strictEqual(await result, undefined);
+  assert.deepStrictEqual(events, [
+    'fetch 1',
+    'fetch 2',
+    'add Steam users',
+    'save 2,0',
+    'saved 2,0',
+    'reset Steam users',
+    'find deleted bans',
+    'reset Steam users',
+    'delete bans',
+    'ended'
+  ]);
+}
+
+// A run asked to stop while the import waits for its saves stops once the saves under way have
+// finished. The bans still waiting to be saved are dropped, and nothing is swept.
+{
+  let openGate;
+  const {
+    exports: BanImporter,
+    control,
+    events,
+    saves
+  } = await loadBanImporter({
+    fetch: async (banList, storeBans) => {
+      if (banList.id !== 2) return;
+      saves.gate = new Promise((resolve) => {
+        openGate = resolve;
+      });
+      await storeBans(bans(banList, 5));
+    }
+  });
+  control.setRunLock(heldLock);
+  const result = ended(new BanImporter().importBans(), 'the import');
+  await until(() => events.includes('save 2,1'), 'the first saves');
+  control.requestStop('it received SIGTERM');
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  openGate();
+
+  const error = await result;
+  assert.strictEqual(error.name, 'RunStopped');
+  assert.deepStrictEqual(
+    events.filter((event) => event.startsWith('save')),
+    ['save 2,0', 'save 2,1', 'saved 2,0', 'saved 2,1']
+  );
+  assert.ok(!events.includes('find deleted bans'));
+}
+
 // Load core.js with stand-ins for the models and the Steam client.
 async function loadCore(models, steam = () => {}) {
   return load('../src/core.js', {
@@ -217,6 +345,7 @@ async function loadCore(models, steam = () => {}) {
     'scbl-lib/db/sequelize': { Op: { in: 'in', or: 'or', lt: 'lt' } },
     'scbl-lib/utils': {
       createDiscordWebhookMessage() {},
+      DELETED_WEBHOOK_CODES: [10015, 50027],
       isDiscordWebhookUrl: () => false,
       Logger,
       sendDiscordWebhook() {}
@@ -225,30 +354,37 @@ async function loadCore(models, steam = () => {}) {
   });
 }
 
-// Export bans that record their BattleMetrics requests and saves, and call onRequest(id) during
-// each request.
-function exportBans(events, onRequest = () => {}) {
+// Export bans with the given statuses that record their BattleMetrics requests and saves, and call
+// onRequest(id) during each request. Their ids start at 1.
+function exportBans(
+  events,
+  onRequest = () => {},
+  statuses = ['TO_BE_CREATED', 'TO_BE_CREATED', 'TO_BE_DELETED']
+) {
   const list = { id: 1, type: 'battlemetrics', name: 'List', discordWebhook: null };
-  return [1, 2, 3].map((id) => ({
-    id,
-    status: id === 3 ? 'TO_BE_DELETED' : 'TO_BE_CREATED',
-    ExportBanList: list,
-    SteamUser: { id: `7656119800000000${id}`, name: 'Player' },
-    async createBattlemetricsBan() {
-      events.push(`create ${id} on BattleMetrics`);
-      onRequest(id);
-    },
-    async deleteBattlemetricsBan() {
-      events.push(`delete ${id} on BattleMetrics`);
-      onRequest(id);
-    },
-    async save() {
-      events.push(`save ${id}`);
-    },
-    async destroy() {
-      events.push(`destroy ${id}`);
-    }
-  }));
+  return statuses.map((status, index) => {
+    const id = index + 1;
+    return {
+      id,
+      status,
+      ExportBanList: list,
+      SteamUser: { id: `7656119800000000${id}`, name: 'Player' },
+      async createBattlemetricsBan() {
+        events.push(`create ${id} on BattleMetrics`);
+        onRequest(id);
+      },
+      async deleteBattlemetricsBan() {
+        events.push(`delete ${id} on BattleMetrics`);
+        onRequest(id);
+      },
+      async save() {
+        events.push(`save ${id}`);
+      },
+      async destroy() {
+        events.push(`destroy ${id}`);
+      }
+    };
+  });
 }
 
 // Exports stop between export bans: one whose BattleMetrics request is under way when the run is
@@ -263,6 +399,31 @@ function exportBans(events, onRequest = () => {}) {
   const error = await ended(core.exports.exportExportBans(), 'the export');
   assert.strictEqual(error.name, 'RunStopped');
   assert.deepStrictEqual(events, ['create 1 on BattleMetrics', 'save 1']);
+}
+
+// The same goes for a ban being deleted on BattleMetrics: its export ban is still removed, and the
+// next export ban is not started.
+{
+  const events = [];
+  const rows = exportBans(
+    events,
+    (id) => {
+      if (id === 3) core.control.requestStop('it received SIGTERM');
+    },
+    ['TO_BE_CREATED', 'TO_BE_CREATED', 'TO_BE_DELETED', 'TO_BE_CREATED']
+  );
+  const core = await loadCore({ ExportBan: { findAll: async () => rows } });
+  core.control.setRunLock(heldLock);
+  const error = await ended(core.exports.exportExportBans(), 'the export');
+  assert.strictEqual(error.name, 'RunStopped');
+  assert.deepStrictEqual(events, [
+    'create 1 on BattleMetrics',
+    'save 1',
+    'create 2 on BattleMetrics',
+    'save 2',
+    'delete 3 on BattleMetrics',
+    'destroy 3'
+  ]);
 }
 
 // Nothing reaches BattleMetrics without the run lock: once the run has lost it, or if it never
@@ -358,5 +519,5 @@ for (const lock of [lostLock, null]) {
 }
 
 console.log(
-  'Importer safe point checks passed: ban lists, the sweep, export bans and the batched steps.'
+  'Importer safe point checks passed: ban lists, waiting for saves, the sweep, export bans and the batched steps.'
 );

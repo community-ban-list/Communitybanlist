@@ -96,15 +96,27 @@ async function waitForDatabase() {
 
 // Run the importer's steps once, holding the run lock, and resolve with the exit code. Each step is
 // a function, and a run that is asked to stop does so between them.
+//
+// The lines about the whole run, such as its start, why it is stopping, how it ended or why it
+// failed, are logged as important, so they reach the log channel even when the run's other messages
+// fill its queue.
 export default async function run(steps) {
   const maxRunSeconds = readMaxRunSeconds();
   let lock = null;
 
   // Report on the run: in the Discord log once the run holds the lock, and before that only in the
-  // console, as a run that is skipped must post nothing.
+  // console, so a run that is stopped before it starts posts nothing.
   const report = (message) => {
-    if (lock) Logger.verbose('Core', 1, message);
+    if (lock) Logger.important('Core', message);
     else console.log(message);
+  };
+
+  // Post why the run failed before it held the lock, and wait for the line to be sent. Only a run
+  // that is skipped must post nothing, and a failed run must be seen.
+  const failBeforeLock = async (message, err) => {
+    Logger.important('Core', message, err);
+    await flushLogs();
+    return EXIT_CODES.FAILED;
   };
 
   // Exit straight away. Closing the lock's connection frees the lock.
@@ -155,13 +167,14 @@ export default async function run(steps) {
         console.log(err.message);
         return EXIT_CODES.INTERRUPTED;
       }
-      console.error(
-        `The CBL update run failed, as it could not reach the database: ${describeError(err)}`
+      return await failBeforeLock(
+        'The CBL update run failed, as it could not reach the database: ',
+        err
       );
-      return EXIT_CODES.FAILED;
     }
 
-    // Take the lock before anything is posted to Discord.
+    // Take the lock before anything else is posted to Discord, so a run that is skipped as another
+    // run holds it posts nothing.
     try {
       lock = await takeRunLock({
         onLost: (reason) => {
@@ -170,8 +183,7 @@ export default async function run(steps) {
         }
       });
     } catch (err) {
-      console.error(`The CBL update run failed: ${describeError(err)}`);
-      return EXIT_CODES.FAILED;
+      return await failBeforeLock('The CBL update run failed: ', err);
     }
     if (!lock) {
       console.log('Skipped this CBL update run, as another run holds the run lock.');
@@ -181,9 +193,8 @@ export default async function run(steps) {
 
     try {
       const profileStartTime = Date.now();
-      Logger.verbose(
+      Logger.important(
         'Core',
-        1,
         `Starting new CBL Update run (commit ${process.env.GIT_SHA || 'unknown'}, time limit ${maxRunSeconds}s)...`
       );
       await connect();
@@ -198,15 +209,15 @@ export default async function run(steps) {
         (Date.now() - profileStartTime) /
         1000
       ).toFixed(2)}s. Garbage Collection Completed.`;
-      Logger.verbose('Core', 1, message);
+      Logger.important('Core', message);
       console.log(message);
       return EXIT_CODES.FINISHED;
     } catch (err) {
       if (err instanceof RunStopped) {
-        Logger.verbose('Core', 1, err.message);
+        Logger.important('Core', err.message);
         return err.reason === LOCK_LOST ? EXIT_CODES.FAILED : EXIT_CODES.INTERRUPTED;
       }
-      Logger.verbose('Core', 1, 'The CBL update run failed: ', err);
+      Logger.important('Core', 'The CBL update run failed: ', err);
       return EXIT_CODES.FAILED;
     } finally {
       try {
