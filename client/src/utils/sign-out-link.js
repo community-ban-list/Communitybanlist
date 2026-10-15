@@ -1,4 +1,5 @@
 import { ApolloLink } from '@apollo/client';
+import { OperationTypeNode } from 'graphql';
 import { mergeMap, NEVER, of } from 'rxjs';
 
 import Auth from './auth.js';
@@ -14,6 +15,13 @@ export default new ApolloLink((operation, forward) =>
     mergeMap((result) => {
       if (result.extensions?.signInTokenRejected && Auth.forgetRejectedToken()) {
         reloading = true;
+        // A change the user made, e.g. saving an export ban list, was refused, as every change
+        // needs signing in. Its answer is held back too, and the page that reloads would not say
+        // the change failed, so say so first.
+        if (operation.operationType === OperationTypeNode.MUTATION)
+          window.alert(
+            'Your sign-in has expired, so nothing was changed. Please sign in and try again.'
+          );
         window.location.reload();
       }
       return reloading ? NEVER : of(result);

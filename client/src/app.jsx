@@ -1,24 +1,17 @@
 import React, { useState, useEffect } from 'react';
 
-import { ApolloClient, ApolloLink, HttpLink, InMemoryCache } from '@apollo/client';
-import { SetContextLink } from '@apollo/client/link/context';
+import { ApolloClient, HttpLink, InMemoryCache } from '@apollo/client';
 import { ApolloProvider } from '@apollo/client/react';
 import { relayStylePagination } from '@apollo/client/utilities';
 import { BrowserRouter, Route, Routes } from 'react-router';
 
+import createLink from './utils/apollo-link.js';
 import Auth from './utils/auth';
-import signOutLink from './utils/sign-out-link.js';
 
 import publicRoutes from './views';
 
-const httpLink = new HttpLink({ uri: '/graphql' });
-
-const authLink = new SetContextLink(({ headers }) => {
-  return { headers: { ...headers, JWT: Auth.jwtToken } };
-});
-
 const client = new ApolloClient({
-  link: ApolloLink.from([signOutLink, authLink, httpLink]),
+  link: createLink(new HttpLink({ uri: '/graphql' })),
   cache: new InMemoryCache({
     typePolicies: {
       Query: {
