@@ -2,6 +2,8 @@ import { Ban, ExportBanList } from 'scbl-lib/db/models';
 
 import { calculateRiskRating } from 'scbl-lib/utils';
 
+import isSignedInAs from '../core/is-signed-in-as.js';
+
 export default {
   SteamUser: {
     riskRating: (parent) => {
@@ -20,10 +22,14 @@ export default {
         }
       });
     },
-    exportBanList: (parent, filter) => {
-      return ExportBanList.findByPk(filter.id);
+    // A Steam user's export ban lists are only shown to that user, as they hold the lists' Discord
+    // webhooks and BattleMetrics invites.
+    exportBanList: (parent, filter, context) => {
+      if (!isSignedInAs(context, parent.id)) return null;
+      return ExportBanList.findOne({ where: { id: filter.id, owner: parent.id } });
     },
-    exportBanLists: (parent) => {
+    exportBanLists: (parent, filter, context) => {
+      if (!isSignedInAs(context, parent.id)) return [];
       return ExportBanList.findAll({ where: { owner: parent.id } });
     }
   }
