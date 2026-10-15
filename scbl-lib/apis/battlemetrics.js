@@ -114,7 +114,9 @@ const request = createApiClient({
   }
 });
 
-export default async function (method, url, params, data, priority = 5) {
+// options.repeatable marks a POST as safe to make again after a timeout or a 5xx, for one that does
+// no harm when BattleMetrics carries it out twice.
+export default async function (method, url, params, data, priority = 5, options) {
   reportBudget();
-  return request(method, url, params, data, priority);
+  return request(method, url, params, data, priority, options);
 }

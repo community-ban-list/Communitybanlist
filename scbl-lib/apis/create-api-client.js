@@ -8,7 +8,8 @@
 //   asks in Retry-After.
 // - POST and PATCH requests are made again only after a 429, or when no connection could be made.
 //   The API may have carried out one that timed out, was cut off or failed with 5xx, so its error
-//   is marked ambiguous, for the caller to find out what happened.
+//   is marked ambiguous, for the caller to find out what happened. A caller can mark one that
+//   does no harm when it is carried out twice as repeatable, so it is made again like a GET.
 // - Any other answer fails at once. The error is marked auth when the API refused the credentials.
 //
 // After a 429, or when the API says few requests are left, nothing is sent until the time it
@@ -88,9 +89,8 @@ function retryAfter(response) {
 
 // What a failed attempt means: 'retry' when it can be made again, 'ambiguous' when the API may
 // have carried out a request that must not be repeated, and 'final' otherwise.
-function classify(method, err) {
+function classify(err, repeatable) {
   const status = err.response?.status;
-  const repeatable = REPEATABLE_METHODS.includes(method);
   if (status === 429) return 'retry';
   if (status >= 500) return repeatable ? 'retry' : 'ambiguous';
   if (status === 408 && repeatable) return 'retry';
@@ -235,8 +235,11 @@ export default function createApiClient({
     });
   }
 
-  return async function request(method, path, params, data, priority = 5) {
+  // options.repeatable marks a POST or PATCH as safe to make again, as making it twice does no
+  // harm, e.g. one that creates an invite.
+  return async function request(method, path, params, data, priority = 5, options = {}) {
     const verb = String(method).toUpperCase();
+    const repeatable = options.repeatable === true || REPEATABLE_METHODS.includes(verb);
     for (let attempts = 1; ; attempts++) {
       try {
         // Wait out a pause before joining the limiter's queue, so waiting uses none of the budget.
@@ -244,7 +247,7 @@ export default function createApiClient({
         return await attempt(method, path, params, data, priority);
       } catch (thrown) {
         const err = thrown ?? {};
-        const outcome = classify(verb, err);
+        const outcome = classify(err, repeatable);
         const error = toApiError(verb, path, err, attempts, outcome);
         if (outcome !== 'retry' || attempts >= ATTEMPTS) throw error;
 

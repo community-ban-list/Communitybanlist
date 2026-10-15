@@ -40,6 +40,26 @@ class FakeDate extends Date {
   }
 }
 
+// AbortSignal.timeout's signals abort on the fake clock too. Each records how long it was for and
+// when it was made, to check that every attempt gets one of its own when it is sent.
+class FakeAbortSignal extends EventTarget {
+  static timeout(ms) {
+    return new FakeAbortSignal(ms);
+  }
+
+  constructor(ms) {
+    super();
+    this.ms = ms;
+    this.createdAt = clock;
+    this.aborted = false;
+    fakeTimeout(() => {
+      this.aborted = true;
+      this.reason = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+      this.dispatchEvent(new Event('abort'));
+    }, ms);
+  }
+}
+
 const logs = [];
 const context = vm.createContext({
   console: {
@@ -50,7 +70,7 @@ const context = vm.createContext({
   clearTimeout: (timer) => {
     timers = timers.filter((other) => other !== timer);
   },
-  AbortSignal,
+  AbortSignal: FakeAbortSignal,
   Date: FakeDate
 });
 
@@ -74,13 +94,14 @@ class Bottleneck {
   }
 }
 
-// axios records each request and answers it with reply().
+// axios records each request, and whether its signal had already aborted, and answers it with
+// reply().
 let requests;
 let reply;
 const dependencies = {
   axios: {
     default: async (request) => {
-      requests.push({ ...request, at: clock });
+      requests.push({ ...request, at: clock, abortedWhenSent: request.signal?.aborted });
       return reply(request, requests.length);
     }
   },
@@ -88,8 +109,24 @@ const dependencies = {
   '../config.js': { STEAM_API_KEY: KEY }
 };
 
-// Load a client of its own, with no pause and no jobs, and nothing logged yet.
+// Every attempt is cut off 15 s after it is sent, by a signal of its own: one shared with earlier
+// attempts, or made while the attempt waited in the queue or for a pause, could already have
+// aborted.
+function assertSignals() {
+  for (const [i, request] of requests.entries()) {
+    const which = `Request ${i + 1}, ${request.method} ${request.url}`;
+    assert.ok(request.signal instanceof FakeAbortSignal, which);
+    assert.strictEqual(request.signal.ms, 15000, which);
+    assert.strictEqual(request.signal.createdAt, request.at, which);
+    assert.strictEqual(request.abortedWhenSent, false, which);
+  }
+  assert.strictEqual(new Set(requests.map((request) => request.signal)).size, requests.length);
+}
+
+// Load a client of its own, with no pause and no jobs, and nothing logged yet. The last client's
+// requests are checked for their signals first.
 async function load() {
+  if (requests) assertSignals();
   const url = new URL('../apis/steam.js', import.meta.url);
   const module = new vm.SourceTextModule(await readFile(url, 'utf8'), {
     context,
@@ -172,7 +209,8 @@ await steam('get', summaries, { steamids: '1,2' });
 assert.strictEqual(requests[0].url, `https://partner.steam-api.com/${summaries}`);
 assert.deepStrictEqual({ ...requests[0].params }, { steamids: '1,2', key: KEY });
 assert.strictEqual(requests[0].timeout, 15000);
-assert.ok(requests[0].signal instanceof AbortSignal);
+assert.ok(requests[0].signal instanceof FakeAbortSignal);
+assert.strictEqual(requests[0].signal.ms, 15000);
 assert.deepStrictEqual(
   limiter.jobs.map((job) => [job.id, job.priority]),
   [['STEAM-1', 5]]
@@ -217,7 +255,8 @@ assert.strictEqual(
   `Steam GET ${summaries} failed after 3 attempts: timed out after 15s`
 );
 
-// A 429 pauses every Steam request until the time in Retry-After, or for a minute.
+// A 429 pauses every Steam request until the time in Retry-After, or for a minute. The request
+// queued before the 429 waits out the pause too, and is sent with a signal made then.
 for (const [headers, pause] of [
   [{ 'retry-after': '20' }, 20000],
   [{}, 60000]
@@ -230,8 +269,13 @@ for (const [headers, pause] of [
   const start = clock;
   await Promise.all([steam('get', summaries, { steamids: '1' }), steam('get', summaries, {})]);
   assert.strictEqual(requests.length, 3);
+  assert.deepStrictEqual(
+    limiter.jobs.slice(0, 2).map((job) => job.at),
+    [start, start]
+  );
   for (const request of requests.slice(1))
     assert.ok(request.at >= start + pause, `Sent ${request.at - start} ms after the 429`);
+  assertSignals();
 }
 
 // Steam gives no count of requests left, so a header that looks like one is ignored.
@@ -252,7 +296,8 @@ assert.strictEqual(
   `Steam GET ${summaries} failed after 3 attempts: the request failed (Bad request to /?key=[redacted])`
 );
 assert.strictEqual(requests.length, 3);
+assertSignals();
 
 console.log(
-  'Steam request checks passed: requests, refused keys, retries, pauses and keys kept out of errors.'
+  'Steam request checks passed: requests, time limits, refused keys, retries, pauses and keys kept out of errors.'
 );

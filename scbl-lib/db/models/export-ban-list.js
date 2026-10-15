@@ -10,10 +10,14 @@ import { BATTLEMETRICS_ORGANIZATION } from '../../config.js';
 const { DataTypes } = Sequelize;
 
 class ExportBanList extends Sequelize.Model {
+  // Create the BattleMetrics ban list and its invite.
   async createBattlemetricsBanList() {
-    Logger.verbose('ExportBanList', 1, 'Creating Battlemetrics ban list...');
-    if (this.battlemetricsID) throw new Error('Battlemetrics ban list already exists.');
+    // A list whose ban list was created but not its invite only needs the invite.
+    if (this.battlemetricsID) return this.createBattlemetricsInvite();
 
+    Logger.verbose('ExportBanList', 1, 'Creating Battlemetrics ban list...');
+    // Not made again after a timeout or a 5xx, as BattleMetrics may have created the list, and a
+    // second list would never be deleted.
     const {
       data: { data: dataBanList }
     } = await battlemetrics(
@@ -52,7 +56,17 @@ class ExportBanList extends Sequelize.Model {
 
     await this.save();
 
+    await this.createBattlemetricsInvite();
+  }
+
+  // Create the invite other organisations accept to use the BattleMetrics ban list, unless the list
+  // has one. Nothing else creates a missing invite, so this is also called when the list is saved.
+  async createBattlemetricsInvite() {
+    if (this.type !== 'battlemetrics' || !this.battlemetricsID || this.battlemetricsInvite) return;
+
     Logger.verbose('ExportBanList', 1, ' Creating Battlemetrics ban list invite...');
+    // A second invite does no harm, as it is never shown and is deleted with the list, so the
+    // request is made again after a timeout or a 5xx.
     const {
       data: { data: inviteData }
     } = await battlemetrics(
@@ -78,7 +92,9 @@ class ExportBanList extends Sequelize.Model {
             }
           }
         }
-      }
+      },
+      5,
+      { repeatable: true }
     );
 
     this.battlemetricsInvite = `https://www.battlemetrics.com/rcon/ban-lists/accept-invite?code=${inviteData.id}`;

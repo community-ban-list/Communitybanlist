@@ -5,6 +5,8 @@ import vm from 'vm';
 const base = 'ban-lists/test-list/relationships';
 let calls;
 let failAt;
+// The requests, as method and endpoint, that BattleMetrics answers 404, as the record is gone.
+let goneAt;
 let wrongOwner;
 let invalidSubscription;
 let loop;
@@ -19,6 +21,11 @@ const request = async (method, endpoint, params) => {
   if (method === 'delete' && endpoint === failAt) {
     const error = new Error('Request failed with status code 400');
     error.response = { status: 400, data: { errors: [{ detail: 'Ownership transfer required' }] } };
+    throw error;
+  }
+  if (goneAt.includes(`${method} ${endpoint}`)) {
+    const error = new Error(`BattleMetrics ${method.toUpperCase()} ${endpoint} failed: HTTP 404`);
+    error.response = { status: 404, data: { errors: [{ title: 'Not Found' }] } };
     throw error;
   }
   if (method === 'delete') return { status: 204 };
@@ -65,23 +72,46 @@ const remove = module.namespace.default;
 const reset = () => {
   calls = [];
   failAt = null;
+  goneAt = [];
   wrongOwner = false;
   invalidSubscription = false;
   loop = false;
 };
+const deletions = [
+  ['delete', `${base}/invites/invite-one`],
+  ['delete', `${base}/invites/invite-two`],
+  ['delete', `${base}/organizations/77`],
+  ['delete', `${base}/organizations/88`],
+  ['delete', `${base}/organizations/42`]
+];
 reset();
 await remove('test-list');
 assert.deepStrictEqual(
   calls.filter(([method]) => method === 'delete'),
-  [
-    ['delete', `${base}/invites/invite-one`],
-    ['delete', `${base}/invites/invite-two`],
-    ['delete', `${base}/organizations/77`],
-    ['delete', `${base}/organizations/88`],
-    ['delete', `${base}/organizations/42`]
-  ]
+  deletions
 );
 assert.ok(calls.slice(0, 5).every(([method]) => method === 'get'));
+
+// An invite or subscription that is already gone counts as removed, e.g. the owner's, when
+// BattleMetrics removed it but answered too late, so the request was made again and got 404.
+reset();
+goneAt = [
+  `delete ${base}/invites/invite-one`,
+  `delete ${base}/organizations/77`,
+  `delete ${base}/organizations/42`
+];
+await remove('test-list');
+assert.deepStrictEqual(
+  calls.filter(([method]) => method === 'delete'),
+  deletions
+);
+
+// A 404 when checking ownership still fails, and the local list is kept, as it could also mean
+// that the list's ID is wrong.
+reset();
+goneAt = [`get ${base}/organizations/42`];
+await assert.rejects(remove('test-list'), /while checking ownership: Not Found/);
+assert.deepStrictEqual(calls, [['get', `${base}/organizations/42`]]);
 
 for (const endpoint of [
   `${base}/invites/invite-two`,

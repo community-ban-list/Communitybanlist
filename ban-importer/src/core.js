@@ -16,6 +16,9 @@ import { checkRunLock, stopIfRequested } from './run-control.js';
 const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
 const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 50;
 const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 50000;
+// The Steam step stops once this many batches in a row have failed, as Steam is then most likely
+// down and the rest would fail too. The users left stay due, so the next run updates them.
+const UPDATE_STEAM_USER_INFO_MAX_FAILED_BATCHES = 3;
 const DISCORD_ALERT_CAP = 50;
 
 // Webhooks Discord has reported as deleted during this run, so they are not tried again.
@@ -67,6 +70,7 @@ export default class Core {
       0
     );
 
+    let failedBatches = 0;
     while (users.length > 0) {
       // A run that is asked to stop does so between batches.
       stopIfRequested();
@@ -96,15 +100,40 @@ export default class Core {
           break;
         }
 
-        // Only the message is logged, as an error from a request can hold its API key.
+        // Steam is still limiting requests after the client's retries and minute-long pauses, so
+        // every other batch would wait out the same pauses. The users left stay due, so the next
+        // run updates them, and the later steps do not need fresh Steam data.
+        if (err.status === 429) {
+          Logger.verbose(
+            'Core',
+            1,
+            `Stopped updating Steam users, as Steam is still limiting requests: ${err.message}`
+          );
+          break;
+        }
+
+        failedBatches++;
+        if (failedBatches >= UPDATE_STEAM_USER_INFO_MAX_FAILED_BATCHES) {
+          Logger.verbose(
+            'Core',
+            1,
+            `Stopped updating Steam users, as ${failedBatches} batches in a row failed: ${err.message}`
+          );
+          break;
+        }
+
+        // The Steam client throws ApiErrors, which never hold the key, so the error is logged
+        // whole.
         Logger.verbose(
           'Core',
           1,
-          `Failed to update batch of ${batch.length} Steam users due to Error: ${err.message}`
+          `Failed to update batch of ${batch.length} Steam users due to Error: `,
+          err
         );
         await doSleep(5000);
         continue;
       }
+      failedBatches = 0;
 
       Logger.verbose(
         'Core',
@@ -361,24 +390,40 @@ export default class Core {
     );
     let currentList = 0;
 
+    // Whether BattleMetrics refused the API key, which every BattleMetrics export ban list uses.
+    let battlemetricsRefused = false;
+
     // Update the export bans.
     for (const exportBan of exportBans) {
       // A run that is asked to stop does so between export bans, never between a BattleMetrics
       // request and the database save that records it.
       stopIfRequested();
+
+      // Once BattleMetrics has refused the key, it would refuse every other request too, so the
+      // BattleMetrics export bans left wait for the next run. Remote lists' export bans carry on.
+      if (battlemetricsRefused && exportBan.ExportBanList.type === 'battlemetrics') continue;
+
+      // A creation marks the export ban as created before saving it, so a failed save is still
+      // described as a creation.
+      const creating = exportBan.status === 'TO_BE_CREATED';
       Logger.verbose(
         'Core',
         2,
-        `${exportBan.status === 'TO_BE_CREATED' ? 'Creat' : 'Delet'}ing export ban (ID: ${
-          exportBan.id
-        })...`
+        `${creating ? 'Creat' : 'Delet'}ing export ban (ID: ${exportBan.id})...`
       );
 
       try {
-        if (exportBan.status === 'TO_BE_CREATED') await Core.createExportBan(exportBan);
+        if (creating) await Core.createExportBan(exportBan);
         else await Core.deleteExportBan(exportBan);
       } catch (err) {
-        if (err.response && err.response.status === 404 && exportBan.status !== 'TO_BE_CREATED') {
+        if (err.auth) {
+          battlemetricsRefused = true;
+          await Logger.verbose(
+            'Core',
+            1,
+            `Stopped exporting bans to BattleMetrics until the next run, as BattleMetrics refused the API key: ${err.message}`
+          );
+        } else if (err.response && err.response.status === 404 && !creating) {
           await exportBan.destroy();
           await Logger.verbose(
             'Core',
@@ -386,13 +431,13 @@ export default class Core {
             `Removed export ban (ID: ${exportBan.id}) from Lists due to error 404 during deletion.`
           );
         } else {
-          // Only the message is logged, as an error from a request can hold its API key.
+          // The BattleMetrics client throws ApiErrors, which never hold the API key, so the error
+          // is logged whole, which keeps the stack trace of any other error, e.g. the database's.
           await Logger.verbose(
             'Core',
             1,
-            `Failed to ${
-              exportBan.status === 'TO_BE_CREATED' ? 'create' : 'delete'
-            } export ban (ID: ${exportBan.id}): ${err.message}`
+            `Failed to ${creating ? 'create' : 'delete'} export ban (ID: ${exportBan.id}): `,
+            err
           );
         }
       }

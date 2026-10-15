@@ -40,6 +40,26 @@ class FakeDate extends Date {
   }
 }
 
+// AbortSignal.timeout's signals abort on the fake clock too. Each records how long it was for and
+// when it was made, to check that every attempt gets one of its own when it is sent.
+class FakeAbortSignal extends EventTarget {
+  static timeout(ms) {
+    return new FakeAbortSignal(ms);
+  }
+
+  constructor(ms) {
+    super();
+    this.ms = ms;
+    this.createdAt = clock;
+    this.aborted = false;
+    fakeTimeout(() => {
+      this.aborted = true;
+      this.reason = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+      this.dispatchEvent(new Event('abort'));
+    }, ms);
+  }
+}
+
 const logs = [];
 const context = vm.createContext({
   console: {
@@ -50,8 +70,10 @@ const context = vm.createContext({
   clearTimeout: (timer) => {
     timers = timers.filter((other) => other !== timer);
   },
-  AbortSignal,
-  Date: FakeDate
+  AbortSignal: FakeAbortSignal,
+  Date: FakeDate,
+  // Math.random always gives 0.8, so each wait before a retry is a fifth longer than its base.
+  Math: Object.assign(Object.create(Math), { random: () => 0.8 })
 });
 
 // A stand-in for Bottleneck that records each job and starts jobs at least 250 ms apart.
@@ -74,13 +96,37 @@ class Bottleneck {
   }
 }
 
-// axios records each request and answers it with reply().
+// axios records each request, and whether its signal had already aborted, and answers it with
+// reply().
 let requests;
 let reply;
 const axios = async (request) => {
-  requests.push({ ...request, at: clock });
+  requests.push({ ...request, at: clock, abortedWhenSent: request.signal?.aborted });
   return reply(request, requests.length);
 };
+
+// Every attempt is cut off 30 s after it is sent, by a signal of its own: one shared with earlier
+// attempts, or made while the attempt waited in the queue or for a pause, could already have
+// aborted.
+function assertSignals() {
+  for (const [i, request] of requests.entries()) {
+    const which = `Request ${i + 1}, ${request.method} ${request.url}`;
+    assert.ok(request.signal instanceof FakeAbortSignal, which);
+    assert.strictEqual(request.signal.ms, 30000, which);
+    assert.strictEqual(request.signal.createdAt, request.at, which);
+    assert.strictEqual(request.abortedWhenSent, false, which);
+  }
+  assert.strictEqual(new Set(requests.map((request) => request.signal)).size, requests.length);
+}
+
+// An answer that never comes. As with axios, the request fails once its signal aborts, or at once
+// if it already has.
+const hang = (request) =>
+  new Promise((resolve, reject) => {
+    const cancel = () => reject(axiosError(request, { code: 'ERR_CANCELED', message: 'canceled' }));
+    if (request.signal.aborted) cancel();
+    else request.signal.addEventListener('abort', cancel);
+  });
 
 const dependencies = {
   axios: { default: axios },
@@ -92,8 +138,10 @@ const dependencies = {
   }
 };
 
-// Load a client of its own, with no pause and no jobs, and nothing logged yet.
+// Load a client of its own, with no pause and no jobs, and nothing logged yet. The last client's
+// requests are checked for their signals first.
 async function load() {
+  if (requests) assertSignals();
   const url = new URL('../apis/battlemetrics.js', import.meta.url);
   const module = new vm.SourceTextModule(await readFile(url, 'utf8'), {
     context,
@@ -176,8 +224,9 @@ assert.strictEqual(requests[0].url, `https://api.battlemetrics.com/${endpoint}`)
 assert.strictEqual(requests[0].data, undefined, 'Unsubscribe must not send an empty JSON body');
 assert.strictEqual(requests[0].headers.Authorization, `Bearer ${TOKEN}`);
 assert.strictEqual(requests[0].timeout, 30000);
-assert.ok(requests[0].signal instanceof AbortSignal);
-assert.strictEqual(requests[0].signal.aborted, false);
+assert.ok(requests[0].signal instanceof FakeAbortSignal);
+assert.strictEqual(requests[0].signal.ms, 30000);
+assert.strictEqual(requests[0].abortedWhenSent, false);
 assert.strictEqual(limiter.jobs[0].priority, 5);
 
 await battlemetrics('delete', 'bans/42');
@@ -196,7 +245,7 @@ for (const method of ['post', 'patch']) {
 }
 
 // Every attempt has a signal of its own, and every job an ID of its own.
-assert.strictEqual(new Set(requests.map((request) => request.signal)).size, requests.length);
+assertSignals();
 assert.strictEqual(new Set(limiter.jobs.map((job) => job.id)).size, limiter.jobs.length);
 assert.ok(limiter.jobs.every((job) => /^BM-\d+$/.test(job.id)));
 
@@ -239,6 +288,12 @@ for (const [method, status] of [
   assert.strictEqual(err.ambiguous, false);
 }
 
+// The token is removed from the path too, should a caller ever put it there.
+battlemetrics = await load();
+reply = failWith({ status: 400 });
+err = await failure(battlemetrics('get', `bans/${TOKEN}`));
+assert.strictEqual(err.message, 'BattleMetrics GET bans/[redacted] failed: HTTP 400');
+
 // A 401 means the token was refused, which the caller is told, so it can stop.
 battlemetrics = await load();
 reply = failWith({
@@ -251,16 +306,14 @@ assert.strictEqual(err.auth, true);
 assert.strictEqual(err.response.data.errors[0].detail, 'The token [redacted] is not valid.');
 
 // A 503 on a GET is tried three times, about 1 s and then 4 s apart, each time as a job of its
-// own, so retries use the budget.
+// own, so retries use the budget. Each wait gets up to a quarter more at random, here a fifth.
 battlemetrics = await load();
 reply = failWith({ status: 503, data: { errors: [{ title: 'Service Unavailable' }] } });
 err = await failure(battlemetrics('get', 'bans'));
 assert.strictEqual(requests.length, 3);
 assert.strictEqual(limiter.jobs.length, 3);
 assert.strictEqual(new Set(limiter.jobs.map((job) => job.id)).size, 3);
-const [first, second] = gaps();
-assert.ok(first >= 1000 && first <= 1250, `First wait was ${first} ms`);
-assert.ok(second >= 4000 && second <= 5000, `Second wait was ${second} ms`);
+assert.deepStrictEqual(gaps(), [1200, 4800]);
 assert.strictEqual(
   err.message,
   'BattleMetrics GET bans failed after 3 attempts: HTTP 503 (Service Unavailable)'
@@ -298,6 +351,36 @@ for (const [method, code] of [
   assert.strictEqual(err.ambiguous, false);
 }
 assert.match(err.message, /^BattleMetrics DELETE bans\/42 failed after 3 attempts: could not/);
+
+// A GET whose answer never comes is cut off 30 s after it is sent, and tried again with a signal
+// of its own, so the third attempt can still work.
+battlemetrics = await load();
+reply = (request, count) => (count < 3 ? hang(request) : { status: 200, headers: {}, data: {} });
+assert.strictEqual((await battlemetrics('get', 'bans')).status, 200);
+assert.strictEqual(requests.length, 3);
+assert.deepStrictEqual(gaps(), [30000 + 1200, 30000 + 4800]);
+assertSignals();
+
+// A POST that its caller marks as repeatable, such as one creating an invite, is tried again like
+// a GET after a 5xx or a timeout. The same POST is not, unless it is marked.
+for (const failed of [{ status: 503 }, { code: 'ECONNABORTED', message: 'timeout exceeded' }]) {
+  battlemetrics = await load();
+  reply = (request, count) => {
+    if (count === 1) throw axiosError(request, failed);
+    return { status: 201, headers: {}, data: { data: { id: 'invite' } } };
+  };
+  const invite = await battlemetrics('post', 'ban-lists/1/relationships/invites', {}, {}, 5, {
+    repeatable: true
+  });
+  assert.strictEqual(invite.status, 201);
+  assert.strictEqual(requests.length, 2, JSON.stringify(failed));
+
+  battlemetrics = await load();
+  reply = failWith(failed);
+  err = await failure(battlemetrics('post', 'ban-lists/1/relationships/invites', {}, {}));
+  assert.strictEqual(requests.length, 1, JSON.stringify(failed));
+  assert.strictEqual(err.ambiguous, true);
+}
 
 // A POST that timed out may have been carried out, so it is not tried again, and the error says
 // so. The same goes for one that was cut off or failed with 5xx, and for a PATCH.
@@ -366,13 +449,57 @@ assert.strictEqual(
 );
 
 // Without a Retry-After, a 429 pauses requests for a minute, and a GET still gets its 3 attempts.
+// A request queued before the 429 waits out the pause too, and is sent with a signal made then.
 battlemetrics = await load();
-reply = failWith({ status: 429 });
+reply = (request) => {
+  if (request.url.endsWith('/bans')) throw axiosError(request, { status: 429 });
+  return { status: 200, headers: {}, data: {} };
+};
 const pausedAt = clock;
-err = await failure(battlemetrics('get', 'bans'));
-assert.strictEqual(requests.length, 3);
-assert.ok(requests[1].at >= pausedAt + 60000 && requests[2].at >= requests[1].at + 60000);
-assert.strictEqual(err.message, 'BattleMetrics GET bans failed after 3 attempts: HTTP 429');
+const [limitedError] = await Promise.all([
+  failure(battlemetrics('get', 'bans')),
+  battlemetrics('get', 'bans/2')
+]);
+const sentAfter = (path) =>
+  requests.filter((request) => request.url.endsWith(path)).map((request) => request.at - pausedAt);
+assert.deepStrictEqual(sentAfter('/bans'), [0, 60000, 120000]);
+assert.deepStrictEqual(sentAfter('/bans/2'), [60000]);
+// Both joined the queue before the 429.
+assert.deepStrictEqual(
+  limiter.jobs.slice(0, 2).map((job) => job.at),
+  [pausedAt, pausedAt]
+);
+assert.strictEqual(
+  limitedError.message,
+  'BattleMetrics GET bans failed after 3 attempts: HTTP 429'
+);
+// The wait logged before a retry is the pause's.
+assert.ok(logs.some(([line]) => /Trying again in 60s \(attempt 2 of 3\)/.test(line)));
+assertSignals();
+
+// A Retry-After of a day, in seconds or as a date, is cut to 5 minutes, and so is the pause it
+// starts, so a wrong header cannot hold up every request for long.
+for (const retryAfter of [
+  () => '86400',
+  () => new Date(clock + 24 * 60 * 60 * 1000).toUTCString()
+]) {
+  battlemetrics = await load();
+  reply = (request, count) => {
+    if (count > 1) return { status: 200, headers: {}, data: {} };
+    throw axiosError(request, { status: 429, headers: { 'retry-after': retryAfter() } });
+  };
+  const limitedAt = clock;
+  await Promise.all([
+    battlemetrics('get', 'bans'),
+    wait(1000).then(() => battlemetrics('get', 'bans/2'))
+  ]);
+  assert.strictEqual(requests.length, 3);
+  for (const request of requests.slice(1)) {
+    const after = request.at - limitedAt;
+    assert.ok(after >= 300000 && after <= 301500, `Sent ${after} ms after the 429`);
+  }
+  assert.ok(logs.some(([line]) => /so no requests are sent for 300s/.test(line)));
+}
 
 // Fewer than 60 requests left for the key this minute pauses requests for a minute too.
 battlemetrics = await load();
@@ -414,10 +541,11 @@ assert.strictEqual(requests.length, 6);
 assert.strictEqual(limiter.jobs.length, 6);
 assert.strictEqual(new Set(limiter.jobs.map((job) => job.id)).size, 6);
 assert.strictEqual(requests[5].url, 'https://api.battlemetrics.com/bans/2');
+assertSignals();
 
 // Logged lines never hold the token either.
 assert.ok(!inspect(logs, { depth: null }).includes(TOKEN));
 
 console.log(
-  'BattleMetrics request checks passed: requests, final and retried errors, ambiguous writes, pauses and concurrent requests.'
+  'BattleMetrics request checks passed: requests, time limits, final and retried errors, ambiguous and repeatable writes, pauses and concurrent requests.'
 );
