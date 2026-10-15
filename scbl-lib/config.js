@@ -11,7 +11,17 @@ const JWT_AUTH = {
 
 // APIs
 const BATTLEMETRICS_API_KEY = process.env.BATTLEMETRICS_API_KEY;
-const BATTLEMETRICS_API_RESERVIOR = process.env.BATTLEMETRICS_API_RESERVIOR || 10;
+// How many BattleMetrics requests a minute this service may make, and the variable it came from.
+// scbl-lib/apis/battlemetrics.js checks it and uses a default when it is unset.
+// BATTLEMETRICS_API_RESERVIOR is the old, misspelt name, still read so existing setups keep their
+// budget.
+const BATTLEMETRICS_API_RESERVOIR_VARIABLE = process.env.BATTLEMETRICS_API_RESERVOIR
+  ? 'BATTLEMETRICS_API_RESERVOIR'
+  : process.env.BATTLEMETRICS_API_RESERVIOR
+    ? 'BATTLEMETRICS_API_RESERVIOR'
+    : undefined;
+const BATTLEMETRICS_API_RESERVOIR =
+  BATTLEMETRICS_API_RESERVOIR_VARIABLE && process.env[BATTLEMETRICS_API_RESERVOIR_VARIABLE];
 
 const BATTLEMETRICS_ORGANIZATION = process.env.BATTLEMETRICS_ORGANIZATION || '56746';
 
@@ -30,7 +40,8 @@ const INTAKE_FORM = CLIENT_CONFIG.INTAKE_FORM || process.env.INTAKE_FORM;
 export {
   HOST,
   BATTLEMETRICS_API_KEY,
-  BATTLEMETRICS_API_RESERVIOR,
+  BATTLEMETRICS_API_RESERVOIR,
+  BATTLEMETRICS_API_RESERVOIR_VARIABLE,
   BATTLEMETRICS_ORGANIZATION,
   STEAM_API_KEY,
   LOCALSTORAGE_VERSION,
