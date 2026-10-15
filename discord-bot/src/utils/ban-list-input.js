@@ -1,4 +1,4 @@
-import { BanList, Organisation } from 'scbl-lib/db/models';
+import { BanList, ExportBanList, Organisation } from 'scbl-lib/db/models';
 import { Op } from 'scbl-lib/db/sequelize';
 
 import { checkBanListSource } from './ban-list-source.js';
@@ -27,8 +27,34 @@ export function skipCheckOption(option) {
     .setDescription('Save without test fetching the ban list first.');
 }
 
-// Importing the same source twice would count each of its bans twice.
+// BattleMetrics ban list IDs are UUIDs, so compare them ignoring case, hyphens and spaces.
+function isSameBattlemetricsID(a, b) {
+  const normalise = (id) => id.replace(/[\s-]/g, '').toLowerCase();
+  return normalise(a) !== '' && normalise(a) === normalise(b);
+}
+
+// CBL's own BattleMetrics export ban lists can be read like a partner's ban list, but importing one
+// would feed the players CBL exports back in as new bans, which keeps them on the export ban lists.
+async function checkNotExportBanList(source) {
+  const exportBanLists = await ExportBanList.findAll({
+    attributes: ['id', 'battlemetricsID'],
+    where: { battlemetricsID: { [Op.ne]: null } }
+  });
+  const exportBanList = exportBanLists.find(({ battlemetricsID }) =>
+    isSameBattlemetricsID(battlemetricsID, source)
+  );
+  if (!exportBanList) return;
+
+  throw new UserError(
+    `That source is one of CBL's own export ban lists (#${exportBanList.id}), not a partner's ban list. Importing it would feed the players CBL exports back in as new bans.`
+  );
+}
+
+// Importing the same source twice would count each of its bans twice. These checks run even with
+// skip_check, which only skips the test fetch.
 export async function checkBanListSourceUnused(type, source, banList = null) {
+  if (type === 'battlemetrics') await checkNotExportBanList(source);
+
   const where = { type, source };
   if (banList) where.id = { [Op.ne]: banList.id };
 
