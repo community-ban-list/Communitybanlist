@@ -2,7 +2,12 @@ import { steam } from 'scbl-lib/apis';
 import { sequelize } from 'scbl-lib/db';
 import { ExportBan, ExportBanList, SteamUser } from 'scbl-lib/db/models';
 import { Op } from 'scbl-lib/db/sequelize';
-import { createDiscordWebhookMessage, Logger } from 'scbl-lib/utils';
+import {
+  createDiscordWebhookMessage,
+  isDiscordWebhookUrl,
+  Logger,
+  sendDiscordWebhook
+} from 'scbl-lib/utils';
 import { HOST } from 'scbl-lib/config';
 
 const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
@@ -16,6 +21,10 @@ const DELETED_WEBHOOK_CODES = [10015, 50027];
 
 // Webhooks Discord has reported as deleted during this run, so they are not tried again.
 const deletedWebhooks = new Set();
+
+// Export ban lists whose webhook was skipped during this run for not being a Discord webhook, so it
+// is only reported once.
+const invalidWebhookLists = new Set();
 
 async function withTimeout(promise) {
   const myError = new Error(`timeout`);
@@ -390,14 +399,14 @@ export default class Core {
     for (const { exportBanList, count } of Object.values(listChangeCount)) {
       if (!exportBanList.discordWebhook || count < DISCORD_ALERT_CAP) continue;
 
-      const [hook, message] = createDiscordWebhookMessage(exportBanList.discordWebhook);
+      const [, message] = createDiscordWebhookMessage(exportBanList.discordWebhook);
 
       message.setTitle("We've updated your export ban list.");
       message.setDescription(
         `We've made some changes to who's on your export ban list named "${exportBanList.name}".\nSadly, there's too many changes for us to document them individually.`
       );
 
-      await Core.sendExportBanListAlert(exportBanList, hook, message);
+      await Core.sendExportBanListAlert(exportBanList, message);
     }
     Logger.verbose(
       'Core',
@@ -408,16 +417,30 @@ export default class Core {
 
   // Send an alert to an export ban list's Discord webhook. If Discord says the webhook no longer
   // exists, remove it from every export ban list using it so later runs stop trying it.
-  static async sendExportBanListAlert(exportBanList, hook, message) {
+  static async sendExportBanListAlert(exportBanList, message) {
     const { discordWebhook } = exportBanList;
     if (deletedWebhooks.has(discordWebhook)) return;
 
     // Name the list rather than the webhook, as anyone with its URL can post to the channel.
     const list = `${exportBanList.server}'s List "${exportBanList.name}" (ID: ${exportBanList.id})`;
 
+    // Webhooks saved before the web server checked them could point anywhere, so only send to
+    // Discord webhooks.
+    if (!isDiscordWebhookUrl(discordWebhook)) {
+      if (!invalidWebhookLists.has(exportBanList.id)) {
+        invalidWebhookLists.add(exportBanList.id);
+        Logger.verbose(
+          'Core',
+          1,
+          `Skipped the Discord Webhook for ${list}, as it is not a Discord webhook address.`
+        );
+      }
+      return;
+    }
+
     let reason;
     try {
-      await hook.send(null, message.getJSON().embeds);
+      await sendDiscordWebhook(discordWebhook, { embeds: message.getJSON().embeds });
       return;
     } catch (err) {
       if (!DELETED_WEBHOOK_CODES.includes(err.code)) {
@@ -463,7 +486,7 @@ export default class Core {
     // Send Discord alert.
     if (!exportBan.ExportBanList.discordWebhook || !exportBan.doDiscordAlert) return;
 
-    const [hook, message] = createDiscordWebhookMessage(exportBan.ExportBanList.discordWebhook, {
+    const [, message] = createDiscordWebhookMessage(exportBan.ExportBanList.discordWebhook, {
       color: '#00ff00'
     });
 
@@ -473,7 +496,7 @@ export default class Core {
     );
     message.setThumbnail(exportBan.SteamUser.avatarMedium);
 
-    await Core.sendExportBanListAlert(exportBan.ExportBanList, hook, message);
+    await Core.sendExportBanListAlert(exportBan.ExportBanList, message);
   }
 
   static async deleteExportBan(exportBan) {
@@ -486,7 +509,7 @@ export default class Core {
     // Send Discord alert.
     if (!exportBan.ExportBanList.discordWebhook || !exportBan.doDiscordAlert) return;
 
-    const [hook, message] = createDiscordWebhookMessage(exportBan.ExportBanList.discordWebhook, {
+    const [, message] = createDiscordWebhookMessage(exportBan.ExportBanList.discordWebhook, {
       color: '#ff0000'
     });
 
@@ -496,6 +519,6 @@ export default class Core {
     );
     message.setThumbnail(exportBan.SteamUser.avatarMedium);
 
-    await Core.sendExportBanListAlert(exportBan.ExportBanList, hook, message);
+    await Core.sendExportBanListAlert(exportBan.ExportBanList, message);
   }
 }
