@@ -260,6 +260,10 @@ export default class Core {
     // again in the same process; NOW() is the same for every row. Only players whose rank changed
     // or who were queued for a refresh are written, so lastRefreshedReputationRank is when a
     // player's rank last changed or was last recalculated after their bans changed.
+    // While it runs, it locks every SteamUsers row and stops new rows being added, so other writes
+    // to SteamUsers, a new player's first sign-in included, wait until it finishes: 2 to 2.5
+    // seconds with 145,000 players when most of them are re-ranked, as new bans usually make them,
+    // and about 0.2 seconds when no rank changed.
     // Leave this at RANK() because that way we can actually count how many ppl were on ranks before this one.
     // DENSE_RANK() fucks counting up when browsing ranks
     const affectedRows = await sequelize.query(

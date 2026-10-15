@@ -55,7 +55,14 @@ await Core.updateReputationRank();
 assert.strictEqual(queries.length, 1, 'The rank step should make exactly one query');
 const [{ sql, options }] = queries;
 assert.doesNotMatch(sql, /@|TEMPORARY|;/i, 'The rank step should keep nothing on the connection');
-assert.deepStrictEqual({ ...options }, { type: 'BULKUPDATE' });
+
+// The statement runs on its own, outside any transaction, so the rows it locks are released as
+// soon as it finishes.
+assert.deepStrictEqual(
+  { ...options },
+  { type: 'BULKUPDATE' },
+  'The rank step should run on its own, outside a transaction'
+);
 
 // Players are ranked with RANK(), so tied players share a rank and the next rank counts everyone
 // above it.
