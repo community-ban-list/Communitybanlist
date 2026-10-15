@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
 
-import { ApolloClient, HttpLink, InMemoryCache } from '@apollo/client';
+import { ApolloClient, ApolloLink, HttpLink, InMemoryCache } from '@apollo/client';
 import { SetContextLink } from '@apollo/client/link/context';
 import { ApolloProvider } from '@apollo/client/react';
 import { relayStylePagination } from '@apollo/client/utilities';
 import { BrowserRouter, Route, Routes } from 'react-router';
 
 import Auth from './utils/auth';
+import signOutLink from './utils/sign-out-link.js';
 
 import publicRoutes from './views';
 
@@ -17,7 +18,7 @@ const authLink = new SetContextLink(({ headers }) => {
 });
 
 const client = new ApolloClient({
-  link: authLink.concat(httpLink),
+  link: ApolloLink.from([signOutLink, authLink, httpLink]),
   cache: new InMemoryCache({
     typePolicies: {
       Query: {

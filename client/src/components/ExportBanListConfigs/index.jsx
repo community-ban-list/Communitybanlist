@@ -71,7 +71,7 @@ export default function (props) {
               </td>
             </tr>
           )}
-          {data && data.loggedInSteamUser.exportBanList && (
+          {data && data.loggedInSteamUser?.exportBanList && (
             <>
               {data.loggedInSteamUser.exportBanList.exportBanListConfigs.length === 0 && (
                 <tr>

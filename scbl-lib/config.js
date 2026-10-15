@@ -9,6 +9,10 @@ const JWT_AUTH = {
   SECRET: process.env.JWT_AUTH_SECRET
 };
 
+// How long a sign-in token works for, in seconds: 30 days. The web server stops accepting a token
+// this long after it was issued, and the client then shows the user as signed out.
+const SIGN_IN_TOKEN_LIFETIME = 30 * 24 * 60 * 60;
+
 // APIs
 const BATTLEMETRICS_API_KEY = process.env.BATTLEMETRICS_API_KEY;
 // How many BattleMetrics requests a minute this service may make, and the variable it came from.
@@ -46,6 +50,7 @@ export {
   STEAM_API_KEY,
   LOCALSTORAGE_VERSION,
   JWT_AUTH,
+  SIGN_IN_TOKEN_LIFETIME,
   DISCORD_INVITE,
   INTAKE_FORM
 };
