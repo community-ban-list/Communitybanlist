@@ -1,5 +1,5 @@
 import { connect, disconnect } from 'scbl-lib/db';
-import { Logger } from 'scbl-lib/utils';
+import { describeError, Logger } from 'scbl-lib/utils';
 
 import Core from './src/core.js';
 
@@ -16,9 +16,29 @@ const TASKS_TO_COMPLETE = {
   UPDATE_EXPORT_BANS: true,
   EXPORT_EXPORT_BANS: true
 };
+
+// How long to wait at the end of a run for Discord log messages still waiting to be sent.
+const LOG_FLUSH_TIMEOUT = 30 * 1000;
+
 async function doSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+// Send the progress bars' latest values and wait for queued Discord log messages, but for no longer
+// than LOG_FLUSH_TIMEOUT, so a slow or unreachable Discord cannot keep the run from ending.
+async function flushLogs() {
+  Logger.flush();
+  const deadline = Date.now() + LOG_FLUSH_TIMEOUT;
+  while (Date.now() < deadline && Object.values(Logger.getLogQueue()).some((count) => count > 0))
+    await doSleep(500);
+}
+
+// A promise that fails with nothing to handle it must not stop the run part-way, but the run is
+// then reported as failed. Only a summary is printed, as errors from API clients hold their keys.
+process.on('unhandledRejection', (reason) => {
+  console.error(`Unhandled promise rejection: ${describeError(reason)}`);
+  process.exitCode = 1;
+});
 
 async function main() {
   const profileStartTime = Date.now();
@@ -53,19 +73,11 @@ async function main() {
 }
 
 main()
-  .then(async () => {
-    console.log(`Done!`);
-    while (
-      Logger.getLogQueue().RECEIVED !== 0 ||
-      Logger.getLogQueue().QUEUED !== 0 ||
-      Logger.getLogQueue().RUNNING !== 0 ||
-      Logger.getLogQueue().EXECUTING !== 0
-    ) {
-      await doSleep(1000);
-    }
-    process.exit(0);
-  })
+  .then(() => console.log(`Done!`))
   .catch((error) => {
-    console.error(error);
-    throw error;
-  });
+    process.exitCode = 1;
+    Logger.verbose('Core', 1, 'The CBL update run failed: ', error);
+  })
+  .then(flushLogs)
+  // Exit with process.exitCode, which is 1 if anything above failed.
+  .finally(() => process.exit());

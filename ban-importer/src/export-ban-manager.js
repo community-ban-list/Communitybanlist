@@ -23,7 +23,7 @@ export default class ExportBanManager {
     let currentRunTime = profileStartTime;
 
     const startingLength = users.length;
-    const myProgressBar = await Logger.discordProgressBar(
+    const myProgressBar = Logger.discordProgressBar(
       'Core',
       `Updating ${startingLength} ExportBans...`,
       null,

@@ -59,7 +59,7 @@ export default class Core {
 
     Logger.verbose('Core', 2, `Updating ${users.length} Steam users...`);
     const startingLength = users.length;
-    const myProgressBar = await Logger.discordProgressBar(
+    const myProgressBar = Logger.discordProgressBar(
       'Core',
       `Updating ${users.length} Steam users...`,
       null,
@@ -335,7 +335,7 @@ export default class Core {
         1000
       ).toFixed(2)}s`
     );
-    const myProgressBar = await Logger.discordProgressBar(
+    const myProgressBar = Logger.discordProgressBar(
       'Core',
       `Exporting ${exportBans.length} Bans...`,
       null,

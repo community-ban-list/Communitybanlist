@@ -53,7 +53,11 @@ const requests = [];
 let reply;
 const axios = {
   async post(url, body, options) {
-    requests.push({ url, body, options });
+    requests.push({ method: 'post', url, body, options });
+    return reply();
+  },
+  async patch(url, body, options) {
+    requests.push({ method: 'patch', url, body, options });
     return reply();
   }
 };
@@ -83,17 +87,20 @@ async function load(path) {
     });
   });
   await module.evaluate();
-  return module.namespace.default;
+  return module.namespace;
 }
 
-const send = await load('../utils/discord-webhook.js');
-const testWebhook = await load('../utils/test-discord-webhook.js');
+const { default: send, editDiscordWebhookMessage: edit } = await load(
+  '../utils/discord-webhook.js'
+);
+const { default: testWebhook } = await load('../utils/test-discord-webhook.js');
 const webhook = 'https://discord.com/api/webhooks/1/secret-token';
 
 // A message is posted as CBL, to the webhook with wait=true, with a timeout and no redirects.
 reply = () => ({ status: 200, data: { id: 'message' } });
 assert.strictEqual((await send(webhook, { embeds: ['embed'] })).id, 'message');
 const [request] = requests;
+assert.strictEqual(request.method, 'post');
 assert.strictEqual(request.url, `${webhook}?wait=true`);
 assert.strictEqual(request.body.username, 'Community Ban List');
 assert.strictEqual(request.body.content, null);
@@ -138,10 +145,69 @@ await assert.rejects(
   /^DiscordWebhookError: Could not reach Discord \(ECONNREFUSED\)$/
 );
 
-// Anything else is refused before a request is made.
+// When Discord rate limits a request, the error says how many seconds it asked to wait, from its
+// answer or else from the Retry-After header.
+reply = () => ({
+  status: 429,
+  data: { message: 'You are being rate limited.', retry_after: 1.5, global: false },
+  headers: { 'retry-after': '2' }
+});
+await assert.rejects(send(webhook), (err) => {
+  assert.strictEqual(err.status, 429);
+  assert.strictEqual(err.retryAfter, 1.5);
+  assert.strictEqual(err.message, 'Discord answered HTTP 429: You are being rate limited.');
+  return true;
+});
+reply = () => ({
+  status: 429,
+  data: '<html>Too many requests</html>',
+  headers: { 'retry-after': '3' }
+});
+await assert.rejects(send(webhook), (err) => err.retryAfter === 3);
+reply = () => ({ status: 503, data: {}, headers: {} });
+await assert.rejects(send(webhook), (err) => err.status === 503 && err.retryAfter === undefined);
+
+// A message the webhook posted can be edited, e.g. to update a progress bar, with the same time
+// limits and without following redirects.
+requests.length = 0;
+reply = () => ({ status: 200, data: { id: '123' } });
+assert.strictEqual((await edit(webhook, '123', { content: 'Updated' })).id, '123');
+assert.strictEqual(requests[0].method, 'patch');
+assert.strictEqual(requests[0].url, `${webhook}/messages/123`);
+assert.strictEqual(requests[0].body.content, 'Updated');
+assert.deepStrictEqual([...requests[0].body.embeds], []);
+assert.deepStrictEqual([...requests[0].body.allowed_mentions.parse], []);
+assert.strictEqual(requests[0].options.timeout, 10000);
+assert.strictEqual(requests[0].options.maxRedirects, 0);
+assert.ok(requests[0].options.signal instanceof AbortSignal);
+assert.ok(requests[0].options.validateStatus(500));
+
+// The thread a message was posted in is kept.
+await edit('https://discord.com/api/webhooks/1/token/?thread_id=42', '123', { content: 'x' });
+assert.strictEqual(
+  requests[1].url,
+  'https://discord.com/api/webhooks/1/token/messages/123?thread_id=42'
+);
+
+// Edits fail like sends, with Discord's error and how long to wait.
+reply = () => ({ status: 429, data: { message: 'Slow down', retry_after: 0.25 } });
+await assert.rejects(edit(webhook, '123'), (err) => err.status === 429 && err.retryAfter === 0.25);
+reply = () => ({ status: 404, data: { message: 'Unknown Message', code: 10008 } });
+await assert.rejects(
+  edit(webhook, '123'),
+  /^DiscordWebhookError: Discord answered HTTP 404: Unknown Message \(code 10008\)$/
+);
+
+// Anything else is refused before a request is made, so an edit cannot reach another endpoint.
 requests.length = 0;
 await assert.rejects(send('https://evil.example/api/webhooks/1/token'), /Invalid Discord webhook/);
 await assert.rejects(testWebhook('http://127.0.0.1/hook'), /^Error: Invalid Discord Webhook$/);
+await assert.rejects(
+  edit('https://evil.example/api/webhooks/1/token', '1'),
+  /Invalid Discord webhook/
+);
+for (const id of [undefined, '', '12a', '1/../../2', '../messages', '1?wait=true'])
+  await assert.rejects(edit(webhook, id), /^DiscordWebhookError: Invalid Discord message$/);
 assert.strictEqual(requests.length, 0);
 
 // The webhook test posts a message, and explains failures without the address.
@@ -158,4 +224,4 @@ await assert.rejects(testWebhook(webhook), (err) => {
   return true;
 });
 
-console.log('Discord webhook checks passed: address validation, sending, and errors.');
+console.log('Discord webhook checks passed: address validation, sending, editing, and errors.');
