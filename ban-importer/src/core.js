@@ -85,11 +85,22 @@ export default class Core {
         });
         data = myData.data;
       } catch (err) {
+        // Steam refused the key, so it would refuse every other batch too, and
+        // partner.steam-api.com limits the whole IP address after repeated refusals.
+        if (err.auth) {
+          Logger.verbose(
+            'Core',
+            1,
+            `Stopped updating Steam users, as Steam refused the API key: ${err.message}`
+          );
+          break;
+        }
+
+        // Only the message is logged, as an error from a request can hold its API key.
         Logger.verbose(
           'Core',
           1,
-          `Failed to update batch of ${batch.length} Steam users due to Error: ${err.message}`,
-          err
+          `Failed to update batch of ${batch.length} Steam users due to Error: ${err.message}`
         );
         await doSleep(5000);
         continue;
@@ -375,13 +386,13 @@ export default class Core {
             `Removed export ban (ID: ${exportBan.id}) from Lists due to error 404 during deletion.`
           );
         } else {
+          // Only the message is logged, as an error from a request can hold its API key.
           await Logger.verbose(
             'Core',
             1,
             `Failed to ${
               exportBan.status === 'TO_BE_CREATED' ? 'create' : 'delete'
-            } export ban (ID: ${exportBan.id}): `,
-            err
+            } export ban (ID: ${exportBan.id}): ${err.message}`
           );
         }
       }

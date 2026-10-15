@@ -34,16 +34,18 @@ assert.deepStrictEqual(
   ['20', 'BATTLEMETRICS_API_RESERVIOR']
 );
 
-// Load the API client with a budget and a stand-in for axios, and record what it logs and the
-// limiter it creates.
-async function loadClient(path, config) {
+// Load the API client with a budget and a stand-in for axios, which answers with reply(), and
+// record what it logs and the limiter it creates.
+async function loadClient(path, config, reply = () => ({ status: 200 })) {
   const output = [];
   const limiters = [];
   const requests = [];
+  let limiter;
   class RecordingLimiter extends Bottleneck {
     constructor(options) {
       super(options);
       limiters.push(options);
+      limiter = this;
     }
   }
   const dependencies = {
@@ -51,7 +53,7 @@ async function loadClient(path, config) {
       default: async (request) => {
         requests.push(request);
         await new Promise((resolve) => setTimeout(resolve, 50));
-        return { status: 200 };
+        return reply(requests.length);
       }
     },
     bottleneck: { default: RecordingLimiter },
@@ -62,12 +64,23 @@ async function loadClient(path, config) {
       log: (message) => output.push(message),
       warn: (message) => output.push(message)
     },
-    // The client's 60 second timeouts must not keep the test running.
-    setTimeout: (callback, ms) => setTimeout(callback, ms).unref()
+    // The waits between attempts are cut short, so the test runs quickly.
+    setTimeout: (callback, ms) => setTimeout(callback, Math.min(ms, 20)),
+    AbortSignal
   });
   const url = new URL(path, import.meta.url);
-  const module = new vm.SourceTextModule(await readFile(url, 'utf8'), { context });
-  await module.link((specifier) => {
+  const module = new vm.SourceTextModule(await readFile(url, 'utf8'), {
+    context,
+    identifier: url.href
+  });
+  await module.link(async (specifier, referencingModule) => {
+    if (specifier.startsWith('./')) {
+      const dependency = new URL(specifier, referencingModule.identifier);
+      return new vm.SourceTextModule(await readFile(dependency, 'utf8'), {
+        context,
+        identifier: dependency.href
+      });
+    }
     const exports = dependencies[specifier];
     assert.ok(exports, `Unexpected dependency: ${specifier}`);
     return new vm.SyntheticModule(
@@ -79,7 +92,7 @@ async function loadClient(path, config) {
     );
   });
   await module.evaluate();
-  return { request: module.namespace.default, output, limiters, requests };
+  return { request: module.namespace.default, output, limiters, limiter, requests };
 }
 
 const budget = async (
@@ -170,6 +183,24 @@ assert.deepStrictEqual(
   ['fulfilled', 'fulfilled']
 );
 
+// Each attempt at a request takes from the budget like any other request, so a request that is
+// made three times leaves three fewer.
+const retried = await loadClient(
+  '../apis/battlemetrics.js',
+  {
+    BATTLEMETRICS_API_KEY: 'test-token',
+    BATTLEMETRICS_API_RESERVOIR: '10',
+    BATTLEMETRICS_API_RESERVOIR_VARIABLE: 'BATTLEMETRICS_API_RESERVOIR'
+  },
+  (count) => {
+    if (count < 3) throw Object.assign(new Error('Unavailable'), { response: { status: 503 } });
+    return { status: 200 };
+  }
+);
+assert.strictEqual((await retried.request('get', 'bans')).status, 200);
+assert.strictEqual(retried.requests.length, 3);
+assert.strictEqual(await retried.limiter.currentReservoir(), 7);
+
 console.log(
-  'BattleMetrics budget checks passed: settings, invalid values and concurrent requests.'
+  'BattleMetrics budget checks passed: settings, invalid values, concurrent requests and retries.'
 );
