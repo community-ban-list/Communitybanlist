@@ -50,7 +50,9 @@ export default function (props) {
       </CardBody>
     );
 
-  if (!data.loggedInSteamUser.exportBanList)
+  // loggedInSteamUser is null when the web server answers as signed out, e.g. as the sign-in has
+  // expired.
+  if (!data.loggedInSteamUser?.exportBanList)
     return (
       <CardBody>
         <div className="text-center mt-2 mb-2">Unknown Export Ban List</div>

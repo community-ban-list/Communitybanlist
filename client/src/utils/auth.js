@@ -1,6 +1,7 @@
 import { jwtDecode } from 'jwt-decode';
 
 import httpClient from './http-client';
+import readSignInToken from './sign-in-token.js';
 
 import { LOCALSTORAGE_VERSION } from 'scbl-lib/config';
 
@@ -36,13 +37,21 @@ class Auth {
       localStorage.setItem('LOCALSTORAGE_VERSION', LOCALSTORAGE_VERSION);
     }
 
-    if (localStorage.getItem('JWT') === null) return false;
     const token = localStorage.getItem('JWT');
+    if (token === null) return false;
+
+    // Forget a token that cannot be read or has expired, so the user is shown as signed out
+    // instead of looking signed in while the web server answers every request as signed out.
+    const signIn = readSignInToken(token);
+    if (!signIn || signIn.expires <= Date.now()) {
+      localStorage.removeItem('JWT');
+      return false;
+    }
 
     this.isLoggedIn = true;
     this.jwtToken = token;
     this.saveToken = true;
-    this.claim = jwtDecode(token).user;
+    this.claim = signIn.user;
     return true;
   }
 
@@ -58,6 +67,17 @@ class Auth {
     this.isLoggedIn = true;
     this.jwtToken = response.data.token;
     this.claim = jwtDecode(response.data.token).user;
+  }
+
+  // The web server answered a request as signed out, as it no longer accepts the sign-in token,
+  // e.g. as it has expired. Forget the token, and return whether the user was signed in with it.
+  // Another tab may have stored a newer token since, so the stored token is only removed if it is
+  // this one.
+  forgetRejectedToken() {
+    if (!this.isLoggedIn) return false;
+    if (localStorage.getItem('JWT') === this.jwtToken) localStorage.removeItem('JWT');
+    this.flush();
+    return true;
   }
 }
 
