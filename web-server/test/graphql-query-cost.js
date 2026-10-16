@@ -142,12 +142,14 @@ async function load(path, globals) {
 }
 
 // Load the API as it runs in development, where Apollo Sandbox's introspection query is allowed.
-// Apollo Server reads NODE_ENV when it is built.
+// Apollo Server reads NODE_ENV when it is built. The API also has Node's console and Buffer, so
+// that code that logs errors or reads page cursors runs as it does in the server.
 const { NODE_ENV } = process.env;
 process.env.NODE_ENV = 'development';
 await load('../src/graphql-api/index.js', {
   process: { env: { NODE_ENV: 'development' } },
-  console
+  console,
+  Buffer
 });
 if (NODE_ENV === undefined) delete process.env.NODE_ENV;
 else process.env.NODE_ENV = NODE_ENV;
@@ -271,22 +273,34 @@ async function checkRefused(description, query, variables, message) {
 // for: the size a request asks for, between 1 and the list's largest page, or the list's default
 // when it does not say. Each list's rows are worked out from the costs of pages of one and two rows.
 // A page size from a variable counts as the list's largest page, whatever is sent, and a cursor
-// from a variable as the larger of the pages it can give.
+// from a variable as the larger of the pages it can give. The pages before a cursor are asked for
+// with a cursor for the list's stand-in row, written as the pagination library writes them: base64
+// JSON for the row's values for the fields the list is sorted by, ending with its id. So a list
+// that checks the cursors it is sent accepts them.
+const cursorFor = (...values) => Buffer.from(JSON.stringify(values)).toString('base64');
 const lists = [
-  { name: 'Query.bans', model: 'Ban', path: (args) => `bans${args} { edges { node { id } } }` },
+  {
+    name: 'Query.bans',
+    model: 'Ban',
+    path: (args) => `bans${args} { edges { node { id } } }`,
+    cursor: cursorFor(rows.Ban.created, rows.Ban.id)
+  },
   {
     name: 'Query.steamUsers',
     model: 'SteamUser',
-    path: (args) => `steamUsers${args} { edges { node { id } } }`
+    path: (args) => `steamUsers${args} { edges { node { id } } }`,
+    cursor: cursorFor(rows.SteamUser.id)
   },
   {
     name: 'SteamUser.bans',
     model: 'Ban',
-    path: (args) => `steamUser(id: "${playerID}") { bans${args} { edges { node { id } } } }`
+    path: (args) => `steamUser(id: "${playerID}") { bans${args} { edges { node { id } } } }`,
+    cursor: cursorFor(rows.Ban.created, rows.Ban.id)
   }
 ];
 for (const list of lists) {
   const query = (args, variables = '') => `query Page${variables} { ${list.path(args)} }`;
+  const before = `before: "${list.cursor}"`;
   const one = measure(query('(first: 1)')).cost;
   const perRow = measure(query('(first: 2)')).cost - one;
   const rowsCounted = (args, variables) =>
@@ -310,9 +324,9 @@ for (const list of lists) {
     '(first: 20)',
     '(first: 100)',
     '(first: 200000)',
-    '(before: "cursor")',
-    '(last: 7, before: "cursor")',
-    '(last: 500, before: "cursor")'
+    `(${before})`,
+    `(last: 7, ${before})`,
+    `(last: 500, ${before})`
   ])
     assert.strictEqual(rowsCounted(args), await pageAsked(args), `${list.name}${args}`);
   assert.strictEqual(rowsCounted(''), PAGE_DEFAULTS[list.name]);
@@ -320,18 +334,18 @@ for (const list of lists) {
   const largest = largestPage(PAGE_DEFAULTS[list.name]);
   for (const [args, variables] of [
     ['(first: $size)', '($size: Int)'],
-    ['(last: $size, before: "cursor")', '($size: Int)']
+    [`(last: $size, ${before})`, '($size: Int)']
   ]) {
     assert.strictEqual(rowsCounted(args, variables), largest, `${list.name}${args}`);
     for (const size of [null, 1, 5, 200000])
       assert.ok((await pageAsked(args, variables, { size })) <= largest, `${list.name}${args}`);
   }
-  const fromCursor = ['(first: 5, before: $cursor)', '($cursor: String)'];
+  const fromCursor = ['(before: $cursor)', '($cursor: String)'];
   assert.strictEqual(
     rowsCounted(...fromCursor),
     Math.max(
       await pageAsked(...fromCursor, { cursor: null }),
-      await pageAsked(...fromCursor, { cursor: 'cursor' })
+      await pageAsked(...fromCursor, { cursor: list.cursor })
     )
   );
 }
