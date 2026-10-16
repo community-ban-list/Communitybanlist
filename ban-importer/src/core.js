@@ -304,25 +304,27 @@ export default class Core {
   static async updateReputationRank() {
     Logger.verbose('Core', 2, 'Updating reputation rank of Steam users...');
     const profileStartTime = Date.now();
-    await sequelize.query(`
-    SET @Dt = NOW();
-    `);
 
+    // One statement, so it needs nothing left on a pooled connection by an earlier one and can run
+    // again in the same process; NOW() is the same for every row. Only players whose rank changed
+    // or who were queued for a refresh are written, so lastRefreshedReputationRank is when a
+    // player's rank last changed or was last recalculated after their bans changed.
+    // While it runs, it locks every SteamUsers row and stops new rows being added, so other writes
+    // to SteamUsers, a new player's first sign-in included, wait until it finishes: 2 to 2.5
+    // seconds with 145,000 players when most of them are re-ranked, as new bans usually make them,
+    // and about 0.2 seconds when no rank changed.
     // Leave this at RANK() because that way we can actually count how many ppl were on ranks before this one.
     // DENSE_RANK() fucks counting up when browsing ranks
-    await sequelize.query(
-      `  
-      CREATE TEMPORARY TABLE Temp_RankedSteamUsers
-        SELECT id, RANK() OVER (ORDER BY reputationPoints DESC) AS reputationRank
-      FROM SteamUsers;
-      `
-    );
     const affectedRows = await sequelize.query(
       `
       UPDATE SteamUsers su
-      JOIN Temp_RankedSteamUsers rr ON su.id = rr.id
+      JOIN (
+        SELECT id, RANK() OVER (ORDER BY reputationPoints DESC) AS reputationRank
+        FROM SteamUsers
+      ) rr ON su.id = rr.id
       SET su.reputationRank = rr.reputationRank,
-          su.lastRefreshedReputationRank = @Dt;
+          su.lastRefreshedReputationRank = NOW()
+      WHERE NOT (su.reputationRank <=> rr.reputationRank) OR su.lastRefreshedReputationRank IS NULL
       `,
       { type: sequelize.QueryTypes.BULKUPDATE }
     );
