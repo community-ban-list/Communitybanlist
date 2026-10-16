@@ -55,6 +55,11 @@ async function loadIndex() {
         async importBans() {
           calls.push('importBans');
         }
+
+        report() {
+          calls.push('report');
+          return { lists: 2 };
+        }
       }
     },
     './src/export-ban-manager.js': {
@@ -97,11 +102,11 @@ async function loadIndex() {
   return { calls, output, result, process: fakeProcess, steps: () => steps };
 }
 
-// The run is given every step, in order.
+// The run is given every step, in order, each named after what it runs, as the run record names
+// them. The import also reports its counts for the record.
 {
   const index = await loadIndex();
-  for (const step of index.steps()) await step();
-  assert.deepStrictEqual(index.calls, [
+  const names = [
     'importBans',
     'updateSteamUserInfo',
     'clearOrphanedUsers',
@@ -109,7 +114,19 @@ async function loadIndex() {
     'updateReputationRank',
     'updateExportBans',
     'exportExportBans'
-  ]);
+  ];
+  // Copied into arrays of this test's own, as the steps were made in index.js's context.
+  const steps = Array.from(index.steps());
+  assert.deepStrictEqual(
+    steps.map(({ name }) => name),
+    names
+  );
+  for (const step of steps) await step.run();
+  assert.deepStrictEqual(index.calls, names);
+  assert.deepStrictEqual(
+    steps.filter((step) => step.counts).map((step) => [step.name, { ...step.counts() }]),
+    [['importBans', { lists: 2 }]]
+  );
 }
 
 // The importer exits with the run's code: 0 finished, 1 failed, 3 stopped part-way and 75 skipped.

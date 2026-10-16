@@ -2,6 +2,7 @@ import { connect, disconnect, sequelize, takeRunLock } from 'scbl-lib/db';
 import { isDatabaseUnavailable } from 'scbl-lib/db/sequelize';
 import { describeError, Logger } from 'scbl-lib/utils';
 
+import RunRecord, { alertIfStale, saveRecord } from './run-record.js';
 import {
   LOCK_LOST,
   requestStop,
@@ -10,6 +11,7 @@ import {
   stopIfRequested,
   stopRequest
 } from './run-control.js';
+import migrate from './schema/migrate.js';
 
 // What the importer's exit code tells the script that starts it.
 export const EXIT_CODES = {
@@ -21,11 +23,25 @@ export const EXIT_CODES = {
   SKIPPED: 75
 };
 
+// How the run record names each exit code.
+const OUTCOMES = {
+  [EXIT_CODES.FINISHED]: 'finished',
+  [EXIT_CODES.FAILED]: 'failed',
+  [EXIT_CODES.INTERRUPTED]: 'interrupted',
+  [EXIT_CODES.SKIPPED]: 'skipped'
+};
+
 // A run that takes longer than this stops at its next safe point, so it ends cleanly before the
 // next run, started 6 hours after it, has to stop it. IMPORTER_MAX_RUN_SECONDS changes it.
 const DEFAULT_MAX_RUN_SECONDS = 5 * 60 * 60;
-// The longest time limit a timer can wait for, about 24 days.
-const MAX_RUN_SECONDS_LIMIT = Math.floor((2 ** 31 - 1) / 1000);
+
+// How often the script that starts the importer starts a run. Once no run has succeeded for 3 times
+// this long, the importer posts that it is stale. IMPORTER_CADENCE_SECONDS changes it, e.g. to 3600
+// when runs start every hour.
+const DEFAULT_CADENCE_SECONDS = 6 * 60 * 60;
+
+// The longest time a timer can wait for, about 24 days, which limits both settings.
+const MAX_SECONDS = Math.floor((2 ** 31 - 1) / 1000);
 
 // A run that has not ended this long after reaching its time limit exits at once.
 const HARD_EXIT_DELAY = 60 * 1000;
@@ -37,6 +53,12 @@ const DATABASE_RETRY_DELAY = 5 * 1000;
 
 // How long to wait at the end of a run for Discord log messages still waiting to be sent.
 const LOG_FLUSH_TIMEOUT = 30 * 1000;
+
+// At the end of a run, saving its record and checking whether the importer is stale each wait at
+// most RECORD_TIMEOUT, and closing the database connections at most DISCONNECT_TIMEOUT, so a slow
+// or stuck database can never hold up the end of a run, nor make a run that finished fail.
+const RECORD_TIMEOUT = 15 * 1000;
+const DISCONNECT_TIMEOUT = 10 * 1000;
 
 async function doSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -53,6 +75,15 @@ function pause(ms) {
   });
 }
 
+// Wait for a promise, but for no longer than ms milliseconds, failing with what took too long.
+function withTimeout(promise, ms, what) {
+  let timer;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} took longer than ${ms / 1000}s`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 // Send the progress bars' latest values and wait for queued Discord log messages, but for no longer
 // than LOG_FLUSH_TIMEOUT, so a slow or unreachable Discord cannot keep the run from ending.
 async function flushLogs() {
@@ -62,16 +93,18 @@ async function flushLogs() {
     await doSleep(500);
 }
 
-function readMaxRunSeconds() {
-  const value = process.env.IMPORTER_MAX_RUN_SECONDS;
-  if (value === undefined || value.trim() === '') return DEFAULT_MAX_RUN_SECONDS;
+// Read a setting given in seconds, or use its default when it is not set. An invalid value is
+// replaced with the default, with a warning.
+function readSeconds(name, defaultSeconds) {
+  const value = process.env[name];
+  if (value === undefined || value.trim() === '') return defaultSeconds;
 
   const seconds = Number(value);
-  if (Number.isInteger(seconds) && seconds > 0 && seconds <= MAX_RUN_SECONDS_LIMIT) return seconds;
+  if (Number.isInteger(seconds) && seconds > 0 && seconds <= MAX_SECONDS) return seconds;
   console.warn(
-    `Warning: IMPORTER_MAX_RUN_SECONDS must be a whole number from 1 to ${MAX_RUN_SECONDS_LIMIT}, not "${value}", so the default of ${DEFAULT_MAX_RUN_SECONDS} is used.`
+    `Warning: ${name} must be a whole number from 1 to ${MAX_SECONDS}, not "${value}", so the default of ${defaultSeconds} is used.`
   );
-  return DEFAULT_MAX_RUN_SECONDS;
+  return defaultSeconds;
 }
 
 // Wait for the database to answer, as the script that starts the importer may have just restarted
@@ -95,13 +128,18 @@ async function waitForDatabase() {
 }
 
 // Run the importer's steps once, holding the run lock, and resolve with the exit code. Each step is
-// a function, and a run that is asked to stop does so between them.
+// { name, run, counts }: run() does the step's work, and counts(), if given, returns the counts the
+// run record keeps for it. A run that is asked to stop does so between steps. Once the run holds
+// the lock, the importer's migrations are applied before the first step.
 //
-// The lines about the whole run, such as its start, why it is stopping, how it ended or why it
-// failed, are logged as important, so they reach the log channel even when the run's other messages
-// fill its queue.
+// The run's lines about problems, such as why it failed or is stopping, are logged as important, so
+// they reach the log channel even when the run's other messages fill its queue. Its start and its
+// end, when it finishes, are only printed in the console, as is the JSON line with its record that
+// every run prints when it ends.
 export default async function run(steps) {
-  const maxRunSeconds = readMaxRunSeconds();
+  const record = new RunRecord();
+  const maxRunSeconds = readSeconds('IMPORTER_MAX_RUN_SECONDS', DEFAULT_MAX_RUN_SECONDS);
+  const cadenceSeconds = readSeconds('IMPORTER_CADENCE_SECONDS', DEFAULT_CADENCE_SECONDS);
   let lock = null;
 
   // Report on the run: in the Discord log once the run holds the lock, and before that only in the
@@ -111,19 +149,58 @@ export default async function run(steps) {
     else console.log(message);
   };
 
+  // End the run's record and print it as the run's JSON line, once. Returns the exit code the
+  // importer exits with: a run that finished exits 1 after a promise failed with nothing to handle
+  // it, as index.js then exits 1, and its record says so.
+  const end = (exitCode, reason) => {
+    if (record.ended) return record.ended.exitCode;
+    let code = exitCode;
+    if (code === EXIT_CODES.FINISHED && process.exitCode) {
+      code = EXIT_CODES.FAILED;
+      reason = 'A promise failed with nothing to handle it';
+    }
+    const ended = record.end(OUTCOMES[code], code, reason);
+    try {
+      console.log(JSON.stringify(ended));
+    } catch (err) {
+      console.warn(`Warning: could not print the run record: ${describeError(err)}`);
+    }
+    return code;
+  };
+
+  // Check whether the importer is stale, and post if it is. This never fails or holds up the run.
+  // Resolves with whether it posted.
+  const checkStaleness = async (skipped) => {
+    try {
+      return await withTimeout(
+        alertIfStale({ cadenceSeconds, skipped }),
+        RECORD_TIMEOUT,
+        'Checking whether the CBL update is stale'
+      );
+    } catch (err) {
+      console.warn(
+        `Warning: could not check whether the CBL update is stale: ${describeError(err)}`
+      );
+      return false;
+    }
+  };
+
   // Post why the run failed before it held the lock, and wait for the line to be sent. Only a run
-  // that is skipped must post nothing, and a failed run must be seen.
+  // that is skipped posts nothing, unless the importer is stale, and a failed run must be seen.
   const failBeforeLock = async (message, err) => {
     Logger.important('Core', message, err);
     await flushLogs();
     return EXIT_CODES.FAILED;
   };
 
-  // Exit straight away. Closing the lock's connection frees the lock.
+  // Exit straight away. Closing the lock's connection frees the lock. There is no time to save the
+  // run's record, but its JSON line is printed. A run that has already ended, and is only saving its
+  // record or sending its log messages, exits with its own code.
   const exitNow = (why) => {
     console.error(`${why}, so the run is ending now.`);
+    const exitCode = end(EXIT_CODES.INTERRUPTED, `${why}, so it ended at once`);
     if (lock) lock.destroy();
-    process.exit(EXIT_CODES.INTERRUPTED);
+    process.exit(exitCode);
   };
 
   // The first SIGTERM or SIGINT asks the run to stop at its next safe point, and a second one ends
@@ -161,64 +238,122 @@ export default async function run(steps) {
 
   try {
     try {
-      await waitForDatabase();
+      await record.time('waitForDatabase', waitForDatabase);
     } catch (err) {
       if (err instanceof RunStopped) {
         console.log(err.message);
-        return EXIT_CODES.INTERRUPTED;
+        return end(EXIT_CODES.INTERRUPTED, `Stopped, as ${err.reason}`);
       }
-      return await failBeforeLock(
-        'The CBL update run failed, as it could not reach the database: ',
-        err
+      return end(
+        await failBeforeLock(
+          'The CBL update run failed, as it could not reach the database: ',
+          err
+        ),
+        `Could not reach the database: ${describeError(err)}`
       );
     }
 
     // Take the lock before anything else is posted to Discord, so a run that is skipped as another
-    // run holds it posts nothing.
+    // run holds it posts nothing, unless the importer is stale.
     try {
-      lock = await takeRunLock({
-        onLost: (reason) => {
-          report(`The run lost its run lock (${reason}), so it will stop at its next safe point.`);
-          requestStop(LOCK_LOST);
-        }
-      });
+      lock = await record.time('takeRunLock', () =>
+        takeRunLock({
+          onLost: (reason) => {
+            report(
+              `The run lost its run lock (${reason}), so it will stop at its next safe point.`
+            );
+            requestStop(LOCK_LOST);
+          }
+        })
+      );
     } catch (err) {
-      return await failBeforeLock('The CBL update run failed: ', err);
+      return end(await failBeforeLock('The CBL update run failed: ', err), describeError(err));
     }
     if (!lock) {
       console.log('Skipped this CBL update run, as another run holds the run lock.');
-      return EXIT_CODES.SKIPPED;
+      // A run that holds the lock for too long, e.g. as it is stuck, would otherwise make every
+      // later start skip without a word. The check only reads the run record, and an alert is sent
+      // before the run ends.
+      if (await checkStaleness(true)) await flushLogs();
+      return end(EXIT_CODES.SKIPPED, 'Another run holds the run lock');
     }
     setRunLock(lock);
 
+    let exitCode = EXIT_CODES.FAILED;
+    let reason;
     try {
-      const profileStartTime = Date.now();
-      Logger.important(
+      Logger.verbose(
         'Core',
-        `Starting new CBL Update run (commit ${process.env.GIT_SHA || 'unknown'}, time limit ${maxRunSeconds}s)...`
+        2,
+        `Starting new CBL Update run (commit ${record.gitSha}, time limit ${maxRunSeconds}s, cadence ${cadenceSeconds}s)...`
       );
-      await connect();
+      await record.time('connect', connect);
+
+      stopIfRequested();
+      const migrations = await record.time('migrate', () => migrate());
+      record.migrations = migrations.applied;
+      if (migrations.applied.length > 0)
+        Logger.verbose(
+          'Core',
+          2,
+          `Applied the importer's migrations ${migrations.applied.join(', ')}.`
+        );
+      if (migrations.unknown.length > 0)
+        Logger.verbose(
+          'Core',
+          2,
+          `The database also has importer migrations from a newer version, which are left as they are: ${migrations.unknown.join(', ')}.`
+        );
 
       for (const step of steps) {
         stopIfRequested();
-        await step();
+        await record.time(step.name, async () => {
+          try {
+            await step.run();
+          } finally {
+            if (step.counts) record.count(step.name, step.counts);
+          }
+        });
       }
 
-      await disconnect();
-      const message = `Finished All Tasks. Complete CBL run Took ${(
-        (Date.now() - profileStartTime) /
-        1000
-      ).toFixed(2)}s. Garbage Collection Completed.`;
-      Logger.important('Core', message);
-      console.log(message);
-      return EXIT_CODES.FINISHED;
+      exitCode = EXIT_CODES.FINISHED;
+      console.log(
+        `Finished All Tasks. Complete CBL run Took ${(
+          (Date.now() - record.startedAt) /
+          1000
+        ).toFixed(2)}s. Garbage Collection Completed.`
+      );
     } catch (err) {
       if (err instanceof RunStopped) {
         Logger.important('Core', err.message);
-        return err.reason === LOCK_LOST ? EXIT_CODES.FAILED : EXIT_CODES.INTERRUPTED;
+        exitCode = err.reason === LOCK_LOST ? EXIT_CODES.FAILED : EXIT_CODES.INTERRUPTED;
+        reason = `Stopped, as ${err.reason}`;
+      } else {
+        Logger.important('Core', 'The CBL update run failed: ', err);
+        reason = describeError(err);
       }
-      Logger.important('Core', 'The CBL update run failed: ', err);
-      return EXIT_CODES.FAILED;
+    }
+
+    try {
+      const code = end(exitCode, reason);
+      try {
+        await withTimeout(saveRecord(record.ended), RECORD_TIMEOUT, 'Saving the run record');
+      } catch (err) {
+        console.warn(`Warning: could not save the run record: ${describeError(err)}`);
+      }
+
+      // A run that succeeded closes the database connections. One that did not checks whether the
+      // importer is now stale.
+      if (code === EXIT_CODES.FINISHED) {
+        try {
+          await withTimeout(disconnect(), DISCONNECT_TIMEOUT, 'Closing the database connections');
+        } catch (err) {
+          console.warn(`Warning: could not close the database connections: ${describeError(err)}`);
+        }
+      } else {
+        await checkStaleness(false);
+      }
+      return code;
     } finally {
       try {
         await flushLogs();

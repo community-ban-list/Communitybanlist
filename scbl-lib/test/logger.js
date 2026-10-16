@@ -398,13 +398,20 @@ assert.deepStrictEqual(output.slice(1), [
   'Could not send a message to the Discord log: Error: Discord answered HTTP 503'
 ]);
 
-// A progress bar is returned at once, rather than a promise of one, and posted in the background.
+// A progress bar is returned at once, rather than a promise of one, and posted in the background
+// once it has existed for a minute without being finished. Until then nothing is sent, and it does
+// not count as waiting to be sent, as its step may finish sooner.
 discord.requests.length = 0;
 discord.reply = async ({ type, id }) => ({ id: type === 'send' ? '111' : id });
 const steamUsers = (progressBar, current) =>
   logger.discordProgressBar('Core', 'Updating 100 Steam users...', progressBar, 0, 100, current);
 const progressBar = steamUsers(null, 0);
 assert.strictEqual(typeof progressBar.then, 'undefined');
+advance(59999);
+await pause();
+assert.strictEqual(discord.requests.length, 0);
+assert.deepStrictEqual({ ...logger.getLogQueue() }, emptyQueue);
+advance(1);
 await idle();
 assert.deepStrictEqual(
   discord.requests.map(({ type, content }) => [type, content]),
@@ -452,6 +459,7 @@ discord.reply = async ({ type, id }) => {
 const exportProgress = (bar, current) =>
   logger.discordProgressBar('Core', 'Exporting 10 Bans...', bar, 0, 10, current);
 const exportBar = exportProgress(null, 0);
+advance(60000);
 await idle();
 discord.requests.length = 0;
 exportProgress(exportBar, 5);
@@ -491,6 +499,7 @@ discord.reply = async () => {
   throw networkError('Discord did not answer in time');
 };
 const lostBar = exportProgress(null, 0);
+advance(60000);
 await idle();
 assert.strictEqual(timers.size, 0);
 discord.reply = async () => ({ id: '333' });
@@ -503,16 +512,22 @@ assert.deepStrictEqual(output, [
   'Could not post a progress bar in the Discord log: DiscordWebhookError: Discord did not answer in time'
 ]);
 
-// Bars are 1 to 50 cells long. A full bar of 182 used to round to 51 cells and throw.
-discord.requests.length = 0;
-for (const [current, max] of [
+// Bars are 1 to 50 cells long. A full bar of 182 used to round to 51 cells and throw. Each bar is
+// posted unfinished, a minute after it is made, and its value sent when the logger is flushed.
+const cellUpdates = [
   [182, 182],
   [0, 182],
   [50, 100],
-  [500, 182],
-  [0, 0]
-])
-  logger.discordProgressBar('Core', 'Exporting Bans...', null, 0, max, current);
+  [500, 182]
+].map(([current, max]) => {
+  const bar = logger.discordProgressBar('Core', 'Exporting Bans...', null, 0, max, 0);
+  return () => logger.discordProgressBar('Core', 'Exporting Bans...', bar, 0, max, current);
+});
+advance(60000);
+await idle();
+discord.requests.length = 0;
+for (const update of cellUpdates) update();
+logger.flush();
 await idle();
 assert.deepStrictEqual(
   bars(discord.requests).map((bar) => [bar.length, bar.replaceAll(' ', '').length]),
@@ -520,7 +535,6 @@ assert.deepStrictEqual(
     [50, 50],
     [50, 1],
     [50, 25],
-    [50, 50],
     [50, 50]
   ]
 );
@@ -539,6 +553,7 @@ slow.discord.reply = async () => {
 slow.logger.verbose('Test', 1, 'First');
 await until(() => slow.discord.requests.length === 1, 'the first message to be sent');
 const droppedBar = slow.logger.discordProgressBar('Test', 'Waiting...', null, 0, 1, 0);
+slow.advance(60000);
 for (let i = 1; i <= 250; i++) slow.logger.verbose('Test', 1, `Message ${i}`);
 for (let i = 1; i <= 100; i++) slow.logger.verbose('Test', 1, `Error ${i}: `, new Error('Failed'));
 await until(() => slow.logger.getLogQueue().RECEIVED === 0, 'the messages to be queued');
@@ -548,7 +563,9 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(slow.output.filter((line) => line.includes('falling behind')).length, 1);
 
-// The dropped bar is never posted, and updating it does nothing.
+// The bar was due to be posted, a minute after it was made, but was dropped. It is never posted,
+// and updating it does nothing.
+assert.strictEqual(droppedBar.stopped, true);
 slow.logger.discordProgressBar('Test', 'Waiting...', droppedBar, 0, 1, 1);
 release();
 await slow.idle();
@@ -612,6 +629,7 @@ stuck.discord.reply = async ({ type, id, content }) => {
   return { id: type === 'send' ? '1' : id };
 };
 const stuckBar = stuck.logger.discordProgressBar('Test', 'Edit', null, 0, 10, 0);
+stuck.advance(60000);
 await stuck.idle();
 stuck.logger.verbose('Test', 1, 'Blocker');
 await until(() => stuck.discord.requests.length === 2, 'the blocker to be sent');
@@ -648,6 +666,7 @@ held.discord.reply = async ({ type, id }) => {
   return { id: type === 'send' ? '444' : id };
 };
 const heldBar = held.logger.discordProgressBar('Test', 'Holding...', null, 0, 10, 0);
+held.advance(60000);
 await until(() => held.discord.requests.length === 1, 'the bar to be posted');
 held.logger.discordProgressBar('Test', 'Holding...', heldBar, 0, 10, 10);
 held.logger.flush();
@@ -668,6 +687,7 @@ assert.strictEqual(held.timers.size, 0);
 const noID = await loadLogger();
 noID.discord.reply = async () => ({});
 const noIDBar = noID.logger.discordProgressBar('Test', 'No ID...', null, 0, 10, 0);
+noID.advance(60000);
 await noID.idle();
 for (let current = 1; current <= 10; current++)
   noID.logger.discordProgressBar('Test', 'No ID...', noIDBar, 0, 10, current);
@@ -690,6 +710,7 @@ gone.discord.reply = async ({ type, id }) => ({ id: type === 'send' ? '555' : id
 const goneBar = gone.logger.discordProgressBar('Test', 'Gone...', null, 0, 10, 0);
 // A bar that has nothing waiting to be sent when the webhook is found to be gone.
 const idleBar = gone.logger.discordProgressBar('Test', 'Idle...', null, 0, 10, 0);
+gone.advance(60000);
 await gone.idle();
 gone.discord.requests.length = 0;
 gone.discord.reply = async () => {
@@ -711,9 +732,11 @@ gone.logger.discordProgressBar('Test', 'Gone...', goneBar, 0, 10, 10);
 gone.logger.discordProgressBar('Test', 'Idle...', idleBar, 0, 10, 10);
 gone.logger.discordProgressBar('Test', 'New...', newBar, 0, 10, 10);
 gone.logger.discordProgressBar('Test', 'Another...', null, 0, 10, 0);
-// Updates stop the bars at once, rather than leaving values to wait.
+// Updates stop the bars at once, rather than leaving values to wait, and the bar made just before
+// the webhook was found to be gone is never posted.
 assert.strictEqual(gone.timers.size, 0);
 assert.strictEqual(gone.logger.waitingProgressBars.size, 0);
+assert.strictEqual(gone.logger.unpostedProgressBars.size, 0);
 gone.logger.flush();
 gone.advance(60000);
 await gone.settled();
@@ -734,6 +757,7 @@ await gone.settled();
 const revoked = await loadLogger();
 revoked.discord.reply = async ({ type, id }) => ({ id: type === 'send' ? '666' : id });
 const revokedBar = revoked.logger.discordProgressBar('Test', 'Revoked...', null, 0, 10, 0);
+revoked.advance(60000);
 await revoked.idle();
 revoked.discord.reply = async ({ type }) => {
   if (type === 'edit') {
@@ -758,9 +782,84 @@ assert.deepStrictEqual(warnings(revoked.output), [
   goneWarning('Discord answered HTTP 401: Invalid Webhook Token (code 50027)')
 ]);
 
+// Progress bars are only posted for steps that take longer than a minute. A bar finished within its
+// first minute posts nothing, whatever it was updated to before.
+const quick = await loadLogger();
+const quickBar = quick.logger.discordProgressBar(
+  'Core',
+  'Updating 10 Steam users...',
+  null,
+  0,
+  10,
+  0
+);
+quick.advance(20000);
+quick.logger.discordProgressBar('Core', 'Updating 10 Steam users...', quickBar, 0, 10, 4);
+quick.advance(39000);
+quick.logger.discordProgressBar('Core', 'Updating 10 Steam users...', quickBar, 0, 10, 10);
+quick.advance(120000);
+await quick.idle();
+assert.strictEqual(quick.discord.requests.length, 0);
+assert.strictEqual(quick.timers.size, 0);
+// Nor does a bar that is finished when it is made, such as one for a step with nothing to do.
+quick.logger.discordProgressBar('Core', 'Exporting 0 Bans...', null, 0, 0, 0);
+quick.logger.discordProgressBar('Core', 'Updating 5 ExportBans...', null, 0, 5, 5);
+assert.strictEqual(quick.timers.size, 0);
+quick.advance(120000);
+await quick.idle();
+assert.strictEqual(quick.discord.requests.length, 0);
+
+// A bar that is not finished after a minute is posted then, with its latest value, and edited as
+// usual after that, up to its final value.
+const slowStep = await loadLogger();
+slowStep.discord.reply = async ({ type, id }) => ({ id: type === 'send' ? '888' : id });
+const slowBar = (current, bar = null) =>
+  slowStep.logger.discordProgressBar('Core', 'Updating 10 ExportBans...', bar, 0, 10, current);
+const longBar = slowBar(0);
+slowStep.advance(10000);
+slowBar(3, longBar);
+slowStep.advance(49999);
+await pause();
+assert.strictEqual(slowStep.discord.requests.length, 0);
+slowStep.advance(1);
+await slowStep.idle();
+assert.deepStrictEqual(
+  slowStep.discord.requests.map(({ type }) => type),
+  ['send']
+);
+assert.match(slowStep.discord.requests[0].content, / 3\/10``$/);
+slowBar(7, longBar);
+slowStep.advance(15000);
+await slowStep.idle();
+slowBar(10, longBar);
+slowStep.advance(15000);
+await slowStep.idle();
+assert.deepStrictEqual(
+  slowStep.discord.requests.map(({ type, id, content }) => [type, id, content.split('] ').pop()]),
+  [
+    ['send', undefined, '3/10``'],
+    ['edit', '888', '7/10``'],
+    ['edit', '888', '10/10``']
+  ]
+);
+assert.strictEqual(slowStep.timers.size, 0);
+
+// Flushing the logger before a bar's first minute is up, as the importer does when it exits, drops
+// the bar rather than posting it, so the importer does not wait for it either.
+const ending = await loadLogger();
+const endingBar = ending.logger.discordProgressBar('Core', 'Exporting 10 Bans...', null, 0, 10, 0);
+ending.logger.discordProgressBar('Core', 'Exporting 10 Bans...', endingBar, 0, 10, 6);
+ending.advance(30000);
+ending.logger.flush();
+assert.deepStrictEqual({ ...ending.logger.getLogQueue() }, emptyQueue);
+assert.strictEqual(ending.timers.size, 0);
+ending.advance(120000);
+await ending.idle();
+assert.strictEqual(ending.discord.requests.length, 0);
+
 await pause();
 assert.deepStrictEqual(unhandled, []);
 
 console.log(
-  'Logger checks passed: Discord off, failed sends, retries, long messages, errors, stack traces, progress bars, the queue limit, run lines and gone webhooks.'
+  'Logger checks passed: Discord off, failed sends, retries, long messages, errors, stack traces, progress bars and their first minute, the queue limit, run lines and gone webhooks.'
 );

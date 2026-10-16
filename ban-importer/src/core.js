@@ -182,7 +182,7 @@ export default class Core {
 
     Logger.verbose(
       'Core',
-      1,
+      2,
       `Finished updating Steam users. Took ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
     );
   }
@@ -207,7 +207,7 @@ export default class Core {
     );
     Logger.verbose(
       'Core',
-      1,
+      2,
       `Finished Updating reputation points of ${affectedRows} orphaned Steam users. Took ${(
         (Date.now() - profileStartTime) /
         1000
@@ -293,7 +293,7 @@ export default class Core {
     );
     Logger.verbose(
       'Core',
-      1,
+      2,
       `Finished Updating reputation points of ${affectedRows} outdated Steam users. Took ${(
         (Date.now() - profileStartTime) /
         1000
@@ -328,7 +328,7 @@ export default class Core {
     );
     Logger.verbose(
       'Core',
-      1,
+      2,
       `Finished Updating reputation rank of ${affectedRows} Steam users. Took ${(
         (Date.now() - profileStartTime) /
         1000
@@ -337,7 +337,7 @@ export default class Core {
   }
 
   static async exportExportBans() {
-    Logger.verbose('Core', 1, 'Exporting Bans...');
+    Logger.verbose('Core', 2, 'Exporting Bans...');
     const profileStartTime = Date.now();
     // Get bans that need exporting, the longest waiting first. An export ban BattleMetrics refused
     // was changed when its claim was released, so it goes to the back of the queue, and cannot
@@ -578,7 +578,7 @@ export default class Core {
     }
     Logger.verbose(
       'Core',
-      1,
+      2,
       `Finished Exporting Bans. Took ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
     );
   }
