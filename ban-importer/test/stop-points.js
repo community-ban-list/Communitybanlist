@@ -735,26 +735,52 @@ for (const lock of [lostLock, null]) {
   assert.deepStrictEqual(events, ['request 50', 'update Player']);
 }
 
-// Updating export bans stops between batches of players, after a batch's last statement.
+// Updating export bans stops between batches of players, after a batch's last statement. The first
+// player's export bans make the batch write each kind of change.
 {
   const events = [];
+  const generated = (list) => ({
+    id: `0,${list}`,
+    status: 'TO_BE_CREATED',
+    steamUser: '0',
+    exportBanList: list
+  });
   const manager = await load('../src/export-ban-manager.js', {
     'scbl-lib/db': {
       sequelize: {
         transaction: async (options, work) => work({}),
-        query: async (sql) => {
-          if (sql.trim().startsWith('UPDATE')) return events.push('create again');
+        query: async () => {
           events.push('generate');
           manager.control.requestStop('it received SIGTERM');
-          return [{ id: '0,1', status: 'TO_BE_CREATED', steamUser: '0', exportBanList: 1 }];
+          return [1, 2, 3, 4].map(generated);
         }
       }
     },
     'scbl-lib/db/models': {
       ExportBan: {
+        findAll: async () => {
+          events.push('read');
+          return [
+            [2, 'TO_BE_DELETED', null],
+            [3, 'TO_BE_DELETED', '333'],
+            [4, 'TO_BE_DELETED', null],
+            [5, 'CREATED', '555'],
+            [6, 'TO_BE_CREATED', 'pending'],
+            [7, 'TO_BE_CREATED', null]
+          ].map(([list, status, battlemetricsID]) => ({
+            id: `0,${list}`,
+            exportBanList: list,
+            status,
+            battlemetricsID
+          }));
+        },
         bulkCreate: async () => events.push('create'),
         update: async () => events.push('update'),
         destroy: async () => events.push('destroy')
+      },
+      ExportBanList: {
+        findAll: async () =>
+          [1, 2, 3, 4, 5, 6, 7].map((id) => ({ id, type: id === 4 ? 'remote' : 'battlemetrics' }))
       },
       SteamUser: {
         findAll: async () => Array.from({ length: 600 }, (_, index) => ({ id: `${index}` })),
@@ -762,7 +788,7 @@ for (const lock of [lostLock, null]) {
       }
     },
     'scbl-lib/db/sequelize': {
-      Op: { in: 'in', notIn: 'notIn', not: 'not' },
+      Op: { in: 'in', notIn: 'notIn', not: 'not', ne: 'ne', or: 'or' },
       QueryTypes: { SELECT: 'SELECT', BULKUPDATE: 'BULKUPDATE' },
       Transaction: { ISOLATION_LEVELS: { SERIALIZABLE: 'SERIALIZABLE' } }
     },
@@ -772,8 +798,10 @@ for (const lock of [lostLock, null]) {
   assert.strictEqual(error.name, 'RunStopped');
   assert.deepStrictEqual(events, [
     'generate',
+    'read',
     'create',
-    'create again',
+    'update',
+    'update',
     'update',
     'update',
     'update',
