@@ -175,7 +175,15 @@ export default class BanImporter {
         await pause(SECOND_ATTEMPT_DELAY);
         for (const failed of retries) {
           stopIfRequested();
-          results[results.indexOf(failed)] = await this.importBanList(failed.id, 2);
+          const index = results.indexOf(failed);
+          try {
+            results[index] = await this.importBanList(failed.id, 2);
+          } catch (err) {
+            // A list whose second attempt is stopped part-way is left out of the summary, as one
+            // stopped in the first pass is, since its own line says what the attempt saved.
+            if (err instanceof RunStopped) results.splice(index, 1);
+            throw err;
+          }
         }
       }
     } catch (err) {
@@ -188,9 +196,10 @@ export default class BanImporter {
     return results;
   }
 
-  // Fetch all of a ban list, save its bans, then remove the bans it no longer has. A list that
-  // cannot be fetched or saved keeps all of its stored bans, as does a list whose import is stopped
-  // part-way because the run was asked to stop, which then throws RunStopped.
+  // Fetch all of a ban list, save its bans, then remove the bans it no longer has, or those of its
+  // old source if its type or source was changed meanwhile. A list that cannot be fetched or saved
+  // keeps all of its stored bans, as does a list whose import is stopped part-way because the run
+  // was asked to stop, which then throws RunStopped.
   async importBanList(id, attempt = 1) {
     const result = {
       id,
@@ -236,6 +245,24 @@ export default class BanImporter {
         result.gone = true;
         return result;
       }
+      // A run that was asked to stop while the bans were saved ends here, once the saves under way
+      // have finished.
+      stopIfRequested();
+
+      // The list's type or source may have been changed since it was read, by hand or by a
+      // /banlist update made just as the run started. The bot deletes the list's bans with the
+      // change, but this run may have saved some of the old source's bans again since, so the bans
+      // fetched from it are removed instead of the bans the list no longer has. The new source is
+      // imported on the next run.
+      stage = 'reading it again';
+      const current = await retryOperation(() =>
+        BanList.findByPk(id, { attributes: ['id', 'type', 'source'] })
+      );
+      if (!current) {
+        result.gone = true;
+        return result;
+      }
+      const sourceChanged = current.type !== banList.type || current.source !== banList.source;
 
       // Removing bans must not happen in two runs at once, so it needs the run lock. It is also
       // skipped once the run is asked to stop, so a list whose saves were cut short is never swept,
@@ -243,8 +270,13 @@ export default class BanImporter {
       // happens meanwhile.
       await checkRunLock();
       stopIfRequested();
-      stage = 'removing the bans it no longer has';
-      await this.removeMissingBans(banList, bans, stored, result);
+      if (sourceChanged) {
+        stage = 'removing the bans of its old source';
+        await this.removeOldSourceBans(banList, bans, result);
+      } else {
+        stage = 'removing the bans it no longer has';
+        await this.removeMissingBans(banList, bans, stored, result);
+      }
       return result;
     } catch (err) {
       result.stage = stage;
@@ -410,26 +442,40 @@ export default class BanImporter {
 
     for (let i = 0; i < missing.length; i += CHUNK_SIZE) {
       const chunk = missing.slice(i, i + CHUNK_SIZE);
-      await retryOperation(() =>
-        sequelize.transaction(async (transaction) => {
-          // Queue the Steam users for an update, as they have lost a ban.
-          await SteamUser.update(
-            {
-              lastRefreshedInfo: null,
-              lastRefreshedExport: null,
-              lastRefreshedReputationPoints: null,
-              lastRefreshedReputationRank: null
-            },
-            { where: { id: [...new Set(chunk.map((ban) => ban.steamUser))] }, transaction }
-          );
-          await Ban.destroy({
-            where: { banList: banList.id, id: chunk.map((ban) => ban.id) },
-            transaction
-          });
-        })
-      );
+      await this.removeBans(banList, chunk);
       result.removed += chunk.length;
     }
+  }
+
+  // Remove the bans fetched from the list's old type or source, a chunk at a time as above, and
+  // count those the list still had. Removing them is never held, as the new source's bans replace
+  // them.
+  async removeOldSourceBans(banList, bans, result) {
+    result.sourceChanged = true;
+    for (let i = 0; i < bans.length; i += CHUNK_SIZE)
+      result.removed += await this.removeBans(banList, bans.slice(i, i + CHUNK_SIZE));
+  }
+
+  // Remove the bans from the list in one transaction that also queues their players for an update,
+  // as they have lost a ban. Resolves with the number of bans removed.
+  removeBans(banList, bans) {
+    return retryOperation(() =>
+      sequelize.transaction(async (transaction) => {
+        await SteamUser.update(
+          {
+            lastRefreshedInfo: null,
+            lastRefreshedExport: null,
+            lastRefreshedReputationPoints: null,
+            lastRefreshedReputationRank: null
+          },
+          { where: { id: [...new Set(bans.map((ban) => ban.steamUser))] }, transaction }
+        );
+        return Ban.destroy({
+          where: { banList: banList.id, id: bans.map((ban) => ban.id) },
+          transaction
+        });
+      })
+    );
   }
 
   // Log one line about the list. A line about a list that needs looking at is logged as important,
@@ -470,6 +516,11 @@ export default class BanImporter {
         'BanImporter',
         `Failed to import ${list}${again ? ' again' : ''} while ${result.stage}, ${removed}${progress}. ${result.error}`
       );
+    } else if (result.sourceChanged) {
+      Logger.important(
+        'BanImporter',
+        `Removed the bans fetched for ${list}${again ? ' at the second attempt' : ''}, as its type or source was changed while it was imported${progress}. Its new source is imported on the next run.`
+      );
     } else if (result.fetched === 0 && result.removed === 0 && result.stored > 0) {
       const none = result.rawCount > 0 ? 'no bans with a SteamID' : 'no bans';
       Logger.important(
@@ -497,7 +548,7 @@ export default class BanImporter {
   // is never dropped for other messages. Bans that were kept as their removal needs confirming are
   // counted as held, not removed. When the run stopped part-way, the line sums up the lists imported
   // before it stopped, out of the listCount lists of the run, and leaves out a list it stopped in
-  // the middle of, which has a line of its own.
+  // the middle of, at either attempt, which has a line of its own.
   logSummary(results, { stopped = false, listCount = results.length } = {}) {
     const total = (field) => results.reduce((sum, result) => sum + result[field], 0);
     const removed = total('removed');

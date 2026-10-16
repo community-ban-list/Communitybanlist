@@ -63,11 +63,13 @@ class FakeConnection extends EventEmitter {
   }
 }
 
-// Load run-lock.js with a stand-in for mysql2, Sequelize settings read from a DATABASE_URI, a
-// console that records what it is given, and timers that only run when the test moves the clock on.
+// Load run-lock.js with a stand-in for mysql2, Sequelize settings read from a DATABASE_URI and a
+// Sequelize pool that answers IS_FREE_LOCK with pool.free, a console that records what it is given,
+// and timers that only run when the test moves the clock on.
 async function loadRunLock() {
   const mysql = { options: [], connect: async () => connection };
   let connection = null;
+  const pool = { queries: [], free: 1 };
   const output = [];
   const intervals = [];
   const timers = new Set();
@@ -92,8 +94,13 @@ async function loadRunLock() {
           database: 'cbl',
           dialectOptions: { charset: 'utf8mb4' },
           pool: {}
+        },
+        async query(sql, { type }) {
+          pool.queries.push({ sql, type });
+          return [{ free: pool.free }];
         }
-      }
+      },
+      QueryTypes: { SELECT: 'SELECT' }
     }
   };
   const context = vm.createContext({
@@ -139,7 +146,9 @@ async function loadRunLock() {
 
   return {
     takeRunLock: module.namespace.default,
+    isRunLockHeld: module.namespace.isRunLockHeld,
     mysql,
+    pool,
     output,
     intervals,
     timers,
@@ -425,6 +434,27 @@ for (const [loseLock, reason] of [
   assert.strictEqual(runLock.timers.size, 0);
 }
 
+// isRunLockHeld() asks MySQL, on the Sequelize pool rather than a connection of its own, whether a
+// connection holds the lock under the name it is taken by. NULL, MySQL's answer after an error,
+// counts as held.
+{
+  const runLock = await loadRunLock();
+  const answers = [];
+  for (const free of [1, 0, null]) {
+    runLock.pool.free = free;
+    answers.push(await runLock.isRunLockHeld());
+  }
+  assert.deepStrictEqual(answers, [false, true, true]);
+  assert.deepStrictEqual(
+    runLock.pool.queries,
+    Array(3).fill({
+      sql: "SELECT IS_FREE_LOCK(CONCAT('cbl-importer:', DATABASE())) AS free",
+      type: 'SELECT'
+    })
+  );
+  assert.deepStrictEqual(runLock.mysql.options, []);
+}
+
 console.log(
-  'Run lock checks passed: taking, keeping, losing and releasing it, also when MySQL stops answering.'
+  'Run lock checks passed: taking, keeping, losing and releasing it, also when MySQL stops answering, and asking whether a run holds it.'
 );

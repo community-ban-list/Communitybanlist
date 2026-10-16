@@ -24,7 +24,7 @@ A ban list's `source` is either:
 
 The bot test fetches the source before saving it, and rejects sources that are already used by another ban list. Use `skip_check` to save a source without fetching it, e.g. a list that is empty for now.
 
-Changes take effect on the next ban importer run. When a ban list is removed or given a new type or source, its bans are deleted straight away and the affected players are queued so the importer recalculates their reputation and export bans.
+Changes take effect on the next ban importer run. When a ban list is removed or given a new type or source, its bans are deleted straight away and the affected players are queued so the importer recalculates their reputation and export bans. A new type or source is refused while a ban importer run is under way, as the run could save the old source's bans again; try again once the run has finished.
 
 ## Setup
 

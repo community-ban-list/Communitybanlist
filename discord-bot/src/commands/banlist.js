@@ -1,6 +1,6 @@
 import { SlashCommandBuilder } from 'discord.js';
 
-import { sequelize } from 'scbl-lib/db';
+import { isRunLockHeld, sequelize } from 'scbl-lib/db';
 import { BanList } from 'scbl-lib/db/models';
 import { Op } from 'scbl-lib/db/sequelize';
 
@@ -147,6 +147,15 @@ async function update(interaction) {
       );
       if (!confirmed) return;
     }
+
+    // A ban importer run may be importing the list from its old source, and would save that
+    // source's bans again after they are deleted, so the change is refused while a run is under
+    // way. This is checked once the change is confirmed, just before it is saved: a run that
+    // starts after that reads the new source.
+    if (await isRunLockHeld())
+      throw new UserError(
+        'The ban importer is running, so nothing was changed. Change the type or source again once the run has finished; renaming still works meanwhile.'
+      );
   }
 
   await sequelize.transaction(async (transaction) => {

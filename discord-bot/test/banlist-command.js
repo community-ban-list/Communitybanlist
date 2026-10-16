@@ -12,6 +12,8 @@ const audits = [];
 let transactions = 0;
 let confirmAnswer = true;
 let counts = { bans: 0, steamUsers: 0, exportBanListConfigs: 0 };
+// Whether a ban importer run holds its run lock.
+let importerRunning = false;
 
 const sequelize = {
   async transaction(callback) {
@@ -113,7 +115,13 @@ async function load(path, dependencies) {
 }
 
 const database = {
-  'scbl-lib/db': { sequelize },
+  'scbl-lib/db': {
+    sequelize,
+    async isRunLockHeld() {
+      calls.push(['check run lock']);
+      return importerRunning;
+    }
+  },
   'scbl-lib/db/models': { Ban, BanList, ExportBanListConfig },
   'scbl-lib/db/sequelize': { Op: { ne: 'ne' } }
 };
@@ -139,6 +147,7 @@ const utils = {
   },
   async checkBanListSourceUnused() {},
   async confirm(interaction, content, confirmLabel) {
+    calls.push(['confirm']);
     prompts.push({ content, confirmLabel });
     return confirmAnswer;
   },
@@ -163,6 +172,7 @@ function reset(bans = 0, steamUsers = 0, exportBanListConfigs = 0) {
   for (const list of [calls, prompts, replies, audits]) list.length = 0;
   transactions = 0;
   confirmAnswer = true;
+  importerRunning = false;
   counts = { bans, steamUsers, exportBanListConfigs };
   record = {
     id: 5,
@@ -205,7 +215,8 @@ assert.deepStrictEqual(audits, [
 ]);
 
 // A new source deletes the list's bans, which came from the old one, in the same transaction that
-// saves the source, once the change is confirmed. The players are queued for an update.
+// saves the source, once the change is confirmed and no ban importer run is under way. The players
+// are queued for an update.
 reset(3, 2);
 await run('update', { banlist: '5', source: 'new-list' });
 assert.deepStrictEqual(prompts, [
@@ -219,6 +230,8 @@ assert.deepStrictEqual(calls, [
   ['check source', 'battlemetrics', 'new-list'],
   ['count bans', [5]],
   ['count bans', [5]],
+  ['confirm'],
+  ['check run lock'],
   ['begin', 1],
   ['flags', 1, [5]],
   ['destroy bans', 1, [5]],
@@ -240,7 +253,9 @@ assert.match(
   prompts[0].content,
   /^Change the source of \*\*Org\*\* \/ \*\*Main\*\*\? .* 1 ban on 1 player,/
 );
-assert.deepStrictEqual(calls.slice(-5), [
+assert.deepStrictEqual(calls.slice(-7), [
+  ['confirm'],
+  ['check run lock'],
   ['begin', 1],
   ['flags', 1, [5]],
   ['destroy bans', 1, [5]],
@@ -253,7 +268,11 @@ reset(3, 2);
 confirmAnswer = false;
 await run('update', { banlist: '5', source: 'new-list' });
 assert.strictEqual(prompts.length, 1);
-assert.ok(!calls.some(([call]) => ['begin', 'flags', 'destroy bans', 'save'].includes(call)));
+assert.ok(
+  !calls.some(([call]) =>
+    ['check run lock', 'begin', 'flags', 'destroy bans', 'save'].includes(call)
+  )
+);
 assert.strictEqual(audits.length, 0);
 assert.strictEqual(replies.length, 0);
 
@@ -261,13 +280,49 @@ assert.strictEqual(replies.length, 0);
 reset(0, 0);
 await run('update', { banlist: '5', source: 'new-list' });
 assert.strictEqual(prompts.length, 0);
-assert.deepStrictEqual(calls.slice(-3), [
+assert.deepStrictEqual(calls.slice(-4), [
+  ['check run lock'],
   ['begin', 1],
   ['save', 1, 'battlemetrics', 'new-list', 'Main'],
   ['commit', 1]
 ]);
 assert.deepStrictEqual(audits, [
   'updated ban list "Main" (ID: 5) of organisation "Org" (ID: 2): source "old-list" → "new-list".'
+]);
+
+// While a ban importer run is under way, which could save the old source's bans again after they
+// are deleted, a new type or source is refused once confirmed, and nothing is changed, with or
+// without bans to delete. A rename still works.
+for (const [bans, steamUsers] of [
+  [3, 2],
+  [0, 0]
+]) {
+  reset(bans, steamUsers);
+  importerRunning = true;
+  await assert.rejects(
+    run('update', { banlist: '5', name: 'Renamed', type: 'remote', source: 'https://x.test/b' }),
+    (err) => {
+      assert.ok(err instanceof UserError);
+      assert.strictEqual(
+        err.message,
+        'The ban importer is running, so nothing was changed. Change the type or source again once the run has finished; renaming still works meanwhile.'
+      );
+      return true;
+    }
+  );
+  assert.strictEqual(prompts.length, bans > 0 ? 1 : 0);
+  assert.deepStrictEqual(calls.at(-1), ['check run lock']);
+  assert.ok(!calls.some(([call]) => ['begin', 'flags', 'destroy bans', 'save'].includes(call)));
+  assert.strictEqual(audits.length, 0);
+  assert.strictEqual(replies.length, 0);
+}
+reset(3, 2);
+importerRunning = true;
+await run('update', { banlist: '5', name: 'Renamed' });
+assert.deepStrictEqual(calls, [
+  ['begin', 1],
+  ['save', 1, 'battlemetrics', 'old-list', 'Renamed'],
+  ['commit', 1]
 ]);
 
 // Removing a list still deletes its bans, its export ban list configs and the list together.
@@ -287,5 +342,5 @@ assert.deepStrictEqual(calls.slice(-6), [
 ]);
 
 console.log(
-  'Ban list command checks passed: renames keep bans, source changes delete them once confirmed, and removal.'
+  'Ban list command checks passed: renames keep bans, source changes delete them once confirmed and only while no import runs, and removal.'
 );

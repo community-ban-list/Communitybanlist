@@ -101,9 +101,16 @@ const Ban = {
       events.push(['saved', where.id]);
     }
   },
+  // Resolves with the number of bans removed, as MySQL counts them.
   async destroy({ where, transaction }) {
     events.push(['destroy', transaction, [...where.id]]);
-    for (const id of where.id) if (bans.get(id)?.banList === where.banList) bans.delete(id);
+    let removed = 0;
+    for (const id of where.id)
+      if (bans.get(id)?.banList === where.banList) {
+        bans.delete(id);
+        removed++;
+      }
+    return removed;
   }
 };
 
@@ -682,6 +689,31 @@ BanList.findAll = originalFindAll;
 assert.deepStrictEqual(battlemetricsRequests, ['bm-14']);
 assert.strictEqual(logged(2, /^Skipped ban list \(ID: 13\)/).length, 1);
 
+// So is a list removed once its bans are saved, when it is read again before it is swept.
+reset();
+battlemetricsList(13, pairs('j', 0, 3), [pairs('j', 0, 2)]);
+const originalFindByPk = BanList.findByPk;
+BanList.findByPk = async (id, options) => {
+  if (options?.attributes) {
+    banLists.delete(id);
+    for (const banID of storedIDs(id)) bans.delete(banID);
+  }
+  return originalFindByPk(id);
+};
+results = await run();
+BanList.findByPk = originalFindByPk;
+assert.deepStrictEqual(
+  events.filter(([type]) => type === 'read list'),
+  [
+    ['read list', 13],
+    ['read list', 13]
+  ]
+);
+assert.ok(!events.some(([type]) => type === 'begin' || type === 'destroy'));
+assert.ok(results[0].gone);
+assert.strictEqual(logged(2, /^Skipped ban list \(ID: 13\)/).length, 1);
+assert.strictEqual(warnings().length, 0);
+
 // A list whose bans cannot be saved because the database stays unavailable stops after the
 // retries, and keeps its stored bans. It is not fetched again later in the run.
 reset();
@@ -812,6 +844,78 @@ assert.strictEqual(
   'Got 1 deleted ban. Imported 4 ban lists: 13 bans fetched, 2 new, 1 updated, 1 removed, 31 held, 1 list failed.'
 );
 
+// A list given a new type or source while its bans are being saved, with its bans deleted in the
+// same transaction as /banlist update does, has the bans fetched from its old source removed, with
+// their players queued for an update, instead of being checked for the bans it no longer has.
+// Nothing is held, and the next run imports the new source. One worker saves the bans in order
+// here, so the change comes between two saves.
+for (const change of [{ type: 'remote' }, { source: 'bm-99' }]) {
+  reset();
+  battlemetricsList(
+    25,
+    [...pairs('u', 0, 40), ...pairs('x', 100, 105)],
+    [pairs('u', 0, 30), pairs('u', 30, 60)]
+  );
+  onSave = (id) => {
+    if (id !== '25,u10') return;
+    for (const banID of storedIDs(25)) bans.delete(banID);
+    banLists.set(25, { ...banLists.get(25), ...change });
+  };
+  const [result] = await run({ workers: 1 });
+  const label = JSON.stringify(change);
+  // The bans saved before the change were deleted with it, and those saved after it are removed.
+  assert.deepStrictEqual(storedIDs(25), [], label);
+  assert.deepStrictEqual(
+    events.filter(([type]) => type === 'destroy').map(([, , ids]) => ids),
+    [pairs('u', 0, 60).map(([uid]) => `25,${uid}`)],
+    label
+  );
+  const removal = events.slice(events.findIndex(([type]) => type === 'begin'));
+  assert.deepStrictEqual(
+    removal.slice(0, 4).map(([type]) => type),
+    ['begin', 'flags', 'destroy', 'commit'],
+    label
+  );
+  assert.strictEqual(steamUsers.get(steamID(0)).lastRefreshedInfo, null, label);
+  assert.strictEqual(steamUsers.get(steamID(59)).lastRefreshedInfo, null, label);
+  // Nothing is swept: the player of an old ban that was not fetched, deleted with the change, is
+  // not queued by the run.
+  assert.strictEqual(steamUsers.get(steamID(100)).lastRefreshedInfo, FRESH, label);
+  assert.deepStrictEqual(
+    [result.sourceChanged, result.fetched, result.created, result.removed, result.held],
+    [true, 60, 50, 50, 0],
+    label
+  );
+  assert.deepStrictEqual(
+    warnings().map(({ message, important }) => [message, important]),
+    [
+      [
+        'Removed the bans fetched for ban list (ID: 25), as its type or source was changed while it was imported (60 bans fetched, 50 new, 0 updated, 50 removed). Its new source is imported on the next run.',
+        true
+      ]
+    ],
+    label
+  );
+  assert.strictEqual(
+    summary(),
+    'Got 50 deleted bans. Imported 1 ban list: 60 bans fetched, 50 new, 0 updated, 50 removed, 0 held, 0 lists failed.',
+    label
+  );
+}
+// The next run imports the new source, and has no bans of the old one to hold.
+logs.length = 0;
+onSave = null;
+battlemetricsLists.set('bm-99', [pairs('v', 0, 20)]);
+await run();
+assert.deepStrictEqual(
+  storedIDs(25),
+  pairs('v', 0, 20).map(([uid]) => `25,${uid}`)
+);
+assert.strictEqual(
+  summary(),
+  'Got 0 deleted bans. Imported 1 ban list: 20 bans fetched, 20 new, 0 updated, 0 removed, 0 held, 0 lists failed.'
+);
+
 // A run asked to stop while a list's bans are being saved finishes the saves under way, each with
 // its player's update, and starts no more. None of the list's bans are removed, as the bans it did
 // not save would look removed, and no other list is imported. The summary counts the lists
@@ -856,5 +960,5 @@ assert.strictEqual(
 assert.strictEqual(verboseLevelOneLines, 0, 'Lines for the log channel are logged as important');
 
 console.log(
-  'Ban import checks passed: complete lists only, awaited saves, holds, empty lists, second attempts, retries, stops and the run summary.'
+  'Ban import checks passed: complete lists only, awaited saves, holds, empty lists, second attempts, retries, source changes, stops and the run summary.'
 );
