@@ -1,7 +1,7 @@
 import { STEAM_API_KEY } from 'scbl-lib/config';
 
 // Steam's summary of a player gives their name and avatars. It comes from the host the importer
-// uses, with the same key.
+// uses, with the same key, a Steamworks publisher key, as that host takes no other kind.
 const PLAYER_SUMMARIES = 'https://partner.steam-api.com/ISteamUser/GetPlayerSummaries/v2/';
 
 // Signing in waits for the summary, but the name and avatars are only for show, so Steam has this
@@ -20,7 +20,9 @@ export default async function getSteamProfile(steamID) {
   let response;
   let answer;
   try {
-    response = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT) });
+    // By default fetch follows a redirect, sending the key on to wherever it points. Here it gives
+    // the redirect back instead, which fails the lookup like any other answer that is not OK.
+    response = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT), redirect: 'manual' });
     // Read the whole answer either way, which also frees the connection.
     answer = response.ok ? await response.json() : await response.text();
   } catch (err) {

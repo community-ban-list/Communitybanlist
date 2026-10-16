@@ -14,9 +14,12 @@ const OTHER_PLAYER = '76561199999999999';
 // The OpenID identifier Steam's sign-in gives a player.
 const identifierOf = (steamID) => `https://steamcommunity.com/openid/id/${steamID}`;
 
-// How Steam answers the profile lookup, set by each check: respond(url, options) is given fetch's
-// arguments and gives its answer, and abortAfter, when set, makes the lookup's time limit run out
-// after that many milliseconds.
+// The statuses fetch follows a redirect for.
+const REDIRECTS = [301, 302, 303, 307, 308];
+
+// How Steam answers the profile lookup, set by each check: respond(url, options) is given each
+// request's address and fetch's options and gives the answer, and abortAfter, when set, makes the
+// lookup's time limit run out after that many milliseconds.
 let steam;
 
 // The players the database holds, and copies of the records and options of each save and lookup.
@@ -74,9 +77,17 @@ async function load({ HOST = 'https://cbl.test', NODE_ENV } = {}) {
         return AbortSignal.timeout(steam?.abortAfter ?? milliseconds);
       }
     },
+    // As fetch does, a redirect is followed with a new request, up to 20 times, unless fetch is
+    // told otherwise.
     async fetch(url, options) {
-      loaded.requests.push({ url: new URL(url), options });
-      return steam.respond(url, options);
+      for (let redirects = 0; ; redirects++) {
+        loaded.requests.push({ url: new URL(url), options });
+        const response = await steam.respond(url, options);
+        const location = REDIRECTS.includes(response.status) && response.headers.get('location');
+        if (!location || options?.redirect === 'manual') return response;
+        if (options?.redirect === 'error' || redirects === 20) throw new TypeError('fetch failed');
+        url = new URL(location, url);
+      }
     }
   });
   const stubs = {
@@ -202,7 +213,7 @@ assert.ok(!database.rows.has(OTHER_PLAYER));
 assert.deepStrictEqual(site.logged, []);
 
 // Steam is asked once, over HTTPS, at the host the importer uses, about that player only, with a
-// time limit.
+// time limit, and without following redirects.
 assert.strictEqual(site.requests.length, 1);
 const [{ url: lookup, options: lookupOptions }] = site.requests;
 assert.strictEqual(
@@ -213,6 +224,7 @@ assert.strictEqual(lookup.searchParams.get('steamids'), PLAYER);
 assert.strictEqual(lookup.searchParams.get('key'), STEAM_API_KEY);
 assert.ok(lookupOptions.signal instanceof AbortSignal);
 assert.deepStrictEqual(site.timeouts, [5000]);
+assert.strictEqual(lookupOptions.redirect, 'manual');
 
 // A new player is saved with their Steam name and avatars.
 const NEW_PLAYER = '76561198000000001';
@@ -262,6 +274,20 @@ const failedLookups = [
   [{ respond: () => new Response('<html></html>') }, requestFailed('the answer was not JSON')],
   [{ respond: () => new Response('Forbidden', { status: 403 }) }, requestFailed('HTTP 403')],
   [unavailable, requestFailed('HTTP 503')],
+  // A redirect is not followed, so the key goes to Steam's address only, and nothing from the
+  // address the redirect points to is used.
+  [
+    {
+      respond: (url) => {
+        const asked = new URL(url);
+        if (asked.host !== 'partner.steam-api.com')
+          return Response.json({ response: { players: [playerSummary(PLAYER, 'Redirected')] } });
+        const location = `http://api.steampowered.com${asked.pathname}${asked.search}`;
+        return new Response(null, { status: 302, headers: { location } });
+      }
+    },
+    requestFailed('HTTP 302')
+  ],
   [
     {
       respond: () => {
