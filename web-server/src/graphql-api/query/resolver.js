@@ -1,6 +1,8 @@
 import { Op } from 'scbl-lib/db/sequelize';
 import { Ban, BanList, Organisation, SteamUser } from 'scbl-lib/db/models';
 
+import { PAGE_SIZE, pageArgs } from '../core/page-size.js';
+
 export default {
   Query: {
     organisations: () => {
@@ -16,10 +18,7 @@ export default {
     bans: (parent, filter) => {
       return Ban.paginate({
         order: [[filter.orderBy || 'created', filter.orderDirection || 'DESC']],
-        first: filter.first,
-        after: filter.after,
-        last: filter.last,
-        before: filter.before
+        ...pageArgs(filter, PAGE_SIZE.list)
       });
     },
     steamUsers: (parent, filter) => {
@@ -30,10 +29,7 @@ export default {
 
       return SteamUser.paginate({
         order,
-        first: filter.first,
-        after: filter.after,
-        last: filter.last,
-        before: filter.before,
+        ...pageArgs(filter, PAGE_SIZE.list),
         where:
           filter.orderBy === 'reputationRank' ? { reputationRank: { [Op.ne]: null } } : undefined
       });
