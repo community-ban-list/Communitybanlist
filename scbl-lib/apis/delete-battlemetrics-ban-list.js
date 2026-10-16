@@ -21,6 +21,18 @@ async function readAll(endpoint) {
   return records;
 }
 
+// Remove an invite or subscription. BattleMetrics answers 404 when it is already gone, e.g. when a
+// removal it carried out answered too late, was cut off and was made again, which is what the
+// deletion wants. Without this, a late answer to the owner's removal would leave a list that can
+// never be deleted, as the ownership check fails once the owner has left.
+async function remove(endpoint) {
+  try {
+    await battlemetrics('delete', endpoint);
+  } catch (error) {
+    if (!error.response || error.response.status !== 404) throw error;
+  }
+}
+
 export default async function deleteBattlemetricsBanList(id) {
   const base = `ban-lists/${encodeURIComponent(id)}/relationships`;
   const owner = String(BATTLEMETRICS_ORGANIZATION);
@@ -50,17 +62,17 @@ export default async function deleteBattlemetricsBanList(id) {
 
     stage = 'removing invites';
     for (const inviteID of new Set(inviteIDs))
-      await battlemetrics('delete', `${base}/invites/${encodeURIComponent(inviteID)}`);
+      await remove(`${base}/invites/${encodeURIComponent(inviteID)}`);
 
     stage = 'removing subscribers';
     for (const organizationID of new Set(organizationIDs)) {
       if (organizationID === owner) continue;
-      await battlemetrics('delete', `${base}/organizations/${encodeURIComponent(organizationID)}`);
+      await remove(`${base}/organizations/${encodeURIComponent(organizationID)}`);
     }
 
     // Whether the owner can leave an otherwise unshared list requires live verification.
     stage = 'removing owner';
-    await battlemetrics('delete', `${base}/organizations/${owner}`);
+    await remove(`${base}/organizations/${owner}`);
   } catch (error) {
     const errors = error.response && error.response.data && error.response.data.errors;
     const detail = Array.isArray(errors)
