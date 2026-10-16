@@ -5,12 +5,12 @@ import Koa from 'koa';
 import Router from '@koa/router';
 import Helmet from 'koa-helmet';
 import Cors from '@koa/cors';
-import BodyParser from 'koa-bodyparser';
 import Logger from 'koa-logger';
 import serve from 'koa-static';
 import mount from 'koa-mount';
 import { send } from '@koa/send';
 
+import bodyParser from './body-parser.js';
 import { passport, routes as routesAuth } from './auth/index.js';
 import GraphQL from './graphql-api/index.js';
 import ExportBanLists from './export-ban-lists.js';
@@ -61,17 +61,7 @@ app.use(
   })
 );
 app.use(Cors());
-app.use(
-  BodyParser({
-    enableTypes: ['json'],
-    jsonLimit: '5mb',
-    strict: true,
-    onerror: function (err, ctx) {
-      if (err) console.log(err);
-      ctx.throw(422, 'body parse error');
-    }
-  })
-);
+app.use(bodyParser);
 
 if (!inProduction) app.use(Logger());
 
