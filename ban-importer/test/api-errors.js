@@ -377,6 +377,121 @@ assert.deepStrictEqual(errorLines(), [
   `Stopped exporting bans to BattleMetrics until the next run, as BattleMetrics refused the API key: ${unauthorized}`
 ]);
 
+// Once 3 BattleMetrics export ban lists in a row have stopped because BattleMetrics did not answer
+// or answered with a server error, BattleMetrics is most likely down, so the BattleMetrics export
+// bans left wait for the next run instead of each list waiting out its own timeouts. Remote lists'
+// export bans are still updated.
+const listNumbered = (id) => ({
+  ...battlemetricsList,
+  id,
+  battlemetricsID: `bm-${id}`,
+  name: `List ${id}`
+});
+const listStopped = (id, why) =>
+  `Stopped exporting bans to BattleMetrics for Server's List "List ${id}" (ID: ${id}) until the next run, as ${why}.`;
+const unanswered = 'BattleMetrics did not answer a request, which it may have carried out';
+const down = [
+  exportBan('TO_BE_CREATED', { list: listNumbered(11), request: timeOut }),
+  exportBan('TO_BE_CREATED', { list: listNumbered(12), request: timeOut }),
+  exportBan('TO_BE_CREATED', { list: remoteList }),
+  exportBan('TO_BE_CREATED', { list: listNumbered(13), request: timeOut }),
+  exportBan('TO_BE_CREATED', { list: listNumbered(14) }),
+  exportBan('TO_BE_DELETED', { list: listNumbered(15) }),
+  exportBan('TO_BE_CREATED', { list: remoteList })
+];
+await exportExportBans(...down);
+assert.deepStrictEqual(
+  down.map((ban) => ban.requests),
+  [1, 1, 0, 1, 0, 0, 0]
+);
+assert.deepStrictEqual(
+  down.map((ban) => ban.status),
+  [
+    'TO_BE_CREATED',
+    'TO_BE_CREATED',
+    'CREATED',
+    'TO_BE_CREATED',
+    'TO_BE_CREATED',
+    'TO_BE_DELETED',
+    'CREATED'
+  ]
+);
+assert.deepStrictEqual(errorLines(), [
+  `Failed to create export ban (ID: ${down[0].id}): ${timedOut}`,
+  listStopped(11, unanswered),
+  `Failed to create export ban (ID: ${down[1].id}): ${timedOut}`,
+  listStopped(12, unanswered),
+  `Failed to create export ban (ID: ${down[3].id}): ${timedOut}`,
+  listStopped(13, unanswered),
+  'Stopped exporting bans to BattleMetrics until the next run, as it did not answer or failed for 3 export ban lists in a row, so it is most likely down.'
+]);
+
+// A list stopped by server errors counts too, but a change made on any BattleMetrics list starts
+// the count again, and a list stopped because BattleMetrics refused its requests does not count, as
+// BattleMetrics is answering. So these lists are each tried, and BattleMetrics is not taken to be
+// down.
+const serverError = 'BattleMetrics POST bans failed: HTTP 502 (Bad Gateway)';
+const failWith502 = () => {
+  throw apiError(serverError, { status: 502, ambiguous: true });
+};
+const refuseWith422 = () => {
+  throw apiError(invalid, { status: 422 });
+};
+const counted = [
+  exportBan('TO_BE_CREATED', { list: listNumbered(21), request: timeOut }),
+  ...[1, 2, 3].map(() =>
+    exportBan('TO_BE_CREATED', { list: listNumbered(22), request: failWith502 })
+  ),
+  exportBan('TO_BE_CREATED', { list: listNumbered(23) }),
+  ...[1, 2, 3].map(() =>
+    exportBan('TO_BE_CREATED', { list: listNumbered(24), request: refuseWith422 })
+  ),
+  exportBan('TO_BE_CREATED', { list: listNumbered(25), request: timeOut }),
+  exportBan('TO_BE_CREATED', { list: listNumbered(26), request: timeOut }),
+  exportBan('TO_BE_CREATED', { list: listNumbered(27) })
+];
+await exportExportBans(...counted);
+assert.deepStrictEqual(
+  counted.map((ban) => ban.requests),
+  [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+);
+assert.deepStrictEqual(
+  errorLines().filter((line) => line.startsWith('Stopped')),
+  [
+    listStopped(21, unanswered),
+    listStopped(22, '3 of its requests in a row failed'),
+    listStopped(24, '3 of its requests in a row failed'),
+    listStopped(25, unanswered),
+    listStopped(26, unanswered)
+  ]
+);
+
+// Lists stopped by server errors, BattleMetrics answering 5xx for each of their requests, count
+// towards it being down just as lists whose requests went unanswered do.
+const failingServer = [
+  ...[31, 32].flatMap((id) =>
+    [1, 2, 3].map(() =>
+      exportBan('TO_BE_CREATED', { list: listNumbered(id), request: failWith502 })
+    )
+  ),
+  exportBan('TO_BE_CREATED', { list: listNumbered(33), request: timeOut }),
+  exportBan('TO_BE_CREATED', { list: listNumbered(34) })
+];
+await exportExportBans(...failingServer);
+assert.deepStrictEqual(
+  failingServer.map((ban) => ban.requests),
+  [1, 1, 1, 1, 1, 1, 1, 0]
+);
+assert.deepStrictEqual(
+  errorLines().filter((line) => line.startsWith('Stopped')),
+  [
+    listStopped(31, '3 of its requests in a row failed'),
+    listStopped(32, '3 of its requests in a row failed'),
+    listStopped(33, unanswered),
+    'Stopped exporting bans to BattleMetrics until the next run, as it did not answer or failed for 3 export ban lists in a row, so it is most likely down.'
+  ]
+);
+
 console.log(
-  'API error checks passed: failures are logged with their errors, and the Steam step and BattleMetrics exports stop when retrying cannot help.'
+  'API error checks passed: failures are logged with their errors, and the Steam step and BattleMetrics exports stop when retrying cannot help, or BattleMetrics is down.'
 );

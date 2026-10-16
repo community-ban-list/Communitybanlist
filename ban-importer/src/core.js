@@ -23,6 +23,11 @@ const DISCORD_ALERT_CAP = 50;
 // Once this many of a BattleMetrics export ban list's requests in a row have failed, its other
 // export bans wait for the next run, as BattleMetrics would most likely refuse them too.
 const BATTLEMETRICS_LIST_MAX_FAILURES = 3;
+// Once this many BattleMetrics export ban lists in a row have stopped because BattleMetrics did not
+// answer or answered with a server error, with no change made since, BattleMetrics is most likely
+// down, so the BattleMetrics export bans left wait for the next run rather than each list waiting
+// out its own timeouts.
+const BATTLEMETRICS_MAX_LISTS_DOWN = 3;
 
 // Webhooks Discord has reported as deleted during this run, so they are not tried again.
 const deletedWebhooks = new Set();
@@ -433,6 +438,11 @@ export default class Core {
     // Whether BattleMetrics refused the API key, which every BattleMetrics export ban list uses.
     let battlemetricsRefused = false;
 
+    // How many BattleMetrics export ban lists in a row have stopped as BattleMetrics did not answer
+    // or failed, since a change was last made, and whether BattleMetrics is taken to be down.
+    let listsDown = 0;
+    let battlemetricsDown = false;
+
     // For each BattleMetrics export ban list, how many of its requests in a row have failed, and,
     // once its other export bans wait for the next run, why.
     const listFailures = {};
@@ -447,10 +457,12 @@ export default class Core {
       // request and the database save that records it.
       stopIfRequested();
 
-      // Once BattleMetrics has refused the key, it would refuse every other request too, so the
-      // BattleMetrics export bans left wait for the next run. Remote lists' export bans carry on.
+      // Once BattleMetrics has refused the key, it would refuse every other request too, and once
+      // it seems to be down, it would most likely not answer them either, so the BattleMetrics
+      // export bans left wait for the next run. Remote lists' export bans carry on.
       const { ExportBanList: exportBanList } = exportBan;
-      if (battlemetricsRefused && exportBanList.type === 'battlemetrics') continue;
+      if ((battlemetricsRefused || battlemetricsDown) && exportBanList.type === 'battlemetrics')
+        continue;
 
       // The same goes for the export bans of a list whose requests are failing.
       const failures =
@@ -474,7 +486,10 @@ export default class Core {
           : await Core.deleteExportBan(exportBan, battlemetricsBans);
         if (made) {
           listChangeCount[exportBanList.id].made++;
-          if (failures) failures.count = 0;
+          if (failures) {
+            failures.count = 0;
+            listsDown = 0;
+          }
         }
       } catch (err) {
         if (err.auth) {
@@ -509,12 +524,24 @@ export default class Core {
                 'BattleMetrics did not answer a request, which it may have carried out';
             else if (failures.count >= BATTLEMETRICS_LIST_MAX_FAILURES)
               failures.stopped = `${failures.count} of its requests in a row failed`;
-            if (failures.stopped)
+            if (failures.stopped) {
               Logger.verbose(
                 'Core',
                 1,
                 `Stopped exporting bans to BattleMetrics for ${exportBanList.server}'s List "${exportBanList.name}" (ID: ${exportBanList.id}) until the next run, as ${failures.stopped}.`
               );
+
+              // A list stopped by BattleMetrics refusing its requests says nothing about the others.
+              if (!err.response || err.response.status >= 500) listsDown++;
+              if (listsDown >= BATTLEMETRICS_MAX_LISTS_DOWN && !battlemetricsDown) {
+                battlemetricsDown = true;
+                Logger.verbose(
+                  'Core',
+                  1,
+                  `Stopped exporting bans to BattleMetrics until the next run, as it did not answer or failed for ${listsDown} export ban lists in a row, so it is most likely down.`
+                );
+              }
+            }
           }
         }
       }
