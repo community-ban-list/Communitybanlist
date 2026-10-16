@@ -58,6 +58,31 @@ export default {
             exportBanLsit,
             error
           );
+
+          // Without a BattleMetrics ban list, the export ban list could never be used, so it is
+          // deleted, and the owner can try again. It is deleted on its own rather than created in
+          // a transaction, as f6630b9 tried: createBattlemetricsBanList saves the list outside the
+          // transaction, so the save waited on the list's uncommitted row until MySQL gave up.
+          if (!exportBanLsit.battlemetricsID) {
+            try {
+              await exportBanLsit.destroy();
+            } catch (destroyError) {
+              console.error(
+                'Failed to delete the export ban list with no BattleMetrics ban list:',
+                {
+                  exportBanListID: exportBanLsit.id,
+                  name: destroyError.name,
+                  message: destroyError.message
+                }
+              );
+              throw new Error(
+                'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later.'
+              );
+            }
+            throw new Error(
+              'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.'
+            );
+          }
           throw error;
         }
       }

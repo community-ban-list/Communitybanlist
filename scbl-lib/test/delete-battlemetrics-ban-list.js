@@ -54,7 +54,13 @@ const module = new vm.SourceTextModule(
   await readFile(new URL('../apis/delete-battlemetrics-ban-list.js', import.meta.url), 'utf8'),
   { context }
 );
-await module.link((specifier) => {
+await module.link(async (specifier) => {
+  // The page reader is the real one, and makes its requests through the stand-in too.
+  if (specifier === './read-battlemetrics-pages.js')
+    return new vm.SourceTextModule(
+      await readFile(new URL(`../apis/${specifier}`, import.meta.url), 'utf8'),
+      { context }
+    );
   const exports =
     specifier === './battlemetrics.js'
       ? { default: request }

@@ -125,7 +125,23 @@ export default class ExportBanManager {
         ).toFixed(2)}s`
       );
 
-      // Cancel deletion of bans that should still be present.
+      // Cancel deletion of bans that should still be present. Those on BattleMetrics lists with no
+      // BattleMetrics ban, or with one that may or may not have been made ('pending'), are created
+      // again rather than marked as created, so they are not left off BattleMetrics.
+      if (generatedBans.length > 0)
+        await sequelize.query(
+          `
+            UPDATE ExportBans EB
+            JOIN ExportBanLists EBL ON EBL.id = EB.exportBanList
+            SET EB.status = 'TO_BE_CREATED'
+            WHERE EB.id IN (?) AND EB.status = 'TO_BE_DELETED' AND EBL.type = 'battlemetrics'
+              AND (EB.battlemetricsID IS NULL OR EB.battlemetricsID = 'pending')
+          `,
+          {
+            type: QueryTypes.BULKUPDATE,
+            replacements: [generatedBans.map((generatedBan) => generatedBan.id)]
+          }
+        );
       await ExportBan.update(
         {
           status: 'CREATED'
@@ -174,7 +190,27 @@ export default class ExportBanManager {
         ).toFixed(2)}s`
       );
 
-      // Delete bans that have not yet been created.
+      // Delete bans that have not yet been created. Those whose BattleMetrics ban was made, or may
+      // have been ('pending'), are queued to be deleted instead, so the ban is found and deleted
+      // too. A claim keeps its time, which says how long ago its ban may have been made.
+      await ExportBan.update(
+        {
+          status: 'TO_BE_DELETED'
+        },
+        {
+          where: {
+            id: {
+              [Op.notIn]: generatedBans.map((generatedBan) => generatedBan.id)
+            },
+            steamUser: {
+              [Op.in]: batch.map((steamUser) => steamUser.id)
+            },
+            status: 'TO_BE_CREATED',
+            battlemetricsID: { [Op.not]: null }
+          },
+          silent: true
+        }
+      );
       await ExportBan.destroy({
         where: {
           id: {
@@ -183,7 +219,8 @@ export default class ExportBanManager {
           steamUser: {
             [Op.in]: batch.map((steamUser) => steamUser.id)
           },
-          status: 'TO_BE_CREATED'
+          status: 'TO_BE_CREATED',
+          battlemetricsID: null
         }
       });
       Logger.verbose(

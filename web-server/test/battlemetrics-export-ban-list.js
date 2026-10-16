@@ -27,7 +27,12 @@ const dependencies = {
     ExportBanListConfig: {},
     ExportBanList: {
       count: async () => 0,
-      create: async (fields) => Object.assign(created, fields),
+      // A list is never created in a transaction, which its BattleMetrics ban list's save would
+      // wait on.
+      create: async (fields, options) => {
+        assert.strictEqual(options, undefined);
+        return Object.assign(created, fields);
+      },
       findOne: async () => found
     }
   },
@@ -83,21 +88,30 @@ function apiError(message, status, extra = {}) {
   });
 }
 
-// When BattleMetrics fails to create the ban list, the owner gets the error, and the web server
-// logs which list it was and that BattleMetrics may have created a ban list anyway.
+// When BattleMetrics fails to create the ban list, the web server logs which list it was and that
+// BattleMetrics may have created a ban list anyway. The list could never be used without one, so
+// it is deleted, without a transaction, and the owner is told that it was not created.
 const listError = apiError(
   'BattleMetrics POST ban-lists failed: HTTP 502 (Bad Gateway), so it may have been carried out',
   502,
   { ambiguous: true }
 );
+const deletions = [];
 created = {
   id: 9,
   battlemetricsID: null,
   async createBattlemetricsBanList() {
     throw listError;
+  },
+  async destroy(...args) {
+    deletions.push({ id: this.id, args: args.length });
   }
 };
-await assert.rejects(create(), (error) => error === listError);
+await assert.rejects(create(), {
+  message:
+    'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.'
+});
+assert.deepStrictEqual(deletions, [{ id: 9, args: 0 }]);
 assert.deepStrictEqual(logged(), [
   [
     'Failed to create the BattleMetrics ban list for export ban list:',
@@ -114,8 +128,39 @@ assert.deepStrictEqual(logged(), [
 ]);
 assert.ok(!JSON.stringify(logged()).includes('secret-test-token'));
 
-// When only the invite fails, the log gives the BattleMetrics ban list that was created.
+// If the list cannot be deleted either, that is logged too, and the owner is asked to delete it.
 logs.length = 0;
+created = {
+  id: 13,
+  battlemetricsID: null,
+  async createBattlemetricsBanList() {
+    throw listError;
+  },
+  async destroy() {
+    throw new Error('Database unavailable');
+  }
+};
+await assert.rejects(create(), {
+  message:
+    'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later.'
+});
+assert.deepStrictEqual(
+  logged().map(([description]) => description),
+  [
+    'Failed to create the BattleMetrics ban list for export ban list:',
+    'Failed to delete the export ban list with no BattleMetrics ban list:'
+  ]
+);
+assert.deepStrictEqual(logged()[1][1], {
+  exportBanListID: 13,
+  name: 'Error',
+  message: 'Database unavailable'
+});
+
+// When only the invite fails, the list keeps its BattleMetrics ban list and the owner gets the
+// error, and the log gives the BattleMetrics ban list that was created.
+logs.length = 0;
+deletions.length = 0;
 const inviteError = apiError(
   'BattleMetrics POST ban-lists/list-10/relationships/invites failed after 3 attempts: HTTP 502',
   502,
@@ -127,9 +172,13 @@ created = {
   async createBattlemetricsBanList() {
     this.battlemetricsID = 'list-10';
     throw inviteError;
+  },
+  async destroy() {
+    deletions.push(this.id);
   }
 };
 await assert.rejects(create(), (error) => error === inviteError);
+assert.deepStrictEqual(deletions, []);
 assert.strictEqual(logs.length, 1);
 assert.strictEqual(logged()[0][1].battlemetricsID, 'list-10');
 assert.strictEqual(logged()[0][1].ambiguous, false);
@@ -172,5 +221,5 @@ assert.deepStrictEqual(
 assert.ok(!JSON.stringify(logged()).includes('secret-test-token'));
 
 console.log(
-  'BattleMetrics export ban list checks passed: failed creations are logged, and missing invites are made on save.'
+  'BattleMetrics export ban list checks passed: failed creations are logged and their lists deleted, and missing invites are made on save.'
 );
