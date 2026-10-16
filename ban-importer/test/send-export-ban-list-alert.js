@@ -25,6 +25,7 @@ const dependencies = {
   'scbl-lib/db/sequelize': { Op: {} },
   'scbl-lib/utils': {
     createDiscordWebhookMessage() {},
+    DELETED_WEBHOOK_CODES: [10015, 50027],
     isDiscordWebhookUrl,
     Logger: { verbose: (...args) => logs.push(args.slice(2).join('')) },
     async sendDiscordWebhook(url, message) {
@@ -32,7 +33,8 @@ const dependencies = {
       if (sendError) throw sendError;
     }
   },
-  'scbl-lib/config': { HOST: 'https://communitybanlist.example' }
+  'scbl-lib/config': { HOST: 'https://communitybanlist.example' },
+  './run-control.js': { checkRunLock: async () => {}, stopIfRequested() {} }
 };
 
 const context = vm.createContext({});

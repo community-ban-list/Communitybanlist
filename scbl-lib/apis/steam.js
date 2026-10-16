@@ -1,20 +1,14 @@
 import axios from 'axios';
 import Bottleneck from 'bottleneck';
+
+import createApiClient from './create-api-client.js';
 import { STEAM_API_KEY } from '../config.js';
 
 if (!STEAM_API_KEY) throw new Error('Environmental variable STEAM_API_KEY must be provided.');
 const STEAM_API_RESERVIOR = 200;
-const STEAM_API_RETRIES = 30;
-const STEAM_TIMEOUT = 10000;
 
-async function withTimeout(promise) {
-  const myError = new Error(`timeout`);
-  const timeout = new Promise((resolve, reject) =>
-    setTimeout(() => reject(myError), STEAM_TIMEOUT)
-  );
-
-  return await Promise.race([promise, timeout]);
-}
+// How long Steam has to answer a request in full, after which the request is cut off.
+const STEAM_TIMEOUT = 15 * 1000;
 
 const rl = new Bottleneck({
   reservoir: STEAM_API_RESERVIOR,
@@ -23,48 +17,36 @@ const rl = new Bottleneck({
   minTime: 1500 // 300s per 200 requests as a rule of thumb to stop hitting burst rate limit on Steam
 });
 
-rl.on('failed', async (error, jobInfo) => {
-  const id = jobInfo.options.id;
-  console.warn(`Job ${id} failed`, error);
-
-  if (jobInfo.retryCount <= STEAM_API_RETRIES) {
-    console.log(`Retrying job ${id} in 1s!`);
-    return 1000;
-  } else throw error;
-});
-
-// eslint-disable-next-line n/handle-callback-err
-rl.on('retry', (error, jobInfo) => console.log(`Now retrying ${jobInfo.options.id}`));
-
-const makeRequest = rl.wrap(async (method, url, params, data = {}) => {
-  console.log('starting steam axios request');
-  const profileStartTime = Date.now();
-  const retVar = await withTimeout(
-    axios({
+// Each attempt is a job of its own on the limiter, with an ID of its own, so retries use the
+// budget. Steam refuses a key with 401 or 403, which is never tried again: retrying does not help,
+// and partner.steam-api.com limits the whole IP address after repeated refusals. The key is sent
+// in the address, which a failed request's ApiError never includes. See create-api-client.js for
+// when a request is made again.
+const request = createApiClient({
+  name: 'Steam',
+  limiter: rl,
+  jobPrefix: 'STEAM',
+  timeout: STEAM_TIMEOUT,
+  authStatuses: [401, 403],
+  secrets: [STEAM_API_KEY],
+  async send(method, url, params, data, options) {
+    console.log('starting steam axios request');
+    const profileStartTime = Date.now();
+    const response = await axios({
       method,
       // url: 'https://api.steampowered.com/' + url,
       url: 'https://partner.steam-api.com/' + url,
       params: { ...params, key: STEAM_API_KEY },
-      data
-    })
-  );
-  console.log(
-    `done with steam axios request after ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
-  );
-  return retVar;
+      data,
+      ...options
+    });
+    console.log(
+      `done with steam axios request after ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
+    );
+    return response;
+  }
 });
 
-// Each request gets a job ID of its own. Bottleneck rejects a job while another with the same ID is
-// waiting or running.
-let jobCount = 0;
-
 export default async function (method, url, params, data = {}, priority = 5) {
-  jobCount++;
-  return await makeRequest.withOptions(
-    { priority, id: `STEAM-${jobCount}` },
-    method,
-    url,
-    params,
-    data
-  );
+  return request(method, url, params, data, priority);
 }

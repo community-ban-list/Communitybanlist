@@ -4,20 +4,30 @@ import { ExportBan, ExportBanList, SteamUser } from 'scbl-lib/db/models';
 import { Op } from 'scbl-lib/db/sequelize';
 import {
   createDiscordWebhookMessage,
+  DELETED_WEBHOOK_CODES,
   isDiscordWebhookUrl,
   Logger,
   sendDiscordWebhook
 } from 'scbl-lib/utils';
 import { HOST } from 'scbl-lib/config';
 
+import { checkRunLock, stopIfRequested } from './run-control.js';
+
 const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
 const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 50;
 const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 50000;
+// The Steam step stops once this many batches in a row have failed, as Steam is then most likely
+// down and the rest would fail too. The users left stay due, so the next run updates them.
+const UPDATE_STEAM_USER_INFO_MAX_FAILED_BATCHES = 3;
 const DISCORD_ALERT_CAP = 50;
-
-// Discord error codes meaning an export ban list's webhook is gone for good: it was deleted (Unknown
-// Webhook) or its token no longer works (Invalid Webhook Token).
-const DELETED_WEBHOOK_CODES = [10015, 50027];
+// Once this many of a BattleMetrics export ban list's requests in a row have failed, its other
+// export bans wait for the next run, as BattleMetrics would most likely refuse them too.
+const BATTLEMETRICS_LIST_MAX_FAILURES = 3;
+// Once this many BattleMetrics export ban lists in a row have stopped because BattleMetrics did not
+// answer or answered with a server error, with no change made since, BattleMetrics is most likely
+// down, so the BattleMetrics export bans left wait for the next run rather than each list waiting
+// out its own timeouts.
+const BATTLEMETRICS_MAX_LISTS_DOWN = 3;
 
 // Webhooks Discord has reported as deleted during this run, so they are not tried again.
 const deletedWebhooks = new Set();
@@ -59,7 +69,7 @@ export default class Core {
 
     Logger.verbose('Core', 2, `Updating ${users.length} Steam users...`);
     const startingLength = users.length;
-    const myProgressBar = await Logger.discordProgressBar(
+    const myProgressBar = Logger.discordProgressBar(
       'Core',
       `Updating ${users.length} Steam users...`,
       null,
@@ -68,7 +78,10 @@ export default class Core {
       0
     );
 
+    let failedBatches = 0;
     while (users.length > 0) {
+      // A run that is asked to stop does so between batches.
+      stopIfRequested();
       const batch = users.splice(0, Math.min(UPDATE_STEAM_USER_INFO_BATCH_SIZE, users.length));
 
       let data = null;
@@ -84,15 +97,51 @@ export default class Core {
         });
         data = myData.data;
       } catch (err) {
+        // Steam refused the key, so it would refuse every other batch too, and
+        // partner.steam-api.com limits the whole IP address after repeated refusals.
+        if (err.auth) {
+          Logger.verbose(
+            'Core',
+            1,
+            `Stopped updating Steam users, as Steam refused the API key: ${err.message}`
+          );
+          break;
+        }
+
+        // Steam is still limiting requests after the client's retries and minute-long pauses, so
+        // every other batch would wait out the same pauses. The users left stay due, so the next
+        // run updates them, and the later steps do not need fresh Steam data.
+        if (err.status === 429) {
+          Logger.verbose(
+            'Core',
+            1,
+            `Stopped updating Steam users, as Steam is still limiting requests: ${err.message}`
+          );
+          break;
+        }
+
+        failedBatches++;
+        if (failedBatches >= UPDATE_STEAM_USER_INFO_MAX_FAILED_BATCHES) {
+          Logger.verbose(
+            'Core',
+            1,
+            `Stopped updating Steam users, as ${failedBatches} batches in a row failed: ${err.message}`
+          );
+          break;
+        }
+
+        // The Steam client throws ApiErrors, which never hold the key, so the error is logged
+        // whole.
         Logger.verbose(
           'Core',
           1,
-          `Failed to update batch of ${batch.length} Steam users due to Error: ${err.message}`,
+          `Failed to update batch of ${batch.length} Steam users due to Error: `,
           err
         );
         await doSleep(5000);
         continue;
       }
+      failedBatches = 0;
 
       Logger.verbose(
         'Core',
@@ -133,7 +182,7 @@ export default class Core {
 
     Logger.verbose(
       'Core',
-      1,
+      2,
       `Finished updating Steam users. Took ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
     );
   }
@@ -158,7 +207,7 @@ export default class Core {
     );
     Logger.verbose(
       'Core',
-      1,
+      2,
       `Finished Updating reputation points of ${affectedRows} orphaned Steam users. Took ${(
         (Date.now() - profileStartTime) /
         1000
@@ -244,7 +293,7 @@ export default class Core {
     );
     Logger.verbose(
       'Core',
-      1,
+      2,
       `Finished Updating reputation points of ${affectedRows} outdated Steam users. Took ${(
         (Date.now() - profileStartTime) /
         1000
@@ -279,7 +328,7 @@ export default class Core {
     );
     Logger.verbose(
       'Core',
-      1,
+      2,
       `Finished Updating reputation rank of ${affectedRows} Steam users. Took ${(
         (Date.now() - profileStartTime) /
         1000
@@ -288,12 +337,15 @@ export default class Core {
   }
 
   static async exportExportBans() {
-    Logger.verbose('Core', 1, 'Exporting Bans...');
+    Logger.verbose('Core', 2, 'Exporting Bans...');
     const profileStartTime = Date.now();
-    // Get bans that need exporting.
-    const exportBans = await ExportBan.findAll({
+    // Get bans that need exporting, the longest waiting first. An export ban BattleMetrics refused
+    // was changed when its claim was released, so it goes to the back of the queue, and cannot
+    // hold up the rest of its list run after run.
+    const queuedExportBans = await ExportBan.findAll({
       where: { status: { [Op.in]: ['TO_BE_CREATED', 'TO_BE_DELETED'] } },
-      include: [ExportBanList, SteamUser]
+      include: [ExportBanList, SteamUser],
+      order: [['updatedAt', 'ASC']]
     });
     Logger.verbose(
       'Core',
@@ -304,6 +356,38 @@ export default class Core {
       ).toFixed(2)}s`
     );
 
+    // A BattleMetrics export ban list whose BattleMetrics ban list was never made, e.g. as
+    // BattleMetrics failed when the list was created, has nowhere to add bans to. Its bans to be
+    // created wait until it has one, rather than being sent to BattleMetrics, and failing, on every
+    // run. Its bans to be deleted are still deleted, as that needs no ban list.
+    const listsWithoutBanList = {};
+    const exportBans = queuedExportBans.filter((exportBan) => {
+      const { ExportBanList: exportBanList } = exportBan;
+      if (
+        exportBan.status !== 'TO_BE_CREATED' ||
+        exportBanList.type !== 'battlemetrics' ||
+        exportBanList.battlemetricsID
+      )
+        return true;
+      listsWithoutBanList[exportBanList.id] ||= { exportBanList, count: 0 };
+      listsWithoutBanList[exportBanList.id].count++;
+      return false;
+    });
+    for (const { exportBanList, count } of Object.values(listsWithoutBanList))
+      Logger.verbose(
+        'Core',
+        1,
+        `Skipped ${count} bans to add to ${exportBanList.server}'s List "${exportBanList.name}" (ID: ${exportBanList.id}), as it has no BattleMetrics ban list to add them to.`
+      );
+
+    // Export bans claimed by an earlier run go first, so a ban BattleMetrics may have made for one is
+    // looked for, and recorded, early in the run. Claiming one changed its time, which would put it
+    // behind every export ban queued since, and those could hold it up for more runs. The others
+    // keep their order.
+    exportBans.sort(
+      (a, b) => (b.battlemetricsID === 'pending') - (a.battlemetricsID === 'pending')
+    );
+
     // Tally the number of changes per ban list.
     const listChangeCount = {};
     for (const exportBan of exportBans) {
@@ -312,7 +396,9 @@ export default class Core {
       else
         listChangeCount[exportBan.ExportBanList.id] = {
           exportBanList: exportBan.ExportBanList,
-          count: 1
+          count: 1,
+          // How many of the changes were made this run.
+          made: 0
         };
     }
     Logger.verbose(
@@ -335,7 +421,11 @@ export default class Core {
         1000
       ).toFixed(2)}s`
     );
-    const myProgressBar = await Logger.discordProgressBar(
+
+    // Changes reach BattleMetrics from here on, so they must never be made by two runs at once.
+    await checkRunLock();
+
+    const myProgressBar = Logger.discordProgressBar(
       'Core',
       `Exporting ${exportBans.length} Bans...`,
       null,
@@ -345,36 +435,114 @@ export default class Core {
     );
     let currentList = 0;
 
+    // Whether BattleMetrics refused the API key, which every BattleMetrics export ban list uses.
+    let battlemetricsRefused = false;
+
+    // How many BattleMetrics export ban lists in a row have stopped as BattleMetrics did not answer
+    // or failed, since a change was last made, and whether BattleMetrics is taken to be down.
+    let listsDown = 0;
+    let battlemetricsDown = false;
+
+    // For each BattleMetrics export ban list, how many of its requests in a row have failed, and,
+    // once its other export bans wait for the next run, why.
+    const listFailures = {};
+
+    // The bans on each BattleMetrics ban list, read at most once a run, the first time a ban that
+    // BattleMetrics may or may not have made has to be looked for on it.
+    const battlemetricsBans = new Map();
+
     // Update the export bans.
     for (const exportBan of exportBans) {
+      // A run that is asked to stop does so between export bans, never between a BattleMetrics
+      // request and the database save that records it.
+      stopIfRequested();
+
+      // Once BattleMetrics has refused the key, it would refuse every other request too, and once
+      // it seems to be down, it would most likely not answer them either, so the BattleMetrics
+      // export bans left wait for the next run. Remote lists' export bans carry on.
+      const { ExportBanList: exportBanList } = exportBan;
+      if ((battlemetricsRefused || battlemetricsDown) && exportBanList.type === 'battlemetrics')
+        continue;
+
+      // The same goes for the export bans of a list whose requests are failing.
+      const failures =
+        exportBanList.type === 'battlemetrics'
+          ? (listFailures[exportBanList.id] ||= { count: 0, stopped: null })
+          : null;
+      if (failures && failures.stopped) continue;
+
+      // A creation marks the export ban as created before saving it, so a failed save is still
+      // described as a creation.
+      const creating = exportBan.status === 'TO_BE_CREATED';
       Logger.verbose(
         'Core',
         2,
-        `${exportBan.status === 'TO_BE_CREATED' ? 'Creat' : 'Delet'}ing export ban (ID: ${
-          exportBan.id
-        })...`
+        `${creating ? 'Creat' : 'Delet'}ing export ban (ID: ${exportBan.id})...`
       );
 
       try {
-        if (exportBan.status === 'TO_BE_CREATED') await Core.createExportBan(exportBan);
-        else await Core.deleteExportBan(exportBan);
+        const made = creating
+          ? await Core.createExportBan(exportBan, battlemetricsBans)
+          : await Core.deleteExportBan(exportBan, battlemetricsBans);
+        if (made) {
+          listChangeCount[exportBanList.id].made++;
+          if (failures) {
+            failures.count = 0;
+            listsDown = 0;
+          }
+        }
       } catch (err) {
-        if (err.response && err.response.status === 404 && exportBan.status !== 'TO_BE_CREATED') {
-          await exportBan.destroy();
+        if (err.auth) {
+          battlemetricsRefused = true;
           await Logger.verbose(
             'Core',
             1,
-            `Removed export ban (ID: ${exportBan.id}) from Lists due to error 404 during deletion.`
+            `Stopped exporting bans to BattleMetrics until the next run, as BattleMetrics refused the API key: ${err.message}`
           );
         } else {
+          // The BattleMetrics client throws ApiErrors, which never hold the API key, so the error
+          // is logged whole, which keeps the stack trace of any other error, e.g. the database's.
           await Logger.verbose(
             'Core',
             1,
-            `Failed to ${
-              exportBan.status === 'TO_BE_CREATED' ? 'create' : 'delete'
-            } export ban (ID: ${exportBan.id}): `,
+            `Failed to ${creating ? 'create' : 'delete'} export ban (ID: ${exportBan.id}): `,
             err
           );
+
+          // Once a few of a list's requests in a row have failed, its other export bans wait for
+          // the next run, rather than each failing in turn. A request BattleMetrics may have
+          // carried out, e.g. one answered with 5xx, keeps its export ban claimed, so the ban is
+          // not made twice, and only counts towards those. One that went unanswered, as it timed
+          // out or was cut off, stops the list at once, as BattleMetrics is then most likely not
+          // answering, and every other export ban would wait as long. Not so for an export ban an
+          // earlier run claimed: its request failed before, so the request itself may be what
+          // fails, and as claimed export bans go first, it would stop its list on every run.
+          if (failures) {
+            failures.count++;
+            if (err.ambiguous && !err.response && exportBan.battlemetricsID !== 'pending')
+              failures.stopped =
+                'BattleMetrics did not answer a request, which it may have carried out';
+            else if (failures.count >= BATTLEMETRICS_LIST_MAX_FAILURES)
+              failures.stopped = `${failures.count} of its requests in a row failed`;
+            if (failures.stopped) {
+              Logger.verbose(
+                'Core',
+                1,
+                `Stopped exporting bans to BattleMetrics for ${exportBanList.server}'s List "${exportBanList.name}" (ID: ${exportBanList.id}) until the next run, as ${failures.stopped}.`
+              );
+
+              // A list stopped by BattleMetrics refusing its requests says nothing about the others.
+              if (!err.response || err.response.status >= 500) listsDown++;
+              if (listsDown >= BATTLEMETRICS_MAX_LISTS_DOWN && !battlemetricsDown) {
+                battlemetricsDown = true;
+                Logger.verbose(
+                  'Core',
+                  1,
+                  `Stopped exporting bans to BattleMetrics until the next run, as it did not answer or failed for ${listsDown} export ban lists in a row, so it is most likely down.`
+                );
+              }
+            }
+          }
         }
       }
       currentList++;
@@ -395,9 +563,9 @@ export default class Core {
       )}s`
     );
 
-    // Do Discord alerts for ban lists exceeding the threshold.
-    for (const { exportBanList, count } of Object.values(listChangeCount)) {
-      if (!exportBanList.discordWebhook || count < DISCORD_ALERT_CAP) continue;
+    // Do Discord alerts for ban lists exceeding the threshold, if any of their changes were made.
+    for (const { exportBanList, count, made } of Object.values(listChangeCount)) {
+      if (!exportBanList.discordWebhook || count < DISCORD_ALERT_CAP || made === 0) continue;
 
       const [, message] = createDiscordWebhookMessage(exportBanList.discordWebhook);
 
@@ -410,7 +578,7 @@ export default class Core {
     }
     Logger.verbose(
       'Core',
-      1,
+      2,
       `Finished Exporting Bans. Took ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
     );
   }
@@ -475,50 +643,97 @@ export default class Core {
     }
   }
 
-  static async createExportBan(exportBan) {
-    // Add to external export sources.
-    if (exportBan.ExportBanList.type === 'battlemetrics') await exportBan.createBattlemetricsBan();
+  // Create an export ban: add it to its list's BattleMetrics ban list, for a BattleMetrics export
+  // ban list, and mark it as created. Resolves with whether it was created, as one for BattleMetrics
+  // may be left for a later run.
+  static async createExportBan(exportBan, battlemetricsBans) {
+    let { ExportBanList: exportBanList } = exportBan;
 
-    // Update the record to indicate it has been created.
-    exportBan.status = 'CREATED';
-    await exportBan.save();
+    if (exportBanList.type === 'battlemetrics') {
+      // Add to BattleMetrics, which also marks the export ban as created. The export ban and its
+      // list are read again first, as the run may have started hours ago, and either may have
+      // been deleted or changed since.
+      const current = await ExportBan.findOne({
+        where: { id: exportBan.id },
+        include: [ExportBanList]
+      });
+      if (!current || current.status !== 'TO_BE_CREATED' || !current.ExportBanList) return false;
+      const result = await current.createBattlemetricsBan(battlemetricsBans);
+      if (result !== 'created' && result !== 'found') return false;
+      exportBanList = current.ExportBanList;
+    } else {
+      // Update the record to indicate it has been created.
+      exportBan.status = 'CREATED';
+      await exportBan.save();
+    }
 
     // Send Discord alert.
-    if (!exportBan.ExportBanList.discordWebhook || !exportBan.doDiscordAlert) return;
+    if (!exportBanList.discordWebhook || !exportBan.doDiscordAlert) return true;
 
-    const [, message] = createDiscordWebhookMessage(exportBan.ExportBanList.discordWebhook, {
+    const [, message] = createDiscordWebhookMessage(exportBanList.discordWebhook, {
       color: '#00ff00'
     });
 
     message.setTitle(`${exportBan.SteamUser.name} has been added to your export ban list.`);
     message.setDescription(
-      `[${exportBan.SteamUser.name}](${HOST}/search/${exportBan.SteamUser.id}) has reached the threshold required to be added to your export ban list named "${exportBan.ExportBanList.name}".\n\n* [BM RCON Link](https://www.battlemetrics.com/rcon/players?filter[search]=${exportBan.SteamUser.id}&method=quick&redirect=1)\n* [SteamID.uk Profile](https://steamid.uk/profile/${exportBan.SteamUser.id})`
+      `[${exportBan.SteamUser.name}](${HOST}/search/${exportBan.SteamUser.id}) has reached the threshold required to be added to your export ban list named "${exportBanList.name}".\n\n* [BM RCON Link](https://www.battlemetrics.com/rcon/players?filter[search]=${exportBan.SteamUser.id}&method=quick&redirect=1)\n* [SteamID.uk Profile](https://steamid.uk/profile/${exportBan.SteamUser.id})`
     );
     message.setThumbnail(exportBan.SteamUser.avatarMedium);
 
-    await Core.sendExportBanListAlert(exportBan.ExportBanList, message);
+    await Core.sendExportBanListAlert(exportBanList, message);
+    return true;
   }
 
-  static async deleteExportBan(exportBan) {
-    // Delete from external export sources.
-    if (exportBan.ExportBanList.type === 'battlemetrics') await exportBan.deleteBattlemetricsBan();
+  // Delete an export ban: remove it from its list's BattleMetrics ban list, for a BattleMetrics
+  // export ban list, and delete the record. Resolves with whether it was removed from the list, as
+  // one for BattleMetrics may be left for a later run, or have had no BattleMetrics ban.
+  static async deleteExportBan(exportBan, battlemetricsBans) {
+    let { ExportBanList: exportBanList } = exportBan;
 
-    // Delete the record.
-    await exportBan.destroy();
+    if (exportBanList.type === 'battlemetrics') {
+      // Delete from BattleMetrics, which also deletes the record. As for a creation, the export
+      // ban and its list are read again first.
+      const current = await ExportBan.findOne({
+        where: { id: exportBan.id },
+        include: [ExportBanList]
+      });
+      if (!current || current.status !== 'TO_BE_DELETED' || !current.ExportBanList) return false;
+      const result = await current.deleteBattlemetricsBan(battlemetricsBans);
+      if (result === 'gone')
+        Logger.verbose(
+          'Core',
+          1,
+          `Removed export ban (ID: ${exportBan.id}) from Lists due to error 404 during deletion.`
+        );
+      // Nothing was removed from the list for an export ban that had no BattleMetrics ban, so its
+      // owner is not told otherwise.
+      if (result === 'cleared')
+        Logger.verbose(
+          'Core',
+          2,
+          `Deleted export ban (ID: ${exportBan.id}), which had no Battlemetrics ban.`
+        );
+      if (result !== 'deleted' && result !== 'gone') return false;
+      exportBanList = current.ExportBanList;
+    } else {
+      // Delete the record.
+      await exportBan.destroy();
+    }
 
     // Send Discord alert.
-    if (!exportBan.ExportBanList.discordWebhook || !exportBan.doDiscordAlert) return;
+    if (!exportBanList.discordWebhook || !exportBan.doDiscordAlert) return true;
 
-    const [, message] = createDiscordWebhookMessage(exportBan.ExportBanList.discordWebhook, {
+    const [, message] = createDiscordWebhookMessage(exportBanList.discordWebhook, {
       color: '#ff0000'
     });
 
     message.setTitle(`${exportBan.SteamUser.name} has been removed from your export ban list.`);
     message.setDescription(
-      `[${exportBan.SteamUser.name}](${HOST}/search/${exportBan.SteamUser.id}) no longer meets the threshold required to be on your export ban list named "${exportBan.ExportBanList.name}" so has been removed.\n\n* [BM RCON Link](https://www.battlemetrics.com/rcon/players?filter[search]=${exportBan.SteamUser.id}&method=quick&redirect=1)\n* [SteamID.uk Profile](https://steamid.uk/profile/${exportBan.SteamUser.id})`
+      `[${exportBan.SteamUser.name}](${HOST}/search/${exportBan.SteamUser.id}) no longer meets the threshold required to be on your export ban list named "${exportBanList.name}" so has been removed.\n\n* [BM RCON Link](https://www.battlemetrics.com/rcon/players?filter[search]=${exportBan.SteamUser.id}&method=quick&redirect=1)\n* [SteamID.uk Profile](https://steamid.uk/profile/${exportBan.SteamUser.id})`
     );
     message.setThumbnail(exportBan.SteamUser.avatarMedium);
 
-    await Core.sendExportBanListAlert(exportBan.ExportBanList, message);
+    await Core.sendExportBanListAlert(exportBanList, message);
+    return true;
   }
 }

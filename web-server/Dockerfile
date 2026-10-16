@@ -33,6 +33,11 @@ WORKDIR /opt/workdir/
 # Copy only the necessary files from the build stage
 COPY --from=build /opt/workdir /opt/workdir
 
+# The commit the image was built from, which CI passes in, so the services can say which build is
+# running. It is set last, so a new commit does not change any earlier layer.
+ARG GIT_SHA
+ENV GIT_SHA=${GIT_SHA}
+
 # Expose ports
 EXPOSE 80
 

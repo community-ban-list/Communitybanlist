@@ -1,6 +1,25 @@
 import { BanList, ExportBanList, ExportBanListConfig } from 'scbl-lib/db/models';
 import { testDiscordWebhook } from 'scbl-lib/utils';
 
+// What is logged of a failed BattleMetrics request for an export ban list: the BattleMetrics client
+// says in the message what failed and whether BattleMetrics may have carried it out anyway, and the
+// list's IDs say what there is to clean up. The error is never logged whole.
+function logBattlemetricsFailure(description, exportBanList, error) {
+  const response = error.response;
+  const errors = response && response.data && response.data.errors;
+  console.error(description, {
+    exportBanListID: exportBanList.id,
+    battlemetricsID: exportBanList.battlemetricsID,
+    name: error.name,
+    message: error.message,
+    status: response && response.status,
+    ambiguous: error.ambiguous,
+    errors: Array.isArray(errors)
+      ? errors.map(({ code, title, detail }) => ({ code, title, detail }))
+      : undefined
+  });
+}
+
 export default {
   Mutation: {
     createExportBanList: async (parent, args, context) => {
@@ -28,7 +47,45 @@ export default {
         owner: context.user.id
       });
 
-      if (exportBanLsit.type === 'battlemetrics') await exportBanLsit.createBattlemetricsBanList();
+      if (exportBanLsit.type === 'battlemetrics') {
+        try {
+          await exportBanLsit.createBattlemetricsBanList();
+        } catch (error) {
+          // The owner sees the message, but only this says which list it was, and whether
+          // BattleMetrics may have created a ban list that the list does not record.
+          logBattlemetricsFailure(
+            'Failed to create the BattleMetrics ban list for export ban list:',
+            exportBanLsit,
+            error
+          );
+
+          // Without a BattleMetrics ban list, the export ban list could never be used, so it is
+          // deleted, and the owner can try again. It is deleted on its own rather than created in
+          // a transaction, as f6630b9 tried: createBattlemetricsBanList saves the list outside the
+          // transaction, so the save waited on the list's uncommitted row until MySQL gave up.
+          if (!exportBanLsit.battlemetricsID) {
+            try {
+              await exportBanLsit.destroy();
+            } catch (destroyError) {
+              console.error(
+                'Failed to delete the export ban list with no BattleMetrics ban list:',
+                {
+                  exportBanListID: exportBanLsit.id,
+                  name: destroyError.name,
+                  message: destroyError.message
+                }
+              );
+              throw new Error(
+                'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later.'
+              );
+            }
+            throw new Error(
+              'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.'
+            );
+          }
+          throw error;
+        }
+      }
 
       return exportBanLsit;
     },
@@ -72,6 +129,18 @@ export default {
       if ('discordWebhook' in args) exportBanList.discordWebhook = args.discordWebhook;
 
       await exportBanList.save();
+
+      // A BattleMetrics export ban list whose invite could not be created along with it gets one
+      // now. The changes are saved either way, so a failure is only logged.
+      try {
+        await exportBanList.createBattlemetricsInvite();
+      } catch (error) {
+        logBattlemetricsFailure(
+          'Failed to create the BattleMetrics invite for export ban list:',
+          exportBanList,
+          error
+        );
+      }
 
       return exportBanList;
     },

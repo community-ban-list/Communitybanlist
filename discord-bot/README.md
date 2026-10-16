@@ -12,7 +12,7 @@ Slash commands for managing partner organisations and their ban lists from the C
 | `/org info organisation` | Show an organisation and its ban lists with their ban counts. |
 | `/org list` | List all organisations. |
 | `/banlist add organisation name type source [skip_check]` | Add another ban list to an organisation. |
-| `/banlist update banlist [name] [type] [source] [skip_check]` | Rename a ban list or change where its bans come from. |
+| `/banlist update banlist [name] [type] [source] [skip_check]` | Rename a ban list or change where its bans come from. A new type or source deletes the list's bans, after a confirmation, as the new source's bans replace them. |
 | `/banlist remove banlist` | Remove a ban list and its bans, after a confirmation. |
 
 Organisations and ban lists can be picked from autocomplete suggestions. Replies are only visible to the person running the command, and every change is posted to the log webhook (`DISCORD_LOG_WEBHOOK`) with who made it.
@@ -24,7 +24,7 @@ A ban list's `source` is either:
 
 The bot test fetches the source before saving it. It rejects sources that are already used by another ban list, and BattleMetrics sources that are one of CBL's own export ban lists, since importing one would feed exported players back in as new bans. Use `skip_check` to save a source without fetching it, e.g. a list that is empty for now; it skips only the test fetch, so the other checks still apply.
 
-Changes take effect on the next ban importer run. When a ban list is removed, its bans are deleted straight away and the affected players are queued so the importer recalculates their reputation and export bans.
+Changes take effect on the next ban importer run. When a ban list is removed or given a new type or source, its bans are deleted straight away and the affected players are queued so the importer recalculates their reputation and export bans. A new type or source is refused while a ban importer run is under way, as the run could save the old source's bans again; try again once the run has finished.
 
 ## Setup
 

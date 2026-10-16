@@ -1,20 +1,25 @@
 import axios from 'axios';
 import Bottleneck from 'bottleneck';
 
+import createApiClient from './create-api-client.js';
 import {
   BATTLEMETRICS_API_KEY,
   BATTLEMETRICS_API_RESERVOIR,
   BATTLEMETRICS_API_RESERVOIR_VARIABLE
 } from '../config.js';
 
-const BATTLEMETRICS_TIMEOUT = 60000;
-const BATTLEMETRICS_API_RETRIES = 20;
+// How long BattleMetrics has to answer a request in full, after which the request is cut off.
+const BATTLEMETRICS_TIMEOUT = 30 * 1000;
 
 // BattleMetrics allows 300 requests a minute for the whole API key. The web server and the
 // importer share it, each with a budget of its own from BATTLEMETRICS_API_RESERVOIR.
 const BATTLEMETRICS_LIMIT = 300;
 const DEFAULT_REQUESTS_PER_MINUTE = 10;
 const HIGH_REQUESTS_PER_MINUTE = 200;
+
+// BattleMetrics says in each answer how many of the key's requests are left this minute. When
+// fewer than this many are, nothing is sent for a minute.
+const MIN_REMAINING = 60;
 
 // Requests start at least this far apart to stay under BattleMetrics' burst limit, so the client
 // never sends more than about MAX_REQUESTS_PER_MINUTE, whatever the budget.
@@ -23,15 +28,6 @@ const MAX_REQUESTS_PER_MINUTE = Math.floor((60 * 1000) / MIN_TIME);
 
 if (!BATTLEMETRICS_API_KEY)
   throw new Error('Environmental variable BATTLEMETRICS_API_KEY must be provided.');
-
-async function withTimeout(promise) {
-  const myError = new Error(`timeout`);
-  const timeout = new Promise((resolve, reject) =>
-    setTimeout(() => reject(myError), BATTLEMETRICS_TIMEOUT)
-  );
-
-  return await Promise.race([promise, timeout]);
-}
 
 const VARIABLE = BATTLEMETRICS_API_RESERVOIR_VARIABLE || 'BATTLEMETRICS_API_RESERVOIR';
 
@@ -89,43 +85,38 @@ const rl = new Bottleneck({
   minTime: MIN_TIME // stop hitting burst rate limit on BM
 });
 
-rl.on('failed', async (error, jobInfo) => {
-  const id = jobInfo.options.id;
-  console.warn(`Job ${id} failed`, error);
-
-  if (jobInfo.retryCount <= BATTLEMETRICS_API_RETRIES) {
-    console.log(`Retrying job ${id} in 1s!`);
-    return 1000;
-  } else throw error;
-});
-
-// eslint-disable-next-line n/handle-callback-err
-rl.on('retry', (error, jobInfo) => console.log(`Now retrying ${jobInfo.options.id}`));
-
-const makeRequest = rl.wrap(async (method, endpoint, params, data) => {
-  console.log('Starting BM axios request');
-  const profileStartTime = Date.now();
-  const retVar = await withTimeout(
-    axios({
+// Each attempt is a job of its own on the limiter, with an ID of its own, so retries use the
+// budget and requests made at the same time are not rejected for sharing an ID. A failed request
+// throws an ApiError, which never includes the API key. See create-api-client.js for when a
+// request is made again.
+const request = createApiClient({
+  name: 'BattleMetrics',
+  limiter: rl,
+  jobPrefix: 'BM',
+  timeout: BATTLEMETRICS_TIMEOUT,
+  minRemaining: MIN_REMAINING,
+  secrets: [BATTLEMETRICS_API_KEY],
+  async send(method, endpoint, params, data, options) {
+    console.log('Starting BM axios request');
+    const profileStartTime = Date.now();
+    const response = await axios({
       method,
       url: 'https://api.battlemetrics.com/' + endpoint,
       params,
       data,
-      headers: { Authorization: `Bearer ${BATTLEMETRICS_API_KEY}` }
-    })
-  );
-  console.log(
-    `Done with BM axios request after ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
-  );
-  return retVar;
+      headers: { Authorization: `Bearer ${BATTLEMETRICS_API_KEY}` },
+      ...options
+    });
+    console.log(
+      `Done with BM axios request after ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
+    );
+    return response;
+  }
 });
 
-// Each request gets a job ID of its own. Bottleneck rejects a job while another with the same ID is
-// waiting or running, so a shared ID made requests fail whenever two were made at once.
-let jobCount = 0;
-
-export default async function (method, url, params, data, priority = 5) {
+// options.repeatable marks a POST as safe to make again after a timeout or a 5xx, for one that does
+// no harm when BattleMetrics carries it out twice.
+export default async function (method, url, params, data, priority = 5, options) {
   reportBudget();
-  jobCount++;
-  return makeRequest.withOptions({ priority, id: `BM-${jobCount}` }, method, url, params, data);
+  return request(method, url, params, data, priority, options);
 }
