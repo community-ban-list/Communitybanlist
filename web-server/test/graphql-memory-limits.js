@@ -133,17 +133,21 @@ assert.strictEqual(codeOf(persisted), 'PERSISTED_QUERY_NOT_SUPPORTED');
 await server.stop();
 
 // The body parser reads only the JSON bodies the client sends: sent as-is, and within the size
-// limit. Mount it on a small app that echoes the parsed body back.
+// limit. Mount it on a small app that keeps the body it hands on for the checks below, and answers
+// with a fixed word rather than sending the body back.
 const { default: bodyParser } = await import('../src/body-parser.js');
 const app = new Koa();
 app.use(bodyParser);
+let received;
 app.use((ctx) => {
-  ctx.body = ctx.request.body;
+  received = ctx.request.body;
+  ctx.body = 'read';
 });
 const httpServer = http.createServer(app.callback());
 await new Promise((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
 const { port } = httpServer.address();
 async function post(body, headers = {}) {
+  received = undefined;
   const response = await fetch(`http://127.0.0.1:${port}/`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...headers },
@@ -155,7 +159,7 @@ async function post(body, headers = {}) {
 // A request the size of the client's is parsed and handed on.
 const parsed = await post(JSON.stringify({ query: '{ hello }', padding: 'x'.repeat(2000) }));
 assert.strictEqual(parsed.status, 200);
-assert.strictEqual(JSON.parse(parsed.text).query, '{ hello }');
+assert.strictEqual(received?.query, '{ hello }');
 
 // A request far larger than the client's is refused. The parser answers any body it cannot read
 // with 422 and logs it, as it does today, so quiet that one expected line to keep this check's
@@ -173,7 +177,7 @@ for (const encoding of ['identity', 'IDENTITY']) {
     'content-encoding': encoding
   });
   assert.strictEqual(plain.status, 200, `a body sent with Content-Encoding ${encoding} is read`);
-  assert.strictEqual(JSON.parse(plain.text).query, '{ hello }');
+  assert.strictEqual(received?.query, '{ hello }');
 }
 const encoded = await post('{}', { 'content-encoding': 'gzip' });
 assert.strictEqual(encoded.status, 415);
