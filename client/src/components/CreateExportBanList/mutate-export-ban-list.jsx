@@ -7,6 +7,7 @@ import { Navigate } from 'react-router';
 
 import { ErrorModal, LoadingModal } from '../';
 
+import addToCache from './add-to-cache.js';
 import Form from './form';
 
 const CREATE_EXPORT_BAN_LIST = gql`
@@ -76,45 +77,6 @@ const UPDATE_EXPORT_BAN_LIST = gql`
     }
   }
 `;
-
-function addToCache(cache, { data: { createExportBanList } }) {
-  cache.modify({
-    fields: {
-      loggedInSteamUser(loggedInSteamUser) {
-        cache.modify({
-          id: loggedInSteamUser.__ref,
-          fields: {
-            exportBanLists(exportBanLists = [], { readField }) {
-              const newExportBanList = cache.writeFragment({
-                data: createExportBanList,
-                fragment: gql`
-                  fragment NewExportBanList on ExportBanList {
-                    id
-                    name
-                    server
-                    type
-                    threshold
-                    defaultActivePoints
-                    defaultExpiredPoints
-                    maxBanAge
-                    discordWebhook
-                  }
-                `
-              });
-
-              if (exportBanLists.some((ref) => readField('id', ref) === createExportBanList.id))
-                return exportBanLists;
-
-              return [...exportBanLists, newExportBanList];
-            }
-          }
-        });
-
-        return loggedInSteamUser;
-      }
-    }
-  });
-}
 
 export default function (props) {
   const [mutateExportBanList, { loading, error, data }] = useMutation(
