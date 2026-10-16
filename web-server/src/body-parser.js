@@ -20,5 +20,8 @@ const parseJsonBody = BodyParser({
 export default async function bodyParser(ctx, next) {
   const encoding = ctx.get('Content-Encoding').trim().toLowerCase();
   if (encoding && encoding !== 'identity') ctx.throw(415, 'Unsupported Content-Encoding.');
+  // Encoding names are case-insensitive, but the parser only recognises "identity" in lower case,
+  // so pass it on in that form.
+  if (encoding) ctx.req.headers['content-encoding'] = 'identity';
   return parseJsonBody(ctx, next);
 }
