@@ -14,9 +14,11 @@ const {
 
 // The most one operation may cost, as queryCost works it out, and the most fields it may ask for at
 // its top level. Each field at the top level runs on its own, such as a player lookup or a change
-// to an export ban list. The site's own queries cost less than half as much, and each asks for one
-// field at its top level.
-export const QUERY_LIMITS = { cost: 20000, topLevelFields: 10 };
+// to an export ban list. The cost allows about 1,200 fields that may look data up, about twice the
+// most the site's costliest page asks for. That is the banned page, at about 8,400, as it asks for
+// three lists of up to PAGE_SIZE.playerBans of a player's bans, so raising playerBans raises its
+// cost. Each of the site's queries asks for one field at its top level.
+export const QUERY_LIMITS = { cost: 12000, topLevelFields: 10 };
 
 // A field costs this much for each row it can be returned for, or more when it has its own
 // resolver, as that may look rows up in the database.

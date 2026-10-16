@@ -6,6 +6,7 @@ import * as apolloServer from '@apollo/server';
 import * as apolloServerErrors from '@apollo/server/errors';
 import * as apolloServerDisabledPlugins from '@apollo/server/plugin/disabled';
 import * as graphqlToolsSchema from '@graphql-tools/schema';
+import graphql from 'graphql';
 import jwt from 'jsonwebtoken';
 
 // The secret is read from the environment when the config loads.
@@ -21,6 +22,7 @@ const packages = {
   '@apollo/server/errors': apolloServerErrors,
   '@apollo/server/plugin/disabled': apolloServerDisabledPlugins,
   '@graphql-tools/schema': graphqlToolsSchema,
+  graphql: { default: graphql },
   jsonwebtoken: { default: jwt },
   'scbl-lib/config': config,
   'scbl-lib/db/sequelize': {

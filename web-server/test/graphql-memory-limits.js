@@ -7,6 +7,7 @@ import * as apolloServer from '@apollo/server';
 import * as apolloServerErrors from '@apollo/server/errors';
 import * as apolloServerDisabledPlugins from '@apollo/server/plugin/disabled';
 import * as graphqlToolsSchema from '@graphql-tools/schema';
+import graphql from 'graphql';
 import jwt from 'jsonwebtoken';
 import Koa from 'koa';
 
@@ -26,6 +27,7 @@ const packages = {
   '@apollo/server/errors': apolloServerErrors,
   '@apollo/server/plugin/disabled': apolloServerDisabledPlugins,
   '@graphql-tools/schema': graphqlToolsSchema,
+  graphql: { default: graphql },
   jsonwebtoken: { default: jwt },
   // These are only read when signing a request in, which these checks do not do. Both the current
   // and the sign-in-token values are supplied, so the API loads whichever way it reads them.
@@ -75,14 +77,18 @@ async function load(path, stubs, globals = {}) {
   return module.namespace.default;
 }
 
-// A small schema whose one field is cheap to resolve, so the checks are about how requests are read
+// A small schema whose fields are cheap to resolve, so the checks are about how requests are read
 // rather than what they return.
 await load(
   '../src/graphql-api/index.js',
   {
     '@as-integrations/koa': { koaMiddleware: () => async () => {} },
-    './typedefs.js': { default: 'type Query { hello: String }' },
-    './resolvers.js': { default: { Query: { hello: () => 'world' } } },
+    './typedefs.js': {
+      default: 'type Query { hello: String greeting: Greeting } type Greeting { hello: String }'
+    },
+    './resolvers.js': {
+      default: { Query: { hello: () => 'world', greeting: () => ({ hello: 'world' }) } }
+    },
     './core/index.js': { directives: {} }
   },
   { process: { env: { NODE_ENV: undefined } }, console }
@@ -103,12 +109,13 @@ async function run(request) {
 }
 const codeOf = (result) => result.errors?.[0]?.extensions?.code;
 
-// A request the size of the site's largest (here 39 fields, 119 tokens) is answered.
+// A request the size of the site's largest (here 39 fields, 119 tokens) is answered. Like the
+// site's requests, it asks for one field at its top level, with the other 38 inside it.
 const fields = (count) =>
-  `{\n${Array.from({ length: count }, (_, i) => `f${i}: hello`).join('\n')}\n}`;
-const small = await run({ query: fields(39) });
+  `{ greeting {\n${Array.from({ length: count }, (_, i) => `f${i}: hello`).join('\n')}\n} }`;
+const small = await run({ query: fields(38) });
 assert.strictEqual(small.errors, undefined, 'a client-sized request is answered');
-assert.strictEqual(small.data.f0, 'world');
+assert.strictEqual(small.data.greeting.f0, 'world');
 
 // A request far larger than any the client sends is refused while it is still being read, and the
 // answer says why.

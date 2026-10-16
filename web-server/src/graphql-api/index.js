@@ -27,9 +27,9 @@ const server = new ApolloServer({
   persistedQueries: false,
   parseOptions: { maxTokens: 2000 },
   // Refuse a request that asks for far more at once than any of the site's pages, before any of it
-  // runs: one with more than 1,000 selections, counting a fragment's each time it is spread, or one
-  // that queryCostRule finds too costly. Apollo Server counts the selections first, so the cost is
-  // only worked out for requests of a sensible size.
+  // runs: one with more than 1,000 selections, counting a fragment's selections each time it is
+  // spread, or one that queryCostRule finds too costly. Apollo Server counts the selections first,
+  // so the cost is only worked out for requests of a sensible size.
   maxRecursiveSelections: 1000,
   validationRules: [queryCostRule(schema)],
   // While the database cannot be reached, e.g. as it restarts, show a general message rather than

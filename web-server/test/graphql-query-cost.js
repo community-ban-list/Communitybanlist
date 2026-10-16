@@ -38,7 +38,9 @@ const rows = {
     type: 'remote',
     owner: playerID,
     async save() {},
-    async destroy() {}
+    async destroy() {},
+    // A remote list has no BattleMetrics invite to make.
+    async createBattlemetricsInvite() {}
   },
   ExportBanListConfig: { id: 1, exportBanList: 1, banList: 1, activePoints: 1, async destroy() {} }
 };
@@ -99,6 +101,7 @@ const packages = {
       calls.push({ model: 'utils', method: 'calculateRiskRating' });
       return points / 10;
     },
+    isDiscordWebhookUrl: () => true,
     async testDiscordWebhook() {}
   }
 };
@@ -166,9 +169,9 @@ const pagedLists = Object.values(schema.getTypeMap())
   );
 assert.deepStrictEqual(pagedLists.sort(), Object.keys(PAGE_DEFAULTS).sort());
 
-// Every query the client sends, read from its source, costs at most half the limit and asks for at
-// most the limit's number of fields at its top level, so the site's pages have room to grow and a
-// page that outgrows it fails this check before it can be refused in production.
+// Every query the client sends, read from its source, costs at most three quarters of the limit and
+// asks for at most the limit's number of fields at its top level, so the site's pages have room to
+// grow and a page that outgrows it fails this check before it can be refused in production.
 const clientSource = fileURLToPath(new URL('../../client/src/', import.meta.url));
 const clientOperations = [];
 for (const entry of await readdir(clientSource, { recursive: true, withFileTypes: true })) {
@@ -189,7 +192,7 @@ for (const entry of await readdir(clientSource, { recursive: true, withFileTypes
 }
 assert.ok(clientOperations.length > 0, "the client's queries are found");
 for (const { name, cost, topLevelFields } of clientOperations) {
-  assert.ok(cost <= QUERY_LIMITS.cost / 2, `${name} costs ${cost}`);
+  assert.ok(cost <= (QUERY_LIMITS.cost * 3) / 4, `${name} costs ${cost}`);
   assert.ok(topLevelFields <= QUERY_LIMITS.topLevelFields, `${name} has ${topLevelFields} fields`);
 }
 const largestClientCost = Math.max(...clientOperations.map(({ cost }) => cost));
@@ -354,6 +357,14 @@ const refused = [
     '{ organisations { banLists { organisation { banLists { id } } } } }'
   ],
   [
+    "a page of players with three bans each, and those bans' players with three bans each, twice",
+    `{ steamUsers(first: 20) { edges { node { id bans(first: 3) { edges { node { id
+      steamUser { id bans(first: 3) { edges { node { id
+        steamUser { id bans(first: 3) { edges { node { id steamUser { id } } } } }
+      } } } }
+    } } } } } } }`
+  ],
+  [
     'pages of players with pages of their bans, sized by a variable',
     `query Nested($size: Int) { steamUsers(first: $size) { edges { node {
       bans(first: $size) { edges { node { id } } }
@@ -385,12 +396,17 @@ await checkRefused(
   elevenFields
 );
 
-// Apollo Server counts an operation's selections first, with each fragment's counted every time it
-// is spread, and refuses more than 1,000, so the cost is only worked out for sensible requests.
-const selections = (count) => `{ bans(first: 1) { edges { node { ${aliases(count, 'id')} } } } }`;
-assert.strictEqual((await run(selections(997))).result.errors, undefined, '1,000 selections');
+// Apollo Server counts an operation's selections first, with each fragment's selections counted
+// every time it is spread, and refuses more than 1,000, so the cost is only worked out for sensible
+// requests. A fragment keeps these documents short enough to be read: bans, edges and node, and 9
+// spreads of a fragment of 109 fields, make 993 selections before the fields beside the spreads.
+const selections = (count) => `
+  { bans(first: 1) { edges { node { ${'...Fields '.repeat(9)}${'id '.repeat(count - 993)}} } } }
+  fragment Fields on Ban { ${aliases(109, 'id')} }
+`;
+assert.strictEqual((await run(selections(1000))).result.errors, undefined, '1,000 selections');
 const tooManySelections = /recursively requests too many selections/;
-await checkRefused('1,001 selections', selections(998), undefined, tooManySelections);
+await checkRefused('1,001 selections', selections(1001), undefined, tooManySelections);
 await checkRefused('fragments that double 10 times', doubling(10), undefined, tooManySelections);
 
 // Nesting within reason is answered.
@@ -399,6 +415,15 @@ const reasonable = await run(`{ bans(first: 20) { edges { node {
 } } } }`);
 assert.strictEqual(reasonable.result.errors, undefined);
 assert.strictEqual(reasonable.result.data.bans.edges[0].node.steamUser.bans.edges[0].node.id, '1');
+
+// So are several pages at once that together cost less than the site's costliest page, such as
+// five pages of players with three of their bans each and each ban's player.
+const playersBans = `steamUsers(first: 20) { edges { node { id
+  bans(first: 3) { edges { node { id steamUser { id } } } }
+} } }`;
+const severalPages = `{ ${aliases(5, playersBans)} }`;
+assert.ok(measure(severalPages).cost < largestClientCost, "less than the site's costliest page");
+assert.strictEqual((await run(severalPages)).result.errors, undefined, 'several pages at once');
 
 // The client's own queries and changes are answered. The server has already run requests above,
 // after which Apollo Server gives every field a resolver, so this also checks that the rule still
