@@ -3,6 +3,7 @@ import { connect } from 'scbl-lib/db';
 import { describeError, stackTrace } from 'scbl-lib/utils';
 
 import server from './src/app.js';
+import limitOpenIDRequests from './src/auth/openid-request-timeout.js';
 import checkJwtSecret from './src/jwt-secret.js';
 
 const PORT = process.env.PORT || 80;
@@ -23,6 +24,9 @@ if (jwtSecretProblem?.fatal) {
   process.exit(1);
 }
 if (jwtSecretProblem) console.warn(`Warning: ${jwtSecretProblem.message}`);
+
+// Steam sign-ins are checked with Steam by the OpenID library, which sets no time limit itself.
+limitOpenIDRequests();
 
 connect()
   .then(() => {
