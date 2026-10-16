@@ -13,20 +13,26 @@ export const RECORD_EVENT = 'cbl-importer-run';
 export const STATE = {
   // The record of the latest run, as its JSON line shows it.
   LAST_RUN: 'lastRun',
-  // When the latest successful run, one that exited 0, ended.
+  // When the latest successful run started (see succeeded).
   LAST_SUCCESS_AT: 'lastSuccessAt',
   // A summary of each of the latest runs, oldest first.
   RECENT_RUNS: 'recentRuns',
-  // When a run that held the run lock last posted that the importer is stale.
+  // When the run, or the skipped start, that last posted that the importer is stale started.
   LAST_STALE_ALERT_AT: 'lastStaleAlertAt'
 };
 
 // How many runs recentRuns keeps.
 const RECENT_RUNS_KEPT = 100;
 
-// The importer is stale once no run has succeeded for this many times its cadence, i.e. after 3
-// runs in a row have failed or not happened.
+// The importer is stale once no run has succeeded for this many times its cadence. Runs start once
+// a cadence, and the check compares when runs started, so it is stale when the 3rd run since the
+// last success, due 3 cadences after it, fails or is skipped too. Only runs check, at the end of a
+// run that did not succeed and at a skipped start, so nothing is posted while no run starts at all.
 const STALE_CADENCES = 3;
+
+// Runs start a little before or after their time, e.g. when Docker takes longer to start one, so
+// the check allows this much leeway, or a tenth of the cadence if that is less.
+const STALE_LEEWAY = 5 * 60 * 1000;
 
 // Why a run did not finish is kept to this many characters.
 const MAX_REASON_LENGTH = 500;
@@ -43,8 +49,13 @@ function duration(ms) {
   return minutes < 120 ? `${minutes} minutes` : `${(ms / (60 * 60 * 1000)).toFixed(1)} hours`;
 }
 
+// Cut a reason short on a character boundary, as MySQL rejects JSON with half a surrogate pair, such
+// as half an emoji. A lone half already in the text is replaced.
 function truncate(text) {
-  return text.length > MAX_REASON_LENGTH ? `${text.slice(0, MAX_REASON_LENGTH - 1)}…` : text;
+  const whole = String(text).toWellFormed();
+  return whole.length > MAX_REASON_LENGTH
+    ? `${whole.slice(0, MAX_REASON_LENGTH - 1).replace(/[\uD800-\uDBFF]$/, '')}…`
+    : whole;
 }
 
 // The importer's tables do not exist yet, as no run has applied its migrations.
@@ -127,8 +138,22 @@ export default class RunRecord {
   }
 }
 
+// Whether a run counts as a success: it exited 0, and its import imported at least one ban list, if
+// it had any to import. A run while every list fails, e.g. during a BattleMetrics outage, does not,
+// so it cannot hold off the stale alert. A run whose import gave no counts is judged by its exit
+// code.
+export function succeeded(record) {
+  if (record?.exitCode !== 0) return false;
+  const banLists = record.counts?.importBans?.banLists;
+  return (
+    !Array.isArray(banLists) ||
+    banLists.length === 0 ||
+    banLists.some((banList) => !banList.error && !banList.gone)
+  );
+}
+
 // Save the record of a run that held the run lock: as the latest run, at the end of recentRuns and,
-// for a run that exited 0, as the time of the latest success, all in one transaction. A run that
+// for a run that succeeded, as the start of the latest success, all in one transaction. A run that
 // lost the lock saves its record too, and may save at the same time as the run that took the lock
 // over, so recentRuns is read with a row lock, which keeps both runs' summaries.
 export async function saveRecord(record) {
@@ -145,26 +170,26 @@ export async function saveRecord(record) {
       { name: STATE.RECENT_RUNS, value: runs.slice(-RECENT_RUNS_KEPT) },
       { transaction }
     );
-    if (record.exitCode === 0)
+    if (succeeded(record))
       await ImporterState.upsert(
-        { name: STATE.LAST_SUCCESS_AT, value: record.endedAt },
+        { name: STATE.LAST_SUCCESS_AT, value: record.startedAt },
         { transaction }
       );
   });
 }
 
-// Save the time of a stale alert, unless another run posted one within the cadence. The alert's
-// row is read with a row lock, so two runs that check at once cannot both post it. Resolves with
-// whether this run is to post it.
-async function claimStaleAlert(now, cadence) {
+// Save when the run that posts a stale alert started, unless a run that started less than a
+// cadence before it, or after it, posted one. The alert's row is read with a row lock, so two runs
+// that check at once cannot both post it. Resolves with whether this run is to post it.
+async function claimStaleAlert(startedAt, cadence, leeway) {
   return sequelize.transaction(async (transaction) => {
     const last = await ImporterState.findByPk(STATE.LAST_STALE_ALERT_AT, {
       transaction,
       lock: transaction.LOCK.UPDATE
     });
-    if (last && now - Date.parse(last.value) < cadence) return false;
+    if (last && startedAt - Date.parse(last.value) < cadence - leeway) return false;
     await ImporterState.upsert(
-      { name: STATE.LAST_STALE_ALERT_AT, value: isoTime(now) },
+      { name: STATE.LAST_STALE_ALERT_AT, value: isoTime(startedAt) },
       { transaction }
     );
     return true;
@@ -172,15 +197,18 @@ async function claimStaleAlert(now, cadence) {
 }
 
 // Post one alert to the log channel when no run has succeeded for 3 cadences, at most once a
-// cadence. Before the first success, the time is counted from when the importer's tables were made.
-// A run that held the run lock saves the time of its alert. A start that is skipped, as another run
-// holds the lock, checks too, as a stuck run would otherwise make every later start skip quietly,
-// but it only reads the record, which needs no lock, and saves nothing: it posts unless a run
-// posted within the cadence, and as runs start once a cadence, so do skipped starts. Resolves with
-// whether it posted.
-export async function alertIfStale({ cadenceSeconds, skipped = false }) {
+// cadence. It compares when runs started, as the script that starts them spaces them a cadence
+// apart: the last success, the run that checks (startedAt) and the run that last posted the alert.
+// Comparing when they ended would make the alert a run late whenever a failed run ends sooner after
+// its start than the last success did. Before the first success, the time is counted from when the
+// importer's tables were made, early in the first run. A start that is skipped, as another run
+// holds the run lock, checks too, as a stuck run would otherwise make every later start skip
+// quietly. Whichever posts saves when it started, with a row lock that needs no run lock, so no
+// other run or skipped start posts it again within the cadence. Resolves with whether it posted.
+export async function alertIfStale({ cadenceSeconds, skipped = false, startedAt = Date.now() }) {
   const now = Date.now();
   const cadence = cadenceSeconds * 1000;
+  const leeway = Math.min(STALE_LEEWAY, cadence / 10);
   try {
     const rows = await ImporterState.findAll({
       where: { name: [STATE.LAST_SUCCESS_AT, STATE.LAST_RUN, STATE.LAST_STALE_ALERT_AT] }
@@ -188,28 +216,32 @@ export async function alertIfStale({ cadenceSeconds, skipped = false }) {
     const state = Object.fromEntries(rows.map(({ name, value }) => [name, value]));
 
     let since = Date.parse(state[STATE.LAST_SUCCESS_AT]);
-    const succeeded = !Number.isNaN(since);
-    if (!succeeded) {
+    const hadSuccess = !Number.isNaN(since);
+    if (!hadSuccess) {
       const made = await ImporterSchemaMigration.min('appliedAt');
       since = made ? new Date(made).getTime() : NaN;
     }
-    if (Number.isNaN(since) || now - since < STALE_CADENCES * cadence) return false;
+    if (Number.isNaN(since) || startedAt - since < STALE_CADENCES * cadence - leeway) return false;
 
-    if (now - Date.parse(state[STATE.LAST_STALE_ALERT_AT]) < cadence) return false;
-    if (!skipped && !(await claimStaleAlert(now, cadence))) return false;
+    // A quick check without a lock first, then the claim, which saves the alert's time with one.
+    if (startedAt - Date.parse(state[STATE.LAST_STALE_ALERT_AT]) < cadence - leeway) return false;
+    if (!(await claimStaleAlert(startedAt, cadence, leeway))) return false;
 
     const lastRun = state[STATE.LAST_RUN];
     const parts = [
-      `The CBL update is stale: no run has succeeded for ${duration(now - since)}, ${
-        succeeded ? 'since' : 'since its run record began at'
-      } ${isoTime(since)}, which is over ${STALE_CADENCES} times IMPORTER_CADENCE_SECONDS (${duration(cadence)}).`
+      `The CBL update is stale: no run has succeeded for ${duration(now - since)}, since ${
+        hadSuccess ? 'the one that started at' : 'its run record began at'
+      } ${isoTime(since)}. Runs start every IMPORTER_CADENCE_SECONDS (${duration(cadence)}), so ${STALE_CADENCES} or more in a row have not succeeded.`
     ];
-    if (lastRun?.endedAt)
+    if (lastRun?.endedAt) {
+      let how = '';
+      if (lastRun.reason) how = ` (${lastRun.reason})`;
+      else if (lastRun.exitCode === 0 && !succeeded(lastRun))
+        how = `, but imported none of its ${lastRun.counts.importBans.lists} ban lists`;
       parts.push(
-        `The last run ended at ${lastRun.endedAt} with exit code ${lastRun.exitCode}${
-          lastRun.reason ? ` (${lastRun.reason})` : ''
-        }.`
+        `The last run ended at ${lastRun.endedAt} with exit code ${lastRun.exitCode}${how}.`
       );
+    }
     if (skipped) parts.push('This start was skipped, as another run holds the run lock.');
     Logger.important('Core', parts.join(' '));
     return true;

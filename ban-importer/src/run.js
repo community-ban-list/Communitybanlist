@@ -2,7 +2,7 @@ import { connect, disconnect, sequelize, takeRunLock } from 'scbl-lib/db';
 import { isDatabaseUnavailable } from 'scbl-lib/db/sequelize';
 import { describeError, Logger } from 'scbl-lib/utils';
 
-import RunRecord, { alertIfStale, saveRecord } from './run-record.js';
+import RunRecord, { alertIfStale, saveRecord, succeeded } from './run-record.js';
 import {
   LOCK_LOST,
   requestStop,
@@ -60,6 +60,20 @@ const LOG_FLUSH_TIMEOUT = 30 * 1000;
 const RECORD_TIMEOUT = 15 * 1000;
 const DISCONNECT_TIMEOUT = 10 * 1000;
 
+// The end of a run that holds the run lock, from saving its record to releasing the lock, takes at
+// most END_TIMEOUT, so a run that docker stop stops, which it gives 60 seconds with
+// --stop-timeout 60, exits in time once it reaches its next safe point. The last RELEASE_RESERVE of
+// it is kept for releasing the lock, which takes at most 5 seconds, and the log messages are sent
+// in what is left after the database.
+const END_TIMEOUT = 45 * 1000;
+const RELEASE_RESERVE = 5 * 1000;
+
+// Why a run failed that was left waiting for something that can never happen.
+const LEFT_WAITING = 'The run was left waiting for something that can never happen';
+
+// Ends the run under way as one that was left waiting, while a run is under way.
+let endLeftWaiting = null;
+
 async function doSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -75,22 +89,34 @@ function pause(ms) {
   });
 }
 
-// Wait for a promise, but for no longer than ms milliseconds, failing with what took too long.
+// Wait for a promise, but for no longer than ms milliseconds, failing with what took too long, in an
+// error marked timedOut.
 function withTimeout(promise, ms, what) {
   let timer;
   const timeout = new Promise((resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`${what} took longer than ${ms / 1000}s`)), ms);
+    timer = setTimeout(() => {
+      const err = new Error(`${what} took longer than ${Math.round(ms / 100) / 10}s`);
+      reject(Object.assign(err, { timedOut: true }));
+    }, ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 // Send the progress bars' latest values and wait for queued Discord log messages, but for no longer
-// than LOG_FLUSH_TIMEOUT, so a slow or unreachable Discord cannot keep the run from ending.
-async function flushLogs() {
+// than until deadline, by default LOG_FLUSH_TIMEOUT from now, so a slow or unreachable Discord
+// cannot keep the run from ending.
+async function flushLogs(deadline = Date.now() + LOG_FLUSH_TIMEOUT) {
   Logger.flush();
-  const deadline = Date.now() + LOG_FLUSH_TIMEOUT;
   while (Date.now() < deadline && Object.values(Logger.getLogQueue()).some((count) => count > 0))
-    await doSleep(500);
+    await doSleep(Math.min(500, deadline - Date.now()));
+}
+
+// End the run under way as failed, as it was left waiting for something that can never happen,
+// e.g. an answer on a connection that is gone. index.js calls this when Node finds nothing left to
+// wait for before the run has ended. The failure is posted, and a run that holds the run lock ends
+// as a failed run does, printing and saving its record. Resolves with the exit code.
+export async function leftWaiting() {
+  return endLeftWaiting ? endLeftWaiting() : EXIT_CODES.FAILED;
 }
 
 // Read a setting given in seconds, or use its default when it is not set. An invalid value is
@@ -168,13 +194,13 @@ export default async function run(steps) {
     return code;
   };
 
-  // Check whether the importer is stale, and post if it is. This never fails or holds up the run.
-  // Resolves with whether it posted.
-  const checkStaleness = async (skipped) => {
+  // Check whether the importer is stale, and post if it is, waiting at most ms. The check compares
+  // when the run started. This never fails or holds up the run. Resolves with whether it posted.
+  const checkStaleness = async (skipped, ms = RECORD_TIMEOUT) => {
     try {
       return await withTimeout(
-        alertIfStale({ cadenceSeconds, skipped }),
-        RECORD_TIMEOUT,
+        alertIfStale({ cadenceSeconds, skipped, startedAt: record.startedAt }),
+        ms,
         'Checking whether the CBL update is stale'
       );
     } catch (err) {
@@ -191,6 +217,71 @@ export default async function run(steps) {
     Logger.important('Core', message, err);
     await flushLogs();
     return EXIT_CODES.FAILED;
+  };
+
+  // End a run that holds the lock, once: print its record and save it, check whether the importer
+  // is now stale if the run did not succeed, close the database connections if it finished, then
+  // send the log messages still waiting and release the lock, all within END_TIMEOUT. A database
+  // that could not save the record in time, or is unavailable, is not asked whether the importer is
+  // stale, which leaves the time for the log messages. Resolves with the exit code.
+  let finishing = null;
+  const finish = (exitCode, reason) => {
+    finishing ??= (async () => {
+      const code = end(exitCode, reason);
+      const releaseBy = Date.now() + END_TIMEOUT - RELEASE_RESERVE;
+      // The time left before the lock is released, but at most limit.
+      const left = (limit) => Math.max(0, Math.min(limit, releaseBy - Date.now()));
+      try {
+        let databaseDown = false;
+        try {
+          await withTimeout(
+            saveRecord(record.ended),
+            left(RECORD_TIMEOUT),
+            'Saving the run record'
+          );
+        } catch (err) {
+          console.warn(`Warning: could not save the run record: ${describeError(err)}`);
+          databaseDown = err?.timedOut === true || isDatabaseUnavailable(err);
+        }
+
+        if (!succeeded(record.ended) && !databaseDown)
+          await checkStaleness(false, left(RECORD_TIMEOUT));
+        if (code === EXIT_CODES.FINISHED) {
+          try {
+            await withTimeout(
+              disconnect(),
+              left(DISCONNECT_TIMEOUT),
+              'Closing the database connections'
+            );
+          } catch (err) {
+            console.warn(
+              `Warning: could not close the database connections: ${describeError(err)}`
+            );
+          }
+        }
+        return code;
+      } finally {
+        try {
+          await flushLogs(releaseBy);
+        } finally {
+          await lock.release();
+        }
+      }
+    })();
+    return finishing;
+  };
+
+  // A run left waiting for something that can never happen failed, and is posted as failed runs
+  // are. If any of it is still under way, it stops at its next safe point.
+  endLeftWaiting = async () => {
+    requestStop('it was left waiting for something that can never happen');
+    Logger.important(
+      'Core',
+      'The CBL update run failed, as it was left waiting for something that can never happen.'
+    );
+    if (lock) return finish(EXIT_CODES.FAILED, LEFT_WAITING);
+    await flushLogs();
+    return end(EXIT_CODES.FAILED, LEFT_WAITING);
   };
 
   // Exit straight away. Closing the lock's connection frees the lock. There is no time to save the
@@ -272,8 +363,8 @@ export default async function run(steps) {
     if (!lock) {
       console.log('Skipped this CBL update run, as another run holds the run lock.');
       // A run that holds the lock for too long, e.g. as it is stuck, would otherwise make every
-      // later start skip without a word. The check only reads the run record, and an alert is sent
-      // before the run ends.
+      // later start skip without a word. The check needs no run lock, and an alert is sent before
+      // the run ends.
       if (await checkStaleness(true)) await flushLogs();
       return end(EXIT_CODES.SKIPPED, 'Another run holds the run lock');
     }
@@ -290,8 +381,10 @@ export default async function run(steps) {
       await record.time('connect', connect);
 
       stopIfRequested();
-      const migrations = await record.time('migrate', () => migrate());
-      record.migrations = migrations.applied;
+      // Each migration is recorded as it is applied, as a later one may fail.
+      const migrations = await record.time('migrate', () =>
+        migrate({ onApplied: (id) => record.migrations.push(id) })
+      );
       if (migrations.applied.length > 0)
         Logger.verbose(
           'Core',
@@ -334,34 +427,9 @@ export default async function run(steps) {
       }
     }
 
-    try {
-      const code = end(exitCode, reason);
-      try {
-        await withTimeout(saveRecord(record.ended), RECORD_TIMEOUT, 'Saving the run record');
-      } catch (err) {
-        console.warn(`Warning: could not save the run record: ${describeError(err)}`);
-      }
-
-      // A run that succeeded closes the database connections. One that did not checks whether the
-      // importer is now stale.
-      if (code === EXIT_CODES.FINISHED) {
-        try {
-          await withTimeout(disconnect(), DISCONNECT_TIMEOUT, 'Closing the database connections');
-        } catch (err) {
-          console.warn(`Warning: could not close the database connections: ${describeError(err)}`);
-        }
-      } else {
-        await checkStaleness(false);
-      }
-      return code;
-    } finally {
-      try {
-        await flushLogs();
-      } finally {
-        await lock.release();
-      }
-    }
+    return await finish(exitCode, reason);
   } finally {
+    endLeftWaiting = null;
     clearTimeout(watchdog);
     clearTimeout(hardExitTimer);
     process.off('SIGTERM', onSignal);

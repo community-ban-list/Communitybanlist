@@ -71,8 +71,10 @@ async function loadLogger(env = { DISCORD_LOG_WEBHOOK: webhook }, { highWater } 
     },
     process: { env },
     Date: { now: () => now },
+    // Timers note whether they were told not to keep the process running.
     setTimeout: (callback, ms) => {
-      const timer = { at: now + ms, callback, unref: () => timer };
+      const timer = { at: now + ms, ms, callback, unrefed: false };
+      timer.unref = () => Object.assign(timer, { unrefed: true });
       timers.add(timer);
       return timer;
     },
@@ -792,6 +794,11 @@ const quickBar = quick.logger.discordProgressBar(
   0,
   10,
   0
+);
+// Its first minute does not keep the process running, so a service that is done can exit.
+assert.deepStrictEqual(
+  [...quick.timers].map(({ ms, unrefed }) => [ms, unrefed]),
+  [[60000, true]]
 );
 quick.advance(20000);
 quick.logger.discordProgressBar('Core', 'Updating 10 Steam users...', quickBar, 0, 10, 4);

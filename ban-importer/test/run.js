@@ -40,8 +40,12 @@ const describeLine = (message, extras) => `${message}${extras.map(describeError)
 
 // A stand-in for the ImporterState and ImporterSchemaMigrations tables, holding JSON text as the
 // database would. A transaction's writes are kept once it commits. With hang, transactions never
-// end, and with error, every use of the tables fails with it.
-function fakeState(events, { rows = {}, tablesMadeAt = null, hang = false, error = null } = {}) {
+// end, with hangReads, the staleness check's reads never end, and with error, every use of the
+// tables fails with it.
+function fakeState(
+  events,
+  { rows = {}, tablesMadeAt = null, hang = false, hangReads = false, error = null } = {}
+) {
   const state = new Map(Object.entries(rows).map(([name, value]) => [name, JSON.stringify(value)]));
   const read = (name) => (state.has(name) ? JSON.parse(state.get(name)) : undefined);
   const fail = () => {
@@ -51,6 +55,7 @@ function fakeState(events, { rows = {}, tablesMadeAt = null, hang = false, error
   const ImporterState = {
     async findAll({ where: { name } }) {
       events.push('read state');
+      if (hangReads) return new Promise(() => {});
       fail();
       return [...name]
         .filter((key) => state.has(key))
@@ -88,7 +93,8 @@ function fakeState(events, { rows = {}, tablesMadeAt = null, hang = false, error
 // Load run.js with stand-ins for the database, the run lock, the migrations, the logger and the
 // process, and a clock that only moves when the test moves it. takeRunLockError, when given, is
 // what taking the lock fails with, migrations is what migrate() resolves with or a function that
-// returns it or throws, and state sets up the stand-in for ImporterState (see fakeState).
+// is given migrate()'s options and returns it or throws, state sets up the stand-in for
+// ImporterState (see fakeState), and logQueue is what the logger says is waiting to be sent.
 async function loadRun({
   env = {},
   authenticate = async () => {},
@@ -97,7 +103,8 @@ async function loadRun({
   migrations = { applied: [], unknown: [] },
   connect = async () => {},
   disconnect = async () => {},
-  state: stateOptions = {}
+  state: stateOptions = {},
+  logQueue = emptyQueue
 } = {}) {
   const events = [];
   const output = [];
@@ -184,13 +191,16 @@ async function loadRun({
           discord.push(text);
         },
         flush: () => events.push('flush'),
-        getLogQueue: () => emptyQueue
+        getLogQueue: () => logQueue
       }
     },
     './schema/migrate.js': {
-      default: async () => {
+      // Like migrate(), it tells the run of each migration it applied as it records it.
+      default: async (options) => {
         events.push('migrate');
-        return typeof migrations === 'function' ? migrations() : migrations;
+        if (typeof migrations === 'function') return migrations(options);
+        for (const id of migrations.applied) options.onApplied(id);
+        return migrations;
       }
     }
   };
@@ -247,6 +257,7 @@ async function loadRun({
   return {
     run: module.namespace.default,
     EXIT_CODES: module.namespace.EXIT_CODES,
+    leftWaiting: module.namespace.leftWaiting,
     control: control.namespace,
     lock,
     events,
@@ -282,7 +293,22 @@ async function loadRun({
     },
     // Wait for the run to start waiting for a timer of ms milliseconds.
     waitForTimer: (ms) =>
-      until(() => [...timers].some((timer) => timer.ms === ms), `a timer of ${ms} ms`)
+      until(() => [...timers].some((timer) => timer.ms === ms), `a timer of ${ms} ms`),
+    // Let the run get on, moving the clock on to each timer it waits for in turn, until it has
+    // ended. Resolves with its exit code.
+    async runTimers(run) {
+      const progress = { ended: false };
+      const done = () => (progress.ended = true);
+      run.then(done, done);
+      for (let turn = 0; ; turn++) {
+        await new Promise(setImmediate);
+        if (progress.ended) return run;
+        assert.ok(turn < 1000, 'The run ends');
+        const [next] = [...timers].sort((a, b) => a.at - b.at);
+        assert.ok(next, 'The run waits for a timer');
+        this.advance(next.at - now);
+      }
+    }
   };
 }
 
@@ -338,8 +364,8 @@ function gatedStep(events, name) {
   ]);
 
   // The record says when the run started and ended, which commit it ran, how it ended and how long
-  // each phase took. It is saved as the latest run and the latest success, and added to the
-  // summaries of recent runs.
+  // each phase took. It is saved as the latest run and, by when it started, the latest success, and
+  // added to the summaries of recent runs.
   const record = importer.record();
   assert.deepStrictEqual(record, {
     event: 'cbl-importer-run',
@@ -353,7 +379,7 @@ function gatedStep(events, name) {
     counts: {}
   });
   assert.deepStrictEqual(importer.state.read('lastRun'), record);
-  assert.strictEqual(importer.state.read('lastSuccessAt'), record.endedAt);
+  assert.strictEqual(importer.state.read('lastSuccessAt'), record.startedAt);
   const { event, ...summary } = record;
   assert.strictEqual(event, 'cbl-importer-run');
   assert.deepStrictEqual(importer.state.read('recentRuns'), [summary]);
@@ -441,7 +467,8 @@ function gatedStep(events, name) {
 }
 
 // A skipped start that finds no run has succeeded for 3 cadences posts that the importer is stale,
-// and sends it before it ends, unless a run posted within the cadence. It still saves nothing.
+// and sends it before it ends, unless a run or skipped start posted within the cadence. It saves
+// when it started as the time of the alert, and nothing else.
 {
   const rows = {
     lastSuccessAt: new Date(START - 19 * HOUR).toISOString(),
@@ -450,11 +477,23 @@ function gatedStep(events, name) {
   const importer = await loadRun({ lockFree: false, state: { rows } });
   assert.strictEqual(await importer.run([]), 75);
   assert.deepStrictEqual(importer.discord, [
-    'The CBL update is stale: no run has succeeded for 19.0 hours, since 2026-10-14T17:00:00.000Z, which is over 3 times IMPORTER_CADENCE_SECONDS (6.0 hours). The last run ended at 2026-10-15T06:00:00.000Z with exit code 1 (Error: Lost). This start was skipped, as another run holds the run lock.'
+    'The CBL update is stale: no run has succeeded for 19.0 hours, since the one that started at 2026-10-14T17:00:00.000Z. Runs start every IMPORTER_CADENCE_SECONDS (6.0 hours), so 3 or more in a row have not succeeded. The last run ended at 2026-10-15T06:00:00.000Z with exit code 1 (Error: Lost). This start was skipped, as another run holds the run lock.'
   ]);
-  assert.strictEqual(importer.events.at(-1), 'flush');
-  assert.ok(!importer.events.includes('transaction'));
-  assert.deepStrictEqual([...importer.state.state.keys()].sort(), ['lastRun', 'lastSuccessAt']);
+  assert.deepStrictEqual(importer.events, [
+    'authenticate',
+    'takeRunLock',
+    'read state',
+    'transaction',
+    'commit',
+    `important ${importer.discord[0]}`,
+    'flush'
+  ]);
+  assert.deepStrictEqual([...importer.state.state.keys()].sort(), [
+    'lastRun',
+    'lastStaleAlertAt',
+    'lastSuccessAt'
+  ]);
+  assert.strictEqual(importer.state.read('lastStaleAlertAt'), importer.record().startedAt);
   assert.strictEqual(importer.record().outcome, 'skipped');
 
   const alerted = await loadRun({
@@ -528,10 +567,11 @@ function gatedStep(events, name) {
   assert.strictEqual(await first.run(failing()), 1);
   assert.deepStrictEqual(first.discord, [
     'The CBL update run failed: Error: Deadlock found',
-    'The CBL update is stale: no run has succeeded for 4.0 hours, since 2026-10-15T08:00:00.000Z, which is over 3 times IMPORTER_CADENCE_SECONDS (60 minutes). The last run ended at 2026-10-15T12:00:00.000Z with exit code 1 (Error: Deadlock found).'
+    'The CBL update is stale: no run has succeeded for 4.0 hours, since the one that started at 2026-10-15T08:00:00.000Z. Runs start every IMPORTER_CADENCE_SECONDS (60 minutes), so 3 or more in a row have not succeeded. The last run ended at 2026-10-15T12:00:00.000Z with exit code 1 (Error: Deadlock found).'
   ]);
+  assert.strictEqual(first.state.read('lastStaleAlertAt'), first.record().startedAt);
 
-  // The next run, a moment later, saves its record but posts only its failure.
+  // The next run, started a moment later, saves its record but posts only its failure.
   const saved = Object.fromEntries(
     [...first.state.state].map(([name, value]) => [name, JSON.parse(value)])
   );
@@ -591,7 +631,31 @@ function gatedStep(events, name) {
   const record = importer.record();
   assert.deepStrictEqual([record.outcome, record.exitCode, record.phase], ['failed', 1, 'migrate']);
   assert.match(record.reason, /^MigrationError: Importer migration 001-importer-state failed: /);
+  assert.ok(!('migrations' in record));
   assert.deepStrictEqual(importer.events.slice(-2), ['flush', 'release']);
+}
+{
+  // The migrations applied before a later one or the column check failed are in the record all the
+  // same, as the database has them, and the next run does not apply them again.
+  const importer = await loadRun({
+    migrations: ({ onApplied }) => {
+      onApplied('001-importer-state');
+      throw Object.assign(
+        new Error(
+          "The importer's tables are missing columns after migration 001-importer-state: ImporterState.value."
+        ),
+        { name: 'MigrationError' }
+      );
+    }
+  });
+  assert.strictEqual(await importer.run([step('import', () => importer.events.push('import'))]), 1);
+  const record = importer.record();
+  assert.deepStrictEqual(
+    [record.outcome, record.exitCode, record.migrations],
+    ['failed', 1, ['001-importer-state']]
+  );
+  assert.deepStrictEqual(importer.state.read('lastRun').migrations, ['001-importer-state']);
+  assert.deepStrictEqual(importer.state.read('recentRuns')[0].migrations, ['001-importer-state']);
 }
 
 // A run asked to stop while it connects stops before the migrations.
@@ -668,6 +732,178 @@ function gatedStep(events, name) {
       )
   );
   assert.deepStrictEqual(importer.events.slice(-2), ['flush', 'release']);
+}
+
+// The end of a run takes at most 45 seconds, however slow the database and Discord are, so a run
+// that docker stop stops, which it gives 60 seconds, exits in time once it reaches a safe point.
+// The log messages are waited for until 5 seconds are left for releasing the run lock.
+const failingStep = () =>
+  step('import', async () => {
+    throw new Error('Deadlock found');
+  });
+const sinceEnd = (importer) => importer.now() - Date.parse(importer.record().endedAt);
+{
+  // A database that does not save the record within 15 seconds is not asked whether the importer is
+  // stale, which leaves the time for the log messages.
+  const importer = await loadRun({
+    state: { hang: true },
+    logQueue: { ...emptyQueue, QUEUED: 3 }
+  });
+  assert.strictEqual(await importer.runTimers(importer.run([failingStep()])), 1);
+  assert.strictEqual(sinceEnd(importer), 40000);
+  assert.ok(!importer.events.includes('read state'));
+  assert.deepStrictEqual(importer.events.slice(-3), ['transaction', 'flush', 'release']);
+  assert.deepStrictEqual(importer.printed(), [
+    'Warning: could not save the run record: Error: Saving the run record took longer than 15s'
+  ]);
+}
+{
+  // A staleness check that does not answer is given up after 15 seconds, and the log messages get
+  // the rest of the time.
+  const importer = await loadRun({
+    state: { hangReads: true },
+    logQueue: { ...emptyQueue, QUEUED: 1 }
+  });
+  assert.strictEqual(await importer.runTimers(importer.run([failingStep()])), 1);
+  assert.strictEqual(sinceEnd(importer), 40000);
+  assert.deepStrictEqual(importer.events.slice(-5), [
+    'transaction',
+    'commit',
+    'read state',
+    'flush',
+    'release'
+  ]);
+  assert.deepStrictEqual(importer.printed(), [
+    'Warning: could not check whether the CBL update is stale: Error: Checking whether the CBL update is stale took longer than 15s'
+  ]);
+}
+{
+  // A run that finished, with a database that saves and closes nothing, ends in the same time.
+  const importer = await loadRun({
+    state: { hang: true },
+    disconnect: () => new Promise(() => {}),
+    logQueue: { ...emptyQueue, RUNNING: 1 }
+  });
+  assert.strictEqual(await importer.runTimers(importer.run([])), 0);
+  assert.strictEqual(sinceEnd(importer), 40000);
+  assert.deepStrictEqual(importer.events.slice(-4), [
+    'transaction',
+    'disconnect',
+    'flush',
+    'release'
+  ]);
+}
+{
+  // Nor is a database that is unavailable asked whether the importer is stale.
+  const importer = await loadRun({ state: { error: unavailable() } });
+  assert.strictEqual(await importer.run([failingStep()]), 1);
+  assert.ok(!importer.events.includes('read state'));
+  assert.deepStrictEqual(importer.printed(), [
+    'Warning: could not save the run record: Error: connect ECONNREFUSED'
+  ]);
+  assert.deepStrictEqual(importer.events.slice(-2), ['flush', 'release']);
+}
+
+// A run that finished but imported none of its ban lists, e.g. during a BattleMetrics outage, is
+// not a success: it is not saved as the latest success, and it checks whether the importer is now
+// stale, and says why, before it closes the database connections.
+{
+  const rows = { lastSuccessAt: new Date(START - 19 * HOUR).toISOString() };
+  const importer = await loadRun({ state: { rows } });
+  const error = 'Error: Request failed with status code 503';
+  const exitCode = await importer.run([
+    step(
+      'importBans',
+      async () => {},
+      () => ({
+        lists: 2,
+        imported: 2,
+        failedLists: 2,
+        banLists: [
+          { id: 1, error },
+          { id: 2, error }
+        ]
+      })
+    )
+  ]);
+  assert.strictEqual(exitCode, 0);
+  assert.strictEqual(importer.record().outcome, 'finished');
+  assert.strictEqual(importer.state.read('lastSuccessAt'), rows.lastSuccessAt);
+  assert.match(
+    importer.discord[0],
+    /^The CBL update is stale: .* The last run ended at 2026-10-15T12:00:00\.000Z with exit code 0, but imported none of its 2 ban lists\.$/
+  );
+  assert.deepStrictEqual(importer.events.slice(-9), [
+    'transaction',
+    'commit',
+    'read state',
+    'transaction',
+    'commit',
+    `important ${importer.discord[0]}`,
+    'disconnect',
+    'flush',
+    'release'
+  ]);
+}
+
+// A run left waiting for something that can never happen, such as an answer on a connection that
+// is gone, is ended by index.js through leftWaiting() once Node finds nothing left to wait for. It
+// failed: the failure is posted, and it ends as a failed run does, printing its record as its one
+// JSON line and saving it, checking whether the importer is stale and releasing the lock.
+{
+  const importer = await loadRun();
+  const stuck = gatedStep(importer.events, 'import');
+  const run = importer.run([stuck.step, step('export', () => importer.events.push('export'))]);
+  await stuck.started;
+  assert.strictEqual(await importer.leftWaiting(), 1);
+  const record = importer.record();
+  assert.deepStrictEqual(
+    [record.outcome, record.exitCode, record.phase, record.reason],
+    ['failed', 1, 'import', 'The run was left waiting for something that can never happen']
+  );
+  assert.deepStrictEqual(importer.state.read('lastRun'), record);
+  assert.deepStrictEqual(importer.discord, [
+    'The CBL update run failed, as it was left waiting for something that can never happen.'
+  ]);
+  assert.deepStrictEqual(importer.events.slice(-5), [
+    'transaction',
+    'commit',
+    'read state',
+    'flush',
+    'release'
+  ]);
+
+  // Should the run carry on after all, it stops at its next safe point, and its record stands.
+  stuck.finish();
+  assert.strictEqual(await run, 1);
+  assert.ok(!importer.events.includes('export'));
+  assert.strictEqual(importer.records().length, 1);
+  assert.strictEqual(importer.events.filter((event) => event === 'release').length, 1);
+}
+{
+  // One left waiting before it holds the lock only prints its record, after posting the failure.
+  const importer = await loadRun({ authenticate: () => new Promise(() => {}) });
+  importer.run([]);
+  await until(() => importer.events.includes('authenticate'), 'the database wait');
+  assert.strictEqual(await importer.leftWaiting(), 1);
+  const record = importer.record();
+  assert.deepStrictEqual(
+    [record.outcome, record.exitCode, record.phase],
+    ['failed', 1, 'waitForDatabase']
+  );
+  assert.deepStrictEqual(importer.discord, [
+    'The CBL update run failed, as it was left waiting for something that can never happen.'
+  ]);
+  assert.ok(!importer.events.includes('transaction'));
+  assert.strictEqual(importer.events.at(-1), 'flush');
+}
+{
+  // Without a run under way, there is nothing to end, and the importer exits 1 all the same.
+  const importer = await loadRun();
+  assert.strictEqual(await importer.leftWaiting(), 1);
+  assert.strictEqual(await importer.run([]), 0);
+  assert.strictEqual(await importer.leftWaiting(), 1);
+  assert.strictEqual(importer.records().length, 1);
 }
 
 // A run that finished after a promise failed with nothing to handle it exits 1, as index.js does,
@@ -1022,5 +1258,5 @@ for (const [value, seconds, warning] of [
 }
 
 console.log(
-  'Importer run checks passed: exit codes, the run lock, signals, the time limit, the database wait, migrations, the run record, staleness and posted lines.'
+  'Importer run checks passed: exit codes, the run lock, signals, the time limit, the database wait, migrations, the run record, the end within 45 seconds, a run left waiting, staleness and posted lines.'
 );

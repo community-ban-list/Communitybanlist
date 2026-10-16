@@ -4,7 +4,7 @@ import Core from './src/core.js';
 
 import BanImporter from './src/ban-importer.js';
 import ExportBanManager from './src/export-ban-manager.js';
-import run, { EXIT_CODES } from './src/run.js';
+import run, { EXIT_CODES, leftWaiting } from './src/run.js';
 
 Error.stackTraceLimit = 255;
 
@@ -52,16 +52,23 @@ if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS)
 
 // Set once the run has ended, as the importer exits with the run's code.
 let ended = false;
+// Set once the run is being ended as left waiting.
+let leaving = false;
 
 // Node exits by itself, with code 0, once nothing is left to wait for. Before the run has ended,
 // that means the run was left waiting for something that can never happen, such as an answer on a
-// connection that is gone, so the run failed.
+// connection that is gone, so the run failed. It is ended as failed, with its JSON line and its
+// record, and the importer exits 1. Should that be left waiting too, Node exits 1 by itself.
 process.on('beforeExit', () => {
-  if (ended) return;
-  console.error(
-    'The CBL update run failed, as it was left waiting for something that can never happen.'
-  );
-  process.exit(EXIT_CODES.FAILED);
+  if (ended || leaving) return;
+  leaving = true;
+  process.exitCode = EXIT_CODES.FAILED;
+  leftWaiting()
+    .catch((err) => {
+      console.error(`The CBL update run failed: ${describeError(err)}${stackTrace(err)}`);
+      return EXIT_CODES.FAILED;
+    })
+    .then((exitCode) => process.exit(exitCode));
 });
 
 // Exit with the run's code: 0 finished, 1 failed, 3 stopped part-way by a signal or the time limit,

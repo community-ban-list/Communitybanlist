@@ -80,8 +80,14 @@ async function missingColumns(query, models) {
 // the run lock and before its first step, so no other run uses or changes the tables meanwhile.
 // Resolves with the ids of the migrations it applied, and of any the database has that this
 // version does not know, from a newer version, which are left as they are. If anything fails, it
-// throws a MigrationError, which names the migration that failed, if one did.
-export default async function migrate({ migrations = MIGRATIONS, models = IMPORTER_MODELS } = {}) {
+// throws a MigrationError, which names the migration that failed, if one did. onApplied(id) is
+// called as each migration is recorded, so the run record names the migrations applied before a
+// failure too.
+export default async function migrate({
+  migrations = MIGRATIONS,
+  models = IMPORTER_MODELS,
+  onApplied = () => {}
+} = {}) {
   const latest = migrations.at(-1)?.id;
   let connection;
   try {
@@ -118,6 +124,7 @@ export default async function migrate({ migrations = MIGRATIONS, models = IMPORT
         throw new MigrationError(`Importer migration ${id} failed: ${describeError(err)}`, id);
       }
       applied.push(id);
+      onApplied(id);
     }
 
     let missing;

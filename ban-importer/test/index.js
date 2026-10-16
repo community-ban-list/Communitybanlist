@@ -25,11 +25,13 @@ function deferred() {
 const settle = () => new Promise(setImmediate);
 
 // Load index.js with stand-ins for the process, the console and the steps, which record their
-// calls, and for run.js, whose run settles as the test settles it.
+// calls, and for run.js, whose run, and ending of a run left waiting, settle as the test settles
+// them.
 async function loadIndex() {
   const calls = [];
   const output = [];
   const result = deferred();
+  const leftWaiting = deferred();
   let steps = null;
 
   // As in Node, exit() without a code exits with process.exitCode, or 0 if that is not set.
@@ -70,7 +72,11 @@ async function loadIndex() {
         steps = given;
         return result.promise;
       },
-      EXIT_CODES
+      EXIT_CODES,
+      leftWaiting: () => {
+        calls.push('leftWaiting');
+        return leftWaiting.promise;
+      }
     }
   };
 
@@ -99,7 +105,7 @@ async function loadIndex() {
   });
   await module.evaluate();
 
-  return { calls, output, result, process: fakeProcess, steps: () => steps };
+  return { calls, output, result, leftWaiting, process: fakeProcess, steps: () => steps };
 }
 
 // The run is given every step, in order, each named after what it runs, as the run record names
@@ -166,14 +172,33 @@ for (const [code, exit] of [
 }
 
 // Node exits by itself, with code 0, once nothing is left to wait for. If the run has not ended by
-// then, it was left waiting for something that can never happen, so it exits 1 instead.
+// then, it was left waiting for something that can never happen: run.js ends it as failed, with its
+// JSON line and record, and the importer exits with the code that gives, rather than 0. Meanwhile
+// the exit code is 1, so if ending the run is left waiting too, Node exits 1 when it checks again.
 {
   const index = await loadIndex();
   index.process.emit('beforeExit', 0);
+  assert.deepStrictEqual(index.calls, ['leftWaiting']);
+  assert.strictEqual(index.process.exitCode, 1);
+  assert.deepStrictEqual(index.process.exits, []);
+  index.process.emit('beforeExit', 1);
+  assert.deepStrictEqual(index.calls, ['leftWaiting']);
+  index.leftWaiting.resolve(1);
+  await settle();
   assert.deepStrictEqual(index.process.exits, [1]);
-  assert.deepStrictEqual(index.output, [
-    'The CBL update run failed, as it was left waiting for something that can never happen.'
-  ]);
+  assert.deepStrictEqual(index.output, []);
+}
+{
+  // Ending the run that way cannot fail without the importer exiting 1.
+  const index = await loadIndex();
+  index.process.emit('beforeExit', 0);
+  index.leftWaiting.reject(new TypeError('Cannot read properties of undefined'));
+  await settle();
+  assert.match(
+    index.output[0],
+    /^The CBL update run failed: TypeError: Cannot read properties of undefined\n {4}at /
+  );
+  assert.deepStrictEqual(index.process.exits, [1]);
 }
 {
   // Once the run has ended, its own code stands.
@@ -182,6 +207,7 @@ for (const [code, exit] of [
   await settle();
   index.process.emit('beforeExit', 0);
   assert.deepStrictEqual(index.process.exits, [0]);
+  assert.deepStrictEqual(index.calls, []);
   assert.deepStrictEqual(index.output, []);
 }
 

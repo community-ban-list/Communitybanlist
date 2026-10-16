@@ -158,13 +158,19 @@ async function loadMigrate(database, { models = IMPORTER_MODELS, connectError = 
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 // On a database without the importer's tables, migration 001 makes ImporterSchemaMigrations and
-// ImporterState and is recorded. The connection first makes schema changes wait at most 10 seconds
-// for a table, and is closed at the end.
+// ImporterState and is recorded, and the run is told as it is. The connection first makes schema
+// changes wait at most 10 seconds for a table, and is closed at the end.
 {
   const database = fakeDatabase();
   const { migrate } = await loadMigrate(database);
-  assert.deepStrictEqual(plain(await migrate()), { applied: ['001-importer-state'], unknown: [] });
+  const told = [];
+  const onApplied = (id) => told.push([id, [...database.migrations]]);
+  assert.deepStrictEqual(plain(await migrate({ onApplied })), {
+    applied: ['001-importer-state'],
+    unknown: []
+  });
   assert.deepStrictEqual(database.migrations, ['001-importer-state']);
+  assert.deepStrictEqual(told, [['001-importer-state', ['001-importer-state']]]);
   assert.strictEqual(database.statements[0], 'SET SESSION lock_wait_timeout = 10');
   assert.deepStrictEqual(database.tables.get('ImporterSchemaMigrations').columns, [
     'id',
@@ -193,7 +199,8 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 
   // A second run applies nothing, and changes nothing, but still checks the columns.
   const before = database.statements.length;
-  assert.deepStrictEqual(plain(await migrate()), { applied: [], unknown: [] });
+  assert.deepStrictEqual(plain(await migrate({ onApplied })), { applied: [], unknown: [] });
+  assert.strictEqual(told.length, 1);
   const again = database.statements.slice(before);
   assert.ok(!again.some((sql) => /^(CREATE|INSERT|ALTER|DROP)/.test(sql)));
   assert.strictEqual(again[0], 'SET SESSION lock_wait_timeout = 10');
@@ -238,7 +245,8 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
         : null
   });
   const { migrate, MigrationError } = await loadMigrate(database);
-  const error = await migrate().catch((err) => err);
+  const told = [];
+  const error = await migrate({ onApplied: (id) => told.push(id) }).catch((err) => err);
   assert.ok(error instanceof MigrationError);
   assert.strictEqual(error.migration, '001-importer-state');
   assert.strictEqual(
@@ -246,6 +254,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
     'Importer migration 001-importer-state failed: Error: Lock wait timeout exceeded; try restarting transaction'
   );
   assert.deepStrictEqual(database.migrations, []);
+  assert.deepStrictEqual(told, []);
   assert.ok(database.tables.has('ImporterSchemaMigrations'));
   assert.ok(database.connections[0].ended);
 
@@ -305,15 +314,18 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
     getAttributes: () => ({ name: { field: 'name' }, cursor: { field: 'cursor' } })
   };
   const { migrate } = await loadMigrate(database, { models: [...IMPORTER_MODELS, extraModel] });
-  const error = await migrate().catch((err) => err);
+  const told = [];
+  const error = await migrate({ onApplied: (id) => told.push(id) }).catch((err) => err);
   assert.strictEqual(error.name, 'MigrationError');
   assert.strictEqual(error.migration, '001-importer-state');
   assert.match(
     error.message,
     /missing columns after migration 001-importer-state: ImporterState\.cursor\.$/
   );
-  // The migration itself was applied and recorded.
+  // The migration itself was applied and recorded, and the run was told, so its record names it,
+  // although the next run will not apply it again.
   assert.deepStrictEqual(database.migrations, ['001-importer-state']);
+  assert.deepStrictEqual(told, ['001-importer-state']);
 }
 
 // Migrations the database has that this version does not know, from a newer version, are left as

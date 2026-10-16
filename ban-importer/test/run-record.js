@@ -8,8 +8,11 @@ import describeError from '../../scbl-lib/utils/describe-error.js';
 // Check the run record, without a database: what a run's record holds, how it is saved in
 // ImporterState, and when the importer posts that it is stale.
 
-const HOUR = 60 * 60 * 1000;
+const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
 const CADENCE = 6 * HOUR;
+// The staleness check's leeway for runs that start a little early or late.
+const LEEWAY = 5 * MINUTE;
 const START = Date.parse('2026-10-15T12:00:00.000Z');
 
 // A stand-in for the ImporterState and ImporterSchemaMigrations tables. A transaction's writes are
@@ -219,12 +222,29 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
   assert.strictEqual(skipped.ended.reason.length, 500);
   assert.ok(skipped.ended.reason.endsWith('x…'));
 }
+{
+  // A reason is cut on a character boundary, never in the middle of an emoji, as MySQL rejects JSON
+  // with half a surrogate pair, which would lose the whole record. A lone half already in a reason
+  // is replaced.
+  const { default: RunRecord } = await loadRunRecord();
+  const { reason } = new RunRecord().end('failed', 1, `${'x'.repeat(498)}\u{1F600}tail`);
+  assert.ok(reason.isWellFormed());
+  assert.ok(!JSON.stringify(reason).includes('\\ud83d'));
+  assert.strictEqual(reason, `${'x'.repeat(498)}…`);
+
+  const whole = new RunRecord().end('failed', 1, `${'x'.repeat(497)}\u{1F600}tail`).reason;
+  assert.strictEqual(whole, `${'x'.repeat(497)}\u{1F600}…`);
+  assert.strictEqual(whole.length, 500);
+
+  const lone = new RunRecord().end('failed', 1, 'Error: no \uD83D such player').reason;
+  assert.strictEqual(lone, 'Error: no � such player');
+}
 
 // Saving a record keeps it as the latest run and adds its summary to recentRuns, all in one
 // transaction. The summary leaves out the lists in the counts, such as each ban list's counts.
 {
   const database = fakeDatabase();
-  const { default: RunRecord, saveRecord, STATE } = await loadRunRecord(database);
+  const { default: RunRecord, saveRecord, STATE, clock } = await loadRunRecord(database);
   const run = new RunRecord();
   run.count('importBans', () => ({ lists: 2, fetched: 30, banLists: [{ id: 1 }, { id: 2 }] }));
   const record = run.end('failed', 1, 'Error: Deadlock found');
@@ -239,16 +259,20 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
   // A run that did not succeed leaves lastSuccessAt alone.
   assert.ok(!database.state.has(STATE.LAST_SUCCESS_AT));
 
-  // A successful run also saves when it ended, and recentRuns keeps the latest 100 runs.
+  // A successful run also saves when it started, which the staleness check compares with when later
+  // runs started, and recentRuns keeps the latest 100 runs.
   const old = Array.from({ length: 100 }, (_, i) => ({ startedAt: `old ${i}` }));
   database.state.set(STATE.RECENT_RUNS, JSON.stringify(old));
-  const success = new RunRecord().end('finished', 0);
-  await saveRecord(success);
+  const success = new RunRecord();
+  clock.now += 30 * MINUTE;
+  success.end('finished', 0);
+  await saveRecord(success.ended);
   const recent = database.read(STATE.RECENT_RUNS);
   assert.strictEqual(recent.length, 100);
   assert.deepStrictEqual(recent[0], { startedAt: 'old 1' });
-  assert.strictEqual(recent.at(-1).startedAt, success.startedAt);
-  assert.strictEqual(database.read(STATE.LAST_SUCCESS_AT), success.endedAt);
+  assert.strictEqual(recent.at(-1).startedAt, success.ended.startedAt);
+  assert.strictEqual(database.read(STATE.LAST_SUCCESS_AT), '2026-10-15T12:00:00.000Z');
+  assert.strictEqual(success.ended.endedAt, '2026-10-15T12:30:00.000Z');
   assert.strictEqual(database.read(STATE.LAST_RUN).outcome, 'finished');
 }
 {
@@ -264,7 +288,59 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
   assert.strictEqual(database.state.size, 0);
 }
 
-// The staleness check: no run has succeeded for 3 cadences.
+// Two runs that save at once, such as a run that lost the run lock and the run that took it over,
+// both keep their summaries in recentRuns, as recentRuns is read with a row lock.
+{
+  const database = fakeDatabase();
+  const { default: RunRecord, saveRecord, STATE } = await loadRunRecord(database);
+  const lost = new RunRecord().end('failed', 1, 'Stopped, as it lost its run lock');
+  const took = new RunRecord().end('finished', 0);
+  await Promise.all([saveRecord(lost), saveRecord(took)]);
+  assert.deepStrictEqual(
+    database.read(STATE.RECENT_RUNS).map((run) => run.outcome),
+    ['failed', 'finished']
+  );
+}
+
+// A run only counts as a success when it exited 0 and its import imported at least one ban list,
+// if it had any, so runs during a BattleMetrics outage, when every list fails, never hold off the
+// stale alert. A list that was removed during the run was not imported either. A run whose import
+// gave no counts, or had no lists, is judged by its exit code.
+{
+  const database = fakeDatabase();
+  const { default: RunRecord, saveRecord, succeeded, STATE, clock } = await loadRunRecord(database);
+  const imported = (banLists) => ({
+    lists: banLists.length,
+    failedLists: banLists.filter((banList) => banList.error).length,
+    banLists
+  });
+  const failure = { id: 1, fetched: 0, error: 'Error: Request failed with status code 503' };
+  const record = (counts, exitCode = 0) => {
+    const run = new RunRecord();
+    if (counts) run.count('importBans', () => counts);
+    return run.end(exitCode === 0 ? 'finished' : 'failed', exitCode);
+  };
+
+  const outage = record(imported([failure, { ...failure, id: 2 }, { id: 3, gone: true }]));
+  assert.strictEqual(succeeded(outage), false);
+  await saveRecord(outage);
+  assert.ok(!database.state.has(STATE.LAST_SUCCESS_AT));
+  assert.strictEqual(database.read(STATE.LAST_RUN).exitCode, 0);
+
+  for (const counts of [imported([failure, { id: 2, fetched: 120 }]), imported([]), null]) {
+    database.state.delete(STATE.LAST_SUCCESS_AT);
+    clock.now += MINUTE;
+    const success = record(counts);
+    assert.strictEqual(succeeded(success), true, JSON.stringify(counts));
+    await saveRecord(success);
+    assert.strictEqual(database.read(STATE.LAST_SUCCESS_AT), success.startedAt);
+  }
+  assert.strictEqual(succeeded(record(imported([{ id: 2, fetched: 120 }]), 1)), false);
+  assert.strictEqual(succeeded(record(null, 3)), false);
+}
+
+// The staleness check: no run has succeeded for 3 cadences. It compares when runs started.
+const cadenceSeconds = CADENCE / 1000;
 const stalenessRows = (lastSuccessAt, extra = {}) => ({
   lastSuccessAt: JSON.stringify(new Date(lastSuccessAt).toISOString()),
   lastRun: JSON.stringify({
@@ -275,76 +351,225 @@ const stalenessRows = (lastSuccessAt, extra = {}) => ({
   ...extra
 });
 
-// Just under 3 cadences after the last success, nothing is posted, and nothing is written.
+// Until 3 cadences after the last success started, less 5 minutes for runs that start a little
+// early or late, nothing is posted, and nothing is written.
 {
-  const database = fakeDatabase({ rows: stalenessRows(START - 3 * CADENCE + 1) });
+  const database = fakeDatabase({ rows: stalenessRows(START - 3 * CADENCE + LEEWAY + 1) });
   const { alertIfStale, discord } = await loadRunRecord(database);
-  assert.strictEqual(await alertIfStale({ cadenceSeconds: CADENCE / 1000 }), false);
+  assert.strictEqual(await alertIfStale({ cadenceSeconds, startedAt: START }), false);
   assert.deepStrictEqual(discord, []);
   assert.strictEqual(database.transactions(), 0);
 }
 
-// From 3 cadences on, one alert is posted, which says how long it has been, since when, the cadence
-// and how the last run ended, and its time is saved.
+// From then on, one alert is posted, which says how long it has been, since when, the cadence and
+// how the last run ended, and when the run that posted it started is saved.
 {
-  const database = fakeDatabase({ rows: stalenessRows(START - 3 * CADENCE - 30 * 60 * 1000) });
+  const database = fakeDatabase({ rows: stalenessRows(START - 3 * CADENCE - 30 * MINUTE) });
   const { alertIfStale, discord, clock, STATE } = await loadRunRecord(database);
-  assert.strictEqual(await alertIfStale({ cadenceSeconds: CADENCE / 1000 }), true);
+  clock.now += 20 * MINUTE;
+  assert.strictEqual(await alertIfStale({ cadenceSeconds, startedAt: START }), true);
   assert.deepStrictEqual(discord, [
-    'The CBL update is stale: no run has succeeded for 18.5 hours, since 2026-10-14T17:30:00.000Z, which is over 3 times IMPORTER_CADENCE_SECONDS (6.0 hours). The last run ended at 2026-10-15T11:00:00.000Z with exit code 1 (Error: Deadlock found).'
+    'The CBL update is stale: no run has succeeded for 18.8 hours, since the one that started at 2026-10-14T17:30:00.000Z. Runs start every IMPORTER_CADENCE_SECONDS (6.0 hours), so 3 or more in a row have not succeeded. The last run ended at 2026-10-15T11:00:00.000Z with exit code 1 (Error: Deadlock found).'
   ]);
   assert.strictEqual(database.read(STATE.LAST_STALE_ALERT_AT), '2026-10-15T12:00:00.000Z');
 
-  // At most once a cadence: not again until a cadence after the last alert, whether by a run or by
-  // a start that was skipped, as another run holds the run lock.
-  clock.now += CADENCE - 1;
-  assert.strictEqual(await alertIfStale({ cadenceSeconds: CADENCE / 1000 }), false);
-  assert.strictEqual(await alertIfStale({ cadenceSeconds: CADENCE / 1000, skipped: true }), false);
+  // At most once a cadence: a run or a skipped start that started less than a cadence, less the 5
+  // minutes, after the run that posted, posts nothing, however late it checks.
+  clock.now = START + 6 * HOUR;
+  const nearlyCadence = START + CADENCE - LEEWAY - 1;
+  assert.strictEqual(await alertIfStale({ cadenceSeconds, startedAt: nearlyCadence }), false);
+  assert.strictEqual(
+    await alertIfStale({ cadenceSeconds, skipped: true, startedAt: nearlyCadence }),
+    false
+  );
   assert.strictEqual(discord.length, 1);
-  clock.now += 1;
+
+  // A start that is skipped, as another run holds the run lock, a cadence later posts, and says so.
+  // It saves when it started too, with a row lock, which needs no run lock.
   const transactions = database.transactions();
-  assert.strictEqual(await alertIfStale({ cadenceSeconds: CADENCE / 1000, skipped: true }), true);
+  const skippedAt = START + CADENCE;
+  assert.strictEqual(
+    await alertIfStale({ cadenceSeconds, skipped: true, startedAt: skippedAt }),
+    true
+  );
   assert.strictEqual(discord.length, 2);
-  // A skipped start says so. It only reads the record, which needs no lock, and saves nothing, as
-  // starts come once a cadence.
   assert.match(
     discord[1],
     /^The CBL update is stale: no run has succeeded for 24\.5 hours, .* This start was skipped, as another run holds the run lock\.$/
   );
-  assert.strictEqual(database.transactions(), transactions);
-  assert.strictEqual(database.read(STATE.LAST_STALE_ALERT_AT), '2026-10-15T12:00:00.000Z');
-
-  // As the skipped start saved nothing, a run that checks next posts too, and saves when.
-  assert.strictEqual(await alertIfStale({ cadenceSeconds: CADENCE / 1000 }), true);
-  assert.strictEqual(discord.length, 3);
+  assert.strictEqual(database.transactions(), transactions + 1);
   assert.strictEqual(database.read(STATE.LAST_STALE_ALERT_AT), '2026-10-15T18:00:00.000Z');
+
+  // So neither a run that checks next within the cadence, such as one that started at the same
+  // time, nor a second skipped start, such as one started by hand, posts it again.
+  clock.now = skippedAt + 2 * HOUR;
+  assert.strictEqual(await alertIfStale({ cadenceSeconds, startedAt: skippedAt }), false);
+  assert.strictEqual(
+    await alertIfStale({ cadenceSeconds, skipped: true, startedAt: skippedAt + 2 * HOUR }),
+    false
+  );
+  // Nor does a run that started before it, e.g. a stuck run that ends later.
+  assert.strictEqual(
+    await alertIfStale({ cadenceSeconds, startedAt: skippedAt - CADENCE / 2 }),
+    false
+  );
+  assert.strictEqual(discord.length, 2);
+  assert.strictEqual(database.transactions(), transactions + 1);
+}
+
+// Walk the schedule, with a run starting every 6 hours, as the script that starts them does. Each
+// run saves its record when it ends, and one that did not succeed then checks whether the importer
+// is stale, as run.js does. A start that is skipped checks when it starts.
+async function schedule() {
+  const database = fakeDatabase();
+  const loaded = await loadRunRecord(database);
+  const { default: RunRecord, saveRecord, alertIfStale, succeeded, clock } = loaded;
+  return {
+    ...loaded,
+    // A run that starts at the time given, takes as long as given and exits with exitCode.
+    // Resolves with whether it posted that the importer is stale.
+    async run(time, lasting, exitCode) {
+      clock.now = Date.parse(time);
+      const run = new RunRecord();
+      clock.now += lasting;
+      const record = run.end(
+        exitCode === 0 ? 'finished' : 'failed',
+        exitCode,
+        exitCode === 0 ? undefined : 'Error: Deadlock found'
+      );
+      await saveRecord(record);
+      return !succeeded(record) && alertIfStale({ cadenceSeconds, startedAt: run.startedAt });
+    },
+    // A start at the time given that is skipped, as another run holds the run lock.
+    async skip(time) {
+      clock.now = Date.parse(time);
+      const run = new RunRecord();
+      clock.now += 1000;
+      return alertIfStale({ cadenceSeconds, skipped: true, startedAt: run.startedAt });
+    }
+  };
+}
+
+// After a success that took 30 minutes, the 3rd run in a row that fails posts the alert, although
+// each failed run ends sooner after its start than the success did. Then the run each cadence after
+// it posts it again, however quickly it fails, until a run succeeds.
+{
+  const walk = await schedule();
+  assert.strictEqual(await walk.run('2026-10-15T00:00:00.000Z', 30 * MINUTE, 0), false);
+  assert.strictEqual(await walk.run('2026-10-15T06:00:00.000Z', 20 * MINUTE, 1), false);
+  assert.strictEqual(await walk.run('2026-10-15T12:00:00.000Z', 20 * MINUTE, 1), false);
+  assert.strictEqual(await walk.run('2026-10-15T18:00:00.000Z', 20 * MINUTE, 1), true);
+  assert.deepStrictEqual(walk.discord, [
+    'The CBL update is stale: no run has succeeded for 18.3 hours, since the one that started at 2026-10-15T00:00:00.000Z. Runs start every IMPORTER_CADENCE_SECONDS (6.0 hours), so 3 or more in a row have not succeeded. The last run ended at 2026-10-15T18:20:00.000Z with exit code 1 (Error: Deadlock found).'
+  ]);
+  assert.strictEqual(await walk.run('2026-10-16T00:00:00.000Z', MINUTE, 1), true);
+  assert.strictEqual(await walk.run('2026-10-16T06:00:00.000Z', 2 * HOUR, 1), true);
+  assert.strictEqual(
+    walk.database.read(walk.STATE.LAST_STALE_ALERT_AT),
+    '2026-10-16T06:00:00.000Z'
+  );
+  // A run started by hand in between posts nothing.
+  assert.strictEqual(await walk.run('2026-10-16T09:00:00.000Z', MINUTE, 1), false);
+  assert.strictEqual(await walk.run('2026-10-16T12:00:00.000Z', 30 * MINUTE, 0), false);
+  assert.strictEqual(await walk.run('2026-10-16T18:00:00.000Z', MINUTE, 1), false);
+  assert.strictEqual(walk.discord.length, 3);
+}
+
+// Runs that start a few minutes early or late are still counted on the schedule: a success that
+// started 4 minutes late, then runs that start on time, and a repeat that starts 4 minutes early.
+{
+  const walk = await schedule();
+  await walk.run('2026-10-15T00:04:00.000Z', 30 * MINUTE, 0);
+  assert.strictEqual(await walk.run('2026-10-15T06:00:00.000Z', MINUTE, 1), false);
+  assert.strictEqual(await walk.run('2026-10-15T12:00:00.000Z', MINUTE, 1), false);
+  assert.strictEqual(await walk.run('2026-10-15T18:00:00.000Z', MINUTE, 1), true);
+  assert.strictEqual(await walk.run('2026-10-15T23:56:00.000Z', MINUTE, 1), true);
+  assert.strictEqual(walk.discord.length, 2);
+}
+
+// A run that is stuck holding the run lock makes the starts after it skip. The 3rd start after the
+// last success posts, and saves when it started, so a second skipped start in the same cadence
+// posts nothing, and the next cadence's does.
+{
+  const walk = await schedule();
+  await walk.run('2026-10-15T00:00:00.000Z', 30 * MINUTE, 0);
+  assert.strictEqual(await walk.skip('2026-10-15T06:00:00.000Z'), false);
+  assert.strictEqual(await walk.skip('2026-10-15T12:00:00.000Z'), false);
+  const transactions = walk.database.transactions();
+  assert.strictEqual(await walk.skip('2026-10-15T18:00:00.000Z'), true);
+  assert.strictEqual(walk.database.transactions(), transactions + 1);
+  assert.strictEqual(
+    walk.database.read(walk.STATE.LAST_STALE_ALERT_AT),
+    '2026-10-15T18:00:00.000Z'
+  );
+  assert.match(walk.discord[0], /^The CBL update is stale: no run has succeeded for 18\.0 hours, /);
+  assert.strictEqual(await walk.skip('2026-10-15T20:00:00.000Z'), false);
+  assert.strictEqual(await walk.skip('2026-10-16T00:00:00.000Z'), true);
+  assert.strictEqual(walk.discord.length, 2);
 }
 
 // The cadence is a setting, e.g. an hour for hourly runs, which makes the importer stale after 3
-// hours. Durations under 2 hours are given in minutes.
+// hours, with the same 5 minutes' leeway, or a tenth of the cadence if that is less. Durations
+// under 2 hours are given in minutes.
 {
-  const database = fakeDatabase({ rows: stalenessRows(START - 3 * HOUR - 60 * 1000) });
+  const database = fakeDatabase({ rows: stalenessRows(START - 3 * HOUR + LEEWAY) });
   const { alertIfStale, discord } = await loadRunRecord(database);
   assert.strictEqual(await alertIfStale({ cadenceSeconds: 3600 }), true);
-  assert.match(discord[0], /for 3\.0 hours, .* times IMPORTER_CADENCE_SECONDS \(60 minutes\)\./);
+  assert.match(
+    discord[0],
+    /for 2\.9 hours, .* Runs start every IMPORTER_CADENCE_SECONDS \(60 minutes\), so 3 or more/
+  );
+}
+for (const [minutes, stale] of [
+  [28, false],
+  [29, true]
+]) {
+  const database = fakeDatabase({ rows: stalenessRows(START - minutes * MINUTE) });
+  const { alertIfStale } = await loadRunRecord(database);
+  assert.strictEqual(await alertIfStale({ cadenceSeconds: 600 }), stale);
 }
 
-// Before any run has succeeded, the time is counted from when the importer's tables were made.
+// Before any run has succeeded, the time is counted from when the importer's tables were made,
+// early in the first run.
 {
-  const tablesMadeAt = new Date(START - 3 * CADENCE - HOUR);
+  const tablesMadeAt = new Date(START - 3 * CADENCE + 2 * MINUTE);
   const database = fakeDatabase({ tablesMadeAt });
   const { alertIfStale, discord } = await loadRunRecord(database);
-  assert.strictEqual(await alertIfStale({ cadenceSeconds: CADENCE / 1000 }), true);
+  assert.strictEqual(await alertIfStale({ cadenceSeconds }), true);
   assert.deepStrictEqual(discord, [
-    'The CBL update is stale: no run has succeeded for 19.0 hours, since its run record began at 2026-10-14T17:00:00.000Z, which is over 3 times IMPORTER_CADENCE_SECONDS (6.0 hours).'
+    'The CBL update is stale: no run has succeeded for 18.0 hours, since its run record began at 2026-10-14T18:02:00.000Z. Runs start every IMPORTER_CADENCE_SECONDS (6.0 hours), so 3 or more in a row have not succeeded.'
   ]);
 }
 {
   // Tables made more recently are not stale yet.
   const database = fakeDatabase({ tablesMadeAt: new Date(START - HOUR) });
   const { alertIfStale, discord } = await loadRunRecord(database);
-  assert.strictEqual(await alertIfStale({ cadenceSeconds: CADENCE / 1000 }), false);
+  assert.strictEqual(await alertIfStale({ cadenceSeconds }), false);
   assert.deepStrictEqual(discord, []);
+}
+
+// A run that exited 0 but imported no ban list did not succeed, and the alert says so.
+{
+  const lastRun = {
+    endedAt: '2026-10-15T11:30:00.000Z',
+    exitCode: 0,
+    counts: {
+      importBans: {
+        lists: 20,
+        failedLists: 20,
+        banLists: [{ id: 1, error: 'Error: Request failed with status code 401' }]
+      }
+    }
+  };
+  const database = fakeDatabase({
+    rows: stalenessRows(START - 3 * CADENCE, { lastRun: JSON.stringify(lastRun) })
+  });
+  const { alertIfStale, discord } = await loadRunRecord(database);
+  assert.strictEqual(await alertIfStale({ cadenceSeconds }), true);
+  assert.match(
+    discord[0],
+    / The last run ended at 2026-10-15T11:30:00\.000Z with exit code 0, but imported none of its 20 ban lists\.$/
+  );
 }
 
 // Before the importer's tables exist, there is nothing to check. Other errors are left to the run,
@@ -354,18 +579,18 @@ const stalenessRows = (lastSuccessAt, extra = {}) => ({
     original: { errno: 1146 }
   });
   const { alertIfStale } = await loadRunRecord(fakeDatabase({ error: missing }));
-  assert.strictEqual(await alertIfStale({ cadenceSeconds: CADENCE / 1000, skipped: true }), false);
+  assert.strictEqual(await alertIfStale({ cadenceSeconds, skipped: true }), false);
 
   const { alertIfStale: failing } = await loadRunRecord(
     fakeDatabase({ error: new Error('Connection lost') })
   );
-  await assert.rejects(failing({ cadenceSeconds: CADENCE / 1000 }), /Connection lost/);
+  await assert.rejects(failing({ cadenceSeconds }), /Connection lost/);
 }
 
-// Two runs that save their alerts and check at the same moment, such as a run that lost the run
-// lock and the run that took it over, post one alert between them, as the alert's row is read with
-// a row lock.
-{
+// Two that check at the same moment, such as a run that lost the run lock and the run that took it
+// over, or a run and a skipped start, post one alert between them, as the alert's row is read with
+// a row lock. The one that loses posts nothing.
+for (const skipped of [false, true]) {
   const database = fakeDatabase({
     rows: stalenessRows(START - 4 * CADENCE, {
       lastStaleAlertAt: JSON.stringify(new Date(START - CADENCE).toISOString())
@@ -373,13 +598,13 @@ const stalenessRows = (lastSuccessAt, extra = {}) => ({
   });
   const { alertIfStale, discord } = await loadRunRecord(database);
   const results = await Promise.all([
-    alertIfStale({ cadenceSeconds: CADENCE / 1000 }),
-    alertIfStale({ cadenceSeconds: CADENCE / 1000 })
+    alertIfStale({ cadenceSeconds }),
+    alertIfStale({ cadenceSeconds, skipped })
   ]);
   assert.deepStrictEqual(results.toSorted(), [false, true]);
   assert.strictEqual(discord.length, 1);
 }
 
 console.log(
-  'Run record checks passed: what a record holds, saving it with the latest 100 summaries, and the staleness alert and its limit of one a cadence.'
+  'Run record checks passed: what a record holds, reasons cut on a character boundary, saving it with the latest 100 summaries, what counts as a success, and the staleness alert on the schedule, with its limit of one a cadence.'
 );
