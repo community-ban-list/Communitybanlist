@@ -1,7 +1,7 @@
 import mysql from 'mysql2/promise';
 
 import describeError from '../utils/describe-error.js';
-import sequelize from './sequelize.js';
+import sequelize, { QueryTypes } from './sequelize.js';
 
 // The ban importer holds this MySQL lock while it runs, so only one run at a time works on the
 // database. It is named after the database, as MySQL's lock names are shared by the whole server.
@@ -10,6 +10,9 @@ import sequelize from './sequelize.js';
 // connections after 10 seconds, which would free the lock, and a connection kept from the pool
 // would stop disconnect() from finishing. MySQL frees the lock as soon as its connection closes,
 // so a run that crashes or is killed never leaves it held.
+
+// The lock's name, in SQL, as it is worked out from the database the connection uses.
+const LOCK_NAME = "CONCAT('cbl-importer:', DATABASE())";
 
 // The lock's connection is used this often, so MySQL never closes it for being idle (wait_timeout).
 const KEEP_ALIVE_INTERVAL = 60 * 1000;
@@ -154,7 +157,7 @@ export default async function takeRunLock({ onLost } = {}) {
     // GET_LOCK gives 1 when it took the lock, 0 when another connection holds it, and NULL after
     // an error.
     [[{ acquired, name }]] = await connection.query({
-      sql: "SELECT GET_LOCK(CONCAT('cbl-importer:', DATABASE()), 0) AS acquired, CONCAT('cbl-importer:', DATABASE()) AS name",
+      sql: `SELECT GET_LOCK(${LOCK_NAME}, 0) AS acquired, ${LOCK_NAME} AS name`,
       timeout: QUERY_TIMEOUT
     });
   } catch (err) {
@@ -167,4 +170,14 @@ export default async function takeRunLock({ onLost } = {}) {
   await close(connection);
   if (acquired !== null && Number(acquired) === 0) return null;
   throw new Error('Could not take the run lock: MySQL gave no result for GET_LOCK.');
+}
+
+// Whether a ban importer run holds the run lock now, asked on the Sequelize pool, e.g. by the bot
+// before a change that must not happen while a run is under way. IS_FREE_LOCK gives 1 when the
+// lock is free, 0 when a connection holds it and NULL after an error, which counts as held.
+export async function isRunLockHeld() {
+  const [{ free }] = await sequelize.query(`SELECT IS_FREE_LOCK(${LOCK_NAME}) AS free`, {
+    type: QueryTypes.SELECT
+  });
+  return Number(free) !== 1;
 }

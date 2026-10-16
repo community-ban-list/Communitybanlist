@@ -5,7 +5,7 @@ if (!process.env.DATABASE_URI)
 
 export default new Sequelize.Sequelize(process.env.DATABASE_URI, { logging: false });
 
-const { Op, QueryTypes, Transaction } = Sequelize;
+const { Op, QueryTypes, Transaction, ForeignKeyConstraintError, ValidationError } = Sequelize;
 
 // Shown instead of the database's own error, which names internal hosts and addresses.
 const DATABASE_UNAVAILABLE_MESSAGE =
@@ -25,4 +25,12 @@ function isDatabaseUnavailable(err) {
   );
 }
 
-export { Op, QueryTypes, Transaction, DATABASE_UNAVAILABLE_MESSAGE, isDatabaseUnavailable };
+export {
+  Op,
+  QueryTypes,
+  Transaction,
+  ForeignKeyConstraintError,
+  ValidationError,
+  DATABASE_UNAVAILABLE_MESSAGE,
+  isDatabaseUnavailable
+};
