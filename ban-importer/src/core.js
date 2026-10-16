@@ -11,6 +11,8 @@ import {
 } from 'scbl-lib/utils';
 import { HOST } from 'scbl-lib/config';
 
+import { checkRunLock, stopIfRequested } from './run-control.js';
+
 const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
 const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 50;
 const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 50000;
@@ -66,6 +68,8 @@ export default class Core {
     );
 
     while (users.length > 0) {
+      // A run that is asked to stop does so between batches.
+      stopIfRequested();
       const batch = users.splice(0, Math.min(UPDATE_STEAM_USER_INFO_BATCH_SIZE, users.length));
 
       let data = null;
@@ -332,6 +336,10 @@ export default class Core {
         1000
       ).toFixed(2)}s`
     );
+
+    // Changes reach BattleMetrics from here on, so they must never be made by two runs at once.
+    await checkRunLock();
+
     const myProgressBar = Logger.discordProgressBar(
       'Core',
       `Exporting ${exportBans.length} Bans...`,
@@ -344,6 +352,9 @@ export default class Core {
 
     // Update the export bans.
     for (const exportBan of exportBans) {
+      // A run that is asked to stop does so between export bans, never between a BattleMetrics
+      // request and the database save that records it.
+      stopIfRequested();
       Logger.verbose(
         'Core',
         2,

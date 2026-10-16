@@ -3,6 +3,8 @@ import { ExportBan, SteamUser } from 'scbl-lib/db/models';
 import { Op, QueryTypes, Transaction } from 'scbl-lib/db/sequelize';
 import { Logger } from 'scbl-lib/utils';
 
+import { stopIfRequested } from './run-control.js';
+
 // Changed Below on the 14900k. Will need to monitor to make sure issues do not arise.
 // const UPDATE_BATCH_SIZE = process.env.UPDATE_EXPORT_BANS_BATCH_SIZE || 100;
 const UPDATE_BATCH_SIZE = process.env.UPDATE_EXPORT_BANS_BATCH_SIZE || 250;
@@ -32,6 +34,8 @@ export default class ExportBanManager {
       0
     );
     while (users.length > 0) {
+      // A run that is asked to stop does so between batches.
+      stopIfRequested();
       currentRunTime = Date.now();
       const batch = users.splice(0, Math.min(UPDATE_BATCH_SIZE, users.length));
       Logger.verbose(

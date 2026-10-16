@@ -1,10 +1,10 @@
-import { connect, disconnect } from 'scbl-lib/db';
-import { describeError, Logger, stackTrace } from 'scbl-lib/utils';
+import { describeError, stackTrace } from 'scbl-lib/utils';
 
 import Core from './src/core.js';
 
 import BanImporter from './src/ban-importer.js';
 import ExportBanManager from './src/export-ban-manager.js';
+import run, { EXIT_CODES } from './src/run.js';
 
 Error.stackTraceLimit = 255;
 
@@ -17,69 +17,49 @@ const TASKS_TO_COMPLETE = {
   EXPORT_EXPORT_BANS: true
 };
 
-// How long to wait at the end of a run for Discord log messages still waiting to be sent.
-const LOG_FLUSH_TIMEOUT = 30 * 1000;
-
-async function doSleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Send the progress bars' latest values and wait for queued Discord log messages, but for no longer
-// than LOG_FLUSH_TIMEOUT, so a slow or unreachable Discord cannot keep the run from ending.
-async function flushLogs() {
-  Logger.flush();
-  const deadline = Date.now() + LOG_FLUSH_TIMEOUT;
-  while (Date.now() < deadline && Object.values(Logger.getLogQueue()).some((count) => count > 0))
-    await doSleep(500);
-}
-
 // A promise that fails with nothing to handle it must not stop the run part-way, but the run is
 // then reported as failed. Only the error's name, message and where it was thrown are printed, as
 // errors from API clients also hold their keys.
 process.on('unhandledRejection', (reason) => {
   console.error(`Unhandled promise rejection: ${describeError(reason)}${stackTrace(reason)}`);
-  process.exitCode = 1;
+  process.exitCode = EXIT_CODES.FAILED;
 });
 
-// The run's start, summary and failure are logged as important, so they reach the log channel even
-// when the run's other messages fill its queue.
-async function main() {
-  const profileStartTime = Date.now();
-  Logger.important('Core', `<@276137824460210178> Starting new CBL Update run...`);
-  await connect();
-
-  if (TASKS_TO_COMPLETE.IMPORT_BANS) {
-    const importer = new BanImporter();
-    await importer.importBans();
-  }
-
-  if (TASKS_TO_COMPLETE.UPDATE_STEAM_USER_INFO) await Core.updateSteamUserInfo();
-  if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_POINTS) await Core.clearOrphanedUsers();
-  if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_POINTS) await Core.updateReputationPoints();
-  if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_RANK) await Core.updateReputationRank();
-  if (TASKS_TO_COMPLETE.UPDATE_EXPORT_BANS) await ExportBanManager.updateExportBans();
-  if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS) await Core.exportExportBans();
-
-  await disconnect();
-  Logger.important(
-    'Core',
-    `Finished All Tasks. Complete CBL run Took ${((Date.now() - profileStartTime) / 1000).toFixed(
-      2
-    )}s. Garbage Collection Completed.`
+// The run's steps, in order. A run that is asked to stop does so between them.
+const steps = [];
+if (TASKS_TO_COMPLETE.IMPORT_BANS) steps.push(() => new BanImporter().importBans());
+if (TASKS_TO_COMPLETE.UPDATE_STEAM_USER_INFO) steps.push(() => Core.updateSteamUserInfo());
+if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_POINTS)
+  steps.push(
+    () => Core.clearOrphanedUsers(),
+    () => Core.updateReputationPoints()
   );
-  console.log(
-    `Finished All Tasks. Complete CBL run Took ${((Date.now() - profileStartTime) / 1000).toFixed(
-      2
-    )}s. Garbage Collection Completed.`
-  );
-}
+if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_RANK) steps.push(() => Core.updateReputationRank());
+if (TASKS_TO_COMPLETE.UPDATE_EXPORT_BANS) steps.push(() => ExportBanManager.updateExportBans());
+if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS) steps.push(() => Core.exportExportBans());
 
-main()
-  .then(() => console.log(`Done!`))
-  .catch((error) => {
-    process.exitCode = 1;
-    Logger.important('Core', 'The CBL update run failed: ', error);
+// Set once the run has ended, as the importer exits with the run's code.
+let ended = false;
+
+// Node exits by itself, with code 0, once nothing is left to wait for. Before the run has ended,
+// that means the run was left waiting for something that can never happen, such as an answer on a
+// connection that is gone, so the run failed.
+process.on('beforeExit', () => {
+  if (ended) return;
+  console.error(
+    'The CBL update run failed, as it was left waiting for something that can never happen.'
+  );
+  process.exit(EXIT_CODES.FAILED);
+});
+
+// Exit with the run's code: 0 finished, 1 failed, 3 stopped part-way by a signal or the time limit,
+// or 75 skipped as another run is active. A run that finished exits 1 after an unhandled rejection.
+run(steps)
+  .catch((err) => {
+    console.error(`The CBL update run failed: ${describeError(err)}${stackTrace(err)}`);
+    return EXIT_CODES.FAILED;
   })
-  .then(flushLogs)
-  // Exit with process.exitCode, which is 1 if anything above failed.
-  .finally(() => process.exit());
+  .then((exitCode) => {
+    ended = true;
+    process.exit(exitCode || process.exitCode);
+  });

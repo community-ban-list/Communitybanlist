@@ -33,7 +33,8 @@ const dependencies = {
       if (sendError) throw sendError;
     }
   },
-  'scbl-lib/config': { HOST: 'https://communitybanlist.example' }
+  'scbl-lib/config': { HOST: 'https://communitybanlist.example' },
+  './run-control.js': { checkRunLock: async () => {}, stopIfRequested() {} }
 };
 
 const context = vm.createContext({});
