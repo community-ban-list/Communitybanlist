@@ -264,7 +264,7 @@ export default class ExportBanManager {
     }
     Logger.verbose(
       'ExportBanManager',
-      1,
+      2,
       `Finished updating ExportBans. Took ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
     );
   }

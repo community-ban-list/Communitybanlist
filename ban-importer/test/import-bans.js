@@ -427,6 +427,57 @@ assert.strictEqual(
   'Got 1 deleted ban. Imported 2 ban lists: 4 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 1 list failed.'
 );
 
+// The import reports the same totals for the run record, with each list's own counts and what went
+// wrong. Before it has run, it reports nothing.
+reset();
+battlemetricsList(1, pairs('a', 0, 5), [
+  pairs('a', 0, 2),
+  new Error('Request failed with status code 500')
+]);
+battlemetricsList(2, pairs('b', 0, 4), [
+  pairs('b', 0, 2),
+  [...pairs('b', 3, 4), ['b9', steamID(9)]]
+]);
+const reporter = new BanImporter();
+// Copied into this test's own objects, as the report is made in the importer's context.
+const report = () => JSON.parse(JSON.stringify(reporter.report()));
+assert.deepStrictEqual(report(), {
+  lists: 0,
+  imported: 0,
+  fetched: 0,
+  new: 0,
+  updated: 0,
+  removed: 0,
+  held: 0,
+  failedLists: 0,
+  banLists: []
+});
+await reporter.importBans();
+assert.deepStrictEqual(report(), {
+  lists: 2,
+  imported: 2,
+  fetched: 4,
+  new: 1,
+  updated: 0,
+  removed: 1,
+  held: 0,
+  failedLists: 1,
+  banLists: [
+    {
+      id: 1,
+      fetched: 0,
+      new: 0,
+      updated: 0,
+      removed: 0,
+      held: 0,
+      attempt: 2,
+      error: 'Error: Request failed with status code 500',
+      stage: 'fetching it'
+    },
+    { id: 2, fetched: 4, new: 1, updated: 0, removed: 1, held: 0, stored: 4 }
+  ]
+});
+
 // Every save has finished before any of the list's bans are removed. The bans it had are read
 // before its bans are saved, so what it lost is measured against the bans it had before the run.
 reset();
@@ -927,7 +978,8 @@ battlemetricsList(31, pairs('t', 0, 2), [pairs('t', 0, 2)]);
 onSave = (id) => {
   if (id === '30,s5') control.requestStop('it received SIGTERM');
 };
-const stopped = await run().catch((err) => err);
+const stoppedImporter = new BanImporter();
+const stopped = await stoppedImporter.importBans().catch((err) => err);
 assert.strictEqual(stopped.name, 'RunStopped');
 assert.strictEqual(stopped.reason, 'it received SIGTERM');
 assert.deepStrictEqual(findOrCreateCalls, ['29,r0', '30,s2', '30,s3', '30,s4', '30,s5']);
@@ -956,6 +1008,18 @@ assert.strictEqual(
   summary(),
   'Got 1 deleted ban. Imported 1 of 3 ban lists before the run stopped: 1 ban fetched, 0 new, 0 updated, 1 removed, 0 held, 0 lists failed.'
 );
+// Its report for the run record counts the same lists as its summary.
+assert.deepStrictEqual(JSON.parse(JSON.stringify(stoppedImporter.report())), {
+  lists: 3,
+  imported: 1,
+  fetched: 1,
+  new: 0,
+  updated: 0,
+  removed: 1,
+  held: 0,
+  failedLists: 0,
+  banLists: [{ id: 29, fetched: 1, new: 0, updated: 0, removed: 1, held: 0, stored: 2 }]
+});
 
 assert.strictEqual(verboseLevelOneLines, 0, 'Lines for the log channel are logged as important');
 

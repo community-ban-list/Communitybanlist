@@ -4,7 +4,7 @@ import Core from './src/core.js';
 
 import BanImporter from './src/ban-importer.js';
 import ExportBanManager from './src/export-ban-manager.js';
-import run, { EXIT_CODES } from './src/run.js';
+import run, { EXIT_CODES, leftWaiting } from './src/run.js';
 
 Error.stackTraceLimit = 255;
 
@@ -25,35 +25,55 @@ process.on('unhandledRejection', (reason) => {
   process.exitCode = EXIT_CODES.FAILED;
 });
 
-// The run's steps, in order. A run that is asked to stop does so between them.
+const banImporter = new BanImporter();
+
+// The run's steps, in order, each named for the run record, which also keeps the counts a step
+// gives. A run that is asked to stop does so between them.
 const steps = [];
-if (TASKS_TO_COMPLETE.IMPORT_BANS) steps.push(() => new BanImporter().importBans());
-if (TASKS_TO_COMPLETE.UPDATE_STEAM_USER_INFO) steps.push(() => Core.updateSteamUserInfo());
+if (TASKS_TO_COMPLETE.IMPORT_BANS)
+  steps.push({
+    name: 'importBans',
+    run: () => banImporter.importBans(),
+    counts: () => banImporter.report()
+  });
+if (TASKS_TO_COMPLETE.UPDATE_STEAM_USER_INFO)
+  steps.push({ name: 'updateSteamUserInfo', run: () => Core.updateSteamUserInfo() });
 if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_POINTS)
   steps.push(
-    () => Core.clearOrphanedUsers(),
-    () => Core.updateReputationPoints()
+    { name: 'clearOrphanedUsers', run: () => Core.clearOrphanedUsers() },
+    { name: 'updateReputationPoints', run: () => Core.updateReputationPoints() }
   );
-if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_RANK) steps.push(() => Core.updateReputationRank());
-if (TASKS_TO_COMPLETE.UPDATE_EXPORT_BANS) steps.push(() => ExportBanManager.updateExportBans());
-if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS) steps.push(() => Core.exportExportBans());
+if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_RANK)
+  steps.push({ name: 'updateReputationRank', run: () => Core.updateReputationRank() });
+if (TASKS_TO_COMPLETE.UPDATE_EXPORT_BANS)
+  steps.push({ name: 'updateExportBans', run: () => ExportBanManager.updateExportBans() });
+if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS)
+  steps.push({ name: 'exportExportBans', run: () => Core.exportExportBans() });
 
 // Set once the run has ended, as the importer exits with the run's code.
 let ended = false;
+// Set once the run is being ended as left waiting.
+let leaving = false;
 
 // Node exits by itself, with code 0, once nothing is left to wait for. Before the run has ended,
 // that means the run was left waiting for something that can never happen, such as an answer on a
-// connection that is gone, so the run failed.
+// connection that is gone, so the run failed. It is ended as failed, with its JSON line and its
+// record, and the importer exits 1. Should that be left waiting too, Node exits 1 by itself.
 process.on('beforeExit', () => {
-  if (ended) return;
-  console.error(
-    'The CBL update run failed, as it was left waiting for something that can never happen.'
-  );
-  process.exit(EXIT_CODES.FAILED);
+  if (ended || leaving) return;
+  leaving = true;
+  process.exitCode = EXIT_CODES.FAILED;
+  leftWaiting()
+    .catch((err) => {
+      console.error(`The CBL update run failed: ${describeError(err)}${stackTrace(err)}`);
+      return EXIT_CODES.FAILED;
+    })
+    .then((exitCode) => process.exit(exitCode));
 });
 
 // Exit with the run's code: 0 finished, 1 failed, 3 stopped part-way by a signal or the time limit,
-// or 75 skipped as another run is active. A run that finished exits 1 after an unhandled rejection.
+// or 75 skipped as another run is active. A run that finished exits 1 after an unhandled rejection,
+// as the run's own exit code and record already say.
 run(steps)
   .catch((err) => {
     console.error(`The CBL update run failed: ${describeError(err)}${stackTrace(err)}`);

@@ -105,6 +105,39 @@ function isRefused(err) {
   return status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
 
+// The import's totals, as its summary line and the run record give them.
+function totals(results) {
+  const sum = (field) => results.reduce((total, result) => total + result[field], 0);
+  return {
+    fetched: sum('fetched'),
+    new: sum('created'),
+    updated: sum('updated'),
+    removed: sum('removed'),
+    held: sum('held'),
+    failedLists: results.filter((result) => result.error).length
+  };
+}
+
+// A list's counts for the run record, with what went wrong or was unusual, when anything was.
+function listReport(result) {
+  const report = {
+    id: result.id,
+    fetched: result.fetched,
+    new: result.created,
+    updated: result.updated,
+    removed: result.removed,
+    held: result.held
+  };
+  if (result.stored !== undefined) report.stored = result.stored;
+  if (result.failed > 0) report.failedToSave = result.failed;
+  if (result.attempt > 1) report.attempt = result.attempt;
+  if (result.gone) report.gone = true;
+  if (result.sourceChanged) report.sourceChanged = true;
+  if (result.massRemoval) report.massRemoval = true;
+  if (result.error) Object.assign(report, { error: result.error, stage: result.stage });
+  return report;
+}
+
 export default class BanImporter {
   constructor(options) {
     options = {
@@ -122,6 +155,10 @@ export default class BanImporter {
         .filter(Boolean)
     );
     this.fetcher = new BanFetcher();
+
+    // The number of ban lists the import started with, and a result for each list it imported.
+    this.listCount = 0;
+    this.results = [];
   }
 
   async importBans() {
@@ -138,32 +175,16 @@ export default class BanImporter {
       );
 
     Logger.verbose('BanImporter', 2, 'Fetching ban lists...');
-    const myProgressBar = Logger.discordProgressBar(
-      'BanImporter',
-      `Fetching ${banLists.length} Ban Lists...`,
-      null,
-      0,
-      banLists.length,
-      0
-    );
 
     // Each list is fetched, saved and checked for removed bans before the next one is started. A
     // run that is asked to stop does so between ban lists, after summing up the lists it imported.
-    const results = [];
+    // The results are kept for the run record, which report() gives them to.
+    this.listCount = banLists.length;
+    const results = (this.results = []);
     try {
-      let currentList = 0;
       for (const banList of banLists) {
         stopIfRequested();
         results.push(await this.importBanList(banList.id));
-        currentList++;
-        Logger.discordProgressBar(
-          'BanImporter',
-          `Fetching ${banLists.length} Ban Lists...`,
-          myProgressBar,
-          0,
-          banLists.length,
-          currentList
-        );
       }
 
       // A list that could not be fetched, e.g. during a short BattleMetrics outage, is tried once
@@ -550,15 +571,14 @@ export default class BanImporter {
   // before it stopped, out of the listCount lists of the run, and leaves out a list it stopped in
   // the middle of, at either attempt, which has a line of its own.
   logSummary(results, { stopped = false, listCount = results.length } = {}) {
-    const total = (field) => results.reduce((sum, result) => sum + result[field], 0);
-    const removed = total('removed');
-    const totals = [
-      `${plural(total('fetched'), 'ban')} fetched`,
-      `${formatCount(total('created'))} new`,
-      `${formatCount(total('updated'))} updated`,
-      `${formatCount(removed)} removed`,
-      `${formatCount(total('held'))} held`,
-      `${plural(results.filter((result) => result.error).length, 'list')} failed`
+    const total = totals(results);
+    const counts = [
+      `${plural(total.fetched, 'ban')} fetched`,
+      `${formatCount(total.new)} new`,
+      `${formatCount(total.updated)} updated`,
+      `${formatCount(total.removed)} removed`,
+      `${formatCount(total.held)} held`,
+      `${plural(total.failedLists, 'list')} failed`
     ];
     const lists =
       results.length < listCount
@@ -566,7 +586,18 @@ export default class BanImporter {
         : plural(results.length, 'ban list');
     Logger.important(
       'BanImporter',
-      `Got ${plural(removed, 'deleted ban')}. Imported ${lists}${stopped ? ' before the run stopped' : ''}: ${totals.join(', ')}.`
+      `Got ${plural(total.removed, 'deleted ban')}. Imported ${lists}${stopped ? ' before the run stopped' : ''}: ${counts.join(', ')}.`
     );
+  }
+
+  // The import's counts for the run record: its totals, as in its summary line, and each list's
+  // own counts. An import that stopped part-way reports the lists its summary line sums up.
+  report() {
+    return {
+      lists: this.listCount,
+      imported: this.results.length,
+      ...totals(this.results),
+      banLists: this.results.map(listReport)
+    };
   }
 }

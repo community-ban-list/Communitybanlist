@@ -36,7 +36,10 @@ const NETWORK_RETRY_WAITS = [1000, 3000];
 // Discord allows 2,000 characters a message.
 const MAX_MESSAGE_LENGTH = 1900;
 
-// A progress bar is edited at most once every 15 seconds, with its latest value.
+// A progress bar is only posted once it has existed for a minute without being finished, so a step
+// that takes less than a minute posts no bar at all. After that it is edited at most once every 15
+// seconds, with its latest value.
+const PROGRESS_BAR_DELAY = 60 * 1000;
 const PROGRESS_BAR_INTERVAL = 15 * 1000;
 
 function convertToBarChart(minValue = 0, maxValue = 1, barValue) {
@@ -71,10 +74,11 @@ function isError(value) {
 }
 
 // A progress bar in the log channel, which discordProgressBar returns at once. It is posted in the
-// background, then edited at most once every 15 seconds with its latest value, so a step that
-// updates it thousands of times sends a few edits and never waits for Discord.
+// background a minute after it is made, unless it is finished by then, and then edited at most once
+// every 15 seconds with its latest value, so a step that updates it thousands of times sends a few
+// edits and never waits for Discord.
 class ProgressBar {
-  constructor(logger, content) {
+  constructor(logger, content, finished) {
     this.logger = logger;
     this.messageID = null;
     // The latest value, while it waits to be sent.
@@ -84,15 +88,42 @@ class ProgressBar {
     this.timer = null;
     this.flushing = false;
     // Without Discord logging, or once the bar could not be posted, updates do nothing rather than
-    // post new bars.
-    this.stopped = !logger.discordWebhook;
-    if (!this.stopped) this.send(content);
+    // post new bars. A bar that is finished when it is made is never posted.
+    this.stopped = !logger.discordWebhook || finished;
+    // The latest value of a bar that is not posted yet.
+    this.unposted = null;
+    if (this.stopped) return;
+
+    this.unposted = content;
+    logger.unpostedProgressBars.add(this);
+    this.timer = setTimeout(() => this.post(), PROGRESS_BAR_DELAY);
+    // A bar that is not posted yet must not keep the process running.
+    this.timer.unref?.();
   }
 
-  update(content) {
+  update(content, finished) {
     if (this.stopped) return;
+    if (this.unposted !== null) {
+      // A bar that is finished within its first minute is never posted.
+      if (finished) this.stop();
+      else this.unposted = content;
+      return;
+    }
     this.wait(content);
     this.sendLatest();
+  }
+
+  // Post the bar with its latest value, now that it has existed for a minute without being
+  // finished.
+  post() {
+    this.timer = null;
+    const content = this.unposted;
+    this.unposted = null;
+    this.logger.unpostedProgressBars.delete(this);
+    // Stop once Discord logging is off, as it is when its webhook turns out to be gone.
+    if (!this.logger.discordWebhook) this.stop();
+    if (this.stopped || content === null) return;
+    this.send(content);
   }
 
   // Send the latest value now rather than when it is due, e.g. before the service exits.
@@ -112,6 +143,8 @@ class ProgressBar {
 
   stop() {
     this.stopped = true;
+    this.unposted = null;
+    this.logger.unpostedProgressBars.delete(this);
     this.wait(null);
     clearTimeout(this.timer);
     this.timer = null;
@@ -222,8 +255,10 @@ class Logger {
       this.dropping = false;
     });
 
-    // Progress bars whose latest value is waiting to be sent.
+    // Progress bars whose latest value is waiting to be sent, and progress bars not posted yet,
+    // which may never be.
     this.waitingProgressBars = new Set();
+    this.unpostedProgressBars = new Set();
   }
 
   verbose(module, verboseness, message, ...extras) {
@@ -264,17 +299,22 @@ class Logger {
   }
 
   // Post a progress bar to the log channel, or update the one passed in, and return it to pass to
-  // later calls. Nothing waits for Discord: the bar is posted in the background and then edited at
-  // most once every 15 seconds, with its latest value.
+  // later calls. A bar is finished once current reaches max. Nothing waits for Discord: the bar is
+  // posted in the background once it has existed for a minute without being finished, so a step
+  // that takes less than a minute posts nothing, and then edited at most once every 15 seconds,
+  // with its latest value.
   discordProgressBar(module, message, progressBar, min = 0, max = 1, current) {
     const content = `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`;
-    if (!progressBar) return new ProgressBar(this, content);
-    progressBar.update(content);
+    const finished = current >= max;
+    if (!progressBar) return new ProgressBar(this, content, finished);
+    progressBar.update(content, finished);
     return progressBar;
   }
 
-  // Send progress bars' latest values now rather than when they are due, e.g. before exiting.
+  // Send progress bars' latest values now rather than when they are due, e.g. before exiting. Bars
+  // that are not posted yet are dropped, as their steps took less than a minute.
   flush() {
+    for (const progressBar of [...this.unpostedProgressBars]) progressBar.stop();
     for (const progressBar of [...this.waitingProgressBars]) progressBar.flush();
   }
 
@@ -308,7 +348,8 @@ class Logger {
       console.warn(
         `Warning: Discord logging is off, as Discord says the DISCORD_LOG_WEBHOOK webhook no longer exists: ${describeError(err)}`
       );
-      for (const progressBar of [...this.waitingProgressBars]) progressBar.stop();
+      for (const progressBar of [...this.waitingProgressBars, ...this.unpostedProgressBars])
+        progressBar.stop();
     }
     return true;
   }
@@ -367,8 +408,9 @@ class Logger {
   }
 
   // How many messages for the log channel have been received, are queued, or are being sent.
-  // Progress bars' latest values count as queued while they wait to be due. Once Discord logging is
-  // off, nothing more will be sent, so nothing is counted.
+  // Progress bars' latest values count as queued while they wait to be due, but bars that are not
+  // posted yet do not, as they may never be. Once Discord logging is off, nothing more will be
+  // sent, so nothing is counted.
   getLogQueue() {
     const counts = this.rl.counts();
     if (!this.discordWebhook)
