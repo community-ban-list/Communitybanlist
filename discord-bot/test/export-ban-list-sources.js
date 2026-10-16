@@ -104,6 +104,10 @@ const stubs = {
         writes.push(['transaction']);
         return callback({});
       }
+    },
+    // The importer is not running, so ban list changes go ahead.
+    async isRunLockHeld() {
+      return false;
     }
   },
   'scbl-lib/db/models': {
@@ -276,9 +280,11 @@ const [fetched] = await run('banlist', 'add', {
 assert.match(fetched.content, /Found 1 ban on the BattleMetrics ban list "Partner bans"\./);
 assert.deepStrictEqual(requests, ['bans', `ban-lists/${OTHER_PARTNER_ID}`]);
 await run('banlist', 'update', { banlist: '8', name: 'Mirror (to remove)' });
+// Updates save in a transaction, which would also delete the old bans if the source changed.
 assert.deepStrictEqual(writes, [
   ['create', NEW_PARTNER_ID],
   ['create', OTHER_PARTNER_ID],
+  ['transaction'],
   ['save', 8]
 ]);
 assert.strictEqual(audits.length, 3);
