@@ -1,14 +1,31 @@
 import { sequelize } from 'scbl-lib/db';
-import { Ban, BanList, SteamUser } from 'scbl-lib/db/models';
+import { BanListSync } from 'scbl-lib/db/importer-models';
+import { Ban, BanList, ExportBanList, SteamUser } from 'scbl-lib/db/models';
 import {
   ForeignKeyConstraintError,
   QueryTypes,
   ValidationError,
   isDatabaseUnavailable
 } from 'scbl-lib/db/sequelize';
-import { describeError, Logger } from 'scbl-lib/utils';
+import {
+  describeError,
+  isSameBattlemetricsID,
+  Logger,
+  normaliseBattlemetricsID
+} from 'scbl-lib/utils';
 
 import BanFetcher from './ban-fetcher.js';
+import {
+  accessProblem,
+  describeAlert,
+  nextSync,
+  NOT_VISIBLE,
+  readAccessCheck,
+  readVisibleBanLists,
+  sourceKey,
+  stateOf,
+  STATES
+} from './ban-list-sync.js';
 import {
   checkRunLock,
   isStopping,
@@ -106,7 +123,9 @@ function isRefused(err) {
   return status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
 
-// The import's totals, as its summary line and the run record give them.
+// The import's totals, as its summary line and the run record give them. The run record also counts
+// the lists that import one of CBL's own export ban lists, and those CBL can no longer read on
+// BattleMetrics.
 function totals(results) {
   const sum = (field) => results.reduce((total, result) => total + result[field], 0);
   return {
@@ -115,7 +134,9 @@ function totals(results) {
     updated: sum('updated'),
     removed: sum('removed'),
     held: sum('held'),
-    failedLists: results.filter((result) => result.error).length
+    failedLists: results.filter((result) => result.error).length,
+    selfImports: results.filter((result) => result.selfImport).length,
+    accessLost: results.filter((result) => result.accessLost).length
   };
 }
 
@@ -130,6 +151,7 @@ function listReport(result) {
     held: result.held
   };
   if (result.stored !== undefined) report.stored = result.stored;
+  if (result.state && result.state !== STATES.OK) report.state = result.state;
   if (result.failed > 0) report.failedToSave = result.failed;
   if (result.attempt > 1) report.attempt = result.attempt;
   if (result.gone) report.gone = true;
@@ -145,6 +167,8 @@ export default class BanImporter {
       workers: 2,
       // The IDs of the ban lists, separated by commas, that may lose any number of bans this run.
       allowMassRemoval: process.env.IMPORTER_ALLOW_MASS_REMOVAL,
+      // Whether the run checks which BattleMetrics ban lists the CBL organisation can see.
+      accessCheck: process.env.IMPORTER_ACCESS_CHECK,
       ...options
     };
 
@@ -155,11 +179,24 @@ export default class BanImporter {
         .map((id) => id.trim())
         .filter(Boolean)
     );
+    const accessCheck = readAccessCheck(options.accessCheck);
+    if (accessCheck.warning) Logger.verbose('BanImporter', 2, accessCheck.warning);
+    this.accessCheck = accessCheck.on;
     this.fetcher = new BanFetcher();
 
     // The number of ban lists the import started with, and a result for each list it imported.
     this.listCount = 0;
     this.results = [];
+
+    // What the run read at its start: each list's BanListSyncs row, by list, and CBL's own export
+    // ban lists on BattleMetrics. The access check is read once, for the first BattleMetrics list,
+    // and its result is ok, failed, off or unused, when no BattleMetrics list needed it. Each
+    // alert about a list is posted once a run.
+    this.syncs = new Map();
+    this.exportBanLists = [];
+    this.visibleBanLists = null;
+    this.accessCheckResult = this.accessCheck ? 'unused' : 'off';
+    this.alerted = new Set();
   }
 
   async importBans() {
@@ -173,6 +210,28 @@ export default class BanImporter {
         `IMPORTER_ALLOW_MASS_REMOVAL allows any number of bans to be removed from ban lists ${[
           ...this.allowMassRemoval
         ].join(', ')}.`
+      );
+
+    // What earlier runs recorded about each list, and the BattleMetrics IDs of CBL's own export ban
+    // lists, which no ban list may import. If either cannot be read, nothing is imported, as a list
+    // that imports an export ban list could not be told from the others, and every list's alerts
+    // would be posted again.
+    const syncs = await retryOperation(() => BanListSync.findAll({ raw: true }));
+    this.syncs = new Map(syncs.map((sync) => [sync.banList, sync]));
+    const exportBanLists = await retryOperation(() =>
+      ExportBanList.findAll({ attributes: ['id', 'battlemetricsID'], raw: true })
+    );
+    this.exportBanLists = exportBanLists.filter(
+      ({ battlemetricsID }) => normaliseBattlemetricsID(battlemetricsID) !== ''
+    );
+    this.visibleBanLists = null;
+    this.accessCheckResult = this.accessCheck ? 'unused' : 'off';
+    this.alerted.clear();
+    if (!this.accessCheck)
+      Logger.verbose(
+        'BanImporter',
+        2,
+        'IMPORTER_ACCESS_CHECK is off, so this run does not check which BattleMetrics ban lists the CBL organisation can see.'
       );
 
     Logger.verbose('BanImporter', 2, 'Fetching ban lists...');
@@ -226,7 +285,9 @@ export default class BanImporter {
   // Fetch all of a ban list, save its bans, then remove the bans it no longer has, or those of its
   // old source if its type or source was changed meanwhile. A list that cannot be fetched or saved
   // keeps all of its stored bans, as does a list whose import is stopped part-way because the run
-  // was asked to stop, which then throws RunStopped.
+  // was asked to stop, which then throws RunStopped. So does a list that imports one of CBL's own
+  // export ban lists, which is not fetched at all, and one CBL can no longer read on BattleMetrics.
+  // How the import went is then saved in the list's BanListSyncs row.
   async importBanList(id, attempt = 1) {
     const result = {
       id,
@@ -239,13 +300,26 @@ export default class BanImporter {
       held: 0
     };
     let stage = 'reading it';
+    let banList = null;
     try {
       // Read the list again, as it may have been changed or removed since the run started.
-      const banList = await retryOperation(() => BanList.findByPk(id));
+      banList = await retryOperation(() => BanList.findByPk(id));
       if (!banList) {
         result.gone = true;
         return result;
       }
+
+      // Importing one of CBL's own export ban lists would feed the players CBL exports back in as
+      // new bans, so such a list is neither fetched nor swept. Its bans stay until it is removed.
+      const exportBanList = this.findExportBanList(banList);
+      if (exportBanList) {
+        result.selfImport = exportBanList.id;
+        return result;
+      }
+
+      // A BattleMetrics list that the CBL organisation cannot see, by the run's access check, is
+      // still fetched, so that any bans it gives are saved, but none of its bans are removed.
+      result.accessLost = await this.checkAccess(banList);
 
       // The fetcher stops between pages if the run is asked to stop, and so does the import once
       // the list is fetched, before any of it is saved.
@@ -294,13 +368,13 @@ export default class BanImporter {
       // Removing bans must not happen in two runs at once, so it needs the run lock. It is also
       // skipped once the run is asked to stop, so a list whose saves were cut short is never swept,
       // as its unsaved bans would look removed. A sweep that has started is finished, whatever
-      // happens meanwhile.
+      // happens meanwhile. A list CBL cannot read is never swept.
       await checkRunLock();
       stopIfRequested();
       if (sourceChanged) {
         stage = 'removing the bans of its old source';
         await this.removeOldSourceBans(banList, bans, result);
-      } else {
+      } else if (!result.accessLost) {
         stage = 'removing the bans it no longer has';
         await this.removeMissingBans(banList, bans, stored, result);
       }
@@ -312,11 +386,112 @@ export default class BanImporter {
         throw err;
       }
       result.error = describeError(err);
+      // BattleMetrics may have answered that CBL can no longer read the list, which would only
+      // happen again later in the run. Its count of the list's bans is kept even so.
+      const lost =
+        banList?.type === 'battlemetrics' && stage === 'fetching it' && accessProblem(err);
+      if (lost) result.accessLost = lost;
+      if (lost && Number.isInteger(err.metaTotal)) result.firstMetaTotal = err.metaTotal;
       // A list whose source failed in a way that can pass is tried again after the other lists.
-      result.retry = stage === 'fetching it' && attempt === 1 && !isRefused(err);
+      result.retry = stage === 'fetching it' && attempt === 1 && !isRefused(err) && !lost;
       return result;
     } finally {
+      if (!result.gone && !result.stopped) result.state = stateOf(result);
       this.logResult(result);
+      if (banList && !result.gone && !result.stopped) await this.saveSync(banList, result);
+    }
+  }
+
+  // The CBL export ban list whose BattleMetrics list the ban list imports, if it does. Its source
+  // is compared with the export ban lists' IDs ignoring case, hyphens and spaces, as the bot does.
+  findExportBanList(banList) {
+    if (banList.type !== 'battlemetrics') return null;
+    return (
+      this.exportBanLists.find(({ battlemetricsID }) =>
+        isSameBattlemetricsID(battlemetricsID, banList.source)
+      ) ?? null
+    );
+  }
+
+  // Why the run's access check says CBL cannot read the BattleMetrics list, or null when it can, or
+  // when the check is off or could not be made. The check reads BattleMetrics' list of the ban lists
+  // the CBL organisation can see, every page of it, once a run, for the first BattleMetrics list.
+  // A check that fails never stops the import: the run goes without it.
+  async checkAccess(banList) {
+    if (banList.type !== 'battlemetrics' || !this.accessCheck) return null;
+    this.visibleBanLists ??= this.readAccess();
+    const visible = await this.visibleBanLists;
+    if (!visible || visible.has(normaliseBattlemetricsID(banList.source))) return null;
+    return NOT_VISIBLE;
+  }
+
+  // Read the IDs of the BattleMetrics ban lists the CBL organisation can see, or null when they
+  // cannot be read, which the console is told of.
+  async readAccess() {
+    try {
+      const visible = await readVisibleBanLists();
+      this.accessCheckResult = 'ok';
+      Logger.verbose(
+        'BanImporter',
+        2,
+        `The CBL organisation can see ${plural(visible.size, 'BattleMetrics ban list')}.`
+      );
+      return visible;
+    } catch (err) {
+      this.accessCheckResult = 'failed';
+      Logger.verbose(
+        'BanImporter',
+        2,
+        `Could not read which BattleMetrics ban lists the CBL organisation can see, so this run does not check them: ${describeError(err)}`
+      );
+      return null;
+    }
+  }
+
+  // Save how the list's import went in its BanListSyncs row, then post the alerts its new state
+  // calls for, only once the row is saved, so each is posted once. A list removed during the run
+  // has its row removed with it, so nothing is saved for it. A row that cannot be saved is left as
+  // it was, which never fails the list's import.
+  async saveSync(banList, result) {
+    try {
+      const outcome = {
+        banList: banList.id,
+        sourceKey: sourceKey(banList),
+        now: new Date(),
+        selfImport: result.selfImport ?? null,
+        accessLost: result.accessLost ?? null,
+        error: result.error ?? null,
+        held: result.held,
+        storedCount: await retryOperation(() => Ban.count({ where: { banList: banList.id } })),
+        // BattleMetrics' count of the list's bans, if the attempt got as far as asking for it.
+        headTotal: 'firstMetaTotal' in result ? result.firstMetaTotal : undefined
+      };
+      const sync = nextSync(this.syncs.get(banList.id) ?? null, outcome);
+      try {
+        await retryOperation(() => BanListSync.upsert(sync.values, { fields: sync.fields }));
+      } catch (err) {
+        if (isMissingBanList(err)) return;
+        throw err;
+      }
+
+      for (const alert of sync.alerts) {
+        const key = `${banList.id} ${alert}`;
+        if (this.alerted.has(key)) continue;
+        this.alerted.add(key);
+        Logger.important('BanImporter', describeAlert(alert, sync.values, outcome));
+      }
+      if (sync.recovered)
+        Logger.verbose(
+          'BanImporter',
+          2,
+          `Ban list (ID: ${banList.id}) is back to normal: ${sync.recovered}.`
+        );
+    } catch (err) {
+      Logger.verbose(
+        'BanImporter',
+        2,
+        `Could not save the sync state of ban list (ID: ${banList.id}): ${describeError(err)}`
+      );
     }
   }
 
@@ -508,11 +683,21 @@ export default class BanImporter {
   // Log one line about the list. A line about a list that needs looking at is logged as important,
   // so it reaches the log channel ahead of other messages and is never dropped for them. The others
   // only go to the console. A second attempt at a list is always logged as important, as its first
-  // one was.
+  // one was. A list that imports a CBL export ban list, or that CBL cannot read, is posted about
+  // once, when that starts (see saveSync), so its line otherwise only goes to the console, unless
+  // its import failed.
   logResult(result) {
     const list = `ban list (ID: ${result.id})`;
     if (result.gone) {
       Logger.verbose('BanImporter', 2, `Skipped ${list}, as it was removed during the run.`);
+      return;
+    }
+    if (result.selfImport) {
+      Logger.verbose(
+        'BanImporter',
+        2,
+        `Skipped ${list}, as its source is CBL's own export ban list (#${result.selfImport}), so none of its bans were fetched or removed.`
+      );
       return;
     }
 
@@ -548,6 +733,10 @@ export default class BanImporter {
         'BanImporter',
         `Removed the bans fetched for ${list}${again ? ' at the second attempt' : ''}, as its type or source was changed while it was imported${progress}. Its new source is imported on the next run.`
       );
+    } else if (result.accessLost) {
+      const line = `${imported}: ${counts.join(', ')}. None of its bans were checked for removal, as ${result.accessLost}.`;
+      if (again) Logger.important('BanImporter', line);
+      else Logger.verbose('BanImporter', 2, line);
     } else if (result.fetched === 0 && result.removed === 0 && result.stored > 0) {
       const none = result.rawCount > 0 ? 'no bans with a SteamID' : 'no bans';
       Logger.important(
@@ -597,13 +786,15 @@ export default class BanImporter {
     );
   }
 
-  // The import's counts for the run record: its totals, as in its summary line, and each list's
-  // own counts. An import that stopped part-way reports the lists its summary line sums up.
+  // The import's counts for the run record: its totals, as in its summary line, how the access
+  // check went, and each list's own counts. An import that stopped part-way reports the lists its
+  // summary line sums up.
   report() {
     return {
       lists: this.listCount,
       imported: this.results.length,
       ...totals(this.results),
+      accessCheck: this.accessCheckResult,
       banLists: this.results.map(listReport)
     };
   }

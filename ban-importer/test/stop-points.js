@@ -1,7 +1,11 @@
 import assert from 'assert';
+import { createHash } from 'crypto';
 import { readFile } from 'fs/promises';
 import vm from 'vm';
 
+import isSameBattlemetricsID, {
+  normaliseBattlemetricsID
+} from '../../scbl-lib/utils/battlemetrics-id.js';
 import describeError from '../../scbl-lib/utils/describe-error.js';
 
 // Check where the importer's steps stop when the run is asked to, and that they check the run lock
@@ -29,8 +33,9 @@ function ended(promise, what) {
 // has none to give them.
 const Logger = { verbose() {}, important() {} };
 
-// Load a module of the importer with stand-ins for its dependencies, the real run-control.js, and
-// any other globals it needs.
+// Load a module of the importer with stand-ins for its dependencies, the real run-control.js, the
+// real version of any other module of the importer it imports without a stand-in, such as
+// ban-list-sync.js, and any other globals it needs.
 async function load(path, dependencies, globals = {}) {
   const context = vm.createContext({
     console: { log() {} },
@@ -59,6 +64,13 @@ async function load(path, dependencies, globals = {}) {
       return control;
     }
     const exports = dependencies[specifier];
+    if (!exports && specifier.startsWith('./')) {
+      const url = new URL(specifier, referencingModule.identifier);
+      return new vm.SourceTextModule(await readFile(url, 'utf8'), {
+        context,
+        identifier: url.href
+      });
+    }
     assert.ok(exports, `Unexpected dependency: ${specifier}`);
     return new vm.SyntheticModule(
       Object.keys(exports),
@@ -96,7 +108,8 @@ function failsOnce(bans) {
 // onFetch(banList, control) before it returns, each ban's save calls hooks.onSave(id) and then
 // waits for its gate in saves.gates, if it has one, and each chunk of bans removed calls
 // hooks.onRemove(). The waits the importer starts and clears are recorded in waits, and take no
-// time once waits.instant is set.
+// time once waits.instant is set. The lists' sync state is saved to nowhere, and the check of
+// which BattleMetrics ban lists CBL can see is off, as import-bans.js tests both.
 async function loadBanImporter(lists, { onFetch = () => {}, options } = {}) {
   const events = [];
   const lines = [];
@@ -120,6 +133,12 @@ async function loadBanImporter(lists, { onFetch = () => {}, options } = {}) {
   const imported = await load(
     '../src/ban-importer.js',
     {
+      crypto: { createHash },
+      'scbl-lib/apis': {
+        async readBattlemetricsPages() {
+          throw new Error('The access check is off');
+        }
+      },
       'scbl-lib/db': {
         sequelize: {
           query: async (sql, { replacements: [id] }) => {
@@ -134,7 +153,11 @@ async function loadBanImporter(lists, { onFetch = () => {}, options } = {}) {
           }
         }
       },
+      'scbl-lib/db/importer-models': {
+        BanListSync: { findAll: async () => [], upsert: async () => {} }
+      },
       'scbl-lib/db/models': {
+        ExportBanList: { findAll: async () => [] },
         BanList: {
           findAll: async () => Object.keys(lists).map((id) => ({ id: Number(id) })),
           findByPk: async (id) => {
@@ -158,7 +181,8 @@ async function loadBanImporter(lists, { onFetch = () => {}, options } = {}) {
             events.push(`remove ${where.id.length} bans`);
             await hooks.onRemove();
             return where.id.length;
-          }
+          },
+          count: async ({ where }) => lists[where.banList].stored.length
         }
       },
       'scbl-lib/db/sequelize': {
@@ -169,10 +193,12 @@ async function loadBanImporter(lists, { onFetch = () => {}, options } = {}) {
       },
       'scbl-lib/utils': {
         describeError,
+        isSameBattlemetricsID,
         Logger: {
           verbose: (module, level, message) => lines.push({ level, message }),
           important: (module, message) => lines.push({ level: 1, message, important: true })
-        }
+        },
+        normaliseBattlemetricsID
       },
       './ban-fetcher.js': { default: BanFetcher }
     },
@@ -191,7 +217,7 @@ async function loadBanImporter(lists, { onFetch = () => {}, options } = {}) {
   );
   const BanImporter = imported.exports;
   return {
-    importer: new BanImporter(options),
+    importer: new BanImporter({ accessCheck: false, ...options }),
     control: imported.control,
     events,
     lines,

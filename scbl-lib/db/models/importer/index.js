@@ -1,3 +1,4 @@
+import BanListSync from './ban-list-sync.js';
 import ImporterSchemaMigration from './importer-schema-migration.js';
 import ImporterState from './importer-state.js';
 
@@ -5,6 +6,6 @@ import ImporterState from './importer-state.js';
 // never synced, and connect() leaves them alone, so the web server and the bot never make or change
 // these tables. The importer makes them with its migrations, while it holds its run lock, and then
 // checks that every column of these models is in the database.
-const IMPORTER_MODELS = [ImporterSchemaMigration, ImporterState];
+const IMPORTER_MODELS = [ImporterSchemaMigration, ImporterState, BanListSync];
 
-export { IMPORTER_MODELS, ImporterSchemaMigration, ImporterState };
+export { BanListSync, IMPORTER_MODELS, ImporterSchemaMigration, ImporterState };

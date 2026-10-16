@@ -70,6 +70,9 @@ For example, spread over several lines here and shortened:
       "removed": 26,
       "held": 0,
       "failedLists": 0,
+      "selfImports": 0,
+      "accessLost": 0,
+      "accessCheck": "ok",
       "banLists": [
         {
           "id": 46,
@@ -105,6 +108,8 @@ The steps that count what they do keep their counts also when they fail or stop 
 | `updateSteamUserInfo` | How many Steam users were `due` to be refreshed, and how many it `updated`.                                                  |
 | `updateExportBans`    | How many `players` it recalculated.                                                                                          |
 | `exportExportBans`    | How many export bans were `queued`, and of those, how many it `created` and `deleted`, and how many `failed`.                |
+
+`importBans` also counts the lists that import one of CBL's own export ban lists (`selfImports`) and those CBL can no longer read on BattleMetrics (`accessLost`), and says how the access check went (`accessCheck`: `ok`, `failed`, `off`, or `unused` when no BattleMetrics list was imported). Each list in `banLists` has its `state` when it is not `ok` (see [Ban list states](#ban-list-states)).
 
 A run that held the run lock also saves its record in the database, in the importer's `ImporterState` table:
 
@@ -142,9 +147,63 @@ Nothing the importer does waits for Discord: its messages are sent in the backgr
 
 Two kinds of embed can still say a run is in progress for good, as no later run knows of them: one Discord posted without answering within those 30 seconds, as the importer never learns which message it is and posts the status again, and one whose post Discord answered only once its run was ending, which the run does not save, should its final edit then not reach Discord.
 
+## Ban list states
+
+After each list's import, the importer saves how it went in the list's row of `BanListSyncs`, so the next runs know it too. A list is in one of these states:
+
+| State         | What it means                                                                                                                                                                    |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ok`          | Its latest import went as it should.                                                                                                                                             |
+| `failing`     | Its latest import failed, e.g. as its source was down. Its bans are kept as they are.                                                                                            |
+| `held`        | It was imported, but it would lose many bans at once, so removing them waits for `IMPORTER_ALLOW_MASS_REMOVAL`.                                                                  |
+| `access_lost` | CBL can no longer read it on BattleMetrics. It is still fetched, and any new bans it gives are saved, but none of its bans are removed, even with `IMPORTER_ALLOW_MASS_REMOVAL`. |
+| `self_import` | Its source is one of CBL's own export ban lists. It is neither fetched nor swept.                                                                                                |
+
+**Failures.** A list that fails 3 runs in a row is posted about once, at the 3rd. A run that tries a list again after the other lists counts as one run. Once the list imports again, it is back to `ok`, and is posted about again only after another 3 failed runs in a row. Each failed run still posts its own line, as before.
+
+**Lost access.** A list is taken to be one CBL can no longer read when:
+
+- the access check, once a run, does not find its source among the ban lists BattleMetrics says the CBL organisation can see (`GET /ban-lists`, every page), comparing IDs ignoring case, hyphens and spaces;
+- BattleMetrics answers its fetch with HTTP 404, Unknown ban list; or
+- BattleMetrics answers with no bans on the first page but still counts some, as it does for a list CBL may see but not its bans. Such a list has not emptied, so its fetch fails.
+
+A list that loses access is posted about once, with what to do: if its owner has stopped sharing it with the CBL organisation, remove it with `/banlist remove`, which removes its bans too. It is not tried again later in the run. Once CBL can read it again, it is checked for removed bans again. A failed read of BattleMetrics' ban lists never holds up the import: that run goes without the check, and says so in the console and in `accessCheck`. `IMPORTER_ACCESS_CHECK=0` turns the check off; the other two signs of lost access still count.
+
+**CBL's own export ban lists.** Importing one of CBL's BattleMetrics export ban lists would feed the players CBL exports back in as new bans, which would keep them on the export ban lists. A list whose source is the BattleMetrics ID of any export ban list, compared as the bot compares them when a source is added, is never fetched or swept, and is posted about once. Its bans are kept as they are: the importer only removes a ban when the list's own complete fetch no longer has it, so removing these is left to an admin, with `/banlist remove`, which removes the list and its bans and queues their players for an update. The bot refuses such sources, but lists from before it, or changed by hand, may still have one; to list them:
+
+```sql
+SELECT banList, storedCount FROM BanListSyncs WHERE state = 'self_import';
+```
+
+A list whose type or source is changed, e.g. with `/banlist update`, starts afresh: what was known about its old source, such as its failures, is forgotten. A list's row is deleted with the list.
+
 ## Database tables
 
-Besides the CBL's own tables, the importer owns `ImporterSchemaMigrations` and `ImporterState`. It makes them itself with its migrations (`src/schema/migrations.js`), which it applies once it holds the run lock, before its first step, and records in `ImporterSchemaMigrations`. The web server and the bot never make or change these tables, and the importer never changes the CBL's own tables' columns or indexes. A migration that fails makes the run fail with exit code 1, naming the migration. Going back to an older importer image leaves the tables in place, and the older importer ignores them.
+Besides the CBL's own tables, the importer owns `ImporterSchemaMigrations`, `ImporterState` and `BanListSyncs`. It makes them itself with its migrations (`src/schema/migrations.js`), which it applies once it holds the run lock, before its first step, and records in `ImporterSchemaMigrations`. The web server and the bot never make or change these tables, and the importer never changes the CBL's own tables' columns or indexes. A migration that fails makes the run fail with exit code 1, naming the migration. Going back to an older importer image leaves the tables in place, and the older importer ignores them.
+
+| Migration            | What it makes                                                                                                                           |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `001-importer-state` | `ImporterSchemaMigrations` and `ImporterState`.                                                                                         |
+| `002-ban-list-syncs` | `BanListSyncs`, with a foreign key to `BanLists`, so a list's row is deleted with the list. It waits at most 10 seconds for `BanLists`. |
+
+`BanListSyncs` has one row for each ban list the importer has imported, or tried to:
+
+| Column                           | What it holds                                                                                                                                |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `banList`                        | The list, by `BanLists.id`.                                                                                                                  |
+| `state`                          | `ok`, `failing`, `held`, `access_lost` or `self_import` (see [Ban list states](#ban-list-states)).                                           |
+| `lastAttemptAt`, `lastSuccessAt` | When the list was last fetched, and when it was last fetched in full and its bans saved, in UTC.                                             |
+| `consecutiveFailures`            | How many runs in a row the list failed to import.                                                                                            |
+| `lastError`                      | Why its latest import failed, or why CBL cannot read it: on one line, at most 500 characters, without addresses. Never shown on the website. |
+| `storedCount`, `headTotal`       | The bans the list has here, and BattleMetrics' count of its bans when it was last fetched, or `NULL` for a remote list.                      |
+| `sourceKey`                      | A SHA-256 of the list's type and source, by which the importer tells that its source was changed.                                            |
+| `updatedAt`                      | When the row was last saved.                                                                                                                 |
+
+Its other columns are not used yet. They are for later versions of the importer, which read only what changed on a list: `lastHeadPollAt`, `lastFullScanAt`, `nextFullScanAt`, `scanReason`, `incompleteScans`, `headUids`, `replacePending`, `allowFullRemovalUntil`, `remoteEtag`, `remoteLastModified` and `remoteBodyHash`.
+
+```sql
+SELECT banList, state, lastSuccessAt, consecutiveFailures, storedCount, headTotal, lastError FROM BanListSyncs ORDER BY banList;
+```
 
 ## Settings
 
@@ -155,4 +214,5 @@ The importer reads the same `DATABASE_URI`, `BATTLEMETRICS_API_KEY`, `BATTLEMETR
 | `IMPORTER_MAX_RUN_SECONDS`    | `18000` | A run that takes longer stops at its next safe point, and exits at once 60 seconds later if it has not. Keep it shorter than the time between starts. |
 | `IMPORTER_CADENCE_SECONDS`    | `21600` | How often the script starts a run, which sets when the importer is stale.                                                                             |
 | `IMPORTER_ALLOW_MASS_REMOVAL` |         | Ban list IDs, separated by commas, that may lose any number of bans in the next run. Without it, a list that would lose many bans at once keeps them. |
+| `IMPORTER_ACCESS_CHECK`       | `1`     | `0` turns off the check, once a run, of which BattleMetrics ban lists the CBL organisation can see (see [Ban list states](#ban-list-states)).         |
 | `GIT_SHA`                     |         | The commit the image was built from, shown when a run starts and in its JSON line.                                                                    |

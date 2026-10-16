@@ -1,14 +1,18 @@
 import assert from 'assert';
+import { createHash } from 'crypto';
 import { readFile } from 'fs/promises';
 import vm from 'vm';
 
+import isSameBattlemetricsID, {
+  normaliseBattlemetricsID
+} from '../../scbl-lib/utils/battlemetrics-id.js';
 import classifyBanReason from '../../scbl-lib/utils/classify-ban-reason.js';
 import describeError from '../../scbl-lib/utils/describe-error.js';
 
 // Exercise BanImporter and BanFetcher together without a database or network requests. The
-// database is a stand-in that keeps ban lists, Steam users and bans in memory, BattleMetrics and
-// remote lists answer from the tables below, and waits between attempts are skipped. The run holds
-// its run lock, so the importer may remove bans.
+// database is a stand-in that keeps ban lists, Steam users, bans, the lists' sync state and CBL's
+// export ban lists in memory, BattleMetrics and remote lists answer from the tables below, and
+// waits between attempts are skipped. The run holds its run lock, so the importer may remove bans.
 
 // Stand-ins for Sequelize's errors.
 class DatabaseError extends Error {
@@ -49,8 +53,10 @@ const findOrCreateCalls = [];
 const saveErrors = new Map();
 // Ban IDs whose saves are slow.
 const slowSaves = new Set();
-// Called with each ban's ID as it starts being saved.
+// Called with each ban's ID as it starts being saved, and with a list's ID as its bans are counted
+// for its sync state, after its import.
 let onSave = null;
+let onCount = null;
 let pendingSaves = 0;
 let transactions = 0;
 // Lines for the log channel must be logged as important, which none of the importer's level-1
@@ -111,6 +117,42 @@ const Ban = {
         removed++;
       }
     return removed;
+  },
+  async count({ where }) {
+    if (onCount) onCount(where.banList);
+    return [...bans.values()].filter((ban) => ban.banList === where.banList).length;
+  }
+};
+
+// The lists' BanListSyncs rows, by list. A row is saved as MySQL's INSERT ... ON DUPLICATE KEY
+// UPDATE saves it: a new row with all the values given, and an existing one with only the fields
+// named. The row of a list that is gone fails its foreign key, as in MySQL. Each save is recorded,
+// and syncError, if set, fails every save.
+const syncRows = new Map();
+const syncSaves = [];
+let syncError = null;
+const BanListSync = {
+  async findAll({ raw }) {
+    assert.strictEqual(raw, true);
+    return Array.from(syncRows.values(), (row) => ({ ...row }));
+  },
+  async upsert(values, { fields }) {
+    syncSaves.push({ values: { ...values }, fields: [...fields] });
+    if (syncError) throw syncError;
+    if (!banLists.has(values.banList)) throw new ForeignKeyConstraintError('banList');
+    const row = syncRows.get(values.banList);
+    if (!row) syncRows.set(values.banList, { ...values });
+    else for (const field of fields) row[field] = values[field];
+  }
+};
+
+// CBL's export ban lists, as { id, battlemetricsID }.
+const exportBanLists = [];
+const ExportBanList = {
+  async findAll({ attributes, raw }) {
+    assert.deepStrictEqual([...attributes], ['id', 'battlemetricsID']);
+    assert.strictEqual(raw, true);
+    return exportBanLists.map((exportBanList) => ({ ...exportBanList }));
   }
 };
 
@@ -162,9 +204,27 @@ const sequelize = {
 };
 
 // BattleMetrics lists, by source: each page is a list of [uid, SteamID, reason] entries, an error,
-// or a function that returns either when the page is fetched.
+// or a function that returns either when the page is fetched. A list in battlemetricsTotals gives
+// that count of its bans with each page.
 const battlemetricsLists = new Map();
+const battlemetricsTotals = new Map();
 const battlemetricsRequests = [];
+
+// BattleMetrics' list of the ban lists CBL can see, read a page at a time by
+// readBattlemetricsPages: the sources of all the BattleMetrics lists, unless visibleBanLists is set
+// to the IDs it gives instead, or to an error.
+let visibleBanLists = null;
+const banListReads = [];
+async function readBattlemetricsPages(endpoint, params) {
+  banListReads.push([endpoint, params]);
+  const visible =
+    visibleBanLists ??
+    Array.from(battlemetricsLists.keys()).filter((source) =>
+      Array.from(banLists.values()).some((banList) => banList.source === source)
+    );
+  if (visible instanceof Error) throw visible;
+  return visible.map((id) => ({ type: 'banList', id, attributes: { name: `List ${id}` } }));
+}
 const record = ([uid, steamUser, reason = 'Cheating']) => ({
   type: 'ban',
   attributes: {
@@ -186,7 +246,9 @@ async function battlemetrics(method, endpoint, params) {
     index + 1 < pages.length
       ? `https://api.battlemetrics.com/bans?filter[banList]=${params['filter[banList]']}&page[key]=${index + 1}&page[size]=100`
       : null;
-  return { data: { data: page.map(record), links: { next } } };
+  const total = battlemetricsTotals.get(params['filter[banList]']);
+  const meta = total === undefined ? undefined : { total };
+  return { data: { meta, data: page.map(record), links: { next } } };
 }
 const httpError = (status) =>
   Object.assign(new Error(`Request failed with status code ${status}`), { response: { status } });
@@ -216,9 +278,11 @@ const dependencies = {
       }
     }
   },
-  'scbl-lib/apis': { battlemetrics },
+  crypto: { createHash },
+  'scbl-lib/apis': { battlemetrics, readBattlemetricsPages },
   'scbl-lib/db': { sequelize },
-  'scbl-lib/db/models': { Ban, BanList, SteamUser },
+  'scbl-lib/db/importer-models': { BanListSync },
+  'scbl-lib/db/models': { Ban, BanList, ExportBanList, SteamUser },
   'scbl-lib/db/sequelize': {
     ForeignKeyConstraintError,
     QueryTypes,
@@ -228,6 +292,7 @@ const dependencies = {
   'scbl-lib/utils': {
     classifyBanReason,
     describeError,
+    isSameBattlemetricsID,
     Logger: {
       verbose: (module, level, message) => {
         if (level === 1) verboseLevelOneLines++;
@@ -236,7 +301,8 @@ const dependencies = {
       // The import no longer posts a progress bar, as the run's status shows how far it has got,
       // so the logger has none to give it.
       important: (module, message) => logs.push({ level: 1, message, important: true })
-    }
+    },
+    normaliseBattlemetricsID
   }
 };
 
@@ -257,6 +323,7 @@ const module = await load('../src/ban-importer.js');
 const runControl = load('../src/run-control.js');
 await module.link(async (specifier) => {
   if (specifier === './ban-fetcher.js') return load('../src/ban-fetcher.js');
+  if (specifier === './ban-list-sync.js') return load('../src/ban-list-sync.js');
   if (specifier === './run-control.js') return runControl;
   const exports = dependencies[specifier];
   assert.ok(exports, `Unexpected dependency: ${specifier}`);
@@ -286,19 +353,42 @@ function user(id) {
 const steamID = (n) => `7656119800${String(n).padStart(7, '0')}`;
 
 function reset() {
-  for (const store of [banLists, steamUsers, bans, saveErrors, remoteLists, battlemetricsLists])
+  for (const store of [
+    banLists,
+    steamUsers,
+    bans,
+    saveErrors,
+    remoteLists,
+    battlemetricsLists,
+    battlemetricsTotals,
+    syncRows
+  ])
     store.clear();
-  for (const list of [events, logs, delays, findOrCreateCalls, remoteRequests]) list.length = 0;
-  battlemetricsRequests.length = 0;
+  for (const list of [
+    events,
+    logs,
+    delays,
+    findOrCreateCalls,
+    remoteRequests,
+    battlemetricsRequests,
+    banListReads,
+    syncSaves,
+    exportBanLists
+  ])
+    list.length = 0;
   slowSaves.clear();
   onSave = null;
+  onCount = null;
+  syncError = null;
+  visibleBanLists = null;
   transactions = 0;
   delete env.IMPORTER_ALLOW_MASS_REMOVAL;
+  delete env.IMPORTER_ACCESS_CHECK;
 }
 
 // Add a BattleMetrics ban list with stored bans, each [uid, SteamID], and the pages it will return.
-function battlemetricsList(id, stored, pages) {
-  banLists.set(id, { id, type: 'battlemetrics', source: `bm-${id}` });
+function battlemetricsList(id, stored, pages, source = `bm-${id}`) {
+  banLists.set(id, { id, type: 'battlemetrics', source });
   for (const [uid, steamUser] of stored) {
     steamUsers.set(steamUser, user(steamUser));
     bans.set(`${id},${uid}`, {
@@ -313,7 +403,7 @@ function battlemetricsList(id, stored, pages) {
       banList: id
     });
   }
-  battlemetricsLists.set(`bm-${id}`, pages);
+  battlemetricsLists.set(source, pages);
 }
 // Add a remote ban list with a stored ban for each of the players, and the body it will return.
 function remoteList(id, players, body) {
@@ -452,9 +542,13 @@ assert.deepStrictEqual(report(), {
   removed: 0,
   held: 0,
   failedLists: 0,
+  selfImports: 0,
+  accessLost: 0,
+  accessCheck: 'unused',
   banLists: []
 });
 await reporter.importBans();
+// A list's state is given when it is not ok, and the access check was read.
 assert.deepStrictEqual(report(), {
   lists: 2,
   imported: 2,
@@ -464,6 +558,9 @@ assert.deepStrictEqual(report(), {
   removed: 1,
   held: 0,
   failedLists: 1,
+  selfImports: 0,
+  accessLost: 0,
+  accessCheck: 'ok',
   banLists: [
     {
       id: 1,
@@ -472,6 +569,7 @@ assert.deepStrictEqual(report(), {
       updated: 0,
       removed: 0,
       held: 0,
+      state: 'failing',
       attempt: 2,
       error: 'Error: Request failed with status code 500',
       stage: 'fetching it'
@@ -981,6 +1079,577 @@ assert.strictEqual(
   'Got 0 deleted bans. Imported 1 ban list: 20 bans fetched, 20 new, 0 updated, 0 removed, 0 held, 0 lists failed.'
 );
 
+// Each list's sync state is saved in its BanListSyncs row after its import. row(id) copies a row
+// into this test's own objects, with its times as numbers.
+function row(id) {
+  const saved = syncRows.get(id);
+  if (!saved) return undefined;
+  const time = (value) => (value && typeof value.getTime === 'function' ? value.getTime() : value);
+  return Object.fromEntries(Object.entries(saved).map(([field, value]) => [field, time(value)]));
+}
+const sha256 = (type, source) =>
+  createHash('sha256')
+    .update(JSON.stringify([type, source]))
+    .digest('hex');
+// The columns the import saves on every run, and those a new row, or the row of a list whose type
+// or source was changed, also starts with.
+const IMPORT_FIELDS = [
+  'banList',
+  'sourceKey',
+  'state',
+  'lastAttemptAt',
+  'lastSuccessAt',
+  'consecutiveFailures',
+  'lastError',
+  'storedCount',
+  'headTotal'
+];
+const FRESH_FIELDS = {
+  lastHeadPollAt: null,
+  lastFullScanAt: null,
+  nextFullScanAt: null,
+  scanReason: null,
+  incompleteScans: 0,
+  headUids: null,
+  replacePending: false,
+  allowFullRemovalUntil: null,
+  remoteEtag: null,
+  remoteLastModified: null,
+  remoteBodyHash: null
+};
+const savedFields = (id) =>
+  syncSaves.filter(({ values }) => values.banList === id).map(({ fields }) => [...fields].sort());
+// The alerts about lists, posted once each: a list failing 3 runs in a row, CBL losing access to
+// one, and one importing a CBL export ban list.
+const ALERT =
+  /^(Ban list \(ID: \d+\) (has failed to import|is not imported)|CBL can no longer read)/;
+const alerts = () => logged(1, ALERT).map((log) => log.message);
+
+// After one run, every list that was not removed during it has a row: imported (ok), failed
+// (failing), or imported with its removals held (held). It says when the list was tried and last
+// imported, how many runs in a row it failed and why, how many bans it has here and BattleMetrics'
+// count of them, and the key of its type and source. A new row starts with every column.
+reset();
+battlemetricsList(1, pairs('a', 0, 3), [pairs('a', 0, 4)]);
+battlemetricsTotals.set('bm-1', 4);
+battlemetricsList(2, pairs('b', 0, 2), [httpError(503)]);
+battlemetricsList(3, pairs('c', 0, 30), [pairs('c', 0, 2)]);
+remoteList(4, [1, 2], `${steamID(1)}:0 //Cheating\n${steamID(2)}:0 //Cheating`);
+battlemetricsList(5, pairs('e', 0, 1), [
+  () => {
+    banLists.delete(5);
+    return pairs('e', 0, 2);
+  }
+]);
+const started = Date.now();
+const firstRun = new BanImporter();
+await firstRun.importBans();
+const ended = Date.now();
+assert.deepStrictEqual(
+  [...syncRows.keys()].sort((a, b) => a - b),
+  [1, 2, 3, 4]
+);
+const imported = row(1);
+assert.ok(imported.lastAttemptAt >= started && imported.lastAttemptAt <= ended);
+assert.deepStrictEqual(imported, {
+  ...FRESH_FIELDS,
+  banList: 1,
+  sourceKey: sha256('battlemetrics', 'bm-1'),
+  state: 'ok',
+  lastAttemptAt: imported.lastAttemptAt,
+  lastSuccessAt: imported.lastAttemptAt,
+  consecutiveFailures: 0,
+  lastError: null,
+  storedCount: 4,
+  headTotal: 4
+});
+// Both of the failed list's attempts count as one failed run.
+assert.deepStrictEqual(row(2), {
+  ...FRESH_FIELDS,
+  banList: 2,
+  sourceKey: sha256('battlemetrics', 'bm-2'),
+  state: 'failing',
+  lastAttemptAt: row(2).lastAttemptAt,
+  lastSuccessAt: null,
+  consecutiveFailures: 1,
+  lastError: 'Error: Request failed with status code 503',
+  storedCount: 2,
+  headTotal: null
+});
+assert.ok(row(2).lastAttemptAt >= imported.lastAttemptAt);
+assert.deepStrictEqual(
+  [row(3).state, row(3).storedCount, row(3).consecutiveFailures, row(3).lastError],
+  ['held', 30, 0, null]
+);
+assert.strictEqual(row(3).lastSuccessAt, row(3).lastAttemptAt);
+assert.deepStrictEqual(
+  [row(4).state, row(4).sourceKey, row(4).storedCount, row(4).headTotal],
+  ['ok', sha256('remote', 'https://bans.example/4.txt'), 2, null]
+);
+assert.deepStrictEqual(savedFields(1), [[...IMPORT_FIELDS, ...Object.keys(FRESH_FIELDS)].sort()]);
+// Saving a row posts nothing.
+assert.deepStrictEqual(alerts(), []);
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(firstRun.report())).banLists.map(({ id, state }) => [id, state]),
+  [
+    [1, undefined],
+    [2, 'failing'],
+    [3, 'held'],
+    [4, undefined],
+    [5, undefined]
+  ]
+);
+
+// A list that fails 3 runs in a row is posted about once, at the 3rd, and not at the runs after.
+// A run's second attempt at it counts with its first. Once it imports again, it is back to ok, with
+// a line in the console, and is posted about again only after another 3 failed runs in a row.
+reset();
+battlemetricsList(6, pairs('f', 0, 2), [httpError(503)]);
+// The other list keeps the second attempts going.
+battlemetricsList(7, [], [pairs('g', 0, 1)]);
+const failureAlert = (lastImported) =>
+  `Ban list (ID: 6) has failed to import 3 runs in a row, so its bans may be out of date: ${lastImported}. Its latest error: Error: Request failed with status code 503`;
+for (let run = 1; run <= 5; run++) {
+  logs.length = 0;
+  battlemetricsRequests.length = 0;
+  await new BanImporter().importBans();
+  assert.deepStrictEqual(battlemetricsRequests, ['bm-6', 'bm-7', 'bm-6'], `run ${run}`);
+  assert.deepStrictEqual(
+    [row(6).state, row(6).consecutiveFailures, row(6).lastSuccessAt],
+    ['failing', run, null],
+    `run ${run}`
+  );
+  assert.deepStrictEqual(
+    alerts(),
+    run === 3 ? [failureAlert('it has not been imported from its current source yet')] : [],
+    `run ${run}`
+  );
+  // Its failures are still posted, as on every run.
+  assert.strictEqual(logged(1, /^Failed to import ban list \(ID: 6\)/).length, 2, `run ${run}`);
+}
+logs.length = 0;
+battlemetricsLists.set('bm-6', [pairs('f', 0, 2)]);
+await run();
+assert.deepStrictEqual(
+  [row(6).state, row(6).consecutiveFailures, row(6).lastError],
+  ['ok', 0, null]
+);
+const lastImported = row(6).lastSuccessAt;
+assert.strictEqual(lastImported, row(6).lastAttemptAt);
+assert.strictEqual(
+  logged(
+    2,
+    /^Ban list \(ID: 6\) is back to normal: it was imported again, after failing 5 runs in a row\.$/
+  ).length,
+  1
+);
+assert.deepStrictEqual(alerts(), []);
+battlemetricsLists.set('bm-6', [httpError(503)]);
+for (let run = 1; run <= 3; run++) {
+  logs.length = 0;
+  await new BanImporter().importBans();
+  assert.strictEqual(row(6).lastSuccessAt, lastImported);
+  assert.deepStrictEqual(
+    alerts(),
+    run === 3
+      ? [failureAlert(`it was last imported at ${new Date(lastImported).toISOString()}`)]
+      : [],
+    `run ${run} after it imported`
+  );
+}
+
+// The access check reads BattleMetrics' list of the ban lists CBL can see, once a run, and compares
+// their IDs with the lists' sources ignoring case, hyphens and spaces. A list whose source is not
+// among them is still fetched and its new bans saved, but none of its bans are removed, even when
+// IMPORTER_ALLOW_MASS_REMOVAL names it. It is posted about once, when CBL loses access, and its row
+// says why. Once CBL can see it again, it is checked for removed bans again.
+reset();
+battlemetricsList(8, pairs('h', 0, 3), [[...pairs('h', 0, 1), ['h9', steamID(9)]]]);
+battlemetricsList(9, pairs('i', 0, 3), [pairs('i', 0, 2)], 'C0FFEE00-cb1e-4a00-b000-0000000000cc');
+battlemetricsList(10, pairs('j', 0, 3), [pairs('j', 0, 3)]);
+visibleBanLists = [' c0ffee00cb1e4a00b0000000000000cc ', 'BM-10', 'another-list'];
+env.IMPORTER_ALLOW_MASS_REMOVAL = '8';
+let checked = new BanImporter();
+results = await checked.importBans();
+assert.deepStrictEqual(banListReads, [['ban-lists', undefined]]);
+assert.deepStrictEqual(battlemetricsRequests, [
+  'bm-8',
+  'C0FFEE00-cb1e-4a00-b000-0000000000cc',
+  'bm-10'
+]);
+assert.deepStrictEqual(storedIDs(8), ['8,h0', '8,h1', '8,h2', '8,h9']);
+assert.deepStrictEqual(storedIDs(9), ['9,i0', '9,i1']);
+assert.ok(
+  !events.some(([type, , ids]) => type === 'destroy' && ids.some((id) => id.startsWith('8,')))
+);
+const NOT_SEEN = 'its source is not among the BattleMetrics ban lists the CBL organisation can see';
+assert.deepStrictEqual(
+  [row(8).state, row(8).consecutiveFailures, row(8).storedCount, row(8).lastError],
+  [
+    'access_lost',
+    0,
+    4,
+    'Its source is not among the BattleMetrics ban lists the CBL organisation can see, so its bans are not checked for removal.'
+  ]
+);
+// The list was fetched in full and its bans saved, so it was last imported now.
+assert.strictEqual(row(8).lastSuccessAt, row(8).lastAttemptAt);
+assert.deepStrictEqual([row(9).state, row(10).state], ['ok', 'ok']);
+assert.deepStrictEqual(alerts(), [
+  `CBL can no longer read ban list (ID: 8) on BattleMetrics, as ${NOT_SEEN}, so none of its 4 stored bans are removed from it while it cannot. If the list's owner has stopped sharing it with the CBL organisation, remove the list with /banlist remove, which removes its bans too.`
+]);
+// The list's own line goes only to the console, as the alert says what needs looking at.
+assert.strictEqual(
+  logged(
+    2,
+    new RegExp(
+      `^Imported ban list \\(ID: 8\\): 2 bans fetched, 1 new, 0 updated\\. None of its bans were checked for removal, as ${NOT_SEEN}\\.$`
+    )
+  ).length,
+  1
+);
+assert.deepStrictEqual(warnings(), logged(1, ALERT));
+assert.strictEqual(
+  summary(),
+  'Got 1 deleted ban. Imported 3 ban lists: 7 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed.'
+);
+let counts = JSON.parse(JSON.stringify(checked.report()));
+assert.deepStrictEqual(
+  [counts.accessLost, counts.accessCheck, counts.banLists[0].state],
+  [1, 'ok', 'access_lost']
+);
+assert.ok(results[0].accessLost);
+// The next run is not posted about again.
+logs.length = 0;
+await run();
+assert.deepStrictEqual([row(8).state, storedIDs(8).length], ['access_lost', 4]);
+assert.deepStrictEqual(alerts(), []);
+// Once CBL can see the list again, it loses the bans it no longer has.
+logs.length = 0;
+visibleBanLists = null;
+delete env.IMPORTER_ALLOW_MASS_REMOVAL;
+await run();
+assert.deepStrictEqual(storedIDs(8), ['8,h0', '8,h9']);
+assert.deepStrictEqual([row(8).state, row(8).lastError], ['ok', null]);
+assert.strictEqual(
+  logged(2, /^Ban list \(ID: 8\) is back to normal: CBL can read it on BattleMetrics again\.$/)
+    .length,
+  1
+);
+assert.deepStrictEqual(alerts(), []);
+
+// A failed read of BattleMetrics' ban lists never holds up the import: the run goes without the
+// check, so no list is marked for it, and says so in the console and the run record.
+reset();
+battlemetricsList(11, pairs('k', 0, 3), [pairs('k', 0, 2)]);
+battlemetricsList(12, pairs('l', 0, 3), [pairs('l', 0, 3)]);
+visibleBanLists = new Error('BattleMetrics GET ban-lists failed after 3 attempts: HTTP 503');
+checked = new BanImporter();
+await checked.importBans();
+assert.strictEqual(banListReads.length, 1);
+assert.deepStrictEqual(battlemetricsRequests, ['bm-11', 'bm-12']);
+assert.deepStrictEqual(storedIDs(11), ['11,k0', '11,k1']);
+assert.deepStrictEqual([row(11).state, row(12).state], ['ok', 'ok']);
+assert.strictEqual(
+  logged(
+    2,
+    /^Could not read which BattleMetrics ban lists the CBL organisation can see, so this run does not check them: Error: BattleMetrics GET ban-lists failed after 3 attempts: HTTP 503$/
+  ).length,
+  1
+);
+assert.deepStrictEqual(warnings(), []);
+assert.strictEqual(checked.report().accessCheck, 'failed');
+// Nor does a read that has a ban list without an ID.
+reset();
+battlemetricsList(11, pairs('k', 0, 3), [pairs('k', 0, 2)]);
+visibleBanLists = ['bm-11', ''];
+checked = new BanImporter();
+await checked.importBans();
+assert.deepStrictEqual([storedIDs(11).length, row(11).state], [2, 'ok']);
+assert.strictEqual(checked.report().accessCheck, 'failed');
+assert.strictEqual(
+  logged(2, /^Could not read .*: Error: BattleMetrics returned a ban list without an ID\.$/).length,
+  1
+);
+
+// IMPORTER_ACCESS_CHECK turns the check off with 0, false, off or no, and the import then reads no
+// list of ban lists and marks no list for it. It is on by default, and an invalid value leaves it
+// on, with a warning in the console. A run without BattleMetrics lists has no need to read it.
+for (const [setting, on] of [
+  [undefined, true],
+  ['', true],
+  ['1', true],
+  [' yes ', true],
+  ['0', false],
+  ['false', false],
+  ['OFF', false],
+  ['no', false],
+  ['maybe', true]
+]) {
+  reset();
+  battlemetricsList(13, pairs('m', 0, 3), [pairs('m', 0, 2)]);
+  visibleBanLists = [];
+  if (setting !== undefined) env.IMPORTER_ACCESS_CHECK = setting;
+  checked = new BanImporter();
+  await checked.importBans();
+  const label = JSON.stringify(setting);
+  assert.strictEqual(banListReads.length, on ? 1 : 0, label);
+  assert.strictEqual(checked.report().accessCheck, on ? 'ok' : 'off', label);
+  assert.deepStrictEqual(
+    [row(13).state, storedIDs(13).length],
+    on ? ['access_lost', 3] : ['ok', 2],
+    label
+  );
+  assert.strictEqual(
+    logged(
+      2,
+      /^IMPORTER_ACCESS_CHECK is off, so this run does not check which BattleMetrics ban lists the CBL organisation can see\.$/
+    ).length,
+    on ? 0 : 1,
+    label
+  );
+  assert.strictEqual(
+    logged(
+      2,
+      /^Warning: IMPORTER_ACCESS_CHECK must be 1 or 0, not "maybe", so the access check stays on\.$/
+    ).length,
+    setting === 'maybe' ? 1 : 0,
+    label
+  );
+}
+reset();
+remoteList(14, [1], `${steamID(1)}:0 //Cheating`);
+checked = new BanImporter();
+await checked.importBans();
+assert.deepStrictEqual([banListReads.length, checked.report().accessCheck], [0, 'unused']);
+
+// BattleMetrics gives a list that CBL may see, but not its bans, with no bans that it still
+// counts. That is not an emptied list: its fetch fails as hidden bans, it is not tried again, none
+// of its bans are removed even when IMPORTER_ALLOW_MASS_REMOVAL names it, and CBL is taken to have
+// lost access to it, with BattleMetrics' count kept in its row. A list that gives no bans and
+// counts none really is empty, and keeps its bans as before, held for confirmation.
+reset();
+battlemetricsList(15, pairs('n', 0, 5), [[]]);
+battlemetricsTotals.set('bm-15', 4376);
+battlemetricsList(16, pairs('o', 0, 5), [[]]);
+battlemetricsTotals.set('bm-16', 0);
+battlemetricsList(17, [], [pairs('p', 0, 1)]);
+env.IMPORTER_ALLOW_MASS_REMOVAL = '15';
+results = await run();
+assert.deepStrictEqual(battlemetricsRequests, ['bm-15', 'bm-16', 'bm-17']);
+assert.deepStrictEqual([storedIDs(15).length, storedIDs(16).length], [5, 5]);
+assert.ok(!events.some(([type]) => type === 'destroy'));
+const HIDDEN =
+  'Error: BattleMetrics counts 4,376 bans on the list but gave none of them, so CBL may no longer be allowed to see its bans.';
+assert.deepStrictEqual(
+  [row(15).state, row(15).headTotal, row(15).consecutiveFailures, row(15).lastError],
+  ['access_lost', 4376, 1, HIDDEN]
+);
+assert.deepStrictEqual([row(16).state, row(16).headTotal], ['held', 0]);
+assert.strictEqual(
+  logged(
+    1,
+    new RegExp(
+      `^Failed to import ban list \\(ID: 15\\) while fetching it, so none of its bans were removed\\. ${HIDDEN.replace(/[.()]/g, '\\$&')}$`
+    )
+  ).length,
+  1
+);
+assert.deepStrictEqual(alerts(), [
+  "CBL can no longer read ban list (ID: 15) on BattleMetrics, as BattleMetrics counts 4,376 bans on it but gave none of them, so none of its 5 stored bans are removed from it while it cannot. If the list's owner has stopped sharing it with the CBL organisation, remove the list with /banlist remove, which removes its bans too."
+]);
+assert.strictEqual(logged(1, /^Imported ban list \(ID: 16\): it returned no bans/).length, 1);
+assert.deepStrictEqual(
+  [results[0].retry, Boolean(results[0].accessLost), results[1].accessLost],
+  [false, true, null]
+);
+
+// BattleMetrics answers HTTP 404, Unknown ban list, for a list CBL cannot see. That list is taken
+// to have lost access, and is not tried again. Its failed runs go on counting, without the alert
+// for 3 failed runs in a row, as its loss of access was posted. Any other 404 is a failure.
+const unknownBanList = () =>
+  Object.assign(new Error('BattleMetrics GET bans failed: HTTP 404 (Unknown ban list)'), {
+    name: 'ApiError',
+    status: 404,
+    titles: ['Unknown ban list'],
+    response: { status: 404, data: { errors: [{ status: '404', title: 'Unknown ban list' }] } }
+  });
+reset();
+battlemetricsList(18, pairs('q', 0, 2), [unknownBanList()]);
+battlemetricsList(19, pairs('r', 0, 2), [httpError(404)]);
+battlemetricsList(20, [], [pairs('s', 0, 1)]);
+for (let run = 1; run <= 3; run++) {
+  logs.length = 0;
+  battlemetricsRequests.length = 0;
+  await new BanImporter().importBans();
+  assert.deepStrictEqual(battlemetricsRequests, ['bm-18', 'bm-19', 'bm-20'], `run ${run}`);
+  assert.deepStrictEqual(
+    [row(18).state, row(18).consecutiveFailures, row(19).state, row(19).consecutiveFailures],
+    ['access_lost', run, 'failing', run],
+    `run ${run}`
+  );
+  assert.deepStrictEqual(
+    alerts(),
+    {
+      1: [
+        "CBL can no longer read ban list (ID: 18) on BattleMetrics, as BattleMetrics answers that it does not know the list (HTTP 404, Unknown ban list), so none of its 2 stored bans are removed from it while it cannot. If the list's owner has stopped sharing it with the CBL organisation, remove the list with /banlist remove, which removes its bans too."
+      ],
+      2: [],
+      3: [
+        'Ban list (ID: 19) has failed to import 3 runs in a row, so its bans may be out of date: it has not been imported from its current source yet. Its latest error: Error: Request failed with status code 404'
+      ]
+    }[run],
+    `run ${run}`
+  );
+}
+assert.strictEqual(
+  row(18).lastError,
+  'ApiError: BattleMetrics GET bans failed: HTTP 404 (Unknown ban list)'
+);
+
+// A BattleMetrics list whose source is one of CBL's own export ban lists, however its case, hyphens
+// and spaces are written, is neither fetched nor swept, so its bans stay as they are until it is
+// removed. It is posted about once, and its row says so, without a time it was tried. A remote
+// list with the same source, an export ban list without a BattleMetrics ID, and a source that is
+// only part of an export ban list's ID are imported as usual.
+const EXPORT_ID = 'c0ffee00-cb1e-4a00-b000-0000000000aa';
+const OTHER_EXPORT_ID = 'c0ffee00-cb1e-4a00-b000-0000000000bb';
+reset();
+exportBanLists.push(
+  { id: 12, battlemetricsID: EXPORT_ID },
+  { id: 13, battlemetricsID: null },
+  { id: 14, battlemetricsID: ' - ' },
+  { id: 15, battlemetricsID: ` ${OTHER_EXPORT_ID.toUpperCase()} ` }
+);
+battlemetricsList(21, pairs('t', 0, 3), [pairs('t', 0, 1)], EXPORT_ID.toUpperCase());
+battlemetricsList(22, pairs('u', 0, 2), [pairs('u', 0, 1)], EXPORT_ID.replace(/-/g, ''));
+battlemetricsList(23, pairs('v', 0, 2), [pairs('v', 0, 1)], ` ${OTHER_EXPORT_ID} `);
+battlemetricsList(24, pairs('w', 0, 3), [pairs('w', 0, 2)], EXPORT_ID.slice(0, 8));
+banLists.set(25, { id: 25, type: 'remote', source: EXPORT_ID });
+remoteLists.set(EXPORT_ID, `${steamID(1)}:0 //Cheating`);
+for (let run = 1; run <= 2; run++) {
+  logs.length = 0;
+  battlemetricsRequests.length = 0;
+  remoteRequests.length = 0;
+  checked = new BanImporter();
+  await checked.importBans();
+  assert.deepStrictEqual(battlemetricsRequests, [EXPORT_ID.slice(0, 8)], `run ${run}`);
+  assert.deepStrictEqual(remoteRequests, [EXPORT_ID], `run ${run}`);
+  assert.deepStrictEqual(
+    [21, 22, 23].map((id) => storedIDs(id).length),
+    [3, 2, 2],
+    `run ${run}`
+  );
+  for (const id of [21, 22, 23])
+    assert.deepStrictEqual(
+      [row(id).state, row(id).lastAttemptAt, row(id).lastSuccessAt, row(id).consecutiveFailures],
+      ['self_import', null, null, 0],
+      `run ${run}, list ${id}`
+    );
+  assert.deepStrictEqual(
+    [row(21).storedCount, row(23).storedCount, row(24).state, row(25).state],
+    [3, 2, 'ok', 'ok'],
+    `run ${run}`
+  );
+  assert.deepStrictEqual(storedIDs(24), ['24,w0', '24,w1']);
+  assert.deepStrictEqual(
+    alerts(),
+    run === 1
+      ? [
+          "Ban list (ID: 21) is not imported, as its source is CBL's own export ban list (#12), and importing it would feed the players CBL exports back in as new bans. Its 3 stored bans are kept until the list is removed with /banlist remove, which removes them too.",
+          "Ban list (ID: 22) is not imported, as its source is CBL's own export ban list (#12), and importing it would feed the players CBL exports back in as new bans. Its 2 stored bans are kept until the list is removed with /banlist remove, which removes them too.",
+          "Ban list (ID: 23) is not imported, as its source is CBL's own export ban list (#15), and importing it would feed the players CBL exports back in as new bans. Its 2 stored bans are kept until the list is removed with /banlist remove, which removes them too."
+        ]
+      : [],
+    `run ${run}`
+  );
+  assert.strictEqual(
+    logged(
+      2,
+      /^Skipped ban list \(ID: 21\), as its source is CBL's own export ban list \(#12\), so none of its bans were fetched or removed\.$/
+    ).length,
+    1,
+    `run ${run}`
+  );
+  counts = JSON.parse(JSON.stringify(checked.report()));
+  assert.deepStrictEqual(
+    [counts.selfImports, counts.banLists.map(({ state }) => state)],
+    [3, ['self_import', 'self_import', 'self_import', undefined, undefined]],
+    `run ${run}`
+  );
+  assert.strictEqual(
+    summary(),
+    run === 1
+      ? 'Got 1 deleted ban. Imported 5 ban lists: 3 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed.'
+      : 'Got 0 deleted bans. Imported 5 ban lists: 3 bans fetched, 0 new, 0 updated, 0 removed, 0 held, 0 lists failed.',
+    `run ${run}`
+  );
+}
+
+// A list whose type or source was changed since its row was saved, as /banlist update does, starts
+// afresh: what was known about its old source, such as its failures, is forgotten, and every
+// column of its row is saved again. Otherwise only the import's own columns are saved, so a value
+// the bot set in another column is kept.
+reset();
+battlemetricsList(26, pairs('x', 0, 2), [httpError(503)]);
+battlemetricsList(27, [], [pairs('y', 0, 1)]);
+await run();
+await run();
+const due = new Date('2026-10-16T12:00:00.000Z');
+syncRows.get(26).nextFullScanAt = due;
+syncSaves.length = 0;
+await run();
+assert.deepStrictEqual([row(26).consecutiveFailures, row(26).nextFullScanAt], [3, due.getTime()]);
+assert.deepStrictEqual(savedFields(26), [[...IMPORT_FIELDS].sort(), [...IMPORT_FIELDS].sort()]);
+for (const id of storedIDs(26)) bans.delete(id);
+banLists.set(26, { ...banLists.get(26), source: 'bm-new' });
+battlemetricsLists.set('bm-new', [httpError(503)]);
+logs.length = 0;
+syncSaves.length = 0;
+await run();
+assert.deepStrictEqual(
+  [row(26).sourceKey, row(26).consecutiveFailures, row(26).nextFullScanAt, row(26).storedCount],
+  [sha256('battlemetrics', 'bm-new'), 1, null, 0]
+);
+assert.deepStrictEqual(savedFields(26).at(-1), [
+  ...[...IMPORT_FIELDS, ...Object.keys(FRESH_FIELDS)].sort()
+]);
+assert.deepStrictEqual(alerts(), []);
+
+// A list removed after its import, before its row is saved, has no row: its foreign key fails, as
+// the list is gone, which is not tried again and needs no warning. So does a list removed during
+// its import.
+reset();
+battlemetricsList(28, pairs('z', 0, 2), [pairs('z', 0, 2)]);
+battlemetricsList(29, [], [pairs('a', 0, 1)]);
+onCount = (id) => {
+  if (id === 28) banLists.delete(28);
+};
+await run();
+assert.deepStrictEqual([...syncRows.keys()], [29]);
+assert.strictEqual(savedFields(28).length, 1);
+assert.strictEqual(logged(2, /Could not save the sync state/).length, 0);
+assert.deepStrictEqual(warnings(), []);
+
+// A row that cannot be saved, as the database stays unavailable, costs the list only its row: its
+// import is unaffected, and the console says so.
+reset();
+battlemetricsList(30, pairs('b', 0, 3), [pairs('b', 0, 2)]);
+syncError = new ConnectionError();
+results = await run();
+assert.deepStrictEqual(storedIDs(30), ['30,b0', '30,b1']);
+assert.strictEqual(results[0].error, undefined);
+assert.strictEqual(syncSaves.length, 5);
+assert.deepStrictEqual(delays, [5000, 5000, 5000, 5000]);
+assert.strictEqual(
+  logged(
+    2,
+    /^Could not save the sync state of ban list \(ID: 30\): SequelizeConnectionRefusedError: connect ECONNREFUSED/
+  ).length,
+  1
+);
+assert.deepStrictEqual(warnings(), []);
+
 // A run asked to stop while a list's bans are being saved finishes the saves under way, each with
 // its player's update, and starts no more. None of the list's bans are removed, as the bans it did
 // not save would look removed, and no other list is imported. The summary counts the lists
@@ -1008,6 +1677,10 @@ assert.deepStrictEqual(
 );
 assert.ok(!events.some(([type, id]) => type === 'read list' && id === 31));
 assert.deepStrictEqual(battlemetricsRequests, ['bm-29', 'bm-30']);
+// The list imported before the stop has its row, and the one stopped part-way has none, as its
+// import neither failed nor finished.
+assert.deepStrictEqual([...syncRows.keys()], [29]);
+assert.strictEqual(row(29).state, 'ok');
 // The list it stopped in the middle of has a line of its own, which says what it saved.
 assert.deepStrictEqual(
   warnings().map(({ message, important }) => [message, important]),
@@ -1032,11 +1705,14 @@ assert.deepStrictEqual(JSON.parse(JSON.stringify(stoppedImporter.report())), {
   removed: 1,
   held: 0,
   failedLists: 0,
+  selfImports: 0,
+  accessLost: 0,
+  accessCheck: 'ok',
   banLists: [{ id: 29, fetched: 1, new: 0, updated: 0, removed: 1, held: 0, stored: 2 }]
 });
 
 assert.strictEqual(verboseLevelOneLines, 0, 'Lines for the log channel are logged as important');
 
 console.log(
-  'Ban import checks passed: complete lists only, awaited saves, holds, empty lists, second attempts, retries, source changes, stops and the run summary.'
+  'Ban import checks passed: complete lists only, awaited saves, holds, empty lists, second attempts, retries, source changes, sync state, the access check, lost access, self-imports, stops and the run summary.'
 );
