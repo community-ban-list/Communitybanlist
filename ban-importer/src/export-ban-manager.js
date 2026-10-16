@@ -3,7 +3,7 @@ import { ExportBan, ExportBanList, SteamUser } from 'scbl-lib/db/models';
 import { Op, QueryTypes, Transaction } from 'scbl-lib/db/sequelize';
 import { Logger } from 'scbl-lib/utils';
 
-import { stopIfRequested } from './run-control.js';
+import { reportProgress, stopIfRequested } from './run-control.js';
 
 // Changed Below on the 14900k. Will need to monitor to make sure issues do not arise.
 // const UPDATE_BATCH_SIZE = process.env.UPDATE_EXPORT_BANS_BATCH_SIZE || 100;
@@ -82,7 +82,9 @@ async function setStatus(ids, status, conditions, options = {}) {
 }
 
 export default class ExportBanManager {
-  static async updateExportBans() {
+  // Recalculate every player's export bans, counting in counts how many players have been, also
+  // when the step stops part-way.
+  static async updateExportBans(counts = {}) {
     Logger.verbose('ExportBanManager', 2, 'Fetching Steam users to update...');
     const profileStartTime = Date.now();
     const users = await SteamUser.findAll({ attributes: ['id'] });
@@ -106,14 +108,8 @@ export default class ExportBanManager {
     );
 
     const startingLength = users.length;
-    const myProgressBar = Logger.discordProgressBar(
-      'Core',
-      `Updating ${startingLength} ExportBans...`,
-      null,
-      0,
-      startingLength,
-      0
-    );
+    counts.players = 0;
+    reportProgress(0, startingLength, 'players');
     while (users.length > 0) {
       // A run that is asked to stop does so between batches.
       stopIfRequested();
@@ -314,14 +310,8 @@ export default class ExportBanManager {
           1000
         ).toFixed(2)}s`
       );
-      Logger.discordProgressBar(
-        'Core',
-        `Updating ${startingLength} ExportBans...`,
-        myProgressBar,
-        0,
-        startingLength,
-        startingLength - users.length
-      );
+      counts.players = startingLength - users.length;
+      reportProgress(counts.players, startingLength, 'players');
     }
     Logger.verbose(
       'ExportBanManager',

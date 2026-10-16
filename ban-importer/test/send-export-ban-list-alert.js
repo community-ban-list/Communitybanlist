@@ -34,7 +34,7 @@ const dependencies = {
     }
   },
   'scbl-lib/config': { HOST: 'https://communitybanlist.example' },
-  './run-control.js': { checkRunLock: async () => {}, stopIfRequested() {} }
+  './run-control.js': { checkRunLock: async () => {}, stopIfRequested() {}, reportProgress() {} }
 };
 
 const context = vm.createContext({});

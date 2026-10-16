@@ -52,6 +52,10 @@ for (const url of [
 const requests = [];
 let reply;
 const axios = {
+  async get(url, options) {
+    requests.push({ method: 'get', url, options });
+    return reply();
+  },
   async post(url, body, options) {
     requests.push({ method: 'post', url, body, options });
     return reply();
@@ -61,7 +65,17 @@ const axios = {
     return reply();
   }
 };
-const context = vm.createContext({ URL, AbortSignal });
+// The time after which each request is cut off, as the abort signal it was given says.
+const deadlines = [];
+const context = vm.createContext({
+  URL,
+  AbortSignal: {
+    timeout(ms) {
+      deadlines.push(ms);
+      return AbortSignal.timeout(ms);
+    }
+  }
+});
 
 async function load(path) {
   const url = new URL(path, import.meta.url);
@@ -93,6 +107,7 @@ async function load(path) {
 const {
   default: send,
   editDiscordWebhookMessage: edit,
+  getDiscordWebhookMessage: get,
   DELETED_WEBHOOK_CODES
 } = await load('../utils/discord-webhook.js');
 const { default: testWebhook } = await load('../utils/test-discord-webhook.js');
@@ -113,6 +128,7 @@ assert.strictEqual(request.body.content, null);
 assert.deepStrictEqual([...request.body.embeds], ['embed']);
 assert.deepStrictEqual([...request.body.allowed_mentions.parse], []);
 assert.strictEqual(request.options.timeout, 10000);
+assert.deepStrictEqual(deadlines, [15000]);
 assert.strictEqual(request.options.maxRedirects, 0);
 assert.ok(request.options.signal instanceof AbortSignal);
 assert.ok(request.options.validateStatus(500));
@@ -137,6 +153,15 @@ for (const [address, expected] of [
   await send(address);
   assert.strictEqual(requests[0].url, `${expected}?wait=true`);
 }
+
+// A caller that does not wait for the answer, such as the logger posting a run's status, can give
+// Discord longer to answer, and the request is then cut off 5 seconds after that.
+requests.length = 0;
+deadlines.length = 0;
+assert.strictEqual((await send(webhook, { embeds: ['embed'] }, { timeout: 30000 })).id, 'message');
+assert.strictEqual(requests[0].url, `${v10}?wait=true`);
+assert.strictEqual(requests[0].options.timeout, 30000);
+assert.deepStrictEqual(deadlines, [35000]);
 
 // Discord's error code reaches the caller, so deleted webhooks can be recognised, and the
 // webhook's address never appears in the error. The importer and the logger share the codes that
@@ -212,6 +237,7 @@ assert.strictEqual(requests[0].body.content, 'Updated');
 assert.deepStrictEqual([...requests[0].body.embeds], []);
 assert.deepStrictEqual([...requests[0].body.allowed_mentions.parse], []);
 assert.strictEqual(requests[0].options.timeout, 10000);
+assert.strictEqual(deadlines.at(-1), 15000);
 assert.strictEqual(requests[0].options.maxRedirects, 0);
 assert.ok(requests[0].options.signal instanceof AbortSignal);
 assert.ok(requests[0].options.validateStatus(500));
@@ -235,6 +261,39 @@ await assert.rejects(
   /^DiscordWebhookError: Discord answered HTTP 404: Unknown Message \(code 10008\)$/
 );
 
+// A message the webhook posted can be read back, e.g. to see whether an earlier run's status still
+// says the run is in progress, with the same time limits, without following redirects, and with no
+// body, in the message's thread and on version 10.
+requests.length = 0;
+reply = () => ({ status: 200, data: { id: '123', embeds: [{ title: 'Running' }] } });
+assert.strictEqual((await get(webhook, '123')).embeds[0].title, 'Running');
+assert.strictEqual(requests[0].method, 'get');
+assert.strictEqual(requests[0].url, `${v10}/messages/123`);
+assert.ok(!('body' in requests[0]));
+assert.strictEqual(requests[0].options.timeout, 10000);
+assert.strictEqual(deadlines.at(-1), 15000);
+assert.strictEqual(requests[0].options.maxRedirects, 0);
+assert.ok(requests[0].options.signal instanceof AbortSignal);
+assert.ok(requests[0].options.validateStatus(500));
+await get('https://discord.com/api/v9/webhooks/1/token/?thread_id=42', '123');
+assert.strictEqual(
+  requests[1].url,
+  'https://discord.com/api/v10/webhooks/1/token/messages/123?thread_id=42'
+);
+// It fails as edits do, e.g. for a message that was deleted.
+reply = () => ({ status: 404, data: { message: 'Unknown Message', code: 10008 } });
+await assert.rejects(get(webhook, '123'), (err) => {
+  assert.strictEqual(err.message, 'Discord answered HTTP 404: Unknown Message (code 10008)');
+  assert.deepStrictEqual([err.status, err.code, err.network], [404, 10008, false]);
+  return true;
+});
+reply = () => {
+  throw Object.assign(new Error(`timeout of 10000ms exceeded for ${webhook}`), {
+    code: 'ECONNABORTED'
+  });
+};
+await assert.rejects(get(webhook, '123'), (err) => err.network === true);
+
 // Anything else is refused before a request is made, so an edit cannot reach another endpoint.
 // These errors are not marked as network errors, so they are never tried again.
 requests.length = 0;
@@ -248,8 +307,14 @@ await assert.rejects(
   edit('https://evil.example/api/webhooks/1/token', '1'),
   /Invalid Discord webhook/
 );
-for (const id of [undefined, '', '12a', '1/../../2', '../messages', '1?wait=true'])
+for (const id of [undefined, '', '12a', '1/../../2', '../messages', '1?wait=true']) {
   await assert.rejects(edit(webhook, id), /^DiscordWebhookError: Invalid Discord message$/);
+  await assert.rejects(get(webhook, id), /^DiscordWebhookError: Invalid Discord message$/);
+}
+await assert.rejects(
+  get('https://evil.example/api/webhooks/1/token', '1'),
+  /Invalid Discord webhook/
+);
 assert.strictEqual(requests.length, 0);
 
 // The webhook test posts a message, and explains failures without the address.
@@ -266,4 +331,6 @@ await assert.rejects(testWebhook(webhook), (err) => {
   return true;
 });
 
-console.log('Discord webhook checks passed: address validation, sending, editing, and errors.');
+console.log(
+  'Discord webhook checks passed: address validation, sending, with longer to answer when asked, editing, reading messages back, and errors.'
+);

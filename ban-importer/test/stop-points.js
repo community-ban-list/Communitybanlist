@@ -25,7 +25,9 @@ function ended(promise, what) {
   return Promise.race([promise.catch((err) => err), timeout]).finally(() => clearTimeout(timer));
 }
 
-const Logger = { verbose() {}, important() {}, discordProgressBar: () => ({}) };
+// The steps post no progress bars, as the run's status shows how far they have got, so the logger
+// has none to give them.
+const Logger = { verbose() {}, important() {} };
 
 // Load a module of the importer with stand-ins for its dependencies, the real run-control.js, and
 // any other globals it needs.
@@ -169,8 +171,7 @@ async function loadBanImporter(lists, { onFetch = () => {}, options } = {}) {
         describeError,
         Logger: {
           verbose: (module, level, message) => lines.push({ level, message }),
-          important: (module, message) => lines.push({ level: 1, message, important: true }),
-          discordProgressBar: () => ({})
+          important: (module, message) => lines.push({ level: 1, message, important: true })
         }
       },
       './ban-fetcher.js': { default: BanFetcher }
@@ -400,7 +401,7 @@ for (const [lock, removes] of [
     [
       [
         'Got 0 deleted bans. Imported 2 ban lists before the run stopped: 1 ban fetched, 1 new, 0 updated, 0 removed, 0 held, 1 list failed.',
-        true
+        undefined
       ]
     ]
   );
@@ -508,8 +509,17 @@ for (const during of ['fetch', 'saves']) {
       'Failed to import ban list (ID: 2) while fetching it, so none of its bans were removed. Error: Request failed with status code 502',
       during === 'saves'
         ? 'Stopped importing ban list (ID: 2) at the second attempt while saving its bans, as the run is stopping, so none of its bans were removed (4 bans fetched, 2 new, 0 updated).'
-        : 'Stopped importing ban list (ID: 2) at the second attempt while fetching it, as the run is stopping, so none of its bans were removed (4 bans fetched, 0 new, 0 updated).',
-      'Got 1 deleted ban. Imported 1 of 2 ban lists before the run stopped: 1 ban fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed.'
+        : 'Stopped importing ban list (ID: 2) at the second attempt while fetching it, as the run is stopping, so none of its bans were removed (4 bans fetched, 0 new, 0 updated).'
+    ]
+  );
+  // The summary line still sums up the lists imported before the stop, in the console only.
+  assert.deepStrictEqual(
+    summary(lines).map(({ message, important }) => [message, important]),
+    [
+      [
+        'Got 1 deleted ban. Imported 1 of 2 ban lists before the run stopped: 1 ban fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed.',
+        undefined
+      ]
     ]
   );
 }

@@ -18,7 +18,10 @@ export const STATE = {
   // A summary of each of the latest runs, oldest first.
   RECENT_RUNS: 'recentRuns',
   // When the run, or the skipped start, that last posted that the importer is stale started.
-  LAST_STALE_ALERT_AT: 'lastStaleAlertAt'
+  LAST_STALE_ALERT_AT: 'lastStaleAlertAt',
+  // The status message in the log channel of the latest run that posted one, and when that run
+  // started, so the next run can correct it if the run's last edit did not reach Discord.
+  LAST_RUN_MESSAGE: 'lastRunMessage'
 };
 
 // How many runs recentRuns keeps.
@@ -79,9 +82,10 @@ export default class RunRecord {
     this.startedAt = Date.now();
     this.gitSha = process.env.GIT_SHA || 'unknown';
     // How long each phase took, in seconds, and the phase under way, which a run that does not
-    // finish names.
+    // finish names, and when it started.
     this.phases = {};
     this.phase = null;
+    this.phaseStartedAt = null;
     // The counts the steps reported, by step.
     this.counts = {};
     // The importer migrations the run applied.
@@ -94,6 +98,7 @@ export default class RunRecord {
   async time(name, work) {
     this.phase = name;
     const start = Date.now();
+    this.phaseStartedAt = start;
     try {
       return await work();
     } finally {
@@ -176,6 +181,41 @@ export async function saveRecord(record) {
         { transaction }
       );
   });
+}
+
+// The status message of the latest run that posted one, as { messageId, startedAt }, or null if
+// there is none. A run reads it before it saves its own.
+export async function readRunMessage() {
+  const row = await ImporterState.findByPk(STATE.LAST_RUN_MESSAGE);
+  const value = row?.value;
+  return typeof value?.messageId === 'string' && /^\d+$/.test(value.messageId) ? value : null;
+}
+
+// Save which status message a run posted, and when the run started, so the next run can find the
+// message if this one ends without its last edit.
+export async function saveRunMessage({ messageId, startedAt }) {
+  await ImporterState.upsert({
+    name: STATE.LAST_RUN_MESSAGE,
+    value: { messageId, startedAt: isoTime(startedAt) }
+  });
+}
+
+// The record of the run that started at startedAt, as lastRunMessage gives it: the latest run's
+// record, or else its summary in recentRuns, e.g. when a run that lost the run lock saved its
+// record after the run that took the lock over. Resolves with null when that run saved no record,
+// e.g. as it was killed.
+export async function readSavedRun(startedAt) {
+  if (typeof startedAt !== 'string') return null;
+  const rows = await ImporterState.findAll({
+    where: { name: [STATE.LAST_RUN, STATE.RECENT_RUNS] }
+  });
+  const state = Object.fromEntries(rows.map(({ name, value }) => [name, value]));
+  const recent = Array.isArray(state[STATE.RECENT_RUNS]) ? state[STATE.RECENT_RUNS] : [];
+  return (
+    [state[STATE.LAST_RUN], ...recent.toReversed()].find(
+      (saved) => saved?.startedAt === startedAt
+    ) ?? null
+  );
 }
 
 // Save when the run that posts a stale alert started, unless a run that started less than a

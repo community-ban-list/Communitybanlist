@@ -2,15 +2,24 @@ import { connect, disconnect, sequelize, takeRunLock } from 'scbl-lib/db';
 import { isDatabaseUnavailable } from 'scbl-lib/db/sequelize';
 import { describeError, Logger } from 'scbl-lib/utils';
 
-import RunRecord, { alertIfStale, saveRecord, succeeded } from './run-record.js';
+import RunRecord, {
+  alertIfStale,
+  readRunMessage,
+  readSavedRun,
+  saveRecord,
+  saveRunMessage,
+  succeeded
+} from './run-record.js';
 import {
   LOCK_LOST,
   requestStop,
   RunStopped,
+  setProgressListener,
   setRunLock,
   stopIfRequested,
   stopRequest
 } from './run-control.js';
+import renderRunStatus, { markEnded, markUnfinished } from './run-status.js';
 import migrate from './schema/migrate.js';
 
 // What the importer's exit code tells the script that starts it.
@@ -70,6 +79,13 @@ const RELEASE_RESERVE = 5 * 1000;
 
 // Why a run failed that was left waiting for something that can never happen.
 const LEFT_WAITING = 'The run was left waiting for something that can never happen';
+
+// Why a run stopped that lost its run lock, as its record gives it.
+const STOPPED_LOCK_LOST = `Stopped, as ${LOCK_LOST}`;
+
+// While a run goes, its status in the log channel is drawn again this often, so the time it has
+// taken stays current while nothing else changes. The logger edits it no more often than this.
+const STATUS_REFRESH = 15 * 1000;
 
 // Ends the run under way as one that was left waiting, while a run is under way.
 let endLeftWaiting = null;
@@ -133,6 +149,38 @@ function readSeconds(name, defaultSeconds) {
   return defaultSeconds;
 }
 
+// How a run's status names the way the run ended, from its record: a run that lost its run lock
+// failed, but is named for that.
+function outcomeOf({ exitCode, reason }) {
+  if (exitCode === EXIT_CODES.FINISHED) return 'finished';
+  if (exitCode === EXIT_CODES.INTERRUPTED) return 'stopped';
+  return reason === STOPPED_LOCK_LOST ? 'lockLost' : 'failed';
+}
+
+// The status of an earlier run, drawn from the record it saved, for a run whose last edit did not
+// reach Discord. The record does not say which steps were still to run, so steps gives them, nor
+// whether the phase a run that did not finish ended in had finished, as it has when the run stopped
+// between two steps, so that phase is shown as the one it ended in.
+function savedStatus(saved, steps) {
+  const phases = saved.phases && typeof saved.phases === 'object' ? saved.phases : {};
+  const finished = saved.exitCode === EXIT_CODES.FINISHED;
+  return {
+    outcome: outcomeOf(saved),
+    startedAt: Date.parse(saved.startedAt),
+    at: Date.parse(saved.endedAt),
+    seconds: saved.seconds,
+    gitSha: saved.gitSha,
+    steps,
+    phases,
+    phase: saved.phase,
+    completed: Object.keys(phases).filter((name) => finished || name !== saved.phase),
+    progress: {},
+    counts: saved.counts,
+    migrations: saved.migrations,
+    reason: saved.reason
+  };
+}
+
 // Wait for the database to answer, as the script that starts the importer may have just restarted
 // it.
 async function waitForDatabase() {
@@ -162,11 +210,124 @@ async function waitForDatabase() {
 // they reach the log channel even when the run's other messages fill its queue. Its start and its
 // end, when it finishes, are only printed in the console, as is the JSON line with its record that
 // every run prints when it ends.
+//
+// Once a run holds the lock, it also posts its status to the log channel: one message, edited at
+// most every 15 seconds while the run goes, with each finished phase and the progress of the one
+// under way, and edited a last time to show how the run ended, at the start of its end, before the
+// lock is released. A run that is skipped, or fails before it holds the lock, posts no status.
 export default async function run(steps) {
   const record = new RunRecord();
   const maxRunSeconds = readSeconds('IMPORTER_MAX_RUN_SECONDS', DEFAULT_MAX_RUN_SECONDS);
   const cadenceSeconds = readSeconds('IMPORTER_CADENCE_SECONDS', DEFAULT_CADENCE_SECONDS);
   let lock = null;
+
+  // The run's status message, once the run holds the lock, and the timer that draws it again. It
+  // shows the phases that finished, and how far each step got, as the steps report it.
+  let status = null;
+  let statusTimer = null;
+  const completed = new Set();
+  const progress = {};
+
+  // Draw the run's status, while it runs or once it has ended.
+  const drawStatus = () => {
+    const { ended } = record;
+    return {
+      embeds: [
+        renderRunStatus({
+          outcome: ended ? outcomeOf(ended) : 'running',
+          startedAt: record.startedAt,
+          at: ended ? Date.parse(ended.endedAt) : Date.now(),
+          seconds: ended?.seconds,
+          gitSha: record.gitSha,
+          steps: steps.map((step) => step.name),
+          phases: record.phases,
+          phase: record.phase,
+          phaseStartedAt: record.phaseStartedAt,
+          completed: [...completed],
+          progress,
+          counts: record.counts,
+          migrations: record.migrations,
+          reason: ended?.reason
+        })
+      ]
+    };
+  };
+
+  // Say that the run's status changed, which its next edit shows. It is drawn only then.
+  const showStatus = () => status?.update(drawStatus);
+
+  // Time a phase of the run, and note in its status when the phase starts and once it finished.
+  const time = async (name, work) => {
+    const timed = record.time(name, work);
+    showStatus();
+    const result = await timed;
+    completed.add(name);
+    showStatus();
+    return result;
+  };
+
+  // Post the run's status, now that the run holds the lock, and keep it up to date: the steps say
+  // how far they have got, and it is drawn again every 15 seconds. Without Discord logging there is
+  // nothing to keep up to date, nor once the message could not be posted or edited.
+  const postStatus = () => {
+    status = Logger.statusMessage(drawStatus);
+    if (status.stopped) return;
+    setProgressListener((report) => {
+      if (record.phase) progress[record.phase] = report;
+      showStatus();
+    });
+    const refresh = () => {
+      if (status.stopped) return;
+      showStatus();
+      statusTimer = setTimeout(refresh, STATUS_REFRESH);
+      // It must not keep the process running.
+      statusTimer.unref();
+    };
+    statusTimer = setTimeout(refresh, STATUS_REFRESH);
+    statusTimer.unref();
+  };
+
+  // Show how the run ended: drawn now and sent at once, ahead of the run's other log messages.
+  // Drawing it never fails the end of the run.
+  const finishStatus = () => {
+    clearTimeout(statusTimer);
+    statusTimer = null;
+    setProgressListener(null);
+    if (!status || status.stopped) return;
+    try {
+      status.finish(drawStatus());
+    } catch (err) {
+      console.warn(
+        `Warning: could not show how the run ended in its status: ${describeError(err)}`
+      );
+    }
+  };
+
+  // The status message of the run before this one is corrected if it still says that run is in
+  // progress, as that run's last edit did not reach Discord. A run that saved its record is shown
+  // as it ended, from its record, e.g. when Discord was down as it ended, and one that saved none
+  // ended without saying how, e.g. as it was killed, so it is marked as having ended without
+  // finishing. This run's own message is then saved in its place, once it is posted, for the next
+  // run to check. It is all done in the background, and nothing of it holds up or fails the run.
+  const checkLastStatus = async () => {
+    if (!status || status.stopped) return;
+    try {
+      const last = await readRunMessage();
+      if (last) {
+        const saved = await readSavedRun(last.startedAt);
+        const names = steps.map((step) => step.name);
+        Logger.reviseMessage(last.messageId, (message) =>
+          saved
+            ? markEnded(message, savedStatus(saved, names))
+            : markUnfinished(message, { foundAt: record.startedAt })
+        );
+      }
+      const messageId = await status.posted;
+      if (messageId && !finishing) await saveRunMessage({ messageId, startedAt: record.startedAt });
+    } catch (err) {
+      console.warn(`Warning: could not check the last run's status message: ${describeError(err)}`);
+    }
+  };
 
   // Report on the run: in the Discord log once the run holds the lock, and before that only in the
   // console, so a run that is stopped before it starts posts nothing.
@@ -219,15 +380,17 @@ export default async function run(steps) {
     return EXIT_CODES.FAILED;
   };
 
-  // End a run that holds the lock, once: print its record and save it, check whether the importer
-  // is now stale if the run did not succeed, close the database connections if it finished, then
-  // send the log messages still waiting and release the lock, all within END_TIMEOUT. A database
-  // that could not save the record in time, or is unavailable, is not asked whether the importer is
-  // stale, which leaves the time for the log messages. Resolves with the exit code.
+  // End a run that holds the lock, once: print its record, show how it ended in its status, save
+  // its record, check whether the importer is now stale if the run did not succeed, close the
+  // database connections if it finished, then send the log messages still waiting, the status's
+  // last edit among them, and release the lock, all within END_TIMEOUT. A database that could not
+  // save the record in time, or is unavailable, is not asked whether the importer is stale, which
+  // leaves the time for the log messages. Resolves with the exit code.
   let finishing = null;
   const finish = (exitCode, reason) => {
     finishing ??= (async () => {
       const code = end(exitCode, reason);
+      finishStatus();
       const releaseBy = Date.now() + END_TIMEOUT - RELEASE_RESERVE;
       // The time left before the lock is released, but at most limit.
       const left = (limit) => Math.max(0, Math.min(limit, releaseBy - Date.now()));
@@ -329,7 +492,7 @@ export default async function run(steps) {
 
   try {
     try {
-      await record.time('waitForDatabase', waitForDatabase);
+      await time('waitForDatabase', waitForDatabase);
     } catch (err) {
       if (err instanceof RunStopped) {
         console.log(err.message);
@@ -347,7 +510,7 @@ export default async function run(steps) {
     // Take the lock before anything else is posted to Discord, so a run that is skipped as another
     // run holds it posts nothing, unless the importer is stale.
     try {
-      lock = await record.time('takeRunLock', () =>
+      lock = await time('takeRunLock', () =>
         takeRunLock({
           onLost: (reason) => {
             report(
@@ -369,6 +532,7 @@ export default async function run(steps) {
       return end(EXIT_CODES.SKIPPED, 'Another run holds the run lock');
     }
     setRunLock(lock);
+    postStatus();
 
     let exitCode = EXIT_CODES.FAILED;
     let reason;
@@ -378,13 +542,20 @@ export default async function run(steps) {
         2,
         `Starting new CBL Update run (commit ${record.gitSha}, time limit ${maxRunSeconds}s, cadence ${cadenceSeconds}s)...`
       );
-      await record.time('connect', connect);
+      await time('connect', connect);
 
       stopIfRequested();
       // Each migration is recorded as it is applied, as a later one may fail.
-      const migrations = await record.time('migrate', () =>
-        migrate({ onApplied: (id) => record.migrations.push(id) })
+      const migrations = await time('migrate', () =>
+        migrate({
+          onApplied: (id) => {
+            record.migrations.push(id);
+            showStatus();
+          }
+        })
       );
+      // The importer's tables are there now, with the last run's status message.
+      checkLastStatus();
       if (migrations.applied.length > 0)
         Logger.verbose(
           'Core',
@@ -400,7 +571,7 @@ export default async function run(steps) {
 
       for (const step of steps) {
         stopIfRequested();
-        await record.time(step.name, async () => {
+        await time(step.name, async () => {
           try {
             await step.run();
           } finally {
@@ -432,6 +603,8 @@ export default async function run(steps) {
     endLeftWaiting = null;
     clearTimeout(watchdog);
     clearTimeout(hardExitTimer);
+    clearTimeout(statusTimer);
+    setProgressListener(null);
     process.off('SIGTERM', onSignal);
     process.off('SIGINT', onSignal);
   }

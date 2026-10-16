@@ -11,7 +11,7 @@ import {
 } from 'scbl-lib/utils';
 import { HOST } from 'scbl-lib/config';
 
-import { checkRunLock, stopIfRequested } from './run-control.js';
+import { checkRunLock, reportProgress, stopIfRequested } from './run-control.js';
 
 const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
 const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 50;
@@ -50,7 +50,9 @@ async function doSleep(ms) {
 }
 
 export default class Core {
-  static async updateSteamUserInfo() {
+  // Update the Steam profiles that are due, counting in counts how many were due and how many were
+  // updated, also when the step stops part-way.
+  static async updateSteamUserInfo(counts = {}) {
     Logger.verbose('Core', 2, 'Fetching Steam users to update...');
     const profileStartTime = Date.now();
     const users = await SteamUser.findAll({
@@ -69,17 +71,11 @@ export default class Core {
 
     Logger.verbose('Core', 2, `Updating ${users.length} Steam users...`);
     const startingLength = users.length;
-    const myProgressBar = Logger.discordProgressBar(
-      'Core',
-      `Updating ${users.length} Steam users...`,
-      null,
-      0,
-      startingLength,
-      0
-    );
+    Object.assign(counts, { due: startingLength, updated: 0 });
 
     let failedBatches = 0;
     while (users.length > 0) {
+      reportProgress(startingLength - users.length, startingLength, 'Steam users');
       // A run that is asked to stop does so between batches.
       stopIfRequested();
       const batch = users.splice(0, Math.min(UPDATE_STEAM_USER_INFO_BATCH_SIZE, users.length));
@@ -165,20 +161,14 @@ export default class Core {
               { where: { id: user.steamid } }
             )
           );
+          counts.updated++;
         } catch (err) {
           Logger.verbose('Core', 1, `Failed to update Steam user: `, err);
           continue;
         }
       }
     }
-    Logger.discordProgressBar(
-      'Core',
-      `Updating ${startingLength} Steam users...`,
-      myProgressBar,
-      0,
-      startingLength,
-      startingLength - users.length
-    );
+    reportProgress(startingLength - users.length, startingLength, 'Steam users');
 
     Logger.verbose(
       'Core',
@@ -338,7 +328,9 @@ export default class Core {
     );
   }
 
-  static async exportExportBans() {
+  // Send the export bans' changes to their lists, counting in counts how many were queued, and how
+  // many were created, deleted and failed, also when the step stops part-way.
+  static async exportExportBans(counts = {}) {
     Logger.verbose('Core', 2, 'Exporting Bans...');
     const profileStartTime = Date.now();
     // Get bans that need exporting, the longest waiting first. An export ban BattleMetrics refused
@@ -427,15 +419,7 @@ export default class Core {
     // Changes reach BattleMetrics from here on, so they must never be made by two runs at once.
     await checkRunLock();
 
-    const myProgressBar = Logger.discordProgressBar(
-      'Core',
-      `Exporting ${exportBans.length} Bans...`,
-      null,
-      0,
-      exportBans.length,
-      0
-    );
-    let currentList = 0;
+    Object.assign(counts, { queued: exportBans.length, created: 0, deleted: 0, failed: 0 });
 
     // Whether BattleMetrics refused the API key, which every BattleMetrics export ban list uses.
     let battlemetricsRefused = false;
@@ -453,8 +437,10 @@ export default class Core {
     // BattleMetrics may or may not have made has to be looked for on it.
     const battlemetricsBans = new Map();
 
-    // Update the export bans.
-    for (const exportBan of exportBans) {
+    // Update the export bans. The run's status shows how many have been gone through, including
+    // those left for the next run.
+    for (const [index, exportBan] of exportBans.entries()) {
+      reportProgress(index, exportBans.length, 'export bans');
       // A run that is asked to stop does so between export bans, never between a BattleMetrics
       // request and the database save that records it.
       stopIfRequested();
@@ -488,12 +474,14 @@ export default class Core {
           : await Core.deleteExportBan(exportBan, battlemetricsBans);
         if (made) {
           listChangeCount[exportBanList.id].made++;
+          counts[creating ? 'created' : 'deleted']++;
           if (failures) {
             failures.count = 0;
             listsDown = 0;
           }
         }
       } catch (err) {
+        counts.failed++;
         if (err.auth) {
           battlemetricsRefused = true;
           await Logger.verbose(
@@ -547,16 +535,8 @@ export default class Core {
           }
         }
       }
-      currentList++;
-      Logger.discordProgressBar(
-        'BanImporter',
-        `Exporting ${exportBans.length} Bans...`,
-        myProgressBar,
-        0,
-        exportBans.length,
-        currentList
-      );
     }
+    reportProgress(exportBans.length, exportBans.length, 'export bans');
     Logger.verbose(
       'Core',
       2,

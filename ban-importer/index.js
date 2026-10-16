@@ -27,6 +27,13 @@ process.on('unhandledRejection', (reason) => {
 
 const banImporter = new BanImporter();
 
+// A step that counts what it does as it goes, in an object it is given, which the run record keeps,
+// also when the step fails or stops part-way.
+function counted(name, work) {
+  let counts;
+  return { name, run: () => work((counts = {})), counts: () => counts };
+}
+
 // The run's steps, in order, each named for the run record, which also keeps the counts a step
 // gives. A run that is asked to stop does so between them.
 const steps = [];
@@ -37,7 +44,7 @@ if (TASKS_TO_COMPLETE.IMPORT_BANS)
     counts: () => banImporter.report()
   });
 if (TASKS_TO_COMPLETE.UPDATE_STEAM_USER_INFO)
-  steps.push({ name: 'updateSteamUserInfo', run: () => Core.updateSteamUserInfo() });
+  steps.push(counted('updateSteamUserInfo', (counts) => Core.updateSteamUserInfo(counts)));
 if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_POINTS)
   steps.push(
     { name: 'clearOrphanedUsers', run: () => Core.clearOrphanedUsers() },
@@ -46,9 +53,9 @@ if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_POINTS)
 if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_RANK)
   steps.push({ name: 'updateReputationRank', run: () => Core.updateReputationRank() });
 if (TASKS_TO_COMPLETE.UPDATE_EXPORT_BANS)
-  steps.push({ name: 'updateExportBans', run: () => ExportBanManager.updateExportBans() });
+  steps.push(counted('updateExportBans', (counts) => ExportBanManager.updateExportBans(counts)));
 if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS)
-  steps.push({ name: 'exportExportBans', run: () => Core.exportExportBans() });
+  steps.push(counted('exportExportBans', (counts) => Core.exportExportBans(counts)));
 
 // Set once the run has ended, as the importer exits with the run's code.
 let ended = false;

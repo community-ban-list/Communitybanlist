@@ -50,8 +50,15 @@ function fakeDatabase({ rows = {}, tablesMadeAt = null, error = null } = {}) {
       }
       return state.has(name) ? { name, value: read(name) } : null;
     },
-    async upsert({ name, value }, { transaction }) {
+    // The record's rows are written in a transaction. The run's status message is the one row
+    // written on its own.
+    async upsert({ name, value }, { transaction } = {}) {
       fail();
+      if (name === 'lastRunMessage' && !transaction) {
+        state.set(name, JSON.stringify(value));
+        writes.push(name);
+        return;
+      }
       assert.ok(transaction, `${name} is written in a transaction`);
       transaction.writes.push([name, JSON.stringify(value)]);
     }
@@ -605,6 +612,57 @@ for (const skipped of [false, true]) {
   assert.strictEqual(discord.length, 1);
 }
 
+// A run saves which status message it posted, and when it started, as lastRunMessage, on its own,
+// and the next run reads it back. A row that does not name a Discord message is ignored.
+{
+  const database = fakeDatabase();
+  const { readRunMessage, saveRunMessage, STATE } = await loadRunRecord(database);
+  assert.strictEqual(STATE.LAST_RUN_MESSAGE, 'lastRunMessage');
+  assert.strictEqual(await readRunMessage(), null);
+  await saveRunMessage({ messageId: '1430000000000000010', startedAt: START });
+  assert.deepStrictEqual(database.read('lastRunMessage'), {
+    messageId: '1430000000000000010',
+    startedAt: '2026-10-15T12:00:00.000Z'
+  });
+  assert.deepStrictEqual(plain(await readRunMessage()), database.read('lastRunMessage'));
+  assert.strictEqual(database.transactions(), 0);
+  for (const value of [{ messageId: 1430 }, { messageId: '../webhooks' }, {}, 'text', null]) {
+    database.state.set('lastRunMessage', JSON.stringify(value));
+    assert.strictEqual(await readRunMessage(), null, JSON.stringify(value));
+  }
+}
+
+// The next run finds the record of the run whose message it checks by when that run started, as
+// lastRunMessage gives it: the latest run's record, or else its summary in recentRuns, e.g. as a
+// run that lost the run lock saved its record after the run that took the lock over. A run that
+// saved no record, e.g. as it was killed, has none.
+{
+  const database = fakeDatabase();
+  const { default: RunRecord, readSavedRun, saveRecord, clock } = await loadRunRecord(database);
+  assert.strictEqual(await readSavedRun('2026-10-15T12:00:00.000Z'), null);
+
+  const earlier = new RunRecord();
+  earlier.count('importBans', () => ({ lists: 2, fetched: 30, banLists: [{ id: 1 }, { id: 2 }] }));
+  await saveRecord(earlier.end('failed', 1, 'Stopped, as it lost its run lock'));
+  clock.now += HOUR;
+  const latest = new RunRecord();
+  await saveRecord(latest.end('finished', 0));
+
+  assert.deepStrictEqual(
+    plain(await readSavedRun('2026-10-15T13:00:00.000Z')),
+    plain(latest.ended)
+  );
+  const { event, ...summary } = plain(earlier.ended);
+  assert.strictEqual(event, 'cbl-importer-run');
+  assert.deepStrictEqual(plain(await readSavedRun('2026-10-15T12:00:00.000Z')), {
+    ...summary,
+    counts: { importBans: { lists: 2, fetched: 30 } }
+  });
+  for (const startedAt of ['2026-10-15T06:00:00.000Z', undefined, null])
+    assert.strictEqual(await readSavedRun(startedAt), null, String(startedAt));
+  assert.strictEqual(database.transactions(), 2);
+}
+
 console.log(
-  'Run record checks passed: what a record holds, reasons cut on a character boundary, saving it with the latest 100 summaries, what counts as a success, and the staleness alert on the schedule, with its limit of one a cadence.'
+  'Run record checks passed: what a record holds, reasons cut on a character boundary, saving it with the latest 100 summaries, what counts as a success, the staleness alert on the schedule, with its limit of one a cadence, and the run status message to check, with the record of its run.'
 );
