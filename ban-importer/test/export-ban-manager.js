@@ -549,27 +549,73 @@ for (const type of ['battlemetrics', 'remote']) {
 }
 
 // However many export bans change, no statement names more than 1,000, so each stays small and
-// MySQL finds its export bans by primary key. Here a player newly qualifies for 1,001 lists, and
-// another no longer qualifies for 2,500.
+// MySQL finds its export bans by primary key. Here every kind of change is made to more than 1,000
+// export bans, each of its own player. A newly qualifies for 1,001 lists. B no longer qualifies
+// for 2,500 created export bans, C for 2,001 not yet created and D for 1,001 claimed ones. E, F
+// and G qualify again for 1,001 export bans queued to be deleted: on BattleMetrics lists with no
+// BattleMetrics ban and with one, and on remote lists.
+const lists = (first, count) => [...Array(count)].map((_, i) => first + i);
+const exportBansOn = (first, count, status, battlemetricsID) =>
+  lists(first, count).map((list) => [list, status, battlemetricsID]);
 setUp({
-  types: {},
-  steamUsers: ['A', 'B'],
-  qualifying: { A: [...Array(1001)].map((_, i) => 1000 + i) },
-  exportBans: { B: [...Array(2500)].map((_, i) => [5000 + i, 'CREATED', null]) }
+  types: Object.fromEntries([
+    ...lists(20000, 1001).map((list) => [list, 'battlemetrics']),
+    ...lists(30000, 1001).map((list) => [list, 'remote'])
+  ]),
+  steamUsers: ['A', 'B', 'C', 'D', 'E', 'F', 'G'],
+  qualifying: {
+    A: lists(1000, 1001),
+    E: lists(20000, 1001),
+    F: lists(20000, 1001),
+    G: lists(30000, 1001)
+  },
+  exportBans: {
+    B: exportBansOn(5000, 2500, 'CREATED', null),
+    C: exportBansOn(9000, 2001, 'TO_BE_CREATED', null),
+    D: exportBansOn(20000, 1001, 'TO_BE_CREATED', 'pending'),
+    E: exportBansOn(20000, 1001, 'TO_BE_DELETED', null),
+    F: exportBansOn(20000, 1001, 'TO_BE_DELETED', '1'),
+    G: exportBansOn(30000, 1001, 'TO_BE_DELETED', null)
+  }
 });
 await ExportBanManager.updateExportBans();
+// Each statement as its kind, the player whose export bans it names and how many it names.
 assert.deepStrictEqual(
-  writes().map((event) => [event.split(' ')[0], event.split(',').length - 1]),
+  writes().map((event) => [
+    event.split(' ')[0],
+    event.match(/([A-Z]),\d/)[1],
+    event.split(',').length - 1
+  ]),
   [
-    ['INSERT', 1000],
-    ['INSERT', 1],
-    ['UPDATE', 1000],
-    ['UPDATE', 1000],
-    ['UPDATE', 500]
+    ['INSERT', 'A', 1000],
+    ['INSERT', 'A', 1],
+    ['UPDATE', 'E', 1000],
+    ['UPDATE', 'E', 1],
+    ['UPDATE', 'F', 1000],
+    ['UPDATE', 'F', 1],
+    ['UPDATE', 'G', 1000],
+    ['UPDATE', 'G', 1],
+    ['UPDATE', 'B', 1000],
+    ['UPDATE', 'B', 1000],
+    ['UPDATE', 'B', 500],
+    ['UPDATE', 'D', 1000],
+    ['UPDATE', 'D', 1],
+    ['DELETE', 'C', 1000],
+    ['DELETE', 'C', 1000],
+    ['DELETE', 'C', 1]
   ]
 );
-assert.strictEqual(table.size, 3501);
-assert.ok([...table.values()].every((row) => row.updatedAt === 'now'));
+// Every one of them is changed, and C's are all deleted.
+const statesOf = (steamUser) =>
+  [...table.values()].filter((row) => row.steamUser === steamUser).map((row) => state(row.id));
+assert.deepStrictEqual(statesOf('A'), Array(1001).fill(['TO_BE_CREATED', null, 'now']));
+assert.deepStrictEqual(statesOf('B'), Array(2500).fill(['TO_BE_DELETED', null, 'now']));
+assert.deepStrictEqual(statesOf('C'), []);
+assert.deepStrictEqual(statesOf('D'), Array(1001).fill(['TO_BE_DELETED', 'pending', 'kept']));
+assert.deepStrictEqual(statesOf('E'), Array(1001).fill(['TO_BE_CREATED', null, 'kept']));
+assert.deepStrictEqual(statesOf('F'), Array(1001).fill(['CREATED', '1', 'now']));
+assert.deepStrictEqual(statesOf('G'), Array(1001).fill(['CREATED', null, 'now']));
+assert.strictEqual(table.size, 7505);
 
 console.log(
   'Export ban manager checks passed: one read a batch, every transition by ID with its conditions, no writes when nothing changes.'

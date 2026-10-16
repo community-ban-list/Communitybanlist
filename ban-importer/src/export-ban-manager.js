@@ -197,9 +197,10 @@ export default class ExportBanManager {
 
       // Read the batch's export bans once, by the index on steamUser, and work out which change.
       // Each step below then writes only those, by ID. They used to be found by three statements
-      // with id NOT IN (the export bans generated), for each of which MySQL read the whole table
-      // when that list held more than a few dozen IDs and at most 1,000, as it does for most
-      // batches: 0.4 to 1 second a statement.
+      // with id NOT IN (the export bans generated). For a list of up to 1,000 IDs, MySQL weighed
+      // up a range on the steamUser index for each player and gap in the list, estimating each by
+      // reading the index, and then, unless the list was short, read the whole table anyway: 0.4
+      // to 1 second a statement, most of it spent planning.
       const changes = findChanges(
         generatedBans,
         await ExportBan.findAll({
