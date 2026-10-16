@@ -22,7 +22,7 @@ A ban list's `source` is either:
 - **Remote:** a link to a text file with one ban per line in the format `steamID:expiry //reason`.
 - **BattleMetrics:** the ID of a BattleMetrics ban list, or a link to it. The CBL BattleMetrics organisation must have accepted the list's invite first.
 
-The bot test fetches the source before saving it, and rejects sources that are already used by another ban list. Use `skip_check` to save a source without fetching it, e.g. a list that is empty for now.
+The bot test fetches the source before saving it. It rejects sources that are already used by another ban list, and BattleMetrics sources that are one of CBL's own export ban lists, since importing one would feed exported players back in as new bans. Use `skip_check` to save a source without fetching it, e.g. a list that is empty for now; it skips only the test fetch, so the other checks still apply.
 
 Changes take effect on the next ban importer run. When a ban list is removed or given a new type or source, its bans are deleted straight away and the affected players are queued so the importer recalculates their reputation and export bans. A new type or source is refused while a ban importer run is under way, as the run could save the old source's bans again; try again once the run has finished.
 
