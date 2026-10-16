@@ -4,6 +4,7 @@ import { ExportBan, ExportBanList, SteamUser } from 'scbl-lib/db/models';
 import { Op } from 'scbl-lib/db/sequelize';
 import {
   createDiscordWebhookMessage,
+  DELETED_WEBHOOK_CODES,
   isDiscordWebhookUrl,
   Logger,
   sendDiscordWebhook
@@ -14,10 +15,6 @@ const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
 const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 50;
 const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 50000;
 const DISCORD_ALERT_CAP = 50;
-
-// Discord error codes meaning an export ban list's webhook is gone for good: it was deleted (Unknown
-// Webhook) or its token no longer works (Invalid Webhook Token).
-const DELETED_WEBHOOK_CODES = [10015, 50027];
 
 // Webhooks Discord has reported as deleted during this run, so they are not tried again.
 const deletedWebhooks = new Set();
@@ -59,7 +56,7 @@ export default class Core {
 
     Logger.verbose('Core', 2, `Updating ${users.length} Steam users...`);
     const startingLength = users.length;
-    const myProgressBar = await Logger.discordProgressBar(
+    const myProgressBar = Logger.discordProgressBar(
       'Core',
       `Updating ${users.length} Steam users...`,
       null,
@@ -335,7 +332,7 @@ export default class Core {
         1000
       ).toFixed(2)}s`
     );
-    const myProgressBar = await Logger.discordProgressBar(
+    const myProgressBar = Logger.discordProgressBar(
       'Core',
       `Exporting ${exportBans.length} Bans...`,
       null,

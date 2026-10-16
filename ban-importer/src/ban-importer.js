@@ -143,7 +143,7 @@ export default class BanImporter {
     const fetcher = new BanFetcher(this.queueBan);
 
     Logger.verbose('BanImporter', 2, 'Fetching ban lists...');
-    const myProgressBar = await Logger.discordProgressBar(
+    const myProgressBar = Logger.discordProgressBar(
       'BanImporter',
       `Fetching ${banLists.length} Ban Lists...`,
       null,
