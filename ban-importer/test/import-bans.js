@@ -342,16 +342,17 @@ const logged = (level, pattern) =>
   logs.filter((log) => log.level === level && pattern.test(log.message));
 const run = (options) => new BanImporter(options).importBans();
 
-// Each run ends with one important level-1 line, posted to Discord, that sums up the import. Other
-// level-1 lines are about lists that need looking at.
+// Each run ends with one line that sums up the import, printed to the console only, as the run's
+// status message in Discord shows the same totals. Level-1 lines are about lists that need looking
+// at.
 const SUMMARY =
   /^Got [\d,]+ deleted bans?\. Imported [\d,]+ (of [\d,]+ )?ban lists?( before the run stopped)?: /;
 const warnings = () => logs.filter((log) => log.level === 1 && !SUMMARY.test(log.message));
 function summary() {
   const lines = logs.filter((log) => SUMMARY.test(log.message));
   assert.strictEqual(lines.length, 1, 'One summary line per run');
-  assert.strictEqual(lines[0].level, 1);
-  assert.ok(lines[0].important);
+  assert.strictEqual(lines[0].level, 2, 'The summary line is not posted to Discord');
+  assert.ok(!lines[0].important);
   return lines[0].message;
 }
 

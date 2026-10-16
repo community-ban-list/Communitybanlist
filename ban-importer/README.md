@@ -130,7 +130,7 @@ Only the importer checks: at the end of every run that did not succeed, and when
 
 ### The log channel
 
-The importer posts to `DISCORD_LOG_WEBHOOK` one status message for each run, and otherwise only what may need looking at: failures, removals held for confirmation, staleness, and the import's one summary line a run (`Got N deleted bans. Imported 20 ban lists: …`), each as a message of its own. Everything else is only printed in the console.
+The importer posts to `DISCORD_LOG_WEBHOOK` one status message for each run, and otherwise only what may need looking at: failures, removals held for confirmation and staleness, each as a message of its own. The import's totals appear in the status message; its summary line (`Got N deleted bans. Imported 20 ban lists: …`) is only printed in the console, with everything else.
 
 As soon as a run holds the run lock, it posts its status, an embed, and keeps it up to date while it goes, editing it at most every 15 seconds. The embed shows that the run is in progress, in blurple, when it started, in each viewer's own time, how long it has taken, the commit it runs and any importer migrations it applied. Below them are the run's steps: each finished one with a tick, its time and what it counted, the one under way with how long it has taken and a bar of how far it has got, e.g. `18,250 / 145,155 players` or `7 / 20 ban lists`, and those still to run.
 

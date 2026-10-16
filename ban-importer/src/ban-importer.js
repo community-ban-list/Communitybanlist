@@ -571,11 +571,11 @@ export default class BanImporter {
     }
   }
 
-  // Log one line for the whole import, which is posted to Discord on every run, as important, so it
-  // is never dropped for other messages. Bans that were kept as their removal needs confirming are
-  // counted as held, not removed. When the run stopped part-way, the line sums up the lists imported
-  // before it stopped, out of the listCount lists of the run, and leaves out a list it stopped in
-  // the middle of, at either attempt, which has a line of its own.
+  // Print one line for the whole import. It only goes to the console: the run's status message in
+  // Discord shows the same totals, from the import's report. Bans that were kept as their removal
+  // needs confirming are counted as held, not removed. When the run stopped part-way, the line sums
+  // up the lists imported before it stopped, out of the listCount lists of the run, and leaves out
+  // a list it stopped in the middle of, at either attempt, which has a line of its own.
   logSummary(results, { stopped = false, listCount = results.length } = {}) {
     const total = totals(results);
     const counts = [
@@ -590,8 +590,9 @@ export default class BanImporter {
       results.length < listCount
         ? `${formatCount(results.length)} of ${plural(listCount, 'ban list')}`
         : plural(results.length, 'ban list');
-    Logger.important(
+    Logger.verbose(
       'BanImporter',
+      2,
       `Got ${plural(total.removed, 'deleted ban')}. Imported ${lists}${stopped ? ' before the run stopped' : ''}: ${counts.join(', ')}.`
     );
   }
