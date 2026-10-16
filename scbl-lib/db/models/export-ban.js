@@ -10,9 +10,10 @@ import sequelize from '../sequelize.js';
 const { DataTypes, Op } = Sequelize;
 
 // While an export ban's BattleMetrics ban is being made, its battlemetricsID is 'pending'. That
-// claims the export ban, so no other run makes a ban for it too. When the request fails but
-// BattleMetrics may have made the ban anyway, the claim is kept, so the ban is looked for before
-// another is made. BattleMetrics' own IDs are numbers.
+// claims the export ban, so no other run makes a ban for it too, although another run that finds
+// the ban by its note may record it first. When the request fails but BattleMetrics may have made
+// the ban anyway, the claim is kept, so the ban is looked for before another is made.
+// BattleMetrics' own IDs are numbers.
 const PENDING = 'pending';
 
 // A claim this recent may belong to a request BattleMetrics is still carrying out, so a claimed
@@ -43,6 +44,9 @@ function bansByNote(bans) {
 // Find the bans with an export ban's note on its BattleMetrics ban list. Resolves with their IDs and
 // when the list's bans were read. Unless IMPORTER_BM_SEARCH_LOOKUP is 1, a list's bans are read the
 // first time one of its export bans is looked for, and kept in bansByList for the rest of the run.
+// A list whose bans could not be read is not read again in the run either: the lookup that read it
+// fails, and the others resolve with null, so their export bans wait for a later run rather than
+// each counting as another failure of the list.
 async function findBattlemetricsBans(exportBan, battlemetricsBanList, bansByList) {
   let found;
   if (SEARCH_LOOKUP) {
@@ -52,17 +56,17 @@ async function findBattlemetricsBans(exportBan, battlemetricsBanList, bansByList
       'filter[search]': exportBan.steamUser
     });
     found = { readAt, notes: bansByNote(bans) };
+  } else if (!bansByList.has(battlemetricsBanList)) {
+    const readAt = Date.now();
+    const read = readBattlemetricsPages('bans', { 'filter[banList]': battlemetricsBanList }).then(
+      (bans) => ({ readAt, notes: bansByNote(bans) })
+    );
+    const kept = read.catch(() => null);
+    bansByList.set(battlemetricsBanList, kept);
+    found = await read;
   } else {
-    if (!bansByList.has(battlemetricsBanList)) {
-      const readAt = Date.now();
-      bansByList.set(
-        battlemetricsBanList,
-        readBattlemetricsPages('bans', { 'filter[banList]': battlemetricsBanList }).then(
-          (bans) => ({ readAt, notes: bansByNote(bans) })
-        )
-      );
-    }
     found = await bansByList.get(battlemetricsBanList);
+    if (!found) return null;
   }
   return { readAt: found.readAt, ids: found.notes.get(battlemetricsNote(exportBan)) || [] };
 }
@@ -101,11 +105,9 @@ class ExportBan extends Sequelize.Model {
 
     if (this.battlemetricsID === PENDING) {
       // An earlier attempt may have made the ban, so it is looked for before another is made.
-      const { readAt, ids } = await findBattlemetricsBans(
-        this,
-        exportBanList.battlemetricsID,
-        bansByList
-      );
+      const lookup = await findBattlemetricsBans(this, exportBanList.battlemetricsID, bansByList);
+      if (!lookup) return 'waiting';
+      const { readAt, ids } = lookup;
       if (ids.length > 0) {
         const [adopted] = await ExportBan.update(
           { battlemetricsID: ids[0], status: 'CREATED' },
@@ -201,6 +203,9 @@ class ExportBan extends Sequelize.Model {
           }
         }
       ));
+      // An answer without the ban's ID fails like one BattleMetrics may have carried out, as it
+      // most likely made the ban, so the claim is kept.
+      if (!banData || !banData.id) throw new Error('Invalid BattleMetrics ban response.');
     } catch (err) {
       // BattleMetrics did not make the ban, so the claim is released for a later attempt. When it
       // may have, the claim is kept, and the ban is looked for before another is made.
@@ -215,15 +220,27 @@ class ExportBan extends Sequelize.Model {
     );
     if (recorded === 1) return 'created';
 
-    // The export ban was deleted while its ban was being made, e.g. along with its list, so
-    // nothing would ever delete the ban.
+    // The claim no longer holds. Another run may have found this ban by its note while it was being
+    // made, and recorded it, and it is then kept.
+    const current = await ExportBan.findByPk(this.id, { attributes: ['battlemetricsID'] });
+    if (current && current.battlemetricsID === String(banData.id)) {
+      Logger.verbose(
+        'ExportBan',
+        2,
+        `Another run recorded the Battlemetrics ban (ID: ${banData.id}) of export ban (ID: ${this.id}) while it was being made.`
+      );
+      return 'skipped';
+    }
+
+    // Otherwise the export ban was deleted while its ban was being made, e.g. along with its list,
+    // or another run recorded another ban for it, so nothing would ever delete this one.
     try {
       await battlemetrics('delete', `bans/${banData.id}`);
     } catch (err) {
       Logger.verbose(
         'ExportBan',
         1,
-        `Failed to delete the Battlemetrics ban (ID: ${banData.id}) made for export ban (ID: ${this.id}), which was deleted meanwhile: `,
+        `Failed to delete the Battlemetrics ban (ID: ${banData.id}) made for export ban (ID: ${this.id}), which nothing records: `,
         err
       );
     }
@@ -253,9 +270,10 @@ class ExportBan extends Sequelize.Model {
   // export ban may or may not have a ban, so it is looked for first.
   //
   // Resolves with 'deleted', or 'gone' when BattleMetrics had deleted the ban already, once the
-  // export ban is deleted, and with 'waiting' or 'skipped' when it left the export ban for a later
-  // run, or found it already deleted. A failed request throws, and leaves the export ban for a
-  // later run to delete.
+  // export ban is deleted, and with 'cleared' when BattleMetrics had no ban for it, so only the
+  // export ban was deleted. Resolves with 'waiting' or 'skipped' when it left the export ban for a
+  // later run, or found it already deleted. A failed request throws, and leaves the export ban for
+  // a later run to delete.
   async deleteBattlemetricsBan(bansByList = new Map()) {
     let banIDs = this.battlemetricsID ? [this.battlemetricsID] : [];
 
@@ -263,14 +281,11 @@ class ExportBan extends Sequelize.Model {
       const exportBanList = this.ExportBanList || (await this.getExportBanList());
       if (!exportBanList.battlemetricsID) return 'waiting';
 
-      const { readAt, ids } = await findBattlemetricsBans(
-        this,
-        exportBanList.battlemetricsID,
-        bansByList
-      );
+      const lookup = await findBattlemetricsBans(this, exportBanList.battlemetricsID, bansByList);
+      if (!lookup) return 'waiting';
       // A ban could still be being made for a recent claim.
-      if (ids.length === 0 && !claimWasOld(this, readAt)) return 'waiting';
-      banIDs = ids;
+      if (lookup.ids.length === 0 && !claimWasOld(this, lookup.readAt)) return 'waiting';
+      banIDs = lookup.ids;
     }
 
     let gone = false;
@@ -287,6 +302,7 @@ class ExportBan extends Sequelize.Model {
 
     const deleted = await ExportBan.destroy({ where: { id: this.id, status: 'TO_BE_DELETED' } });
     if (deleted !== 1) return 'skipped';
+    if (banIDs.length === 0) return 'cleared';
     return gone ? 'gone' : 'deleted';
   }
 }

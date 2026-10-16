@@ -375,6 +375,14 @@ export default class Core {
         `Skipped ${count} bans to add to ${exportBanList.server}'s List "${exportBanList.name}" (ID: ${exportBanList.id}), as it has no BattleMetrics ban list to add them to.`
       );
 
+    // Export bans claimed by an earlier run go first, so a ban BattleMetrics may have made for one is
+    // looked for, and recorded, early in the run. Claiming one changed its time, which would put it
+    // behind every export ban queued since, and those could hold it up for more runs. The others
+    // keep their order.
+    exportBans.sort(
+      (a, b) => (b.battlemetricsID === 'pending') - (a.battlemetricsID === 'pending')
+    );
+
     // Tally the number of changes per ban list.
     const listChangeCount = {};
     for (const exportBan of exportBans) {
@@ -486,14 +494,19 @@ export default class Core {
             err
           );
 
-          // A request that failed but may have been carried out leaves its export ban claimed, for
-          // the next run to look for the ban it may have made. The list's other export bans wait
-          // for that run too, as they do once a few of the list's requests in a row have failed,
-          // rather than each failing in turn.
+          // Once a few of a list's requests in a row have failed, its other export bans wait for
+          // the next run, rather than each failing in turn. A request BattleMetrics may have
+          // carried out, e.g. one answered with 5xx, keeps its export ban claimed, so the ban is
+          // not made twice, and only counts towards those. One that went unanswered, as it timed
+          // out or was cut off, stops the list at once, as BattleMetrics is then most likely not
+          // answering, and every other export ban would wait as long. Not so for an export ban an
+          // earlier run claimed: its request failed before, so the request itself may be what
+          // fails, and as claimed export bans go first, it would stop its list on every run.
           if (failures) {
             failures.count++;
-            if (err.ambiguous)
-              failures.stopped = 'BattleMetrics may have carried out a request that failed';
+            if (err.ambiguous && !err.response && exportBan.battlemetricsID !== 'pending')
+              failures.stopped =
+                'BattleMetrics did not answer a request, which it may have carried out';
             else if (failures.count >= BATTLEMETRICS_LIST_MAX_FAILURES)
               failures.stopped = `${failures.count} of its requests in a row failed`;
             if (failures.stopped)
@@ -645,8 +658,8 @@ export default class Core {
   }
 
   // Delete an export ban: remove it from its list's BattleMetrics ban list, for a BattleMetrics
-  // export ban list, and delete the record. Resolves with whether it was deleted, as one for
-  // BattleMetrics may be left for a later run.
+  // export ban list, and delete the record. Resolves with whether it was removed from the list, as
+  // one for BattleMetrics may be left for a later run, or have had no BattleMetrics ban.
   static async deleteExportBan(exportBan, battlemetricsBans) {
     let { ExportBanList: exportBanList } = exportBan;
 
@@ -664,6 +677,14 @@ export default class Core {
           'Core',
           1,
           `Removed export ban (ID: ${exportBan.id}) from Lists due to error 404 during deletion.`
+        );
+      // Nothing was removed from the list for an export ban that had no BattleMetrics ban, so its
+      // owner is not told otherwise.
+      if (result === 'cleared')
+        Logger.verbose(
+          'Core',
+          2,
+          `Deleted export ban (ID: ${exportBan.id}), which had no Battlemetrics ban.`
         );
       if (result !== 'deleted' && result !== 'gone') return false;
       exportBanList = current.ExportBanList;

@@ -56,8 +56,14 @@ function describe(object) {
 
 // A stand-in for Sequelize's Model, whose update and destroy change the rows in the table and say
 // how many they changed, as MySQL does. update sets updatedAt to the time, unless it is silent.
+// findByPk reads a row's given columns.
 class Model {
   static init() {}
+
+  static async findByPk(id, { attributes }) {
+    const found = table.get(id);
+    return found ? Object.fromEntries(attributes.map((column) => [column, found[column]])) : null;
+  }
 
   static async update(values, { where, silent }) {
     writes.push({ update: describe(values), where: describe(where) });
@@ -308,6 +314,114 @@ for (const change of [{ battlemetricsID: 'pending' }, { status: 'TO_BE_DELETED' 
   assert.strictEqual(writes.length, 1);
 }
 
+// The same goes for claiming an export ban again: if another run claimed it again first, which
+// changed the claim's time, or it is no longer to be created, it is skipped, and nothing is sent.
+// The change is made while the list is read, after this run found the claim to be old.
+for (const change of [
+  (changed) => (changed.updatedAt = new FakeDate(clock)),
+  (changed) => (changed.status = 'TO_BE_DELETED')
+]) {
+  reset();
+  const ban = exportBan(1, {
+    battlemetricsID: 'pending',
+    updatedAt: new FakeDate(clock - 30 * MINUTE)
+  });
+  onRead = () => change(table.get(ban.id));
+  assert.strictEqual(await ban.createBattlemetricsBan(new Map()), 'skipped');
+  assert.strictEqual(posts().length, 0);
+  assert.deepStrictEqual(writes, [
+    {
+      update: { battlemetricsID: 'pending' },
+      where: {
+        id: ban.id,
+        status: 'TO_BE_CREATED',
+        battlemetricsID: 'pending',
+        updatedAt: { lte: clock - 10 * MINUTE }
+      }
+    }
+  ]);
+  assert.strictEqual(row(ban.id).battlemetricsID, 'pending');
+}
+
+// A ban found for a claimed export ban is only recorded while the claim holds: not once another run
+// has recorded a ban for the export ban, nor once it is no longer to be created.
+for (const change of [{ battlemetricsID: '999', status: 'CREATED' }, { status: 'TO_BE_DELETED' }]) {
+  reset();
+  const ban = exportBan(1, { battlemetricsID: 'pending' });
+  const banID = addBan('bm-7', { note: note(ban.id) });
+  onRead = () => Object.assign(table.get(ban.id), change);
+  assert.strictEqual(await ban.createBattlemetricsBan(new Map()), 'skipped');
+  assert.notStrictEqual(row(ban.id).battlemetricsID, banID);
+  assert.strictEqual(row(ban.id).status, change.status);
+  assert.strictEqual(posts().length, 0);
+  assert.strictEqual(logs.length, 0);
+}
+
+// Nor is an earlier ban marked as created once the export ban has changed: once it is no longer to
+// be created, or records another ban.
+for (const change of [{ status: 'TO_BE_DELETED' }, { battlemetricsID: '556' }]) {
+  reset();
+  const ban = exportBan(1, { battlemetricsID: '555' });
+  Object.assign(table.get(ban.id), change);
+  assert.strictEqual(await ban.createBattlemetricsBan(new Map()), 'skipped');
+  assert.strictEqual(requests.length, 0);
+  assert.strictEqual(row(ban.id).status, change.status || 'TO_BE_CREATED');
+}
+
+// The claim stops another run making a second ban, but another run can find the ban by its note,
+// and record it, while the request that made it waits for its answer. The run that made the ban
+// then leaves it, as the export ban records it, rather than deleting it.
+{
+  reset();
+  const ban = exportBan(1);
+  let otherRun;
+  onPost = async (data) => {
+    const answer = makeBan(data);
+    otherRun = await read(ban.id).createBattlemetricsBan(new Map());
+    return answer;
+  };
+  assert.strictEqual(await ban.createBattlemetricsBan(new Map()), 'skipped');
+  assert.strictEqual(otherRun, 'found');
+  assert.deepStrictEqual([row(ban.id).status, row(ban.id).battlemetricsID], ['CREATED', '1']);
+  assert.deepStrictEqual(
+    bmLists.get('bm-7').map(({ id }) => id),
+    ['1']
+  );
+  assert.deepStrictEqual(
+    requests.map(({ method, endpoint }) => `${method} ${endpoint}`),
+    ['post bans', 'get bans']
+  );
+}
+
+// But if the other run records another ban for the export ban, e.g. one an earlier attempt made
+// that BattleMetrics only shows now, the ban this run made is a second one that nothing records,
+// so it is deleted.
+{
+  reset();
+  const ban = exportBan(1, {
+    battlemetricsID: 'pending',
+    updatedAt: new FakeDate(clock - 30 * MINUTE)
+  });
+  let otherRun;
+  onPost = async (data) => {
+    addBan('bm-7', { note: note(ban.id) });
+    const answer = makeBan(data);
+    otherRun = await read(ban.id).createBattlemetricsBan(new Map());
+    return answer;
+  };
+  assert.strictEqual(await ban.createBattlemetricsBan(new Map()), 'skipped');
+  assert.strictEqual(otherRun, 'found');
+  assert.deepStrictEqual([row(ban.id).status, row(ban.id).battlemetricsID], ['CREATED', '1']);
+  assert.deepStrictEqual(
+    bmLists.get('bm-7').map(({ id }) => id),
+    ['1']
+  );
+  assert.deepStrictEqual(
+    requests.map(({ method, endpoint }) => `${method} ${endpoint}`),
+    ['get bans', 'post bans', 'get bans', 'delete bans/2']
+  );
+}
+
 // When BattleMetrics may have made the ban, as the POST timed out, was cut off or failed with 5xx,
 // the claim is kept, so the ban is looked for before another is made, and the error is thrown.
 {
@@ -324,6 +438,24 @@ for (const change of [{ battlemetricsID: 'pending' }, { status: 'TO_BE_DELETED' 
   assert.strictEqual(row(ban.id).battlemetricsID, 'pending');
   assert.strictEqual(row(ban.id).status, 'TO_BE_CREATED');
   assert.strictEqual(writes.length, 1);
+}
+
+// An answer to the POST that does not give the ban's ID fails too, but BattleMetrics most likely
+// made the ban, so the claim is kept, rather than released for another ban to be made.
+for (const answer of [{}, { data: {} }, { data: { data: { type: 'ban' } } }]) {
+  reset();
+  const ban = exportBan(1);
+  onPost = (data) => {
+    makeBan(data);
+    return answer;
+  };
+  await assert.rejects(ban.createBattlemetricsBan(new Map()));
+  assert.deepStrictEqual(
+    [row(ban.id).status, row(ban.id).battlemetricsID],
+    ['TO_BE_CREATED', 'pending']
+  );
+  assert.strictEqual(writes.length, 1);
+  assert.strictEqual(bmLists.get('bm-7').length, 1);
 }
 
 // When BattleMetrics did not make it, as it refused the request or could not be reached, the claim
@@ -480,7 +612,8 @@ for (const failure of [
 }
 
 // A list whose bans cannot be read leaves its claimed export bans as they are, and is not read
-// again in the run.
+// again in the run. The lookup that read it fails, and the list's other claimed export bans, to be
+// created or deleted, wait for a later run, rather than each failing too.
 {
   reset();
   const bansByList = new Map();
@@ -492,8 +625,10 @@ for (const failure of [
   };
   const first = exportBan(1, { battlemetricsID: 'pending' });
   const second = exportBan(2, { battlemetricsID: 'pending' });
+  const third = exportBan(3, { status: 'TO_BE_DELETED', battlemetricsID: 'pending' });
   await assert.rejects(first.createBattlemetricsBan(bansByList), (err) => err === unavailable);
-  await assert.rejects(second.createBattlemetricsBan(bansByList), (err) => err === unavailable);
+  assert.strictEqual(await second.createBattlemetricsBan(bansByList), 'waiting');
+  assert.strictEqual(await third.deleteBattlemetricsBan(bansByList), 'waiting');
   assert.strictEqual(reads().length, 1);
   assert.strictEqual(writes.length, 0);
   assert.strictEqual(posts().length, 0);
@@ -550,21 +685,30 @@ for (const failure of [
 }
 
 // Deleting: an export ban with a ban has it deleted on BattleMetrics, and then is deleted, still
-// queued to be deleted. One with no ban needs no request.
-for (const [battlemetricsID, request] of [
-  ['set', 'delete bans/1'],
-  [null, null]
+// queued to be deleted. One with no ban needs no request, and is cleared: only it is deleted.
+for (const [battlemetricsID, request, result] of [
+  ['set', 'delete bans/1', 'deleted'],
+  [null, null, 'cleared']
 ]) {
   reset();
   const id = battlemetricsID && addBan('bm-7', { note: 'x' });
   const ban = exportBan(1, { status: 'TO_BE_DELETED', battlemetricsID: id });
-  assert.strictEqual(await ban.deleteBattlemetricsBan(new Map()), 'deleted');
+  assert.strictEqual(await ban.deleteBattlemetricsBan(new Map()), result);
   assert.deepStrictEqual(
     requests.map(({ method, endpoint }) => `${method} ${endpoint}`),
     request ? [request] : []
   );
   assert.deepStrictEqual(writes, [{ destroy: { id: ban.id, status: 'TO_BE_DELETED' } }]);
   assert.strictEqual(table.has(ban.id), false);
+}
+
+// One with no ban that is no longer to be deleted, or was deleted meanwhile, is skipped.
+for (const change of [(id) => (table.get(id).status = 'TO_BE_CREATED'), (id) => table.delete(id)]) {
+  reset();
+  const ban = exportBan(1, { status: 'TO_BE_DELETED' });
+  change(ban.id);
+  assert.strictEqual(await ban.deleteBattlemetricsBan(new Map()), 'skipped');
+  assert.strictEqual(requests.length, 0);
 }
 
 // A ban already gone from BattleMetrics, which answers 404, counts as deleted.
@@ -591,7 +735,7 @@ for (const [battlemetricsID, request] of [
 }
 
 // A claimed export ban to be deleted has its ban looked for: one that is found is deleted, and when
-// none is, the export ban is deleted once its claim is over 10 minutes old, as no ban was made.
+// none is, the export ban is cleared once its claim is over 10 minutes old, as no ban was made.
 // With a younger claim it waits.
 {
   reset();
@@ -609,7 +753,7 @@ for (const [battlemetricsID, request] of [
   });
   const bansByList = new Map();
   assert.strictEqual(await found.deleteBattlemetricsBan(bansByList), 'deleted');
-  assert.strictEqual(await old.deleteBattlemetricsBan(bansByList), 'deleted');
+  assert.strictEqual(await old.deleteBattlemetricsBan(bansByList), 'cleared');
   assert.strictEqual(await young.deleteBattlemetricsBan(bansByList), 'waiting');
   assert.deepStrictEqual(
     requests.map(({ method, endpoint }) => `${method} ${endpoint}`),
@@ -619,6 +763,32 @@ for (const [battlemetricsID, request] of [
     [found.id, old.id, young.id].map((id) => table.has(id)),
     [false, false, true]
   );
+}
+
+// Every ban with a claimed export ban's note is deleted, not just the first, as nothing records the
+// others either. One BattleMetrics had deleted already, which answers 404, still counts as deleted.
+for (const [missing, result] of [
+  [false, 'deleted'],
+  [true, 'gone']
+]) {
+  reset();
+  const ban = exportBan(1, { status: 'TO_BE_DELETED', battlemetricsID: 'pending' });
+  const banIDs = [addBan('bm-7', { note: note(ban.id) }), addBan('bm-7', { note: note(ban.id) })];
+  addBan('bm-7', { note: note('someone-else') });
+  if (missing)
+    onDelete = (id) => {
+      if (id === banIDs[0])
+        throw apiError(`BattleMetrics DELETE bans/${id} failed: HTTP 404 (Not Found)`, {
+          status: 404
+        });
+      return deleteBan(id);
+    };
+  assert.strictEqual(await ban.deleteBattlemetricsBan(new Map()), result);
+  assert.deepStrictEqual(
+    requests.map(({ method, endpoint }) => `${method} ${endpoint}`),
+    ['get bans', 'get bans', ...banIDs.map((id) => `delete bans/${id}`)]
+  );
+  assert.strictEqual(table.has(ban.id), false);
 }
 
 // With IMPORTER_BM_SEARCH_LOOKUP=1, each claimed export ban's ban is looked for by searching its
@@ -653,5 +823,5 @@ for (const [battlemetricsID, request] of [
 }
 
 console.log(
-  'Export ban checks passed: claims, notes, lookups of claimed bans, retries after 10 minutes, and deletions.'
+  'Export ban checks passed: claims, notes, lookups of claimed bans, retries after 10 minutes, races with other runs, and deletions.'
 );

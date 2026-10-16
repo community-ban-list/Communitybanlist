@@ -18,6 +18,7 @@ let queued = [];
 let queuedOrder;
 const current = new Map();
 
+const ExportBanList = {};
 const dependencies = {
   'scbl-lib/apis': { steam() {} },
   'scbl-lib/db': { sequelize: {} },
@@ -28,12 +29,15 @@ const dependencies = {
         queuedOrder = JSON.parse(JSON.stringify(order));
         return queued;
       },
-      findOne: async ({ where }) => {
+      // As with Sequelize, an export ban read again has its list only when the read includes it.
+      findOne: async ({ where, include = [] }) => {
         reads.push(where.id);
-        return current.get(where.id) || null;
+        const found = current.get(where.id);
+        if (!found) return null;
+        return include.includes(ExportBanList) ? found : { ...found, ExportBanList: undefined };
       }
     },
-    ExportBanList: {},
+    ExportBanList,
     SteamUser: {}
   },
   'scbl-lib/db/sequelize': { Op: { in: 'in' } },
@@ -102,12 +106,19 @@ const remoteList = {
 const added = (list) => `${webhook(list)}: Player has been added to your export ban list.`;
 const removed = (list) => `${webhook(list)}: Player has been removed from your export ban list.`;
 
-// An export ban as the run first reads it. Reading it again finds it the same, or with the fields
-// in again, or not at all when again is null, and its BattleMetrics work resolves with result.
+// An export ban as the run first reads it, with the given battlemetricsID. Reading it again finds
+// it the same, or with the fields in again, or not at all when again is null, and its BattleMetrics
+// work resolves with result.
 let exportBanCount = 0;
-function exportBan(status, list, { result, again = {} } = {}) {
+function exportBan(status, list, { result, again = {}, battlemetricsID = null } = {}) {
   const id = `7656119800000${String(++exportBanCount).padStart(4, '0')},${list.id}`;
-  const fields = { id, status, ExportBanList: list, SteamUser: { id, name: 'Player' } };
+  const fields = {
+    id,
+    status,
+    battlemetricsID,
+    ExportBanList: list,
+    SteamUser: { id, name: 'Player' }
+  };
   if (again !== null)
     current.set(id, {
       ...fields,
@@ -252,6 +263,54 @@ const reported = () =>
   assert.notStrictEqual([...bansByListMaps][0], firstRun);
 }
 
+// Export bans an earlier run claimed go first, so the bans BattleMetrics may have made for them are
+// looked for early in the run, although claiming them made them the most recently changed. The
+// others keep the order they were read in, the longest waiting first.
+{
+  const list = battlemetricsList(9);
+  const otherList = battlemetricsList(10);
+  const unclaimed = [
+    exportBan('TO_BE_CREATED', list),
+    exportBan('TO_BE_DELETED', otherList, { battlemetricsID: '555' }),
+    exportBan('TO_BE_CREATED', otherList)
+  ];
+  const claimed = [
+    exportBan('TO_BE_CREATED', list, { battlemetricsID: 'pending' }),
+    exportBan('TO_BE_DELETED', otherList, { battlemetricsID: 'pending' })
+  ];
+  await exportExportBans([unclaimed[0], claimed[0], unclaimed[1], unclaimed[2], claimed[1]]);
+  assert.deepStrictEqual(
+    reads,
+    [...claimed, ...unclaimed].map(({ id }) => id)
+  );
+  assert.strictEqual(events.length, 5);
+}
+
+// An export ban that had no BattleMetrics ban is deleted without telling its owner, as nothing was
+// removed from the list. Nor does it count as a change made for a list's summary alert.
+{
+  const list = battlemetricsList(11);
+  const cleared = exportBan('TO_BE_DELETED', list, { result: 'cleared' });
+  await exportExportBans([cleared]);
+  assert.deepStrictEqual(events, [`delete ${cleared.id} on bm-11`]);
+  assert.deepStrictEqual(alerts, []);
+  assert.deepStrictEqual(reported(), []);
+  assert.ok(
+    logs.some(
+      ({ level, message }) =>
+        level === 2 &&
+        message === `Deleted export ban (ID: ${cleared.id}), which had no Battlemetrics ban.`
+    )
+  );
+
+  const manyCleared = battlemetricsList(12);
+  await exportExportBans(
+    Array.from({ length: 50 }, () => exportBan('TO_BE_DELETED', manyCleared, { result: 'cleared' }))
+  );
+  assert.strictEqual(events.length, 50);
+  assert.deepStrictEqual(alerts, []);
+}
+
 console.log(
-  'Export checks passed: lists with no BattleMetrics ban list, export bans read again, and alerts for changes made.'
+  'Export checks passed: lists with no BattleMetrics ban list, export bans read again with their lists, claimed export bans first, and alerts for changes made.'
 );

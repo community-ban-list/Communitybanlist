@@ -173,7 +173,7 @@ assert.strictEqual(fiveSecondWaits(), 0);
 
 // An export ban, on a BattleMetrics list unless another is given, whose BattleMetrics requests
 // call request(). They resolve with what the model would: 'created' or 'deleted' unless request()
-// gives something else.
+// gives something else. An export ban an earlier run claimed has the battlemetricsID 'pending'.
 const battlemetricsList = {
   id: 1,
   type: 'battlemetrics',
@@ -183,9 +183,13 @@ const battlemetricsList = {
 };
 const remoteList = { id: 2, type: 'remote' };
 let exportBanCount = 0;
-const exportBan = (status, { list = battlemetricsList, request = () => {} } = {}) => ({
+const exportBan = (
+  status,
+  { list = battlemetricsList, request = () => {}, battlemetricsID = null } = {}
+) => ({
   id: `${list.id},${++exportBanCount}`,
   status,
+  battlemetricsID,
   ExportBanList: list,
   SteamUser: { id: '76561198000000001' },
   requests: 0,
@@ -210,22 +214,63 @@ async function exportExportBans(...bans) {
   await Core.exportExportBans();
 }
 
-// A BattleMetrics export ban that could not be created is logged with its error. As BattleMetrics
-// may have made its ban, the list's other export bans wait for the next run, which looks for it.
+// A BattleMetrics export ban that could not be created is logged with its error. When BattleMetrics
+// did not answer, as the request timed out or was cut off, it is most likely not answering at all,
+// so the list's other export bans wait for the next run, rather than each waiting as long.
 const timedOut =
   'BattleMetrics POST bans failed: timed out after 30s, so it may have been carried out';
-const unsure = exportBan('TO_BE_CREATED', {
-  request: () => {
-    throw apiError(timedOut, { code: 'ECONNABORTED', ambiguous: true });
-  }
-});
+const timeOut = () => {
+  throw apiError(timedOut, { code: 'ECONNABORTED', ambiguous: true });
+};
+const unsure = exportBan('TO_BE_CREATED', { request: timeOut });
 const waiting = exportBan('TO_BE_CREATED');
 await exportExportBans(unsure, waiting);
 assert.deepStrictEqual(errorLines(), [
   `Failed to create export ban (ID: ${unsure.id}): ${timedOut}`,
-  `Stopped exporting bans to BattleMetrics for Server's List "List" (ID: 1) until the next run, as BattleMetrics may have carried out a request that failed.`
+  `Stopped exporting bans to BattleMetrics for Server's List "List" (ID: 1) until the next run, as BattleMetrics did not answer a request, which it may have carried out.`
 ]);
 assert.strictEqual(waiting.requests, 0);
+
+// A request BattleMetrics answered with 5xx may have been carried out too, but its export ban stays
+// claimed, so its ban is not made twice, and the list's other export bans carry on. So do they
+// after a request that timed out for an export ban an earlier run claimed: its request failed
+// before, so it may be the request that fails, and as claimed export bans go first, it would hold
+// up its list on every run.
+const badGateway = 'BattleMetrics POST bans failed: HTTP 502, so it may have been carried out';
+for (const unanswered of [
+  exportBan('TO_BE_CREATED', {
+    request: () => {
+      throw apiError(badGateway, { status: 502, ambiguous: true });
+    }
+  }),
+  exportBan('TO_BE_CREATED', { request: timeOut, battlemetricsID: 'pending' })
+]) {
+  const others = [exportBan('TO_BE_CREATED'), exportBan('TO_BE_DELETED')];
+  await exportExportBans(unanswered, ...others);
+  assert.deepStrictEqual(
+    others.map((ban) => ban.requests),
+    [1, 1]
+  );
+  assert.deepStrictEqual(errorLines(), [
+    `Failed to create export ban (ID: ${unanswered.id}): ${unanswered.battlemetricsID ? timedOut : badGateway}`
+  ]);
+}
+
+// They still count towards the failures in a row, after which the list's other export bans wait.
+const gatewayErrors = Array.from({ length: 3 }, () =>
+  exportBan('TO_BE_CREATED', {
+    request: () => {
+      throw apiError(badGateway, { status: 502, ambiguous: true });
+    }
+  })
+);
+const afterThree = exportBan('TO_BE_CREATED');
+await exportExportBans(...gatewayErrors, afterThree);
+assert.strictEqual(afterThree.requests, 0);
+assert.strictEqual(
+  errorLines().at(-1),
+  `Stopped exporting bans to BattleMetrics for Server's List "List" (ID: 1) until the next run, as 3 of its requests in a row failed.`
+);
 
 // Any other error is passed to the logger too, so its stack trace is printed, such as one from
 // the database once the BattleMetrics ban was made.
