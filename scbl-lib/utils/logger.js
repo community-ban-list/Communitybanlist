@@ -4,7 +4,8 @@ import Bottleneck from 'bottleneck';
 import describeError, { stackTrace } from './describe-error.js';
 import sendDiscordWebhook, {
   DELETED_WEBHOOK_CODES,
-  editDiscordWebhookMessage
+  editDiscordWebhookMessage,
+  getDiscordWebhookMessage
 } from './discord-webhook.js';
 import isDiscordWebhookUrl from './discord-webhook-url.js';
 
@@ -16,9 +17,11 @@ const MIN_TIME = 400;
 
 // At most 200 messages, or 80 seconds of them, wait to be sent. When more arrive, the least
 // important are dropped first: progress bars, then other messages, then errors. A run's own lines,
-// such as its start, failure and summary, go ahead of all of these and are never dropped for them.
+// such as its start, failure and summary, go ahead of all of these and are never dropped for them,
+// and a status message, such as a run's, goes ahead of those, so its final edit is not lost.
 // Bottleneck sends the lowest numbers first.
 const MAX_QUEUED = 200;
+const STATUS_PRIORITY = 1;
 const RUN_PRIORITY = 2;
 const ERROR_PRIORITY = 4;
 const MESSAGE_PRIORITY = 5;
@@ -38,9 +41,9 @@ const MAX_MESSAGE_LENGTH = 1900;
 
 // A progress bar is only posted once it has existed for a minute without being finished, so a step
 // that takes less than a minute posts no bar at all. After that it is edited at most once every 15
-// seconds, with its latest value.
+// seconds, with its latest value, as is any message that is kept up to date.
 const PROGRESS_BAR_DELAY = 60 * 1000;
-const PROGRESS_BAR_INTERVAL = 15 * 1000;
+const EDIT_INTERVAL = 15 * 1000;
 
 function convertToBarChart(minValue = 0, maxValue = 1, barValue) {
   const chartWidth = 50;
@@ -73,60 +76,103 @@ function isError(value) {
   return typeof value?.message === 'string';
 }
 
-// A progress bar in the log channel, which discordProgressBar returns at once. It is posted in the
-// background a minute after it is made, unless it is finished by then, and then edited at most once
-// every 15 seconds with its latest value, so a step that updates it thousands of times sends a few
-// edits and never waits for Discord.
-class ProgressBar {
-  constructor(logger, content, finished) {
+// What a payload asks Discord to show, with its text cut to fit in a Discord message. A payload is
+// { content, embeds }, either of which may be left out.
+function messageBody(payload) {
+  return {
+    content: typeof payload.content === 'string' ? truncate(payload.content) : null,
+    embeds: payload.embeds ?? []
+  };
+}
+
+// A message in the log channel that is edited as what it shows changes, such as a progress bar or
+// a run's status, which the logger returns at once. It is posted in the background, at once or
+// after a delay, and then edited at most once every 15 seconds with its latest payload, so whatever
+// updates it thousands of times sends a few edits and never waits for Discord. A payload is
+// { content, embeds }, or a function that returns one, which is only called when the payload is
+// sent, so a message can show the latest of something that changes often without drawing it each
+// time.
+class LogMessage {
+  constructor(logger, payload, { priority, name, delay = 0, finished = false }) {
     this.logger = logger;
+    this.priority = priority;
+    // What the message is, for the console, e.g. 'a progress bar'.
+    this.name = name;
     this.messageID = null;
-    // The latest value, while it waits to be sent.
+    // The latest payload, while it waits to be sent.
     this.waiting = null;
     this.sending = false;
     this.sentAt = 0;
     this.timer = null;
     this.flushing = false;
-    // Without Discord logging, or once the bar could not be posted, updates do nothing rather than
-    // post new bars. A bar that is finished when it is made is never posted.
+    // Set once the message has its final payload, after which updates do nothing.
+    this.final = false;
+    // Settles with the message's ID once it is posted, or with null once it never will be.
+    this.posted = new Promise((resolve) => {
+      this.resolvePosted = resolve;
+    });
+    // Without Discord logging, or once the message could not be posted, updates do nothing rather
+    // than post new messages. A message that is finished when it is made is never posted.
     this.stopped = !logger.discordWebhook || finished;
-    // The latest value of a bar that is not posted yet.
+    // The latest payload of a message that is not posted yet.
     this.unposted = null;
-    if (this.stopped) return;
+    if (this.stopped) {
+      this.resolvePosted(null);
+      return;
+    }
 
-    this.unposted = content;
-    logger.unpostedProgressBars.add(this);
-    this.timer = setTimeout(() => this.post(), PROGRESS_BAR_DELAY);
-    // A bar that is not posted yet must not keep the process running.
+    if (delay === 0) {
+      this.wait(payload);
+      this.flush();
+      return;
+    }
+    this.unposted = payload;
+    logger.unpostedMessages.add(this);
+    this.timer = setTimeout(() => this.post(), delay);
+    // A message that is not posted yet must not keep the process running.
     this.timer.unref?.();
   }
 
-  update(content, finished) {
-    if (this.stopped) return;
+  update(payload) {
+    if (this.stopped || this.final) return;
     if (this.unposted !== null) {
-      // A bar that is finished within its first minute is never posted.
-      if (finished) this.stop();
-      else this.unposted = content;
+      this.unposted = payload;
       return;
     }
-    this.wait(content);
+    this.wait(payload);
     this.sendLatest();
   }
 
-  // Post the bar with its latest value, now that it has existed for a minute without being
-  // finished.
-  post() {
-    this.timer = null;
-    const content = this.unposted;
-    this.unposted = null;
-    this.logger.unpostedProgressBars.delete(this);
-    // Stop once Discord logging is off, as it is when its webhook turns out to be gone.
-    if (!this.logger.discordWebhook) this.stop();
-    if (this.stopped || content === null) return;
-    this.send(content);
+  // Give the message its final payload, which is sent at once rather than when it is due. Updates
+  // after it do nothing.
+  finish(payload) {
+    if (this.stopped || this.final) return;
+    this.final = true;
+    if (this.unposted !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+      this.unposted = null;
+      this.logger.unpostedMessages.delete(this);
+    }
+    this.wait(payload);
+    this.flush();
   }
 
-  // Send the latest value now rather than when it is due, e.g. before the service exits.
+  // Post the message with its latest payload, once its delay is up, e.g. a progress bar that has
+  // existed for a minute without being finished.
+  post() {
+    this.timer = null;
+    const payload = this.unposted;
+    this.unposted = null;
+    this.logger.unpostedMessages.delete(this);
+    // Stop once Discord logging is off, as it is when its webhook turns out to be gone.
+    if (!this.logger.discordWebhook) this.stop();
+    if (this.stopped || payload === null) return;
+    this.wait(payload);
+    this.flush();
+  }
+
+  // Send the latest payload now rather than when it is due, e.g. before the service exits.
   flush() {
     if (this.stopped || this.waiting === null) return;
     this.flushing = true;
@@ -135,48 +181,61 @@ class ProgressBar {
     this.sendLatest();
   }
 
-  wait(content) {
-    this.waiting = content;
-    if (content === null) this.logger.waitingProgressBars.delete(this);
-    else this.logger.waitingProgressBars.add(this);
+  wait(payload) {
+    this.waiting = payload;
+    if (payload === null) this.logger.waitingMessages.delete(this);
+    else this.logger.waitingMessages.add(this);
   }
 
   stop() {
     this.stopped = true;
     this.unposted = null;
-    this.logger.unpostedProgressBars.delete(this);
+    this.logger.unpostedMessages.delete(this);
     this.wait(null);
     clearTimeout(this.timer);
     this.timer = null;
+    // A message that was posted has already settled with its ID.
+    this.resolvePosted(null);
   }
 
-  // Send the latest value, once the last one has been sent and 15 seconds have passed since.
+  // Send the latest payload, once the last one has been sent and 15 seconds have passed since.
   sendLatest() {
     // Stop once Discord logging is off, as it is when its webhook turns out to be gone.
     if (!this.logger.discordWebhook) this.stop();
     if (this.stopped || this.sending || this.timer || this.waiting === null) return;
 
-    const due = this.flushing ? 0 : this.sentAt + PROGRESS_BAR_INTERVAL - Date.now();
+    const due = this.flushing ? 0 : this.sentAt + EDIT_INTERVAL - Date.now();
     if (due > 0) {
       this.timer = setTimeout(() => {
         this.timer = null;
         this.sendLatest();
       }, due);
-      // A value waiting to be sent must not keep the process running.
+      // A payload waiting to be sent must not keep the process running.
       this.timer.unref?.();
       return;
     }
 
-    const content = this.waiting;
+    const latest = this.waiting;
     this.wait(null);
     this.flushing = false;
-    this.send(content);
+    // A payload that is a function is drawn now. One that cannot be drawn stops the message, as it
+    // would most likely fail again, rather than fail whatever updated it.
+    let payload;
+    try {
+      payload = typeof latest === 'function' ? latest() : latest;
+      if (!payload || typeof payload !== 'object') throw new Error('It gave nothing to show');
+    } catch (err) {
+      console.warn(`Could not draw ${this.name} for the Discord log: ${describeError(err)}`);
+      this.stop();
+      return;
+    }
+    this.send(payload);
   }
 
-  send(content) {
+  send(payload) {
     this.sending = true;
     this.logger.queue(
-      PROGRESS_PRIORITY,
+      this.priority,
       async () => {
         try {
           // The webhook is read only now, as Discord logging is turned off if it turns out to be
@@ -186,37 +245,38 @@ class ProgressBar {
             this.stop();
           } else if (this.messageID) {
             await this.logger.withRetry(() =>
-              editDiscordWebhookMessage(webhook, this.messageID, { content: truncate(content) })
+              editDiscordWebhookMessage(webhook, this.messageID, messageBody(payload))
             );
           } else {
             const message = await this.logger.withRetry(() =>
-              sendDiscordWebhook(webhook, { content: truncate(content) })
+              sendDiscordWebhook(webhook, messageBody(payload))
             );
             if (!message?.id) throw new Error('Discord did not say which message it posted');
             this.messageID = message.id;
+            this.resolvePosted(message.id);
           }
         } catch (err) {
           if (!this.logger.webhookGone(err))
             console.warn(
-              `Could not ${this.messageID ? 'update' : 'post'} a progress bar in the Discord log: ${describeError(err)}`
+              `Could not ${this.messageID ? 'update' : 'post'} ${this.name} in the Discord log: ${describeError(err)}`
             );
-          this.failed(content, err?.status);
+          this.failed(payload, err?.status);
         }
         this.done();
       },
       () => {
-        this.failed(content);
+        this.failed(payload);
         this.done();
       }
     );
   }
 
-  // After a send failed or was dropped, give up on a bar that was never posted, or that Discord
-  // refused to edit, e.g. because its message was deleted. Otherwise send the value again when the
-  // next one is due, unless a newer value is waiting.
-  failed(content, status) {
+  // After a send failed or was dropped, give up on a message that was never posted, or that Discord
+  // refused to edit, e.g. because it was deleted. Otherwise send the payload again when the next one
+  // is due, unless a newer one is waiting.
+  failed(payload, status) {
     if (!this.messageID || (status >= 400 && status < 500 && status !== 429)) this.stop();
-    else if (this.waiting === null) this.wait(content);
+    else if (this.waiting === null) this.wait(payload);
   }
 
   done() {
@@ -255,10 +315,10 @@ class Logger {
       this.dropping = false;
     });
 
-    // Progress bars whose latest value is waiting to be sent, and progress bars not posted yet,
-    // which may never be.
-    this.waitingProgressBars = new Set();
-    this.unpostedProgressBars = new Set();
+    // Messages whose latest payload is waiting to be sent, such as a progress bar's latest value,
+    // and messages not posted yet, such as progress bars in their first minute, which may never be.
+    this.waitingMessages = new Set();
+    this.unpostedMessages = new Set();
   }
 
   verbose(module, verboseness, message, ...extras) {
@@ -304,18 +364,83 @@ class Logger {
   // that takes less than a minute posts nothing, and then edited at most once every 15 seconds,
   // with its latest value.
   discordProgressBar(module, message, progressBar, min = 0, max = 1, current) {
-    const content = `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`;
+    const payload = {
+      content: `[${module}] Progress on ${message}\n${convertToBarChart(min, max, current)}`
+    };
     const finished = current >= max;
-    if (!progressBar) return new ProgressBar(this, content, finished);
-    progressBar.update(content, finished);
+    if (!progressBar)
+      return new LogMessage(this, payload, {
+        priority: PROGRESS_PRIORITY,
+        name: 'a progress bar',
+        delay: PROGRESS_BAR_DELAY,
+        finished
+      });
+    // A bar that is finished within its first minute is never posted.
+    if (finished && progressBar.unposted !== null) progressBar.stop();
+    else progressBar.update(payload);
     return progressBar;
   }
 
-  // Send progress bars' latest values now rather than when they are due, e.g. before exiting. Bars
-  // that are not posted yet are dropped, as their steps took less than a minute.
+  // Post a message to the log channel that is kept up to date, such as a run's status, and return
+  // it at once, to update and finish later. It is posted in the background straight away, ahead of
+  // other messages, then edited at most once every 15 seconds with its latest payload, and its final
+  // payload, given to finish(), is sent at once. Nothing waits for Discord. A payload is
+  // { content, embeds }, or a function that returns one when it is sent.
+  statusMessage(payload) {
+    return new LogMessage(this, payload, { priority: STATUS_PRIORITY, name: 'a status message' });
+  }
+
+  // Change a message the log webhook posted earlier, such as the status message of a run that ended
+  // without its final edit. revise is given the message as Discord has it now, and returns the
+  // payload to replace it with, or nothing to leave it as it is. It is done in the background, ahead
+  // of other messages, and a failure is only reported in the console. Reading and editing a message
+  // can safely be done twice, so both are tried again after a network error too.
+  reviseMessage(messageID, revise) {
+    if (!this.discordWebhook) return;
+    this.queue(STATUS_PRIORITY, async () => {
+      // Discord logging may have been turned off while this waited, as its webhook is gone.
+      const webhook = this.discordWebhook;
+      if (!webhook) return;
+      let message;
+      try {
+        message = await this.withRetry(() => getDiscordWebhookMessage(webhook, messageID), {
+          retryNetwork: true
+        });
+      } catch (err) {
+        if (!this.webhookGone(err))
+          console.warn(`Could not read a message in the Discord log: ${describeError(err)}`);
+        return;
+      }
+      let payload;
+      try {
+        payload = revise(message);
+      } catch (err) {
+        console.warn(`Could not change a message in the Discord log: ${describeError(err)}`);
+        return;
+      }
+      if (!payload) return;
+
+      this.queue(STATUS_PRIORITY, async () => {
+        const webhook = this.discordWebhook;
+        if (!webhook) return;
+        try {
+          await this.withRetry(
+            () => editDiscordWebhookMessage(webhook, messageID, messageBody(payload)),
+            { retryNetwork: true }
+          );
+        } catch (err) {
+          if (!this.webhookGone(err))
+            console.warn(`Could not change a message in the Discord log: ${describeError(err)}`);
+        }
+      });
+    });
+  }
+
+  // Send messages' latest payloads now rather than when they are due, e.g. before exiting. Progress
+  // bars that are not posted yet are dropped, as their steps took less than a minute.
   flush() {
-    for (const progressBar of [...this.unpostedProgressBars]) progressBar.stop();
-    for (const progressBar of [...this.waitingProgressBars]) progressBar.flush();
+    for (const message of [...this.unpostedMessages]) message.stop();
+    for (const message of [...this.waitingMessages]) message.flush();
   }
 
   // Post a message to the log channel. Nothing waits for it, and a failure is only reported in the
@@ -348,8 +473,7 @@ class Logger {
       console.warn(
         `Warning: Discord logging is off, as Discord says the DISCORD_LOG_WEBHOOK webhook no longer exists: ${describeError(err)}`
       );
-      for (const progressBar of [...this.waitingProgressBars, ...this.unpostedProgressBars])
-        progressBar.stop();
+      for (const message of [...this.waitingMessages, ...this.unpostedMessages]) message.stop();
     }
     return true;
   }
@@ -383,8 +507,9 @@ class Logger {
   // (HTTP 429 or 5xx), after the wait Discord asked for, up to 10 seconds. With retryNetwork, a
   // request Discord could not be reached for, or did not answer in time, is also tried twice more,
   // after 1 and then 3 seconds. Discord may have posted a message it did not answer for in time,
-  // but a rare duplicate line in the log is better than a lost one. Progress bars do not use it: a
-  // posted bar's value is sent again with its next one, and one that was never posted stays quiet.
+  // but a rare duplicate line in the log is better than a lost one. Messages that are kept up to
+  // date, such as progress bars, do not use it: a posted message's payload is sent again with its
+  // next one, and one that was never posted stays quiet rather than risk being posted twice.
   async withRetry(request, { retryNetwork = false } = {}) {
     // The tries left: one after a 429 or 5xx, and one for each wait after a network error.
     const networkWaits = retryNetwork ? [...NETWORK_RETRY_WAITS] : [];
@@ -408,14 +533,14 @@ class Logger {
   }
 
   // How many messages for the log channel have been received, are queued, or are being sent.
-  // Progress bars' latest values count as queued while they wait to be due, but bars that are not
-  // posted yet do not, as they may never be. Once Discord logging is off, nothing more will be
-  // sent, so nothing is counted.
+  // Payloads waiting to be due, such as progress bars' latest values, count as queued, but progress
+  // bars that are not posted yet do not, as they may never be. Once Discord logging is off, nothing
+  // more will be sent, so nothing is counted.
   getLogQueue() {
     const counts = this.rl.counts();
     if (!this.discordWebhook)
       return Object.fromEntries(Object.keys(counts).map((status) => [status, 0]));
-    return { ...counts, QUEUED: counts.QUEUED + this.waitingProgressBars.size };
+    return { ...counts, QUEUED: counts.QUEUED + this.waitingMessages.size };
   }
 
   setVerboseness(module, verboseness) {

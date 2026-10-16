@@ -25,7 +25,9 @@ function ended(promise, what) {
   return Promise.race([promise.catch((err) => err), timeout]).finally(() => clearTimeout(timer));
 }
 
-const Logger = { verbose() {}, important() {}, discordProgressBar: () => ({}) };
+// The steps post no progress bars, as the run's status shows how far they have got, so the logger
+// has none to give them.
+const Logger = { verbose() {}, important() {} };
 
 // Load a module of the importer with stand-ins for its dependencies, the real run-control.js, and
 // any other globals it needs.
@@ -169,8 +171,7 @@ async function loadBanImporter(lists, { onFetch = () => {}, options } = {}) {
         describeError,
         Logger: {
           verbose: (module, level, message) => lines.push({ level, message }),
-          important: (module, message) => lines.push({ level: 1, message, important: true }),
-          discordProgressBar: () => ({})
+          important: (module, message) => lines.push({ level: 1, message, important: true })
         }
       },
       './ban-fetcher.js': { default: BanFetcher }

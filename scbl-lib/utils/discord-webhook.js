@@ -53,17 +53,31 @@ function webhookAddress(webhook) {
   return url;
 }
 
+// The address of a message a webhook posted, found under the webhook. A message in a thread also
+// needs the webhook's thread_id query, which is kept.
+function messageAddress(webhook, messageID) {
+  if (!isDiscordWebhookUrl(webhook)) throw new DiscordWebhookError('Invalid Discord webhook');
+  if (!/^\d+$/.test(messageID)) throw new DiscordWebhookError('Invalid Discord message');
+  const url = webhookAddress(webhook);
+  url.pathname += `/messages/${messageID}`;
+  return url;
+}
+
 // Make a request to a webhook address. Redirects are not followed, and the request gives up when
 // Discord does not answer in time. Returns Discord's answer, or throws a DiscordWebhookError.
 async function request(method, url, body) {
+  const options = {
+    timeout: DISCORD_WEBHOOK_TIMEOUT,
+    signal: AbortSignal.timeout(DISCORD_WEBHOOK_DEADLINE),
+    maxRedirects: 0,
+    validateStatus: () => true
+  };
   let response;
   try {
-    response = await axios[method](url.href, body, {
-      timeout: DISCORD_WEBHOOK_TIMEOUT,
-      signal: AbortSignal.timeout(DISCORD_WEBHOOK_DEADLINE),
-      maxRedirects: 0,
-      validateStatus: () => true
-    });
+    // A GET has no body.
+    response = await (method === 'get'
+      ? axios.get(url.href, options)
+      : axios[method](url.href, body, options));
   } catch (err) {
     if (TIMEOUT_CODES.includes(err.code))
       throw new DiscordWebhookError('Discord did not answer in time', { network: true });
@@ -111,13 +125,13 @@ export async function editDiscordWebhookMessage(
   messageID,
   { content = null, embeds = [] } = {}
 ) {
-  if (!isDiscordWebhookUrl(webhook)) throw new DiscordWebhookError('Invalid Discord webhook');
-  if (!/^\d+$/.test(messageID)) throw new DiscordWebhookError('Invalid Discord message');
-
-  // The message is found under the webhook. A message in a thread also needs the webhook's
-  // thread_id query, which is kept.
-  const url = webhookAddress(webhook);
-  url.pathname += `/messages/${messageID}`;
-
+  const url = messageAddress(webhook, messageID);
   return request('patch', url, { content, embeds, allowed_mentions: { parse: [] } });
+}
+
+// Read a message a webhook posted, e.g. to see whether an earlier run's status message still says
+// it is running, with the same checks and time limits as sendDiscordWebhook. Returns the message,
+// or throws a DiscordWebhookError.
+export async function getDiscordWebhookMessage(webhook, messageID) {
+  return request('get', messageAddress(webhook, messageID));
 }

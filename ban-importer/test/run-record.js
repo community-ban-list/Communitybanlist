@@ -50,8 +50,15 @@ function fakeDatabase({ rows = {}, tablesMadeAt = null, error = null } = {}) {
       }
       return state.has(name) ? { name, value: read(name) } : null;
     },
-    async upsert({ name, value }, { transaction }) {
+    // The record's rows are written in a transaction. The run's status message is the one row
+    // written on its own.
+    async upsert({ name, value }, { transaction } = {}) {
       fail();
+      if (name === 'lastRunMessage' && !transaction) {
+        state.set(name, JSON.stringify(value));
+        writes.push(name);
+        return;
+      }
       assert.ok(transaction, `${name} is written in a transaction`);
       transaction.writes.push([name, JSON.stringify(value)]);
     }
@@ -605,6 +612,26 @@ for (const skipped of [false, true]) {
   assert.strictEqual(discord.length, 1);
 }
 
+// A run saves which status message it posted, and when it started, as lastRunMessage, on its own,
+// and the next run reads it back. A row that does not name a Discord message is ignored.
+{
+  const database = fakeDatabase();
+  const { readRunMessage, saveRunMessage, STATE } = await loadRunRecord(database);
+  assert.strictEqual(STATE.LAST_RUN_MESSAGE, 'lastRunMessage');
+  assert.strictEqual(await readRunMessage(), null);
+  await saveRunMessage({ messageId: '1430000000000000010', startedAt: START });
+  assert.deepStrictEqual(database.read('lastRunMessage'), {
+    messageId: '1430000000000000010',
+    startedAt: '2026-10-15T12:00:00.000Z'
+  });
+  assert.deepStrictEqual(plain(await readRunMessage()), database.read('lastRunMessage'));
+  assert.strictEqual(database.transactions(), 0);
+  for (const value of [{ messageId: 1430 }, { messageId: '../webhooks' }, {}, 'text', null]) {
+    database.state.set('lastRunMessage', JSON.stringify(value));
+    assert.strictEqual(await readRunMessage(), null, JSON.stringify(value));
+  }
+}
+
 console.log(
-  'Run record checks passed: what a record holds, reasons cut on a character boundary, saving it with the latest 100 summaries, what counts as a success, and the staleness alert on the schedule, with its limit of one a cadence.'
+  'Run record checks passed: what a record holds, reasons cut on a character boundary, saving it with the latest 100 summaries, what counts as a success, the staleness alert on the schedule, with its limit of one a cadence, and the run status message to check.'
 );

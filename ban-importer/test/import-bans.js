@@ -233,8 +233,9 @@ const dependencies = {
         if (level === 1) verboseLevelOneLines++;
         logs.push({ level, message });
       },
-      important: (module, message) => logs.push({ level: 1, message, important: true }),
-      discordProgressBar: () => ({})
+      // The import no longer posts a progress bar, as the run's status shows how far it has got,
+      // so the logger has none to give it.
+      important: (module, message) => logs.push({ level: 1, message, important: true })
     }
   }
 };
@@ -800,7 +801,19 @@ battlemetricsList(17, pairs('m', 0, 3), [
   failsOnce([...pairs('m', 2, 3), ['m5', steamID(5)]])
 ]);
 battlemetricsList(18, pairs('o', 0, 2), [pairs('o', 0, 2)]);
+// The import says how many lists it has done, for the run's status: before the first and after
+// each one, and then how many of the lists it tried again.
+const progress = [];
+control.setProgressListener((report) => progress.push({ ...report }));
 results = await run();
+control.setProgressListener(null);
+assert.deepStrictEqual(progress, [
+  { done: 0, total: 2, unit: 'ban lists' },
+  { done: 1, total: 2, unit: 'ban lists' },
+  { done: 2, total: 2, unit: 'ban lists' },
+  { done: 0, total: 1, unit: 'ban lists tried again' },
+  { done: 1, total: 1, unit: 'ban lists tried again' }
+]);
 assert.deepStrictEqual(battlemetricsRequests, ['bm-17', 'bm-17', 'bm-18', 'bm-17', 'bm-17']);
 assert.deepStrictEqual(delays, [60 * 1000]);
 assert.deepStrictEqual(storedIDs(17), ['17,m0', '17,m2', '17,m5']);

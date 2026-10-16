@@ -86,16 +86,25 @@ For example, spread over several lines here and shortened:
 }
 ```
 
-| Field                  | What it holds                                                                                                                  |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `outcome`, `exitCode`  | How the run ended: `finished` (0), `failed` (1), `interrupted` (3) or `skipped` (75).                                          |
-| `startedAt`, `endedAt` | When the run started and ended, in UTC, and `seconds` how long it took.                                                        |
-| `gitSha`               | The commit the image was built from, from `GIT_SHA`, or `unknown` when that is not set.                                        |
-| `reason`               | Why a run did not finish: the error, or why it stopped or was skipped.                                                         |
-| `phase`                | The phase a run that did not finish was in, or had just finished when it stopped between two.                                  |
-| `migrations`           | The importer migrations the run applied, if any, also when a later one failed.                                                 |
-| `phases`               | How long each phase took, in seconds: waiting for the database, taking the run lock, connecting, migrations and each step.     |
-| `counts`               | What the steps counted. `importBans` has the totals of its summary line and, in `banLists`, each list's own counts and errors. |
+| Field                  | What it holds                                                                                                              |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `outcome`, `exitCode`  | How the run ended: `finished` (0), `failed` (1), `interrupted` (3) or `skipped` (75).                                      |
+| `startedAt`, `endedAt` | When the run started and ended, in UTC, and `seconds` how long it took.                                                    |
+| `gitSha`               | The commit the image was built from, from `GIT_SHA`, or `unknown` when that is not set.                                    |
+| `reason`               | Why a run did not finish: the error, or why it stopped or was skipped.                                                     |
+| `phase`                | The phase a run that did not finish was in, or had just finished when it stopped between two.                              |
+| `migrations`           | The importer migrations the run applied, if any, also when a later one failed.                                             |
+| `phases`               | How long each phase took, in seconds: waiting for the database, taking the run lock, connecting, migrations and each step. |
+| `counts`               | What the steps counted (see below).                                                                                        |
+
+The steps that count what they do keep their counts also when they fail or stop part-way:
+
+| Step                  | Counts                                                                                                                       |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `importBans`          | The totals of its summary line, how many of its `lists` it `imported` and, in `banLists`, each list's own counts and errors. |
+| `updateSteamUserInfo` | How many Steam users were `due` to be refreshed, and how many it `updated`.                                                  |
+| `updateExportBans`    | How many `players` it recalculated.                                                                                          |
+| `exportExportBans`    | How many export bans were `queued`, and of those, how many it `created` and `deleted`, and how many `failed`.                |
 
 A run that held the run lock also saves its record in the database, in the importer's `ImporterState` table:
 
@@ -105,12 +114,13 @@ A run that held the run lock also saves its record in the database, in the impor
 | `lastSuccessAt`    | When the latest successful run started: one that exited 0 and imported at least one ban list, if any. |
 | `recentRuns`       | The latest 100 runs' records, oldest first, without per-list counts.                                  |
 | `lastStaleAlertAt` | When the run, or the skipped start, that last posted that the importer is stale started.              |
+| `lastRunMessage`   | The ID of the latest run's status message in the log channel, and when that run started (see below).  |
 
 ```sql
 SELECT name, updatedAt, value FROM ImporterState;
 ```
 
-A run that never held the lock, e.g. one that was skipped or could not reach the database, only prints its line, except that a skipped start that posts that the importer is stale saves when it started, in `lastStaleAlertAt`. A run left waiting for something that can never happen, e.g. an answer on a connection that is gone, is ended as failed, and prints and saves its record. One ended at once by a second signal or 60 seconds after its time limit prints its line but has no time to save it. A run that is killed, e.g. by `docker rm -f` or for running out of memory, prints neither, and then only its exit code tells how it ended.
+A run that never held the lock, e.g. one that was skipped or could not reach the database, only prints its line, except that a skipped start that posts that the importer is stale saves when it started, in `lastStaleAlertAt`. A run left waiting for something that can never happen, e.g. an answer on a connection that is gone, is ended as failed, and prints and saves its record. One ended at once by a second signal or 60 seconds after its time limit prints its line but has no time to save it. A run that is killed, e.g. by `docker rm -f` or for running out of memory, prints neither, and then only its exit code, and its status message in the log channel, tell how far it got.
 
 ### Staleness
 
@@ -120,7 +130,15 @@ Only the importer checks: at the end of every run that did not succeed, and when
 
 ### The log channel
 
-The importer posts to `DISCORD_LOG_WEBHOOK` only what may need looking at: failures, removals held for confirmation, staleness, and the import's one summary line a run (`Got N deleted bans. Imported 20 ban lists: …`). Steps that take longer than a minute also show a progress bar. Everything else is only printed in the console.
+The importer posts to `DISCORD_LOG_WEBHOOK` one status message for each run, and otherwise only what may need looking at: failures, removals held for confirmation, staleness, and the import's one summary line a run (`Got N deleted bans. Imported 20 ban lists: …`), each as a message of its own. Everything else is only printed in the console.
+
+As soon as a run holds the run lock, it posts its status, an embed, and keeps it up to date while it goes, editing it at most every 15 seconds. The embed shows that the run is in progress, in blurple, when it started, in each viewer's own time, how long it has taken, the commit it runs and any importer migrations it applied. Below them are the run's steps: each finished one with a tick, its time and what it counted, the one under way with how long it has taken and a bar of how far it has got, e.g. `18,250 / 145,155 players` or `7 / 20 ban lists`, and those still to run.
+
+When the run ends, it edits the embed a last time, before it releases the lock, to show how it ended: finished in green, failed in red, lost its run lock in red, or stopped in orange, as it received `SIGTERM` or `SIGINT` or took longer than `IMPORTER_MAX_RUN_SECONDS`. The embed then shows how long the run took, each step's time and counts (the import's totals as in its summary line, the Steam profiles updated, the players recalculated, and the export bans created and deleted), and for a run that did not finish, the phase it ended in and why. A run that is skipped, or fails before it holds the lock, posts no status, only its failure line, if it failed.
+
+A run that ends without its last edit, as it was killed, ran out of memory, or was ended at once by a second signal or 60 seconds after its time limit, leaves its embed saying it is in progress. So each run saves which message is its status in `ImporterState` (`lastRunMessage`), and the next run that holds the lock reads that message back and, if it still says it is in progress, marks it as having ended without finishing, in red, keeping how far the run had got. It does so once, in the background.
+
+Nothing the importer does waits for Discord: its messages are sent in the background, one request at a time, and at the end of a run for at most what is left of its 45 seconds. The status goes ahead of the other messages, so it is not dropped when Discord falls behind. If Discord refuses to edit it, e.g. as someone deleted it, the run stops editing it. Without `DISCORD_LOG_WEBHOOK`, or with one that is not a Discord webhook, nothing is posted.
 
 ## Database tables
 

@@ -65,9 +65,11 @@ function fakeState(
       fail();
       return state.has(name) ? { name, value: read(name) } : null;
     },
-    async upsert({ name, value }, { transaction }) {
+    // A write outside a transaction is kept at once.
+    async upsert({ name, value }, { transaction } = {}) {
       fail();
-      transaction.writes.push([name, JSON.stringify(value)]);
+      if (transaction) transaction.writes.push([name, JSON.stringify(value)]);
+      else state.set(name, JSON.stringify(value));
     }
   };
   const ImporterSchemaMigration = {
@@ -90,11 +92,49 @@ function fakeState(
   return { state, read, ImporterState, ImporterSchemaMigration, transaction };
 }
 
+// A stand-in for the logger's status message, which records what it is given: whether it was
+// posted, the payloads it was updated with, which it draws, as the logger would, when the test
+// asks, and its final payload and when it was given. posted settles with the message's ID once
+// the test says so.
+function fakeStatus(events, payload, now) {
+  const posted = deferred();
+  const status = {
+    stopped: false,
+    posted: posted.promise,
+    post: (messageID) => posted.resolve(messageID),
+    latest: payload,
+    updates: 0,
+    final: null,
+    finishedAt: null,
+    update(next) {
+      if (status.final) return;
+      status.updates++;
+      status.latest = next;
+    },
+    finish(next) {
+      events.push('status finish');
+      status.final = next;
+      status.finishedAt = now();
+    },
+    // The embed the message shows now: its final one, or else its latest payload, drawn.
+    embed() {
+      const shown = status.final ?? status.latest;
+      return (typeof shown === 'function' ? shown() : shown).embeds[0];
+    }
+  };
+  // The logger draws a status message's first payload when it is made.
+  status.first = typeof payload === 'function' ? payload() : payload;
+  events.push('status post');
+  return status;
+}
+
 // Load run.js with stand-ins for the database, the run lock, the migrations, the logger and the
 // process, and a clock that only moves when the test moves it. takeRunLockError, when given, is
 // what taking the lock fails with, migrations is what migrate() resolves with or a function that
 // is given migrate()'s options and returns it or throws, state sets up the stand-in for
-// ImporterState (see fakeState), and logQueue is what the logger says is waiting to be sent.
+// ImporterState (see fakeState), and logQueue is what the logger says is waiting to be sent. With
+// discordLog, Discord logging is on, so the run posts its status (see fakeStatus); otherwise the
+// logger gives it a status message that is off, as the real one does.
 async function loadRun({
   env = {},
   authenticate = async () => {},
@@ -104,7 +144,8 @@ async function loadRun({
   connect = async () => {},
   disconnect = async () => {},
   state: stateOptions = {},
-  logQueue = emptyQueue
+  logQueue = emptyQueue,
+  discordLog = false
 } = {}) {
   const events = [];
   const output = [];
@@ -112,6 +153,10 @@ async function loadRun({
   const timers = new Set();
   let now = START;
   const state = fakeState(events, stateOptions);
+  // The run's status messages, and the earlier messages it asked the logger to change, with the
+  // function that says how.
+  const statuses = [];
+  const revisions = [];
 
   class FakeDate extends Date {
     static now() {
@@ -191,7 +236,18 @@ async function loadRun({
           discord.push(text);
         },
         flush: () => events.push('flush'),
-        getLogQueue: () => logQueue
+        getLogQueue: () => logQueue,
+        statusMessage: (payload) => {
+          if (!discordLog)
+            return { stopped: true, posted: Promise.resolve(null), update() {}, finish() {} };
+          const status = fakeStatus(events, payload, () => now);
+          statuses.push(status);
+          return status;
+        },
+        reviseMessage: (messageID, revise) => {
+          events.push(`revise ${messageID}`);
+          revisions.push({ messageID, revise });
+        }
       }
     },
     './schema/migrate.js': {
@@ -213,8 +269,10 @@ async function loadRun({
     },
     process: fakeProcess,
     Date: FakeDate,
+    // Timers note whether they were told not to keep the process running.
     setTimeout: (callback, ms) => {
-      const timer = { at: now + ms, ms, callback, unref: () => timer };
+      const timer = { at: now + ms, ms, callback, unrefed: false };
+      timer.unref = () => Object.assign(timer, { unrefed: true });
       timers.add(timer);
       return timer;
     },
@@ -238,9 +296,10 @@ async function loadRun({
         { context }
       );
     }
-    // The real run-control.js, which the steps use too, and the real run record.
+    // The real run-control.js, which the steps use too, the real run record and the real drawing
+    // of the run's status.
     assert.ok(
-      ['./run-control.js', './run-record.js'].includes(specifier),
+      ['./run-control.js', './run-record.js', './run-status.js'].includes(specifier),
       `Unexpected dependency: ${specifier}`
     );
     const dependency = new URL(specifier, referencingModule.identifier);
@@ -264,6 +323,13 @@ async function loadRun({
     output,
     discord,
     state,
+    statuses,
+    revisions,
+    // The run's one status message.
+    status() {
+      assert.strictEqual(statuses.length, 1, 'One status message per run');
+      return statuses[0];
+    },
     // The lines logged as important.
     important: () =>
       events.filter((event) => event.startsWith('important ')).map((event) => event.slice(10)),
@@ -1257,6 +1323,435 @@ for (const [value, seconds, warning] of [
   assert.ok(importer.events.includes('export'));
 }
 
+// The lines of a status message's embed.
+const lines = (embed) => embed.description.split('\n');
+const STARTED = Math.floor(START / 1000);
+
+// Once a run holds the lock, and not before, it posts its status to the log channel, drawn at once
+// to show the run in progress, and it gives the status its final payload at the start of its end,
+// before its record is saved and the lock released. A finished run's status says so, in green, with
+// each step's time. The timer that keeps the status current is gone once the run has ended.
+{
+  const importer = await loadRun({ discordLog: true, env: { GIT_SHA: 'abc1234' } });
+  const exitCode = await importer.run([
+    step('importBans', async () => importer.events.push('import')),
+    step('exportExportBans', async () => importer.events.push('export'))
+  ]);
+  assert.strictEqual(exitCode, 0);
+  assert.deepStrictEqual(importer.events, [
+    'authenticate',
+    'takeRunLock',
+    'status post',
+    'verbose Starting new CBL Update run (commit abc1234, time limit 18000s, cadence 21600s)...',
+    'connect',
+    'migrate',
+    'import',
+    'export',
+    'status finish',
+    'transaction',
+    'commit',
+    'disconnect',
+    'flush',
+    'release'
+  ]);
+  const status = importer.status();
+  const [posted] = status.first.embeds;
+  assert.strictEqual(posted.title, 'CBL update run in progress');
+  assert.deepStrictEqual(lines(posted), [
+    `Started <t:${STARTED}:f> (<t:${STARTED}:R>) · commit \`abc1234\``,
+    'Elapsed **0.0s**',
+    '',
+    '▫️ Import',
+    '▫️ Export push'
+  ]);
+  const final = status.embed();
+  assert.deepStrictEqual(
+    [final.title, final.color, final.footer.text, final.timestamp],
+    ['CBL update run finished', 0x57f287, 'Ended', importer.record().endedAt]
+  );
+  assert.deepStrictEqual(lines(final), [
+    `Started <t:${STARTED}:f> · took **0.0s** · commit \`abc1234\``,
+    '',
+    '✅ **Import** · 0.0s',
+    '✅ **Export push** · 0.0s'
+  ]);
+  // The run's own lines are unchanged: a run that finishes posts nothing else.
+  assert.deepStrictEqual(importer.discord, []);
+  assert.strictEqual(importer.timers.size, 0);
+}
+
+// A run that is skipped, or that fails before it holds the lock, posts no status.
+for (const options of [
+  { lockFree: false },
+  { takeRunLockError: new Error('ER_LOCK_DEADLOCK') },
+  {
+    authenticate: async () => {
+      throw new Error("Access denied for user 'cbl'");
+    }
+  }
+]) {
+  const importer = await loadRun({ discordLog: true, ...options });
+  await importer.run([step('importBans', () => importer.events.push('import'))]);
+  assert.deepStrictEqual(importer.statuses, []);
+  assert.deepStrictEqual(importer.revisions, []);
+  assert.ok(!importer.state.state.has('lastRunMessage'));
+}
+
+// A run whose step fails says so in red, with the phase it failed in, why, as describeError gives
+// it, and each step's time and counts. The failure is still posted as a line of its own.
+{
+  const importer = await loadRun({ discordLog: true });
+  const imported = {
+    lists: 1,
+    imported: 1,
+    fetched: 3,
+    new: 1,
+    updated: 0,
+    removed: 0,
+    held: 0,
+    failedLists: 0,
+    banLists: []
+  };
+  const exitCode = await importer.run([
+    step(
+      'importBans',
+      async () => importer.advance(90 * 1000),
+      () => imported
+    ),
+    step('updateExportBans', async () => {
+      importer.advance(1500);
+      throw Object.assign(new Error('Deadlock found when trying to get lock'), {
+        config: { url: 'https://discord.com/api/webhooks/1/secret-token' }
+      });
+    }),
+    step('exportExportBans', async () => importer.events.push('export'))
+  ]);
+  assert.strictEqual(exitCode, 1);
+  const final = importer.status().embed();
+  assert.deepStrictEqual([final.title, final.color], ['CBL update run failed', 0xed4245]);
+  assert.deepStrictEqual(lines(final), [
+    `Started <t:${STARTED}:f> · took **1m 32s** · commit \`unknown\``,
+    '**Phase** Export recalculation',
+    '**Reason** Error: Deadlock found when trying to get lock',
+    '',
+    '✅ **Import** · 1m 30s',
+    '> 1 ban list: 3 bans fetched, 1 new, 0 updated, 0 removed, 0 held, 0 lists failed',
+    '❌ **Export recalculation** · 1.5s',
+    '▫️ Export push · not run'
+  ]);
+  assert.ok(!JSON.stringify(final).includes('secret-token'));
+  assert.deepStrictEqual(importer.discord, [
+    'The CBL update run failed: Error: Deadlock found when trying to get lock'
+  ]);
+  assert.deepStrictEqual(importer.events.slice(-6), [
+    'status finish',
+    'transaction',
+    'commit',
+    'read state',
+    'flush',
+    'release'
+  ]);
+}
+
+// A run stopped part-way by a signal or its time limit says so in orange, and one that lost its
+// lock in red, each naming the step it stopped in and why, with the steps not run. So does one left
+// waiting for something that can never happen, as a failure. Each gives its final payload once,
+// before the lock is released.
+for (const { stop, env, exitCode, title, color, mark, reason } of [
+  {
+    stop: (importer) => importer.process.emit('SIGTERM', 'SIGTERM'),
+    exitCode: 3,
+    title: 'CBL update run stopped',
+    color: 0xe67e22,
+    mark: '⏹️',
+    reason: 'Stopped, as it received SIGTERM'
+  },
+  {
+    stop: (importer) => importer.advance(600 * 1000),
+    env: { IMPORTER_MAX_RUN_SECONDS: '600' },
+    exitCode: 3,
+    title: 'CBL update run stopped',
+    color: 0xe67e22,
+    mark: '⏹️',
+    reason: 'Stopped, as it took longer than 600s'
+  },
+  {
+    stop: (importer) => importer.lock.onLost('Connection lost: The server closed the connection.'),
+    exitCode: 1,
+    title: 'CBL update run lost its run lock',
+    color: 0xed4245,
+    mark: '⏹️',
+    reason: 'Stopped, as it lost its run lock'
+  },
+  {
+    stop: (importer) => importer.leftWaiting(),
+    exitCode: 1,
+    title: 'CBL update run failed',
+    color: 0xed4245,
+    mark: '❌',
+    reason: 'The run was left waiting for something that can never happen'
+  }
+]) {
+  const importer = await loadRun({ discordLog: true, env });
+  const started = deferred();
+  const gate = deferred();
+  const run = importer.run([
+    step('importBans', async () => {
+      importer.control.reportProgress(7, 20, 'ban lists');
+      started.resolve();
+      await gate.promise;
+      // The step's next safe point.
+      importer.control.stopIfRequested();
+    }),
+    step('exportExportBans', async () => importer.events.push('export'))
+  ]);
+  await started.promise;
+  const ending = stop(importer);
+  gate.resolve();
+  assert.strictEqual(await (reason.startsWith('The run was left') ? ending : run), exitCode);
+  await run;
+  const status = importer.status();
+  const final = status.embed();
+  assert.deepStrictEqual([final.title, final.color], [title, color], title);
+  assert.deepStrictEqual(lines(final).slice(1), [
+    '**Phase** Import',
+    `**Reason** ${reason}`,
+    '',
+    `${mark} **Import** · ${env ? '10m 00s' : '0.0s'}`,
+    '> got to 7 / 20 ban lists',
+    '▫️ Export push · not run'
+  ]);
+  assert.strictEqual(importer.events.filter((event) => event === 'status finish').length, 1);
+  assert.ok(importer.events.indexOf('status finish') < importer.events.indexOf('release'));
+  assert.strictEqual(status.finishedAt, Date.parse(importer.record().endedAt));
+}
+
+// The final payload is given at the start of the run's end, so a database that does not answer
+// cannot hold it up, and the end of the run then waits for the log messages, the final edit among
+// them, until 5 seconds are left of its 45 for releasing the lock.
+{
+  const importer = await loadRun({
+    discordLog: true,
+    state: { hang: true },
+    logQueue: { ...emptyQueue, QUEUED: 1 }
+  });
+  assert.strictEqual(await importer.runTimers(importer.run([failingStep()])), 1);
+  assert.strictEqual(importer.status().finishedAt, Date.parse(importer.record().endedAt));
+  assert.strictEqual(importer.status().embed().title, 'CBL update run failed');
+  assert.deepStrictEqual(importer.events.slice(-4), [
+    'status finish',
+    'transaction',
+    'flush',
+    'release'
+  ]);
+  assert.strictEqual(sinceEnd(importer), 40000);
+}
+
+// A run ended at once, by a second signal or 60 seconds after its time limit, has no time for its
+// final edit, so its status still shows it in progress, until the next run marks it.
+for (const exit of ['signal', 'time limit']) {
+  const importer = await loadRun({
+    discordLog: true,
+    env: { IMPORTER_MAX_RUN_SECONDS: '600' }
+  });
+  const first = gatedStep(importer.events, 'importBans');
+  const run = importer.run([first.step]);
+  await first.started;
+  if (exit === 'signal') {
+    importer.process.emit('SIGTERM', 'SIGTERM');
+    importer.process.emit('SIGINT', 'SIGINT');
+  } else {
+    importer.advance(660 * 1000);
+  }
+  assert.deepStrictEqual(importer.process.exits, [3]);
+  assert.strictEqual(importer.status().final, null);
+  assert.ok(!importer.events.includes('status finish'));
+  // The test's process.exit() returns, so let the run end.
+  first.finish();
+  await run;
+}
+
+// While the run goes, its status shows how far the step under way has got, as the step reports it,
+// at its next edit, and it is drawn again every 15 seconds, so its time stays current. That timer
+// does not keep the process running.
+{
+  const importer = await loadRun({ discordLog: true });
+  const started = deferred();
+  const gate = deferred();
+  const run = importer.run([
+    step('importBans', async () => {
+      importer.control.reportProgress(7, 20, 'ban lists');
+      started.resolve();
+      await gate.promise;
+    }),
+    step('exportExportBans', async () => {})
+  ]);
+  await started.promise;
+  const status = importer.status();
+  assert.deepStrictEqual(lines(status.embed()).slice(-3), [
+    '🔄 **Import** · 0.0s',
+    '> ``[███████             ]`` 7 / 20 ban lists',
+    '▫️ Export push'
+  ]);
+  importer.control.reportProgress(8, 20, 'ban lists');
+  assert.strictEqual(lines(status.embed()).at(-2), '> ``[████████            ]`` 8 / 20 ban lists');
+
+  const refresh = [...importer.timers].find((timer) => timer.ms === 15000);
+  assert.ok(refresh.unrefed);
+  const updates = status.updates;
+  importer.advance(14999);
+  assert.strictEqual(status.updates, updates);
+  importer.advance(1);
+  assert.strictEqual(status.updates, updates + 1);
+  assert.deepStrictEqual(lines(status.embed()).slice(1, 2), ['Elapsed **15s**']);
+  importer.advance(15000);
+  assert.strictEqual(status.updates, updates + 2);
+  assert.strictEqual(lines(status.embed()).at(-3), '🔄 **Import** · 30s');
+
+  gate.resolve();
+  assert.strictEqual(await run, 0);
+  assert.strictEqual(importer.timers.size, 0);
+  // Progress reported once the run has ended is not shown, as nothing listens any more.
+  importer.control.reportProgress(9, 20, 'ban lists');
+  assert.ok(lines(status.embed()).includes('✅ **Import** · 30s'));
+  assert.ok(!status.embed().description.includes('9 / 20'));
+}
+
+// A step's progress can never fail the step, even if showing it fails: it is only warned about.
+{
+  const importer = await loadRun();
+  importer.control.setProgressListener(() => {
+    throw new TypeError('Cannot read properties of undefined');
+  });
+  assert.doesNotThrow(() => importer.control.reportProgress(1, 2, 'ban lists'));
+  importer.control.setProgressListener(null);
+  importer.control.reportProgress(2, 2, 'ban lists');
+  assert.deepStrictEqual(importer.printed(), [
+    "Warning: could not show a step's progress: Cannot read properties of undefined"
+  ]);
+}
+
+// Once the message has stopped, as it could not be posted or Discord refused an edit, it is not
+// drawn again, and its final payload is not given.
+{
+  const importer = await loadRun({ discordLog: true });
+  const started = deferred();
+  const gate = deferred();
+  const run = importer.run([
+    step('importBans', async () => {
+      started.resolve();
+      await gate.promise;
+    })
+  ]);
+  await started.promise;
+  const status = importer.status();
+  status.stopped = true;
+  const updates = status.updates;
+  importer.advance(15000);
+  assert.strictEqual(status.updates, updates);
+  assert.ok(![...importer.timers].some((timer) => timer.ms === 15000));
+  gate.resolve();
+  assert.strictEqual(await run, 0);
+  assert.strictEqual(status.final, null);
+}
+
+// The run checks the status message of the run before it, in the background once the importer's
+// tables are there, and asks the logger to mark it if it still says that run is in progress, as
+// that run then ended without saying how, e.g. as it was killed. It does so once. Once this run's
+// own message is posted, it is saved in its place, for the next run to check.
+{
+  const last = { messageId: '800', startedAt: '2026-10-15T06:00:00.000Z' };
+  const importer = await loadRun({ discordLog: true, state: { rows: { lastRunMessage: last } } });
+  const started = deferred();
+  const gate = deferred();
+  const run = importer.run([
+    step('importBans', async () => {
+      started.resolve();
+      await gate.promise;
+    })
+  ]);
+  await started.promise;
+  await until(() => importer.revisions.length === 1, "the last run's status to be checked");
+  const [{ messageID, revise }] = importer.revisions;
+  assert.strictEqual(messageID, '800');
+  assert.ok(importer.events.indexOf('revise 800') > importer.events.indexOf('migrate'));
+
+  // A message that still says its run is in progress is marked as having ended without finishing,
+  // with how far it had got. One that ended as usual, or was marked already, is left as it is.
+  const unfinished = {
+    id: '800',
+    content: null,
+    embeds: [
+      {
+        type: 'rich',
+        title: 'CBL update run in progress',
+        description: `Started <t:1792036800:f> (<t:1792036800:R>) · commit \`abc1234\`\nElapsed **9m 00s**\n\n✅ **Import** · 8m 20s\n🔄 **Steam profiles** · 40s\n▫️ Export push`,
+        footer: { text: 'Last updated' },
+        timestamp: '2026-10-15T06:09:00.000+00:00'
+      }
+    ]
+  };
+  const marked = revise(unfinished);
+  assert.strictEqual(marked.embeds[0].title, 'CBL update run ended without finishing');
+  assert.strictEqual(marked.embeds[0].timestamp, '2026-10-15T06:09:00.000+00:00');
+  assert.ok(marked.embeds[0].description.includes(`The next run started <t:${STARTED}:f>.`));
+  assert.ok(marked.embeds[0].description.endsWith('⚠️ **Steam profiles** · 40s\n▫️ Export push'));
+  assert.strictEqual(revise(marked), null);
+  assert.strictEqual(
+    revise({ id: '800', embeds: [{ title: 'CBL update run finished', description: '' }] }),
+    null
+  );
+
+  // The row names the last run's message until this run's own is posted.
+  assert.deepStrictEqual(importer.state.read('lastRunMessage'), last);
+  importer.status().post('900');
+  await until(
+    () => importer.state.read('lastRunMessage').messageId === '900',
+    "this run's message to be saved"
+  );
+  assert.deepStrictEqual(importer.state.read('lastRunMessage'), {
+    messageId: '900',
+    startedAt: '2026-10-15T12:00:00.000Z'
+  });
+  gate.resolve();
+  assert.strictEqual(await run, 0);
+  assert.strictEqual(importer.revisions.length, 1);
+}
+{
+  // Without a last message there is nothing to check, and a message posted only once the run is
+  // ending is not saved, as the run says how it ended in it.
+  const importer = await loadRun({ discordLog: true });
+  assert.strictEqual(await importer.run([step('importBans', async () => {})]), 0);
+  importer.status().post('901');
+  await new Promise(setImmediate);
+  assert.deepStrictEqual(importer.revisions, []);
+  assert.ok(!importer.state.state.has('lastRunMessage'));
+}
+{
+  // Without Discord logging, the run neither reads nor saves the message, and posts nothing.
+  const last = { messageId: '800', startedAt: '2026-10-15T06:00:00.000Z' };
+  const importer = await loadRun({ state: { rows: { lastRunMessage: last } } });
+  assert.strictEqual(await importer.run([step('importBans', async () => {})]), 0);
+  assert.deepStrictEqual(importer.revisions, []);
+  assert.deepStrictEqual(importer.state.read('lastRunMessage'), last);
+  assert.ok(!importer.events.includes('status post'));
+}
+{
+  // A database that cannot read the row only costs the check, with a warning, never the run.
+  const importer = await loadRun({
+    discordLog: true,
+    state: { error: new Error('Connection lost') }
+  });
+  assert.strictEqual(await importer.run([step('importBans', async () => {})]), 0);
+  assert.ok(
+    importer
+      .printed()
+      .includes("Warning: could not check the last run's status message: Error: Connection lost")
+  );
+  assert.deepStrictEqual(importer.revisions, []);
+  assert.strictEqual(importer.status().embed().title, 'CBL update run finished');
+}
+
 console.log(
-  'Importer run checks passed: exit codes, the run lock, signals, the time limit, the database wait, migrations, the run record, the end within 45 seconds, a run left waiting, staleness and posted lines.'
+  'Importer run checks passed: exit codes, the run lock, signals, the time limit, the database wait, migrations, the run record, the end within 45 seconds, a run left waiting, staleness, posted lines, and the run status on every way a run ends.'
 );

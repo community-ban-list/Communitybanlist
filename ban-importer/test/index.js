@@ -40,7 +40,12 @@ async function loadIndex() {
   fakeProcess.exits = [];
   fakeProcess.exit = (code) => fakeProcess.exits.push(code ?? fakeProcess.exitCode ?? 0);
 
-  const step = (name) => async () => calls.push(name);
+  // A step that counts what it does is given an object to count in, which it fills in here with
+  // its name.
+  const step = (name) => async (counts) => {
+    calls.push(name);
+    if (counts) counts.step = name;
+  };
   const dependencies = {
     'scbl-lib/utils': { describeError, stackTrace },
     './src/core.js': {
@@ -109,7 +114,9 @@ async function loadIndex() {
 }
 
 // The run is given every step, in order, each named after what it runs, as the run record names
-// them. The import also reports its counts for the record.
+// them. The import reports its counts for the record, and the Steam step, the export
+// recalculation and the export push count what they do in an object they are given, which the
+// record keeps, also when the step fails part-way. Each run of a step counts afresh.
 {
   const index = await loadIndex();
   const names = [
@@ -127,12 +134,30 @@ async function loadIndex() {
     steps.map(({ name }) => name),
     names
   );
+  const counted = () =>
+    steps.filter((step) => step.counts).map((step) => [step.name, { ...step.counts() }]);
+  // Before a counted step runs, it has counted nothing.
+  assert.deepStrictEqual(
+    steps
+      .filter((step) => step.counts && step.name !== 'importBans')
+      .map((step) => [step.name, step.counts()]),
+    [
+      ['updateSteamUserInfo', undefined],
+      ['updateExportBans', undefined],
+      ['exportExportBans', undefined]
+    ]
+  );
   for (const step of steps) await step.run();
   assert.deepStrictEqual(index.calls, names);
-  assert.deepStrictEqual(
-    steps.filter((step) => step.counts).map((step) => [step.name, { ...step.counts() }]),
-    [['importBans', { lists: 2 }]]
-  );
+  assert.deepStrictEqual(counted(), [
+    ['importBans', { lists: 2 }],
+    ['updateSteamUserInfo', { step: 'updateSteamUserInfo' }],
+    ['updateExportBans', { step: 'updateExportBans' }],
+    ['exportExportBans', { step: 'exportExportBans' }]
+  ]);
+  const first = steps[1].counts();
+  await steps[1].run();
+  assert.notStrictEqual(steps[1].counts(), first);
 }
 
 // The importer exits with the run's code: 0 finished, 1 failed, 3 stopped part-way and 75 skipped.

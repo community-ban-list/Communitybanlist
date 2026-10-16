@@ -23,6 +23,8 @@ const copy = (value) => JSON.parse(JSON.stringify(value));
 
 const table = new Map();
 const events = [];
+// How far the manager said it had got, for the run's status, as [done, total, unit].
+const progress = [];
 // The type of each export ban list, as ExportBanLists holds it.
 let listTypes = {};
 // The players SteamUsers holds, and the export ban lists each qualifies for, which the stand-in for
@@ -188,16 +190,20 @@ const dependencies = {
     Transaction: { ISOLATION_LEVELS: { SERIALIZABLE: 'SERIALIZABLE' } }
   },
   'scbl-lib/utils': {
+    // The manager no longer posts a progress bar, as the run's status shows how far it has got, so
+    // the logger has none to give it.
     Logger: {
       verbose(module, verboseness, message) {
         assert.strictEqual(module, 'ExportBanManager');
         // The times in the lines change from run to run.
         events.push(`LOG ${message.replace(/\d+\.\d\ds/g, 'X.XXs')}`);
-      },
-      discordProgressBar: () => ({})
+      }
     }
   },
-  './run-control.js': { stopIfRequested() {} }
+  './run-control.js': {
+    stopIfRequested() {},
+    reportProgress: (...args) => progress.push(args)
+  }
 };
 
 const source = await readFile(new URL('../src/export-ban-manager.js', import.meta.url), 'utf8');
@@ -524,8 +530,18 @@ for (const type of ['battlemetrics', 'remote']) {
       ]
     }
   });
-  await InSmallBatches.updateExportBans();
+  progress.length = 0;
+  const counts = {};
+  await InSmallBatches.updateExportBans(counts);
   assert.strictEqual(listTypeReads, 1);
+  // The manager says how many players it has recalculated before the first batch and after each
+  // one, for the run's status, and counts them for the run record.
+  assert.deepStrictEqual(progress, [
+    [0, 3, 'players'],
+    [2, 3, 'players'],
+    [3, 3, 'players']
+  ]);
+  assert.deepStrictEqual({ ...counts }, { players: 3 });
   assert.deepStrictEqual(
     events.filter((event) => /^(SELECT|GENERATE|STAMP)/.test(event)),
     [

@@ -1,6 +1,7 @@
 // A run can be asked to stop part-way: by SIGTERM or SIGINT, by its time limit, or because it lost
 // its run lock. It then stops at the next safe point, e.g. between ban lists or between export
-// bans, and never between a BattleMetrics request and the database save that records it.
+// bans, and never between a BattleMetrics request and the database save that records it. The
+// steps also say here how far they have got, which the run's status in the log channel shows.
 //
 // This file has no imports, so it can be loaded on its own.
 
@@ -19,6 +20,9 @@ export const stopRequest = new Promise((resolve) => {
 
 // The run lock the run holds.
 let runLock = null;
+
+// Told how far the step under way has got, while the run listens.
+let progressListener = null;
 
 // Thrown at a safe point to end a run that was asked to stop.
 export class RunStopped extends Error {
@@ -55,4 +59,22 @@ export async function checkRunLock() {
   if (runLock && (await runLock.isHeld())) return;
   requestStop(LOCK_LOST);
   throw new RunStopped(LOCK_LOST);
+}
+
+// Listen to how far each step gets, or stop listening with null. The run listens while it holds
+// the run lock, to show the step's progress in its status.
+export function setProgressListener(listener) {
+  progressListener = listener;
+}
+
+// Say how far the step under way has got: done of total, counted in unit, e.g. 7 of 20 'ban
+// lists'. Steps call it as they go, as often as they like, and it never holds them up or fails
+// them.
+export function reportProgress(done, total, unit) {
+  if (!progressListener) return;
+  try {
+    progressListener({ done, total, unit });
+  } catch (err) {
+    console.warn(`Warning: could not show a step's progress: ${err?.message}`);
+  }
 }

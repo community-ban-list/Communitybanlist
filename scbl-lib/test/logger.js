@@ -45,21 +45,27 @@ async function loadLogger(env = { DISCORD_LOG_WEBHOOK: webhook }, { highWater } 
     }
   }
 
+  // Requests are recorded as they are made, with how many were being made at once.
+  const request = async (details) => {
+    discord.requests.push(details);
+    discord.inFlight++;
+    discord.mostInFlight = Math.max(discord.mostInFlight, discord.inFlight);
+    try {
+      return await discord.reply(details);
+    } finally {
+      discord.inFlight--;
+    }
+  };
+  Object.assign(discord, { inFlight: 0, mostInFlight: 0 });
   const dependencies = {
     chalk: { default: { white: (text) => text } },
     bottleneck: { default: FastLimiter },
     './discord-webhook.js': {
       DELETED_WEBHOOK_CODES: [10015, 50027],
-      default: async (url, { content }) => {
-        const request = { type: 'send', url, content };
-        discord.requests.push(request);
-        return discord.reply(request);
-      },
-      editDiscordWebhookMessage: async (url, id, { content }) => {
-        const request = { type: 'edit', url, id, content };
-        discord.requests.push(request);
-        return discord.reply(request);
-      }
+      default: async (url, { content, embeds }) => request({ type: 'send', url, content, embeds }),
+      editDiscordWebhookMessage: async (url, id, { content, embeds }) =>
+        request({ type: 'edit', url, id, content, embeds }),
+      getDiscordWebhookMessage: async (url, id) => request({ type: 'get', url, id })
     }
   };
   const context = vm.createContext({
@@ -737,8 +743,8 @@ gone.logger.discordProgressBar('Test', 'Another...', null, 0, 10, 0);
 // Updates stop the bars at once, rather than leaving values to wait, and the bar made just before
 // the webhook was found to be gone is never posted.
 assert.strictEqual(gone.timers.size, 0);
-assert.strictEqual(gone.logger.waitingProgressBars.size, 0);
-assert.strictEqual(gone.logger.unpostedProgressBars.size, 0);
+assert.strictEqual(gone.logger.waitingMessages.size, 0);
+assert.strictEqual(gone.logger.unpostedMessages.size, 0);
 gone.logger.flush();
 gone.advance(60000);
 await gone.settled();
@@ -864,9 +870,327 @@ ending.advance(120000);
 await ending.idle();
 assert.strictEqual(ending.discord.requests.length, 0);
 
+// What a status message's requests asked Discord for.
+const shown = (requests) =>
+  requests.map(({ type, id, content, embeds }) =>
+    type === 'get' ? [type, id] : [type, id, content, embeds?.map(({ title }) => title)]
+  );
+
+// A status message, such as a run's, is returned at once and posted in the background straight
+// away, ahead of the messages already waiting, as embeds without text. A payload that is a function
+// is drawn when it is sent, and not before. Once the message is posted, it settles with its ID.
+const live = await loadLogger();
+let releaseLive;
+const liveBlocked = new Promise((resolve) => (releaseLive = resolve));
+live.discord.reply = async ({ type, id, content }) => {
+  if (content === '[Test][1] First') await liveBlocked;
+  return { id: type === 'send' ? (content ? '1' : '777') : id };
+};
+live.logger.verbose('Test', 1, 'First');
+await until(() => live.discord.requests.length === 1, 'the first message to be sent');
+for (let i = 1; i <= 3; i++) live.logger.verbose('Test', 1, `Waiting ${i}`);
+let title = 'Starting';
+let draws = 0;
+const draw = () => {
+  draws++;
+  return { embeds: [{ title }] };
+};
+const status = live.logger.statusMessage(draw);
+assert.strictEqual(typeof status.then, 'undefined');
+assert.strictEqual(status.stopped, false);
+await until(() => live.logger.getLogQueue().RECEIVED === 0, 'the messages to be queued');
+releaseLive();
+assert.strictEqual(await status.posted, '777');
+await live.idle();
+assert.deepStrictEqual(shown(live.discord.requests), [
+  ['send', undefined, '[Test][1] First', undefined],
+  ['send', undefined, null, ['Starting']],
+  ['send', undefined, '[Test][1] Waiting 1', undefined],
+  ['send', undefined, '[Test][1] Waiting 2', undefined],
+  ['send', undefined, '[Test][1] Waiting 3', undefined]
+]);
+assert.strictEqual(draws, 1);
+
+// Updates are coalesced: the latest is drawn and sent 15 seconds after the last edit, however many
+// there are, and until then it counts as queued, so the importer waits for it before it exits.
+live.discord.requests.length = 0;
+for (let i = 1; i <= 100; i++) {
+  title = `Step ${i}`;
+  status.update(draw);
+}
+assert.strictEqual(draws, 1);
+assert.deepStrictEqual({ ...live.logger.getLogQueue() }, { ...emptyQueue, QUEUED: 1 });
+live.advance(14999);
+await pause();
+assert.strictEqual(live.discord.requests.length, 0);
+live.advance(1);
+await live.idle();
+assert.deepStrictEqual(shown(live.discord.requests), [['edit', '777', null, ['Step 100']]]);
+assert.strictEqual(draws, 2);
+// The next one waits another 15 seconds, from that edit.
+title = 'Step 101';
+status.update(draw);
+live.advance(14999);
+await pause();
+assert.strictEqual(live.discord.requests.length, 1);
+live.advance(1);
+await live.idle();
+assert.deepStrictEqual(shown(live.discord.requests).at(-1), ['edit', '777', null, ['Step 101']]);
+
+// Its final payload is sent at once, rather than when it is due, in place of an update still
+// waiting, and nothing after it is sent: not updates, another final payload or a flush.
+live.discord.requests.length = 0;
+live.advance(2000);
+status.update(draw);
+status.finish({ embeds: [{ title: 'Finished' }] });
+await live.idle();
+assert.deepStrictEqual(shown(live.discord.requests), [['edit', '777', null, ['Finished']]]);
+status.update(draw);
+status.finish({ embeds: [{ title: 'Again' }] });
+live.logger.flush();
+live.advance(60000);
+await live.idle();
+assert.strictEqual(live.discord.requests.length, 1);
+assert.strictEqual(live.timers.size, 0);
+// Requests were made one at a time throughout.
+assert.strictEqual(live.discord.mostInFlight, 1);
+
+// An update waiting to be due is sent at once when the logger is flushed, as the importer does
+// before it exits.
+const flushed = await loadLogger();
+flushed.discord.reply = async ({ type, id }) => ({ id: type === 'send' ? '321' : id });
+const flushedStatus = flushed.logger.statusMessage({
+  content: 'Text',
+  embeds: [{ title: 'Posted' }]
+});
+await flushed.idle();
+flushedStatus.update({ embeds: [{ title: 'Latest' }] });
+assert.deepStrictEqual({ ...flushed.logger.getLogQueue() }, { ...emptyQueue, QUEUED: 1 });
+flushed.logger.flush();
+await flushed.idle();
+assert.deepStrictEqual(shown(flushed.discord.requests), [
+  ['send', undefined, 'Text', ['Posted']],
+  ['edit', '321', null, ['Latest']]
+]);
+assert.strictEqual(flushed.timers.size, 0);
+
+// Once Discord refuses to edit the message, e.g. as it was deleted, it is not edited again for the
+// rest of the run, and Discord logging stays on. A failure Discord may get over, such as a 502, is
+// tried again with the next edit.
+const refused = await loadLogger();
+let refusal = discordError('Discord answered HTTP 502', { status: 502 });
+refused.discord.reply = async ({ type }) => {
+  if (type === 'edit') throw refusal;
+  return { id: '888' };
+};
+const refusedStatus = refused.logger.statusMessage({ embeds: [{ title: 'Posted' }] });
+await refused.idle();
+refusedStatus.update({ embeds: [{ title: 'First edit' }] });
+refused.advance(15000);
+await until(() => refused.discord.requests.length === 2 && refused.timers.size === 1, 'a retry');
+refused.advance(1000);
+await refused.settled();
+// The edit was tried twice, and waits to be sent with the next one.
+assert.strictEqual(refused.discord.requests.length, 3);
+assert.deepStrictEqual({ ...refused.logger.getLogQueue() }, { ...emptyQueue, QUEUED: 1 });
+refusal = discordError('Discord answered HTTP 404: Unknown Message (code 10008)', {
+  status: 404,
+  code: 10008
+});
+refused.advance(15000);
+await refused.idle();
+assert.strictEqual(refused.discord.requests.length, 4);
+assert.strictEqual(refusedStatus.stopped, true);
+refusedStatus.update({ embeds: [{ title: 'Later' }] });
+refusedStatus.finish({ embeds: [{ title: 'Final' }] });
+refused.logger.flush();
+refused.advance(60000);
+await refused.idle();
+assert.strictEqual(refused.discord.requests.length, 4);
+assert.strictEqual(refused.logger.discordWebhook, webhook);
+assert.deepStrictEqual(warnings(refused.output), [
+  'Could not update a status message in the Discord log: DiscordWebhookError: Discord answered HTTP 502',
+  'Could not update a status message in the Discord log: DiscordWebhookError: Discord answered HTTP 404: Unknown Message (code 10008)'
+]);
+refused.logger.verbose('Test', 1, 'Still logging');
+await refused.idle();
+assert.strictEqual(refused.discord.requests.at(-1).content, '[Test][1] Still logging');
+
+// A status message that could not be posted is not posted again, as a progress bar is not, and
+// settles with no ID, so nothing waits for one.
+const unposted = await loadLogger();
+unposted.discord.reply = async () => {
+  throw discordError('Discord answered HTTP 400: Invalid Form Body (code 50035)', {
+    status: 400,
+    code: 50035
+  });
+};
+const unpostedStatus = unposted.logger.statusMessage({ embeds: [{ title: 'Refused' }] });
+assert.strictEqual(await unpostedStatus.posted, null);
+unpostedStatus.update({ embeds: [{ title: 'Later' }] });
+unpostedStatus.finish({ embeds: [{ title: 'Final' }] });
+unposted.advance(60000);
+await unposted.idle();
+assert.strictEqual(unposted.discord.requests.length, 1);
+assert.deepStrictEqual(warnings(unposted.output), [
+  'Could not post a status message in the Discord log: DiscordWebhookError: Discord answered HTTP 400: Invalid Form Body (code 50035)'
+]);
+
+// A payload that cannot be drawn stops the message, with a warning, rather than fail whatever
+// updated it.
+const broken = await loadLogger();
+const brokenStatus = broken.logger.statusMessage({ embeds: [{ title: 'Posted' }] });
+await broken.idle();
+brokenStatus.update(() => {
+  throw new TypeError("Cannot read properties of undefined (reading 'embeds')");
+});
+broken.logger.flush();
+brokenStatus.update(() => null);
+brokenStatus.finish({ embeds: [{ title: 'Final' }] });
+await broken.idle();
+assert.strictEqual(brokenStatus.stopped, true);
+assert.strictEqual(broken.discord.requests.length, 1);
+assert.deepStrictEqual(warnings(broken.output), [
+  "Could not draw a status message for the Discord log: TypeError: Cannot read properties of undefined (reading 'embeds')"
+]);
+
+// Without Discord logging, a status message is never drawn or posted, settles with no ID, and
+// nothing waits for it. Nor is any earlier message read or changed.
+const off = await loadLogger({});
+const offStatus = off.logger.statusMessage(() => assert.fail('Drawn without Discord logging'));
+assert.strictEqual(offStatus.stopped, true);
+assert.strictEqual(await offStatus.posted, null);
+offStatus.update(() => assert.fail('Drawn without Discord logging'));
+offStatus.finish({ embeds: [{ title: 'Final' }] });
+off.logger.reviseMessage('555', () => assert.fail('Read without Discord logging'));
+off.logger.flush();
+off.advance(60000);
+await pause();
+assert.strictEqual(off.discord.requests.length, 0);
+assert.deepStrictEqual({ ...off.logger.getLogQueue() }, emptyQueue);
+assert.strictEqual(off.timers.size, 0);
+
+// When Discord says the webhook is gone, a status message stops with everything else.
+const goneStatusLog = await loadLogger();
+goneStatusLog.discord.reply = async ({ type, id }) => {
+  if (type === 'edit')
+    throw discordError('Discord answered HTTP 404: Unknown Webhook (code 10015)', {
+      status: 404,
+      code: 10015
+    });
+  return { id: '444' };
+};
+const goneStatus = goneStatusLog.logger.statusMessage({ embeds: [{ title: 'Posted' }] });
+await goneStatusLog.idle();
+goneStatus.finish({ embeds: [{ title: 'Final' }] });
+await goneStatusLog.settled();
+assert.strictEqual(goneStatusLog.logger.discordWebhook, null);
+assert.strictEqual(goneStatus.stopped, true);
+assert.deepStrictEqual({ ...goneStatusLog.logger.getLogQueue() }, emptyQueue);
+assert.strictEqual(goneStatusLog.discord.requests.length, 2);
+
+// While Discord is slow and the queue is full, a status message goes ahead of every other message,
+// and is not dropped for them: here its final edit, while errors and a run's own lines fill a
+// queue of 10. The oldest of the least important messages are dropped instead. Requests are still
+// made one at a time.
+const crowded = await loadLogger(undefined, { highWater: 10 });
+let releaseCrowded;
+const crowdedBlocked = new Promise((resolve) => (releaseCrowded = resolve));
+crowded.discord.reply = async ({ type, id, content }) => {
+  if (content === '[Test][1] Blocker') await crowdedBlocked;
+  return { id: type === 'send' ? '999' : id };
+};
+const crowdedStatus = crowded.logger.statusMessage({ embeds: [{ title: 'Posted' }] });
+await crowded.idle();
+crowded.logger.verbose('Test', 1, 'Blocker');
+await until(() => crowded.discord.requests.length === 2, 'the blocker to be sent');
+for (let i = 1; i <= 15; i++)
+  crowded.logger.verbose('Test', 1, `Error ${i}: `, new Error('Failed'));
+for (let i = 1; i <= 5; i++) crowded.logger.important('Test', `Run line ${i}`);
+crowdedStatus.finish({ embeds: [{ title: 'Final' }] });
+await until(() => crowded.logger.getLogQueue().RECEIVED === 0, 'the messages to be queued');
+assert.deepStrictEqual(
+  { ...crowded.logger.getLogQueue() },
+  { ...emptyQueue, QUEUED: 10, EXECUTING: 1 }
+);
+releaseCrowded();
+await crowded.idle();
+assert.deepStrictEqual(shown(crowded.discord.requests).slice(1), [
+  ['send', undefined, '[Test][1] Blocker', undefined],
+  ['edit', '999', null, ['Final']],
+  ...[1, 2, 3, 4, 5].map((i) => ['send', undefined, `[Test][1] Run line ${i}`, undefined]),
+  ...[7, 8, 9, 10].map((i) => ['send', undefined, `[Test][1] Error ${i}: Error: Failed`, undefined])
+]);
+assert.strictEqual(crowded.discord.mostInFlight, 1);
+
+// A message posted earlier, such as an earlier run's status, can be read back and changed: the
+// function it is given gets the message as Discord has it, and says what to replace it with, or
+// to leave it as it is. Both requests go ahead of other messages.
+const revising = await loadLogger();
+const earlier = { id: '555', content: null, embeds: [{ title: 'Running' }] };
+let getError = null;
+revising.discord.reply = async ({ type, id }) => {
+  if (type !== 'get') return { id };
+  if (getError) {
+    const err = getError;
+    getError = null;
+    throw err;
+  }
+  return earlier;
+};
+const seen = [];
+revising.logger.reviseMessage('555', (message) => {
+  seen.push(message);
+  return { embeds: [{ title: 'Ended' }] };
+});
+await revising.idle();
+assert.deepStrictEqual(shown(revising.discord.requests), [
+  ['get', '555'],
+  ['edit', '555', null, ['Ended']]
+]);
+assert.deepStrictEqual(seen, [earlier]);
+// Left as it is when the function says so.
+revising.discord.requests.length = 0;
+revising.logger.reviseMessage('555', () => null);
+await revising.idle();
+assert.deepStrictEqual(shown(revising.discord.requests), [['get', '555']]);
+// Read again after a network error, as reading it twice does no harm.
+revising.discord.requests.length = 0;
+getError = networkError('Could not reach Discord (ECONNRESET)');
+revising.logger.reviseMessage('555', () => ({ embeds: [{ title: 'Ended' }] }));
+await until(() => revising.discord.requests.length === 1 && revising.timers.size === 1, 'a retry');
+revising.advance(1000);
+await revising.idle();
+assert.deepStrictEqual(shown(revising.discord.requests), [
+  ['get', '555'],
+  ['get', '555'],
+  ['edit', '555', null, ['Ended']]
+]);
+// A message that cannot be read, e.g. as it was deleted, or that the function fails on, is left as
+// it is, with a warning, and Discord logging stays on.
+revising.discord.requests.length = 0;
+getError = discordError('Discord answered HTTP 404: Unknown Message (code 10008)', {
+  status: 404,
+  code: 10008
+});
+revising.logger.reviseMessage('555', () => assert.fail('Revised a message it could not read'));
+revising.logger.reviseMessage('555', () => {
+  throw new TypeError('Cannot read properties of null');
+});
+await revising.idle();
+assert.deepStrictEqual(shown(revising.discord.requests), [
+  ['get', '555'],
+  ['get', '555']
+]);
+assert.deepStrictEqual(warnings(revising.output), [
+  'Could not read a message in the Discord log: DiscordWebhookError: Discord answered HTTP 404: Unknown Message (code 10008)',
+  'Could not change a message in the Discord log: TypeError: Cannot read properties of null'
+]);
+assert.strictEqual(revising.logger.discordWebhook, webhook);
+
 await pause();
 assert.deepStrictEqual(unhandled, []);
 
 console.log(
-  'Logger checks passed: Discord off, failed sends, retries, long messages, errors, stack traces, progress bars and their first minute, the queue limit, run lines and gone webhooks.'
+  'Logger checks passed: Discord off, failed sends, retries, long messages, errors, stack traces, progress bars and their first minute, status messages, changing earlier messages, the queue limit, run lines and gone webhooks.'
 );

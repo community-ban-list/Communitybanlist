@@ -4,7 +4,8 @@ import createDiscordWebhookMessage from './create-discord-webhook-message.js';
 import describeError, { stackTrace } from './describe-error.js';
 import sendDiscordWebhook, {
   DELETED_WEBHOOK_CODES,
-  editDiscordWebhookMessage
+  editDiscordWebhookMessage,
+  getDiscordWebhookMessage
 } from './discord-webhook.js';
 import isDiscordWebhookUrl from './discord-webhook-url.js';
 import Logger from './logger.js';
@@ -17,6 +18,7 @@ export {
   DELETED_WEBHOOK_CODES,
   describeError,
   editDiscordWebhookMessage,
+  getDiscordWebhookMessage,
   isDiscordWebhookUrl,
   Logger,
   sendDiscordWebhook,

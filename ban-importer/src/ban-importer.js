@@ -12,6 +12,7 @@ import BanFetcher from './ban-fetcher.js';
 import {
   checkRunLock,
   isStopping,
+  reportProgress,
   RunStopped,
   stopIfRequested,
   stopRequest
@@ -178,13 +179,16 @@ export default class BanImporter {
 
     // Each list is fetched, saved and checked for removed bans before the next one is started. A
     // run that is asked to stop does so between ban lists, after summing up the lists it imported.
-    // The results are kept for the run record, which report() gives them to.
+    // The results are kept for the run record, which report() gives them to. The run's status
+    // shows how many lists are done.
     this.listCount = banLists.length;
     const results = (this.results = []);
     try {
+      reportProgress(0, banLists.length, 'ban lists');
       for (const banList of banLists) {
         stopIfRequested();
         results.push(await this.importBanList(banList.id));
+        reportProgress(results.length, banLists.length, 'ban lists');
       }
 
       // A list that could not be fetched, e.g. during a short BattleMetrics outage, is tried once
@@ -193,8 +197,9 @@ export default class BanImporter {
       const retries = results.filter((result) => result.retry);
       if (retries.length > 0 && results.some((result) => !result.gone && !result.retry)) {
         stopIfRequested();
+        reportProgress(0, retries.length, 'ban lists tried again');
         await pause(SECOND_ATTEMPT_DELAY);
-        for (const failed of retries) {
+        for (const [tried, failed] of retries.entries()) {
           stopIfRequested();
           const index = results.indexOf(failed);
           try {
@@ -205,6 +210,7 @@ export default class BanImporter {
             if (err instanceof RunStopped) results.splice(index, 1);
             throw err;
           }
+          reportProgress(tried + 1, retries.length, 'ban lists tried again');
         }
       }
     } catch (err) {

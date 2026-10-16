@@ -57,16 +57,13 @@ const dependencies = {
     },
     DELETED_WEBHOOK_CODES: [10015, 50027],
     isDiscordWebhookUrl: () => true,
-    Logger: {
-      verbose: (module, level, message) => logs.push({ level, message }),
-      discordProgressBar: () => null
-    },
+    Logger: { verbose: (module, level, message) => logs.push({ level, message }) },
     async sendDiscordWebhook(url, { embeds }) {
       alerts.push(`${url}: ${embeds[0]}`);
     }
   },
   'scbl-lib/config': { HOST: 'https://communitybanlist.example' },
-  './run-control.js': { checkRunLock: async () => {}, stopIfRequested() {} }
+  './run-control.js': { checkRunLock: async () => {}, stopIfRequested() {}, reportProgress() {} }
 };
 
 const context = vm.createContext({});

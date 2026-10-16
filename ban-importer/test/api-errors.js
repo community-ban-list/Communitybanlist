@@ -6,6 +6,8 @@ import vm from 'vm';
 // Exercise how Core handles failed Steam and BattleMetrics requests, without a database or
 // network requests.
 const logs = [];
+// How far the steps said they had got, for the run's status, as [done, total, unit].
+const progress = [];
 // How long each wait Core asked for was, in milliseconds.
 const waits = [];
 let steamCalls = 0;
@@ -40,15 +42,17 @@ const dependencies = {
     // core.js imports this from here once the change to Discord logging is merged.
     DELETED_WEBHOOK_CODES: [10015, 50027],
     isDiscordWebhookUrl: () => false,
-    Logger: {
-      verbose: (...args) => logs.push(args),
-      discordProgressBar: () => null
-    },
+    // The steps no longer post progress bars, as the run's status shows how far they have got, so
+    // the logger has none to give them.
+    Logger: { verbose: (...args) => logs.push(args) },
     sendDiscordWebhook() {}
   },
   'scbl-lib/config': { HOST: 'https://communitybanlist.example' },
-  // core.js imports these once the change that runs one importer at a time is merged.
-  './run-control.js': { checkRunLock: async () => {}, stopIfRequested() {} }
+  './run-control.js': {
+    checkRunLock: async () => {},
+    stopIfRequested() {},
+    reportProgress: (...args) => progress.push(args)
+  }
 };
 
 // Waits are recorded and skipped, such as the 5 seconds after a failed batch of Steam users.
@@ -100,16 +104,20 @@ const logged = (start) => logs.find(([, , message]) => message.startsWith(start)
 const fiveSecondWaits = () => waits.filter((ms) => ms === 5000).length;
 
 // Update the given number of Steam users, 50 to a batch, with steam() answering with reply().
+// Resolves with what the step counted.
 async function updateSteamUsers(count, reply) {
   logs.length = 0;
   waits.length = 0;
+  progress.length = 0;
   updatedUsers.length = 0;
   steamCalls = 0;
   steamReply = reply;
   users = Array.from({ length: count }, (_, i) => ({
     id: `7656119800000${String(i).padStart(4, '0')}`
   }));
-  await Core.updateSteamUserInfo();
+  const counts = {};
+  await Core.updateSteamUserInfo(counts);
+  return { ...counts };
 }
 
 const unavailable = 'Steam GET ISteamUser/GetPlayerSummaries/v2 failed after 3 attempts: HTTP 503';
@@ -124,16 +132,27 @@ const answer = (params) => ({
 const failedBatch = (size) => `Failed to update batch of ${size} Steam users due to Error: `;
 
 // A failed batch of Steam users is logged with its error, and the next batch is still tried.
-await updateSteamUsers(120, (call, params) => (call === 1 ? fail() : answer(params)));
+const someFailed = await updateSteamUsers(120, (call, params) =>
+  call === 1 ? fail() : answer(params)
+);
 assert.strictEqual(steamCalls, 3);
 assert.deepStrictEqual(errorLines(), [failedBatch(50) + unavailable]);
 assert.strictEqual(logged('Failed')[3].name, 'ApiError');
 assert.strictEqual(fiveSecondWaits(), 1);
 assert.strictEqual(updatedUsers.length, 70);
+// The step says how far it has got before each batch and once it is done, for the run's status,
+// and counts how many users were due and how many it updated, for the run record.
+assert.deepStrictEqual(progress, [
+  [0, 120, 'Steam users'],
+  [50, 120, 'Steam users'],
+  [100, 120, 'Steam users'],
+  [120, 120, 'Steam users']
+]);
+assert.deepStrictEqual(someFailed, { due: 120, updated: 70 });
 
 // Once 3 batches in a row have failed, the step stops, as Steam is most likely down and the rest
-// would fail too.
-await updateSteamUsers(250, fail);
+// would fail too. Its progress and counts say how far it got.
+const allFailed = await updateSteamUsers(250, fail);
 assert.strictEqual(steamCalls, 3);
 assert.deepStrictEqual(errorLines(), [
   failedBatch(50) + unavailable,
@@ -141,6 +160,8 @@ assert.deepStrictEqual(errorLines(), [
   `Stopped updating Steam users, as 3 batches in a row failed: ${unavailable}`
 ]);
 assert.strictEqual(fiveSecondWaits(), 2);
+assert.deepStrictEqual(progress.at(-1), [150, 250, 'Steam users']);
+assert.deepStrictEqual(allFailed, { due: 250, updated: 0 });
 
 // Batches that fail between batches that work do not stop the step.
 await updateSteamUsers(300, (call, params) => ([3, 6].includes(call) ? answer(params) : fail()));
@@ -208,10 +229,14 @@ const exportBan = (
     this.destroyed = true;
   }
 });
+// Resolves with what the step counted.
 async function exportExportBans(...bans) {
   logs.length = 0;
+  progress.length = 0;
   exportBans = bans;
-  await Core.exportExportBans();
+  const counts = {};
+  await Core.exportExportBans(counts);
+  return { ...counts };
 }
 
 // A BattleMetrics export ban that could not be created is logged with its error. When BattleMetrics
@@ -359,7 +384,14 @@ const bans = [
   exportBan('TO_BE_CREATED', { list: remoteList }),
   exportBan('TO_BE_DELETED', { request: refuse })
 ];
-await exportExportBans(...bans);
+const refusedCounts = await exportExportBans(...bans);
+// The step goes through every export ban, those left for the next run included, and says so for
+// the run's status. It counts how many were queued, and how many were created, deleted and failed.
+assert.deepStrictEqual(
+  progress,
+  [0, 1, 2, 3, 4].map((done) => [done, 4, 'export bans'])
+);
+assert.deepStrictEqual(refusedCounts, { queued: 4, created: 1, deleted: 0, failed: 1 });
 assert.deepStrictEqual(
   bans.map((ban) => ban.requests),
   [1, 0, 0, 0]
