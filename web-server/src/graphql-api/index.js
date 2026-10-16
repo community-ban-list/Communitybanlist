@@ -8,6 +8,7 @@ import { DATABASE_UNAVAILABLE_MESSAGE, isDatabaseUnavailable } from 'scbl-lib/db
 
 import typeDefs from './typedefs.js';
 import resolvers from './resolvers.js';
+import { queryCostRule } from './core/query-cost.js';
 import { directives } from './core/index.js';
 import { reportRejectedSignInTokens, signInContext } from './core/sign-in.js';
 
@@ -25,6 +26,12 @@ const server = new ApolloServer({
   documentStore: null,
   persistedQueries: false,
   parseOptions: { maxTokens: 2000 },
+  // Refuse a request that asks for far more at once than any of the site's pages, before any of it
+  // runs: one with more than 1,000 selections, counting a fragment's each time it is spread, or one
+  // that queryCostRule finds too costly. Apollo Server counts the selections first, so the cost is
+  // only worked out for requests of a sensible size.
+  maxRecursiveSelections: 1000,
+  validationRules: [queryCostRule(schema)],
   // While the database cannot be reached, e.g. as it restarts, show a general message rather than
   // the database's own error.
   formatError: (formattedError, error) =>
