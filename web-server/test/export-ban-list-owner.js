@@ -2,6 +2,8 @@ import assert from 'assert';
 import { readFile } from 'fs/promises';
 import vm from 'vm';
 
+import graphql from 'graphql';
+
 const context = vm.createContext({});
 
 // Load a resolver with its package imports replaced by stubs. Relative imports load the real files.
@@ -51,7 +53,9 @@ const ExportBanList = {
 };
 
 const { SteamUser } = await load('../src/graphql-api/steam-user/resolver.js', {
+  graphql: { default: graphql },
   'scbl-lib/db/models': { Ban: {}, ExportBanList },
+  'scbl-lib/db/sequelize': { Op: { ne: Symbol('ne'), gt: Symbol('gt') } },
   'scbl-lib/utils': { calculateRiskRating() {} }
 });
 const { ExportBanList: ExportBanListFields } = await load(

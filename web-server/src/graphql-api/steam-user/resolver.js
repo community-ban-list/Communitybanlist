@@ -3,6 +3,7 @@ import { Ban, ExportBanList } from 'scbl-lib/db/models';
 import { calculateRiskRating } from 'scbl-lib/utils';
 
 import isSignedInAs from '../core/is-signed-in-as.js';
+import { listOrder } from '../core/list-order.js';
 import { PAGE_SIZE, pageArgs } from '../core/page-size.js';
 
 export default {
@@ -11,10 +12,12 @@ export default {
       return calculateRiskRating(parent.reputationPoints);
     },
     bans: (parent, filter) => {
+      const { order, where } = listOrder('bans', filter);
       return Ban.paginate({
-        order: [[filter.orderBy || 'created', filter.orderDirection || 'DESC']],
+        order,
         ...pageArgs(filter, PAGE_SIZE.playerBans),
         where: {
+          ...where,
           steamUser: parent.id,
           ...(typeof filter.expired !== 'undefined' && { expired: filter.expired })
         }

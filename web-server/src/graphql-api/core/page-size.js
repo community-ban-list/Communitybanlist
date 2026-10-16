@@ -15,8 +15,8 @@ export function largestPage(fallback) {
 export function pageArgs({ first, after, last, before }, fallback) {
   const size = (requested) => Math.min(Math.max(requested ?? fallback, 1), largestPage(fallback));
 
-  // The page before a cursor. first and after are passed on as well, so that paginate still
-  // refuses a request that mixes both directions.
+  // The page before a cursor. The lists refuse requests that mix both directions (see
+  // core/list-order.js), and first and after are passed on unchanged, so paginate would as well.
   if (last != null || before != null) return { first, after, last: size(last), before };
 
   return { first: size(first), after };

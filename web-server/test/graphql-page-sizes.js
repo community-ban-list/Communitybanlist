@@ -3,6 +3,8 @@ import { readFile } from 'fs/promises';
 import { createRequire } from 'module';
 import vm from 'vm';
 
+import graphql from 'graphql';
+
 import { PAGE_SIZE, largestPage, pageArgs } from '../src/graphql-api/core/page-size.js';
 
 // Load a resolver in this context, so the options it passes on can be compared as they are, with
@@ -36,15 +38,18 @@ const recorder = (model) => ({
 });
 const Ban = recorder('Ban');
 const SteamUser = recorder('SteamUser');
-const Op = { ne: Symbol('ne') };
+const Op = { ne: Symbol('ne'), gt: Symbol('gt') };
 const models = { Ban, BanList: {}, ExportBanList: {}, Organisation: {}, SteamUser };
 
 const { Query } = await load('../src/graphql-api/query/resolver.js', {
+  graphql: { default: graphql },
   'scbl-lib/db/models': models,
   'scbl-lib/db/sequelize': { Op }
 });
 const { SteamUser: SteamUserFields } = await load('../src/graphql-api/steam-user/resolver.js', {
+  graphql: { default: graphql },
   'scbl-lib/db/models': models,
+  'scbl-lib/db/sequelize': { Op },
   'scbl-lib/utils': { calculateRiskRating() {} }
 });
 
@@ -60,6 +65,15 @@ const playerBans = {
   model: 'Ban',
   resolve: (args) => SteamUserFields.bans(player, args)
 };
+
+// Cursors as the library writes them, for each list's default order.
+const cursor = (...values) => Buffer.from(JSON.stringify(values)).toString('base64');
+const created = cursor('2024-01-01T00:00:00.000Z', '1,1');
+const cursors = new Map([
+  [bans, created],
+  [steamUsers, cursor(player.id)],
+  [playerBans, created]
+]);
 
 // The options a list passes to paginate for these arguments.
 function optionsFor(list, args) {
@@ -98,8 +112,8 @@ for (const list of [bans, steamUsers]) {
     assert.deepStrictEqual(pageFor(list, args), { first }, `${list.name} ${JSON.stringify(args)}`);
 
   // The page after a cursor has the same sizes, as does the page before one.
-  const next = { after: 'next-cursor' };
-  const previous = { before: 'previous-cursor' };
+  const next = { after: cursors.get(list) };
+  const previous = { before: cursors.get(list) };
   assert.deepStrictEqual(pageFor(list, next), { first: 20, ...next });
   assert.deepStrictEqual(pageFor(list, { first: 12, ...next }), { first: 12, ...next });
   assert.deepStrictEqual(pageFor(list, previous), { last: 20, ...previous });
@@ -107,19 +121,22 @@ for (const list of [bans, steamUsers]) {
   assert.deepStrictEqual(pageFor(list, { last: 12, ...previous }), { last: 12, ...previous });
   assert.deepStrictEqual(pageFor(list, { last: 500, ...previous }), { last: 100, ...previous });
   assert.deepStrictEqual(pageFor(list, { last: 0, ...previous }), { last: 1, ...previous });
-
-  // Requests that paginate refuses, as they mix both directions or ask for the last rows with no
-  // cursor to end before, are still passed on for it to refuse, with the number of last rows set
-  // as above.
-  assert.deepStrictEqual(pageFor(list, { first: 5, ...previous }), {
-    first: 5,
-    last: 20,
-    ...previous
-  });
-  assert.deepStrictEqual(pageFor(list, { last: 5, ...next }), { last: 5, ...next });
-  assert.deepStrictEqual(pageFor(list, { last: 5 }), { last: 5 });
-  assert.deepStrictEqual(pageFor(list, { last: 0 }), { last: 1 });
 }
+
+// The lists refuse requests that mix both directions or ask for the last rows with no cursor to
+// end before (see core/list-order.js). Their page arguments still pass them on for paginate to
+// refuse, with the number of last rows set as above.
+assert.deepStrictEqual(pageOf(pageArgs({ first: 5, before: created }, PAGE_SIZE.list)), {
+  first: 5,
+  last: 20,
+  before: created
+});
+assert.deepStrictEqual(pageOf(pageArgs({ last: 5, after: created }, PAGE_SIZE.list)), {
+  last: 5,
+  after: created
+});
+assert.deepStrictEqual(pageOf(pageArgs({ last: 5 }, PAGE_SIZE.list)), { last: 5 });
+assert.deepStrictEqual(pageOf(pageArgs({ last: 0 }, PAGE_SIZE.list)), { last: 1 });
 
 // A player's bans come PAGE_SIZE.playerBans to a page when a request does not say how many, as
 // the profile and banned pages show all of a player's bans without asking for more. No page holds
@@ -132,10 +149,10 @@ for (const [args, page] of [
   [{ first: 0 }, { first: 1 }],
   [{ first: 20 }, { first: 20 }],
   [{ first: 200000 }, { first: playerPage }],
-  [{ before: 'previous-cursor' }, { last: PAGE_SIZE.playerBans, before: 'previous-cursor' }],
+  [{ before: created }, { last: PAGE_SIZE.playerBans, before: created }],
   [
-    { last: 200000, before: 'previous-cursor' },
-    { last: playerPage, before: 'previous-cursor' }
+    { last: 200000, before: created },
+    { last: playerPage, before: created }
   ]
 ])
   assert.deepStrictEqual(pageFor(playerBans, args), page, `SteamUser.bans ${JSON.stringify(args)}`);
@@ -153,20 +170,22 @@ assert.deepStrictEqual(pageOf(pageArgs({ before: 'previous-cursor' }, larger)), 
   before: 'previous-cursor'
 });
 
-// The lists are sorted and filtered as before: a player's bans are only theirs, and only the active
-// or expired ones when asked; the most harmful players are only those with a rank; and this month's
-// most harmful players are sorted by rank when their points rose by the same amount.
+// The lists are sorted and filtered as core/list-order.js says: a player's bans are only theirs,
+// and only the active or expired ones when asked; bans need a date; the most harmful players are
+// only those with a rank; and this month's most harmful players are those with a rank whose points
+// rose, sorted by rank when their points rose by the same amount.
+const dated = { created: { [Op.ne]: null } };
 for (const [args, where] of [
-  [{}, { steamUser: player.id }],
-  [{ expired: false }, { steamUser: player.id, expired: false }],
-  [{ expired: true }, { steamUser: player.id, expired: true }]
+  [{}, { ...dated, steamUser: player.id }],
+  [{ expired: false }, { ...dated, steamUser: player.id, expired: false }],
+  [{ expired: true }, { ...dated, steamUser: player.id, expired: true }]
 ]) {
   const options = optionsFor(playerBans, { orderBy: 'created', orderDirection: 'DESC', ...args });
   assert.deepStrictEqual(options.order, [['created', 'DESC']]);
   assert.deepStrictEqual(options.where, where);
 }
 assert.deepStrictEqual(optionsFor(bans, {}).order, [['created', 'DESC']]);
-assert.strictEqual(optionsFor(bans, {}).where, undefined);
+assert.deepStrictEqual(optionsFor(bans, {}).where, dated);
 assert.deepStrictEqual(optionsFor(steamUsers, {}).order, [['id', 'DESC']]);
 assert.strictEqual(optionsFor(steamUsers, {}).where, undefined);
 const ranked = optionsFor(steamUsers, { orderBy: 'reputationRank', orderDirection: 'ASC' });
@@ -180,7 +199,10 @@ assert.deepStrictEqual(rising.order, [
   ['reputationPointsMonthChange', 'DESC'],
   ['reputationRank', 'ASC']
 ]);
-assert.strictEqual(rising.where, undefined);
+assert.deepStrictEqual(rising.where, {
+  reputationPointsMonthChange: { [Op.gt]: 0 },
+  reputationRank: { [Op.ne]: null }
+});
 
 // With the pagination library the models use, which fetches one row more than a page to tell
 // whether there is another, every query a list makes is limited to between 2 rows and one more
@@ -203,23 +225,14 @@ async function limitFor(list, args) {
   return queries[0].limit;
 }
 
-// Cursors as the library writes them, for each list's default order.
-const cursor = (...values) => Buffer.from(JSON.stringify(values)).toString('base64');
-const created = cursor('2024-01-01T00:00:00.000Z', 1);
-const cursors = new Map([
-  [bans, created],
-  [steamUsers, cursor(player.id)],
-  [playerBans, created]
-]);
-
 assert.strictEqual(await limitFor(steamUsers, {}), 21);
 assert.strictEqual(await limitFor(steamUsers, { first: 200000 }), 101);
 assert.strictEqual(await limitFor(bans, { first: 0 }), 2);
 assert.strictEqual(await limitFor(bans, { before: created }), 21);
 assert.strictEqual(await limitFor(playerBans, {}), PAGE_SIZE.playerBans + 1);
 
-// Check that a request's query is limited, or that paginate refused it as a request for the page
-// before a cursor that it does not support. Arguments set to undefined are left out, as GraphQL
+// Check that a request's query is limited, or that it was refused as a request for the page before
+// a cursor that paginate does not support. Arguments set to undefined are left out, as GraphQL
 // leaves out those a request does not give.
 async function checkLimited(list, page) {
   const args = Object.fromEntries(Object.entries(page).filter(([, value]) => value !== undefined));
@@ -229,7 +242,8 @@ async function checkLimited(list, page) {
     limit = await limitFor(list, args);
   } catch (error) {
     assert.ok(args.last != null || args.before != null, `${request} was refused`);
-    assert.match(error.message, /^This package does not support/, request);
+    assert.strictEqual(error.extensions?.code, 'BAD_USER_INPUT', request);
+    assert.match(error.message, /^Use (first and after, or last and before|last with a)/, request);
     return;
   }
   const largest = list === playerBans ? playerPage : 100;
