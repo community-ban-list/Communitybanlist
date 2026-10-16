@@ -45,6 +45,11 @@ const MAX_MESSAGE_LENGTH = 1900;
 const PROGRESS_BAR_DELAY = 60 * 1000;
 const EDIT_INTERVAL = 15 * 1000;
 
+// A status message, such as a run's, has 30 seconds rather than the usual 10 for Discord to answer
+// its post, as nothing waits for it. Discord may post a message it does not answer for in time,
+// and the logger then never learns which message it is, so the longer this is, the rarer that is.
+const STATUS_POST_TIMEOUT = 30 * 1000;
+
 function convertToBarChart(minValue = 0, maxValue = 1, barValue) {
   const chartWidth = 50;
   if (minValue === maxValue) minValue = 0;
@@ -91,13 +96,21 @@ function messageBody(payload) {
 // updates it thousands of times sends a few edits and never waits for Discord. A payload is
 // { content, embeds }, or a function that returns one, which is only called when the payload is
 // sent, so a message can show the latest of something that changes often without drawing it each
-// time.
+// time. postTimeout, if given, is how long Discord has to answer its post, and with postAgain, a
+// post that failed is made again when the next payload is due, unless Discord refused it (see
+// failed).
 class LogMessage {
-  constructor(logger, payload, { priority, name, delay = 0, finished = false }) {
+  constructor(
+    logger,
+    payload,
+    { priority, name, delay = 0, finished = false, postTimeout, postAgain = false }
+  ) {
     this.logger = logger;
     this.priority = priority;
     // What the message is, for the console, e.g. 'a progress bar'.
     this.name = name;
+    this.postTimeout = postTimeout;
+    this.postAgain = postAgain;
     this.messageID = null;
     // The latest payload, while it waits to be sent.
     this.waiting = null;
@@ -249,7 +262,7 @@ class LogMessage {
             );
           } else {
             const message = await this.logger.withRetry(() =>
-              sendDiscordWebhook(webhook, messageBody(payload))
+              sendDiscordWebhook(webhook, messageBody(payload), { timeout: this.postTimeout })
             );
             if (!message?.id) throw new Error('Discord did not say which message it posted');
             this.messageID = message.id;
@@ -260,22 +273,29 @@ class LogMessage {
             console.warn(
               `Could not ${this.messageID ? 'update' : 'post'} ${this.name} in the Discord log: ${describeError(err)}`
             );
-          this.failed(payload, err?.status);
+          this.failed(payload, err);
         }
         this.done();
       },
       () => {
-        this.failed(payload);
+        this.failed(payload, null);
         this.done();
       }
     );
   }
 
-  // After a send failed or was dropped, give up on a message that was never posted, or that Discord
-  // refused to edit, e.g. because it was deleted. Otherwise send the payload again when the next one
-  // is due, unless a newer one is waiting.
-  failed(payload, status) {
-    if (!this.messageID || (status >= 400 && status < 500 && status !== 429)) this.stop();
+  // After a send failed, or was dropped as the queue was full (err is then null), send the payload
+  // again when the next one is due, unless a newer one is waiting. A message Discord refused to
+  // post or edit, with a 4xx other than 429, e.g. as it was deleted, is not sent again. Nor is a
+  // message that was never posted, rather than risk posting it twice, unless it is one to post
+  // again (postAgain), such as a run's status, which matters more than a rare second message. That
+  // is posted again when Discord did not post it, as it rate limited or failed the post or never
+  // got it, or may not have, as it did not answer.
+  failed(payload, err) {
+    const status = err?.status;
+    const refused = status >= 400 && status < 500 && status !== 429;
+    const notPosted = err === null || status === 429 || status >= 500 || err?.network === true;
+    if (refused || (!this.messageID && !(this.postAgain && notPosted))) this.stop();
     else if (this.waiting === null) this.wait(payload);
   }
 
@@ -385,9 +405,16 @@ class Logger {
   // it at once, to update and finish later. It is posted in the background straight away, ahead of
   // other messages, then edited at most once every 15 seconds with its latest payload, and its final
   // payload, given to finish(), is sent at once. Nothing waits for Discord. A payload is
-  // { content, embeds }, or a function that returns one when it is sent.
+  // { content, embeds }, or a function that returns one when it is sent. Unlike a progress bar, a
+  // status message whose post failed is posted again, with its latest payload, 15 seconds later,
+  // unless Discord refused it, and Discord has 30 seconds to answer its post.
   statusMessage(payload) {
-    return new LogMessage(this, payload, { priority: STATUS_PRIORITY, name: 'a status message' });
+    return new LogMessage(this, payload, {
+      priority: STATUS_PRIORITY,
+      name: 'a status message',
+      postTimeout: STATUS_POST_TIMEOUT,
+      postAgain: true
+    });
   }
 
   // Change a message the log webhook posted earlier, such as the status message of a run that ended
@@ -509,7 +536,8 @@ class Logger {
   // after 1 and then 3 seconds. Discord may have posted a message it did not answer for in time,
   // but a rare duplicate line in the log is better than a lost one. Messages that are kept up to
   // date, such as progress bars, do not use it: a posted message's payload is sent again with its
-  // next one, and one that was never posted stays quiet rather than risk being posted twice.
+  // next one, and one that was never posted stays quiet rather than risk being posted twice, or,
+  // for a status message, is posted again with its next payload.
   async withRetry(request, { retryNetwork = false } = {}) {
     // The tries left: one after a 429 or 5xx, and one for each wait after a network error.
     const networkWaits = retryNetwork ? [...NETWORK_RETRY_WAITS] : [];

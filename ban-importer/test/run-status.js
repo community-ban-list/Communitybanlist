@@ -50,7 +50,7 @@ const module = new vm.SourceTextModule(await readFile(url, 'utf8'), {
 });
 await module.link(() => assert.fail('run-status.js has no imports'));
 await module.evaluate();
-const { default: draw, markUnfinished, COLORS, TITLES } = module.namespace;
+const { default: draw, markEnded, markUnfinished, COLORS, TITLES } = module.namespace;
 // Embeds are made in the drawing's own context, so they are copied into this one to compare them.
 const copy = (value) => JSON.parse(JSON.stringify(value));
 const render = (state) => {
@@ -506,16 +506,23 @@ for (const [gitSha, shown] of [
   );
   assert.ok(!shown.includes('secret') && !shown.includes('token') && !shown.includes('pass'));
 }
-for (const filler of ['x', '😀']) {
-  // A reason of 10,000 characters, with an emoji, two characters long, across where it is cut.
-  const reason = `Error: ${'y'.repeat(292)}${filler.repeat(5000)}`;
+// A reason of 10,000 characters keeps its first 299 and ends with …, wherever that cut falls: just
+// after an emoji, which is two characters long, inside one, which leaves the emoji out rather than
+// keep half of it, or just before one.
+for (const [ys, filler, kept] of [
+  [290, 'x', 'xx'],
+  [290, '😀', '😀'],
+  [291, 'x', 'x'],
+  [291, '😀', ''],
+  [292, 'x', ''],
+  [292, '😀', '']
+]) {
+  const reason = `Error: ${'y'.repeat(ys)}${filler.repeat(5000)}`;
   const embed = render(ended('failed', { reason }));
   const shown = lines(embed).find((line) => line.startsWith('**Reason** '));
   const text = shown.slice('**Reason** '.length);
-  assert.ok(text.length <= 300, `${text.length} characters`);
-  assert.ok(text.endsWith('…'));
-  assert.ok(text.isWellFormed());
-  assert.ok(text.startsWith(`Error: ${'y'.repeat(292)}`));
+  assert.strictEqual(text, `Error: ${'y'.repeat(ys)}${kept}…`, `${ys} y and ${filler}`);
+  assert.ok(text.length <= 300 && text.isWellFormed());
 }
 
 // However many steps a run has, and however long their names, the embed stays within Discord's
@@ -553,6 +560,42 @@ for (const filler of ['x', '😀']) {
   const stopped = render({ ...state, outcome: 'stopped', seconds: 3600, reason: 'x'.repeat(5000) });
   assert.ok(lines(stopped).includes('▫️ 29 more steps · not run'));
   assert.ok(lines(stopped).some((line) => line.startsWith('⏹️ **step30nnn')));
+}
+
+// The description is drawn in at most 3,500 of Discord's 4,096 characters, which leaves room for
+// the next run to mark it: up to that, each step has a line of its own, and past it, the steps are
+// summed up. Here a run's 43 steps, which have finished, have long names, and the list of its
+// migrations grows a character at a time.
+{
+  const steps = Array.from({ length: 43 }, (_, i) => `step${i}`.padEnd(60, 'n'));
+  const drawn = Array.from({ length: 300 }, (_, i) =>
+    render({
+      outcome: 'running',
+      startedAt: START,
+      at: START + 3600 * SECOND,
+      gitSha: '28388ba',
+      steps,
+      phases: Object.fromEntries(steps.map((name) => [name, 60])),
+      phase: steps.at(-1),
+      completed: steps,
+      migrations: ['m'.repeat(i + 1)]
+    })
+  );
+  const summed = (embed) => lines(embed).includes('✅ **43 steps** · 43m 00s');
+  const first = drawn.findIndex(summed);
+  assert.ok(first > 0, 'Some descriptions are drawn whole, and some summed up');
+  assert.ok(drawn.slice(first).every(summed));
+  for (const [i, embed] of drawn.slice(0, first).entries()) {
+    assert.ok(!summed(embed));
+    assert.strictEqual(lines(embed).length, 3 + 1 + 43);
+    assert.strictEqual(embed.description.length, drawn[0].description.length + i);
+  }
+  const longest = drawn[first - 1];
+  assert.strictEqual(longest.description.length, 3500);
+  // The next run's mark fits in what is left, so it keeps all of the longest.
+  const [marked] = copy(markUnfinished({ embeds: [longest] }, { foundAt: START })).embeds;
+  checkLimits(marked);
+  assert.ok(marked.description.endsWith(`\n\n${longest.description}`));
 }
 
 // Whatever the state holds, the drawing gives an embed within Discord's limits rather than fail:
@@ -634,6 +677,45 @@ for (const state of [
   assert.ok(ownMarked.description.endsWith(lines(own).at(-1)));
 }
 
+// A run whose last edit did not reach Discord, e.g. as Discord was down while it ended, but which
+// saved its record, is shown by the next run as it ended, drawn from its record as its own last
+// edit would have drawn it, and the footer says so. It is drawn once: a message that does not show
+// a run in progress is left as it is.
+{
+  const message = {
+    id: '900',
+    content: null,
+    embeds: [{ type: 'rich', ...render(running('updateExportBans')) }]
+  };
+  const footer =
+    'Ended · shown by the next run, from its record, as its last update did not reach Discord';
+  const shown = [];
+  for (const [outcome, options] of [
+    ['finished', {}],
+    ['failed', { ...recalculation, reason: 'Error: Deadlock found' }],
+    ['stopped', { ...recalculation, reason: 'Stopped, as it received SIGTERM' }],
+    ['lockLost', { ...recalculation, reason: 'Stopped, as it lost its run lock' }]
+  ]) {
+    const state = ended(outcome, options);
+    const revised = copy(markEnded(message, state));
+    assert.deepStrictEqual(revised, {
+      content: null,
+      embeds: [{ ...render(state), footer: { text: footer } }]
+    });
+    checkLimits(revised.embeds[0]);
+    assert.strictEqual(revised.embeds[0].title, TITLES[outcome]);
+    shown.push(revised);
+  }
+  for (const other of [
+    ...shown,
+    markUnfinished(message, { foundAt: START }),
+    { content: 'Hello', embeds: [] },
+    { embeds: [{ description: 'No title' }] },
+    null
+  ])
+    assert.strictEqual(markEnded(other, ended('finished')), null);
+}
+
 console.log(
-  'Run status checks passed: every step and outcome, progress bars, counts, times, commits, migrations, reasons, Discord limits and runs that ended without finishing.'
+  'Run status checks passed: every step and outcome, progress bars, counts, times, commits, migrations, reasons, Discord limits, and runs that ended without finishing or whose last edit was lost.'
 );

@@ -632,6 +632,37 @@ for (const skipped of [false, true]) {
   }
 }
 
+// The next run finds the record of the run whose message it checks by when that run started, as
+// lastRunMessage gives it: the latest run's record, or else its summary in recentRuns, e.g. as a
+// run that lost the run lock saved its record after the run that took the lock over. A run that
+// saved no record, e.g. as it was killed, has none.
+{
+  const database = fakeDatabase();
+  const { default: RunRecord, readSavedRun, saveRecord, clock } = await loadRunRecord(database);
+  assert.strictEqual(await readSavedRun('2026-10-15T12:00:00.000Z'), null);
+
+  const earlier = new RunRecord();
+  earlier.count('importBans', () => ({ lists: 2, fetched: 30, banLists: [{ id: 1 }, { id: 2 }] }));
+  await saveRecord(earlier.end('failed', 1, 'Stopped, as it lost its run lock'));
+  clock.now += HOUR;
+  const latest = new RunRecord();
+  await saveRecord(latest.end('finished', 0));
+
+  assert.deepStrictEqual(
+    plain(await readSavedRun('2026-10-15T13:00:00.000Z')),
+    plain(latest.ended)
+  );
+  const { event, ...summary } = plain(earlier.ended);
+  assert.strictEqual(event, 'cbl-importer-run');
+  assert.deepStrictEqual(plain(await readSavedRun('2026-10-15T12:00:00.000Z')), {
+    ...summary,
+    counts: { importBans: { lists: 2, fetched: 30 } }
+  });
+  for (const startedAt of ['2026-10-15T06:00:00.000Z', undefined, null])
+    assert.strictEqual(await readSavedRun(startedAt), null, String(startedAt));
+  assert.strictEqual(database.transactions(), 2);
+}
+
 console.log(
-  'Run record checks passed: what a record holds, reasons cut on a character boundary, saving it with the latest 100 summaries, what counts as a success, the staleness alert on the schedule, with its limit of one a cadence, and the run status message to check.'
+  'Run record checks passed: what a record holds, reasons cut on a character boundary, saving it with the latest 100 summaries, what counts as a success, the staleness alert on the schedule, with its limit of one a cadence, and the run status message to check, with the record of its run.'
 );

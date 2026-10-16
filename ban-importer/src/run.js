@@ -5,6 +5,7 @@ import { describeError, Logger } from 'scbl-lib/utils';
 import RunRecord, {
   alertIfStale,
   readRunMessage,
+  readSavedRun,
   saveRecord,
   saveRunMessage,
   succeeded
@@ -18,7 +19,7 @@ import {
   stopIfRequested,
   stopRequest
 } from './run-control.js';
-import renderRunStatus, { markUnfinished } from './run-status.js';
+import renderRunStatus, { markEnded, markUnfinished } from './run-status.js';
 import migrate from './schema/migrate.js';
 
 // What the importer's exit code tells the script that starts it.
@@ -78,6 +79,9 @@ const RELEASE_RESERVE = 5 * 1000;
 
 // Why a run failed that was left waiting for something that can never happen.
 const LEFT_WAITING = 'The run was left waiting for something that can never happen';
+
+// Why a run stopped that lost its run lock, as its record gives it.
+const STOPPED_LOCK_LOST = `Stopped, as ${LOCK_LOST}`;
 
 // While a run goes, its status in the log channel is drawn again this often, so the time it has
 // taken stays current while nothing else changes. The logger edits it no more often than this.
@@ -145,6 +149,38 @@ function readSeconds(name, defaultSeconds) {
   return defaultSeconds;
 }
 
+// How a run's status names the way the run ended, from its record: a run that lost its run lock
+// failed, but is named for that.
+function outcomeOf({ exitCode, reason }) {
+  if (exitCode === EXIT_CODES.FINISHED) return 'finished';
+  if (exitCode === EXIT_CODES.INTERRUPTED) return 'stopped';
+  return reason === STOPPED_LOCK_LOST ? 'lockLost' : 'failed';
+}
+
+// The status of an earlier run, drawn from the record it saved, for a run whose last edit did not
+// reach Discord. The record does not say which steps were still to run, so steps gives them, nor
+// whether the phase a run that did not finish ended in had finished, as it has when the run stopped
+// between two steps, so that phase is shown as the one it ended in.
+function savedStatus(saved, steps) {
+  const phases = saved.phases && typeof saved.phases === 'object' ? saved.phases : {};
+  const finished = saved.exitCode === EXIT_CODES.FINISHED;
+  return {
+    outcome: outcomeOf(saved),
+    startedAt: Date.parse(saved.startedAt),
+    at: Date.parse(saved.endedAt),
+    seconds: saved.seconds,
+    gitSha: saved.gitSha,
+    steps,
+    phases,
+    phase: saved.phase,
+    completed: Object.keys(phases).filter((name) => finished || name !== saved.phase),
+    progress: {},
+    counts: saved.counts,
+    migrations: saved.migrations,
+    reason: saved.reason
+  };
+}
+
 // Wait for the database to answer, as the script that starts the importer may have just restarted
 // it.
 async function waitForDatabase() {
@@ -191,15 +227,6 @@ export default async function run(steps) {
   let statusTimer = null;
   const completed = new Set();
   const progress = {};
-  // Why the run stopped part-way, e.g. that it lost its run lock, which its status names.
-  let stopReason = null;
-
-  // How the run's status names the way the run ended, by its exit code.
-  const outcomeOf = (exitCode) => {
-    if (exitCode === EXIT_CODES.FINISHED) return 'finished';
-    if (exitCode === EXIT_CODES.INTERRUPTED) return 'stopped';
-    return stopReason === LOCK_LOST ? 'lockLost' : 'failed';
-  };
 
   // Draw the run's status, while it runs or once it has ended.
   const drawStatus = () => {
@@ -207,7 +234,7 @@ export default async function run(steps) {
     return {
       embeds: [
         renderRunStatus({
-          outcome: ended ? outcomeOf(ended.exitCode) : 'running',
+          outcome: ended ? outcomeOf(ended) : 'running',
           startedAt: record.startedAt,
           at: ended ? Date.parse(ended.endedAt) : Date.now(),
           seconds: ended?.seconds,
@@ -276,18 +303,25 @@ export default async function run(steps) {
     }
   };
 
-  // The status message of the run before this one is marked if it still says that run is in
-  // progress, as that run then ended without saying how, e.g. as it was killed. This run's own
-  // message is then saved in its place, once it is posted, for the next run to check. It is all
-  // done in the background, and nothing of it holds up or fails the run.
+  // The status message of the run before this one is corrected if it still says that run is in
+  // progress, as that run's last edit did not reach Discord. A run that saved its record is shown
+  // as it ended, from its record, e.g. when Discord was down as it ended, and one that saved none
+  // ended without saying how, e.g. as it was killed, so it is marked as having ended without
+  // finishing. This run's own message is then saved in its place, once it is posted, for the next
+  // run to check. It is all done in the background, and nothing of it holds up or fails the run.
   const checkLastStatus = async () => {
     if (!status || status.stopped) return;
     try {
       const last = await readRunMessage();
-      if (last)
+      if (last) {
+        const saved = await readSavedRun(last.startedAt);
+        const names = steps.map((step) => step.name);
         Logger.reviseMessage(last.messageId, (message) =>
-          markUnfinished(message, { foundAt: record.startedAt })
+          saved
+            ? markEnded(message, savedStatus(saved, names))
+            : markUnfinished(message, { foundAt: record.startedAt })
         );
+      }
       const messageId = await status.posted;
       if (messageId && !finishing) await saveRunMessage({ messageId, startedAt: record.startedAt });
     } catch (err) {
@@ -556,7 +590,6 @@ export default async function run(steps) {
     } catch (err) {
       if (err instanceof RunStopped) {
         Logger.important('Core', err.message);
-        stopReason = err.reason;
         exitCode = err.reason === LOCK_LOST ? EXIT_CODES.FAILED : EXIT_CODES.INTERRUPTED;
         reason = `Stopped, as ${err.reason}`;
       } else {

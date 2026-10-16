@@ -65,7 +65,17 @@ const axios = {
     return reply();
   }
 };
-const context = vm.createContext({ URL, AbortSignal });
+// The time after which each request is cut off, as the abort signal it was given says.
+const deadlines = [];
+const context = vm.createContext({
+  URL,
+  AbortSignal: {
+    timeout(ms) {
+      deadlines.push(ms);
+      return AbortSignal.timeout(ms);
+    }
+  }
+});
 
 async function load(path) {
   const url = new URL(path, import.meta.url);
@@ -118,6 +128,7 @@ assert.strictEqual(request.body.content, null);
 assert.deepStrictEqual([...request.body.embeds], ['embed']);
 assert.deepStrictEqual([...request.body.allowed_mentions.parse], []);
 assert.strictEqual(request.options.timeout, 10000);
+assert.deepStrictEqual(deadlines, [15000]);
 assert.strictEqual(request.options.maxRedirects, 0);
 assert.ok(request.options.signal instanceof AbortSignal);
 assert.ok(request.options.validateStatus(500));
@@ -142,6 +153,15 @@ for (const [address, expected] of [
   await send(address);
   assert.strictEqual(requests[0].url, `${expected}?wait=true`);
 }
+
+// A caller that does not wait for the answer, such as the logger posting a run's status, can give
+// Discord longer to answer, and the request is then cut off 5 seconds after that.
+requests.length = 0;
+deadlines.length = 0;
+assert.strictEqual((await send(webhook, { embeds: ['embed'] }, { timeout: 30000 })).id, 'message');
+assert.strictEqual(requests[0].url, `${v10}?wait=true`);
+assert.strictEqual(requests[0].options.timeout, 30000);
+assert.deepStrictEqual(deadlines, [35000]);
 
 // Discord's error code reaches the caller, so deleted webhooks can be recognised, and the
 // webhook's address never appears in the error. The importer and the logger share the codes that
@@ -217,6 +237,7 @@ assert.strictEqual(requests[0].body.content, 'Updated');
 assert.deepStrictEqual([...requests[0].body.embeds], []);
 assert.deepStrictEqual([...requests[0].body.allowed_mentions.parse], []);
 assert.strictEqual(requests[0].options.timeout, 10000);
+assert.strictEqual(deadlines.at(-1), 15000);
 assert.strictEqual(requests[0].options.maxRedirects, 0);
 assert.ok(requests[0].options.signal instanceof AbortSignal);
 assert.ok(requests[0].options.validateStatus(500));
@@ -250,6 +271,7 @@ assert.strictEqual(requests[0].method, 'get');
 assert.strictEqual(requests[0].url, `${v10}/messages/123`);
 assert.ok(!('body' in requests[0]));
 assert.strictEqual(requests[0].options.timeout, 10000);
+assert.strictEqual(deadlines.at(-1), 15000);
 assert.strictEqual(requests[0].options.maxRedirects, 0);
 assert.ok(requests[0].options.signal instanceof AbortSignal);
 assert.ok(requests[0].options.validateStatus(500));
@@ -310,5 +332,5 @@ await assert.rejects(testWebhook(webhook), (err) => {
 });
 
 console.log(
-  'Discord webhook checks passed: address validation, sending, editing, reading messages back, and errors.'
+  'Discord webhook checks passed: address validation, sending, with longer to answer when asked, editing, reading messages back, and errors.'
 );

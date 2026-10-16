@@ -313,8 +313,9 @@ assert.strictEqual(exportError, saveError);
 // A BattleMetrics ban that was already gone when it was deleted still counts as deleted, and is
 // reported.
 const gone = exportBan('TO_BE_DELETED', { request: () => 'gone' });
-await exportExportBans(gone);
+const goneCounts = await exportExportBans(gone);
 assert.strictEqual(gone.requests, 1);
+assert.deepStrictEqual(goneCounts, { queued: 1, created: 0, deleted: 1, failed: 0 });
 assert.deepStrictEqual(errorLines(), [
   `Removed export ban (ID: ${gone.id}) from Lists due to error 404 during deletion.`
 ]);
@@ -365,12 +366,14 @@ const mixed = [
   rejected(),
   exportBan('TO_BE_CREATED')
 ];
-await exportExportBans(...mixed);
+const mixedCounts = await exportExportBans(...mixed);
 assert.deepStrictEqual(
   mixed.map((ban) => ban.requests),
   [1, 1, 1, 1, 1, 1, 1, 1]
 );
 assert.ok(!errorLines().some((line) => line.startsWith('Stopped')));
+// The step counts the export bans it created and deleted apart, and those that failed.
+assert.deepStrictEqual(mixedCounts, { queued: 8, created: 2, deleted: 1, failed: 5 });
 
 // Once BattleMetrics refuses the key, the BattleMetrics export bans left wait for the next run, as
 // it would refuse them too. Remote lists' export bans are still updated.

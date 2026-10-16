@@ -3,9 +3,10 @@ import axios from 'axios';
 import isDiscordWebhookUrl from './discord-webhook-url.js';
 
 // How long a webhook has to answer, so one that never answers cannot hold up the importer or a
-// request to the web server. A request still being answered is cut off a little later.
+// request to the web server, unless the caller gives another time. A request still being answered
+// is cut off 5 seconds later.
 const DISCORD_WEBHOOK_TIMEOUT = 10 * 1000;
-const DISCORD_WEBHOOK_DEADLINE = 15 * 1000;
+const DISCORD_WEBHOOK_DEADLINE_MARGIN = 5 * 1000;
 
 // axios's error codes for a request that ran out of time.
 const TIMEOUT_CODES = ['ECONNABORTED', 'ETIMEDOUT', 'ERR_CANCELED'];
@@ -64,11 +65,12 @@ function messageAddress(webhook, messageID) {
 }
 
 // Make a request to a webhook address. Redirects are not followed, and the request gives up when
-// Discord does not answer in time. Returns Discord's answer, or throws a DiscordWebhookError.
-async function request(method, url, body) {
+// Discord does not answer within timeout milliseconds. Returns Discord's answer, or throws a
+// DiscordWebhookError.
+async function request(method, url, body, { timeout = DISCORD_WEBHOOK_TIMEOUT } = {}) {
   const options = {
-    timeout: DISCORD_WEBHOOK_TIMEOUT,
-    signal: AbortSignal.timeout(DISCORD_WEBHOOK_DEADLINE),
+    timeout,
+    signal: AbortSignal.timeout(timeout + DISCORD_WEBHOOK_DEADLINE_MARGIN),
     maxRedirects: 0,
     validateStatus: () => true
   };
@@ -100,21 +102,31 @@ async function request(method, url, body) {
 
 // Post a message to a Discord webhook as the Community Ban List. Only Discord webhook addresses
 // are accepted, redirects are not followed, and the request gives up when Discord does not answer
-// in time. Returns the message Discord posted, or throws a DiscordWebhookError.
-export default async function sendDiscordWebhook(webhook, { content = null, embeds = [] } = {}) {
+// in time: within 10 seconds, or the timeout given, in milliseconds, by a caller that does not wait
+// for the answer. Returns the message Discord posted, or throws a DiscordWebhookError.
+export default async function sendDiscordWebhook(
+  webhook,
+  { content = null, embeds = [] } = {},
+  { timeout } = {}
+) {
   if (!isDiscordWebhookUrl(webhook)) throw new DiscordWebhookError('Invalid Discord webhook');
 
   // Build the address rather than appending to it, as it may already have a thread_id query.
   const url = webhookAddress(webhook);
   url.searchParams.set('wait', 'true');
 
-  return request('post', url, {
-    content,
-    username: USERNAME,
-    avatar_url: AVATAR_URL,
-    embeds,
-    allowed_mentions: { parse: [] }
-  });
+  return request(
+    'post',
+    url,
+    {
+      content,
+      username: USERNAME,
+      avatar_url: AVATAR_URL,
+      embeds,
+      allowed_mentions: { parse: [] }
+    },
+    { timeout }
+  );
 }
 
 // Replace the content and embeds of a message a webhook posted, e.g. to update a progress bar,

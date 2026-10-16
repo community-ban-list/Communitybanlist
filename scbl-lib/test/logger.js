@@ -45,7 +45,8 @@ async function loadLogger(env = { DISCORD_LOG_WEBHOOK: webhook }, { highWater } 
     }
   }
 
-  // Requests are recorded as they are made, with how many were being made at once.
+  // Requests are recorded as they are made, with how many were being made at once, and, for a
+  // post, how long it gives Discord to answer, if not the usual time.
   const request = async (details) => {
     discord.requests.push(details);
     discord.inFlight++;
@@ -62,7 +63,8 @@ async function loadLogger(env = { DISCORD_LOG_WEBHOOK: webhook }, { highWater } 
     bottleneck: { default: FastLimiter },
     './discord-webhook.js': {
       DELETED_WEBHOOK_CODES: [10015, 50027],
-      default: async (url, { content, embeds }) => request({ type: 'send', url, content, embeds }),
+      default: async (url, { content, embeds }, { timeout } = {}) =>
+        request({ type: 'send', url, content, embeds, timeout }),
       editDiscordWebhookMessage: async (url, id, { content, embeds }) =>
         request({ type: 'edit', url, id, content, embeds }),
       getDiscordWebhookMessage: async (url, id) => request({ type: 'get', url, id })
@@ -425,6 +427,8 @@ assert.deepStrictEqual(
   discord.requests.map(({ type, content }) => [type, content]),
   [['send', `[Core] Progress on Updating 100 Steam users...\n\`\`[█${' '.repeat(49)}] 0/100\`\``]]
 );
+// Unlike a status message's, its post has the usual time for Discord to answer.
+assert.strictEqual(discord.requests[0].timeout, undefined);
 
 // Updates are coalesced: only the latest value is sent, 15 seconds after the last one was. Until
 // then it counts as queued, so services that wait for the log queue wait for it too.
@@ -1016,8 +1020,8 @@ refused.logger.verbose('Test', 1, 'Still logging');
 await refused.idle();
 assert.strictEqual(refused.discord.requests.at(-1).content, '[Test][1] Still logging');
 
-// A status message that could not be posted is not posted again, as a progress bar is not, and
-// settles with no ID, so nothing waits for one.
+// A status message Discord refused to post, with a 4xx other than 429, is not posted again, as it
+// would be refused again, and settles with no ID, so nothing waits for one.
 const unposted = await loadLogger();
 unposted.discord.reply = async () => {
   throw discordError('Discord answered HTTP 400: Invalid Form Body (code 50035)', {
@@ -1035,6 +1039,129 @@ assert.strictEqual(unposted.discord.requests.length, 1);
 assert.deepStrictEqual(warnings(unposted.output), [
   'Could not post a status message in the Discord log: DiscordWebhookError: Discord answered HTTP 400: Invalid Form Body (code 50035)'
 ]);
+
+// A status message whose post Discord rate limited or failed, after the post was tried once more,
+// as any message is, is posted again with its latest payload when the next one is due, 15 seconds
+// later, rather than lost for the whole run. It settles with its ID once it is posted, and its
+// final payload is then sent as an edit.
+for (const error of [
+  {
+    status: 429,
+    retryAfter: 1.2,
+    message: 'Discord answered HTTP 429: You are being rate limited.'
+  },
+  { status: 503, message: 'Discord answered HTTP 503' }
+]) {
+  const limited = await loadLogger();
+  let failures = 2;
+  limited.discord.reply = async ({ type, id }) => {
+    if (type === 'send' && failures-- > 0) throw discordError(error.message, error);
+    return { id: type === 'send' ? '1001' : id };
+  };
+  let title = 'Posting';
+  const draw = () => ({ embeds: [{ title }] });
+  const limitedStatus = limited.logger.statusMessage(draw);
+  let postedID;
+  limitedStatus.posted.then((id) => (postedID = id));
+  await until(() => limited.discord.requests.length === 1 && limited.timers.size === 1, 'a retry');
+  limited.advance(error.retryAfter ? 1200 : 1000);
+  await limited.settled();
+  assert.strictEqual(limited.discord.requests.length, 2);
+  assert.strictEqual(limitedStatus.stopped, false);
+  assert.strictEqual(postedID, undefined);
+  // It waits for its next payload's time, and counts as queued until then, so the importer waits
+  // for it before it exits.
+  assert.deepStrictEqual({ ...limited.logger.getLogQueue() }, { ...emptyQueue, QUEUED: 1 });
+  title = 'Updated';
+  limitedStatus.update(draw);
+  limited.advance(14999);
+  await pause();
+  assert.strictEqual(limited.discord.requests.length, 2);
+  limited.advance(1);
+  assert.strictEqual(await limitedStatus.posted, '1001');
+  await limited.idle();
+  limitedStatus.finish({ embeds: [{ title: 'Final' }] });
+  await limited.idle();
+  assert.deepStrictEqual(shown(limited.discord.requests), [
+    ['send', undefined, null, ['Posting']],
+    ['send', undefined, null, ['Posting']],
+    ['send', undefined, null, ['Updated']],
+    ['edit', '1001', null, ['Final']]
+  ]);
+  assert.strictEqual(limited.timers.size, 0);
+  assert.deepStrictEqual(warnings(limited.output), [
+    `Could not post a status message in the Discord log: DiscordWebhookError: ${error.message}`
+  ]);
+}
+
+// Discord has 30 seconds to answer a status message's post, rather than the usual 10, as nothing
+// waits for it, which makes it rarer that Discord posts a message the logger never learns the ID
+// of. One it still does not answer, or cannot be reached for, is not tried again at once, as
+// Discord may have posted it, but nor is it given up: it is posted again when its next payload is
+// due, here its final payload, which is sent at once. Other messages, such as the log's lines,
+// have the usual time.
+{
+  const unanswered = await loadLogger();
+  let answering = false;
+  unanswered.discord.reply = async ({ type, id }) => {
+    if (type === 'send' && !answering) throw networkError('Discord did not answer in time');
+    return { id: type === 'send' ? '2002' : id };
+  };
+  const unansweredStatus = unanswered.logger.statusMessage({ embeds: [{ title: 'Posting' }] });
+  await unanswered.settled();
+  assert.strictEqual(unanswered.discord.requests.length, 1);
+  assert.strictEqual(unansweredStatus.stopped, false);
+  assert.deepStrictEqual(
+    [...unanswered.timers].map(({ ms }) => ms),
+    [15000]
+  );
+  answering = true;
+  unansweredStatus.finish({ embeds: [{ title: 'Final' }] });
+  assert.strictEqual(await unansweredStatus.posted, '2002');
+  unanswered.logger.verbose('Test', 1, 'Line');
+  await unanswered.idle();
+  assert.deepStrictEqual(shown(unanswered.discord.requests), [
+    ['send', undefined, null, ['Posting']],
+    ['send', undefined, null, ['Final']],
+    ['send', undefined, '[Test][1] Line', undefined]
+  ]);
+  assert.deepStrictEqual(
+    unanswered.discord.requests.map(({ timeout }) => timeout),
+    [30000, 30000, undefined]
+  );
+  assert.strictEqual(unanswered.timers.size, 0);
+  assert.deepStrictEqual(warnings(unanswered.output), [
+    'Could not post a status message in the Discord log: DiscordWebhookError: Discord did not answer in time'
+  ]);
+}
+
+// Nor is a status message whose post was dropped from a full queue lost, which can only happen
+// when the queue is full of status messages. It is posted when its next payload is due.
+{
+  const full = await loadLogger(undefined, { highWater: 2 });
+  let releaseFull;
+  const fullBlocked = new Promise((resolve) => (releaseFull = resolve));
+  full.discord.reply = async ({ type, id, content, embeds }) => {
+    if (content === '[Test][1] Blocker') await fullBlocked;
+    return { id: type === 'send' ? (content ? '1' : embeds[0].title) : id };
+  };
+  full.logger.verbose('Test', 1, 'Blocker');
+  await until(() => full.discord.requests.length === 1, 'the blocker to be sent');
+  const statuses = [1, 2, 3].map((i) => full.logger.statusMessage({ embeds: [{ title: `${i}` }] }));
+  await until(() => full.logger.getLogQueue().RECEIVED === 0, 'the posts to be queued');
+  assert.ok(statuses.every((status) => !status.stopped));
+  releaseFull();
+  await full.settled();
+  assert.deepStrictEqual(shown(full.discord.requests).slice(1), [
+    ['send', undefined, null, ['1']],
+    ['send', undefined, null, ['2']]
+  ]);
+  full.advance(15000);
+  assert.deepStrictEqual(await Promise.all(statuses.map(({ posted }) => posted)), ['1', '2', '3']);
+  await full.idle();
+  assert.deepStrictEqual(shown(full.discord.requests).at(-1), ['send', undefined, null, ['3']]);
+  assert.strictEqual(full.timers.size, 0);
+}
 
 // A payload that cannot be drawn stops the message, with a warning, rather than fail whatever
 // updated it.
@@ -1192,5 +1319,5 @@ await pause();
 assert.deepStrictEqual(unhandled, []);
 
 console.log(
-  'Logger checks passed: Discord off, failed sends, retries, long messages, errors, stack traces, progress bars and their first minute, status messages, changing earlier messages, the queue limit, run lines and gone webhooks.'
+  'Logger checks passed: Discord off, failed sends, retries, long messages, errors, stack traces, progress bars and their first minute, status messages and their posts made again, changing earlier messages, the queue limit, run lines and gone webhooks.'
 );

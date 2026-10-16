@@ -20,7 +20,7 @@ export const STATE = {
   // When the run, or the skipped start, that last posted that the importer is stale started.
   LAST_STALE_ALERT_AT: 'lastStaleAlertAt',
   // The status message in the log channel of the latest run that posted one, and when that run
-  // started, so the next run can mark it if the run ended without saying how.
+  // started, so the next run can correct it if the run's last edit did not reach Discord.
   LAST_RUN_MESSAGE: 'lastRunMessage'
 };
 
@@ -198,6 +198,24 @@ export async function saveRunMessage({ messageId, startedAt }) {
     name: STATE.LAST_RUN_MESSAGE,
     value: { messageId, startedAt: isoTime(startedAt) }
   });
+}
+
+// The record of the run that started at startedAt, as lastRunMessage gives it: the latest run's
+// record, or else its summary in recentRuns, e.g. when a run that lost the run lock saved its
+// record after the run that took the lock over. Resolves with null when that run saved no record,
+// e.g. as it was killed.
+export async function readSavedRun(startedAt) {
+  if (typeof startedAt !== 'string') return null;
+  const rows = await ImporterState.findAll({
+    where: { name: [STATE.LAST_RUN, STATE.RECENT_RUNS] }
+  });
+  const state = Object.fromEntries(rows.map(({ name, value }) => [name, value]));
+  const recent = Array.isArray(state[STATE.RECENT_RUNS]) ? state[STATE.RECENT_RUNS] : [];
+  return (
+    [state[STATE.LAST_RUN], ...recent.toReversed()].find(
+      (saved) => saved?.startedAt === startedAt
+    ) ?? null
+  );
 }
 
 // Save when the run that posts a stale alert started, unless a run that started less than a

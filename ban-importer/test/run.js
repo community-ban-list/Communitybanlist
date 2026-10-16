@@ -1656,12 +1656,17 @@ for (const exit of ['signal', 'time limit']) {
 }
 
 // The run checks the status message of the run before it, in the background once the importer's
-// tables are there, and asks the logger to mark it if it still says that run is in progress, as
-// that run then ended without saying how, e.g. as it was killed. It does so once. Once this run's
-// own message is posted, it is saved in its place, for the next run to check.
+// tables are there, and asks the logger to mark it if it still says that run is in progress and
+// that run saved no record, as it then ended without saying how, e.g. as it was killed. It does so
+// once. Once this run's own message is posted, it is saved in its place, for the next run to check.
+const last = { messageId: '800', startedAt: '2026-10-15T06:00:00.000Z' };
 {
-  const last = { messageId: '800', startedAt: '2026-10-15T06:00:00.000Z' };
-  const importer = await loadRun({ discordLog: true, state: { rows: { lastRunMessage: last } } });
+  // The records saved are of other runs.
+  const other = { startedAt: '2026-10-15T00:00:00.000Z', exitCode: 0, outcome: 'finished' };
+  const importer = await loadRun({
+    discordLog: true,
+    state: { rows: { lastRunMessage: last, lastRun: other, recentRuns: [other] } }
+  });
   const started = deferred();
   const gate = deferred();
   const run = importer.run([
@@ -1717,6 +1722,154 @@ for (const exit of ['signal', 'time limit']) {
   assert.strictEqual(await run, 0);
   assert.strictEqual(importer.revisions.length, 1);
 }
+
+// A run whose last edit did not reach Discord, e.g. as Discord was down while it ended, but which
+// saved its record, is shown by the next run as it ended, drawn from that record, rather than
+// marked as having ended without finishing. The record is the latest run's, or a summary in
+// recentRuns, e.g. for a run that lost its run lock and saved its record after the run that took
+// the lock over. The steps are this run's, and those its record has no time for were not run.
+const inProgress = {
+  id: '800',
+  content: null,
+  embeds: [
+    {
+      type: 'rich',
+      title: 'CBL update run in progress',
+      description: `Started <t:1792044000:f> (<t:1792044000:R>) · commit \`abc1234\`\nElapsed **1m 30s**\n\n✅ **Import** · 1m 30s\n🔄 **Export recalculation** · 0.0s\n▫️ Export push`,
+      footer: { text: 'Last updated' },
+      timestamp: '2026-10-15T06:01:30.000+00:00'
+    }
+  ]
+};
+const earlier = {
+  event: 'cbl-importer-run',
+  startedAt: '2026-10-15T06:00:00.000Z',
+  endedAt: '2026-10-15T06:01:31.500Z',
+  seconds: 91.5,
+  gitSha: 'abc1234',
+  phases: {
+    waitForDatabase: 0,
+    takeRunLock: 0,
+    connect: 0,
+    migrate: 0,
+    importBans: 90,
+    updateExportBans: 1.5
+  },
+  counts: {
+    importBans: {
+      lists: 1,
+      imported: 1,
+      fetched: 3,
+      new: 1,
+      updated: 0,
+      removed: 0,
+      held: 0,
+      failedLists: 0
+    },
+    updateExportBans: { players: 250 }
+  }
+};
+const ending = (mark, reason) => [
+  '**Phase** Export recalculation',
+  `**Reason** ${reason}`,
+  '',
+  '✅ **Import** · 1m 30s',
+  '> 1 ban list: 3 bans fetched, 1 new, 0 updated, 0 removed, 0 held, 0 lists failed',
+  `${mark} **Export recalculation** · 1.5s`,
+  '> 250 players',
+  '▫️ Export push · not run'
+];
+for (const { saved, recentOnly, title, shown } of [
+  {
+    saved: { outcome: 'failed', exitCode: 1, reason: 'Error: Deadlock found' },
+    title: 'CBL update run failed',
+    shown: ending('❌', 'Error: Deadlock found')
+  },
+  {
+    saved: { outcome: 'failed', exitCode: 1, reason: 'Stopped, as it lost its run lock' },
+    recentOnly: true,
+    title: 'CBL update run lost its run lock',
+    shown: ending('⏹️', 'Stopped, as it lost its run lock')
+  },
+  {
+    saved: { outcome: 'interrupted', exitCode: 3, reason: 'Stopped, as it received SIGTERM' },
+    title: 'CBL update run stopped',
+    shown: ending('⏹️', 'Stopped, as it received SIGTERM')
+  },
+  {
+    saved: {
+      outcome: 'finished',
+      exitCode: 0,
+      phase: undefined,
+      phases: { ...earlier.phases, exportExportBans: 0.5 },
+      counts: {
+        ...earlier.counts,
+        exportExportBans: { queued: 2, created: 1, deleted: 1, failed: 0 }
+      }
+    },
+    title: 'CBL update run finished',
+    shown: [
+      '',
+      '✅ **Import** · 1m 30s',
+      '> 1 ban list: 3 bans fetched, 1 new, 0 updated, 0 removed, 0 held, 0 lists failed',
+      '✅ **Export recalculation** · 1.5s',
+      '> 250 players',
+      '✅ **Export push** · 0.5s',
+      '> 1 created, 1 deleted of 2 export bans'
+    ]
+  }
+]) {
+  const record = JSON.parse(JSON.stringify({ ...earlier, phase: 'updateExportBans', ...saved }));
+  const { event, ...summary } = record;
+  assert.strictEqual(event, 'cbl-importer-run');
+  const taker = {
+    ...earlier,
+    startedAt: '2026-10-15T06:05:00.000Z',
+    outcome: 'finished',
+    exitCode: 0
+  };
+  const rows = recentOnly
+    ? { lastRun: taker, recentRuns: [summary, taker] }
+    : { lastRun: record, recentRuns: [summary] };
+  const importer = await loadRun({
+    discordLog: true,
+    state: { rows: { lastRunMessage: last, ...rows } }
+  });
+  const started = deferred();
+  const gate = deferred();
+  const run = importer.run([
+    step('importBans', async () => {
+      started.resolve();
+      await gate.promise;
+    }),
+    step('updateExportBans', async () => {}),
+    step('exportExportBans', async () => {})
+  ]);
+  await started.promise;
+  await until(() => importer.revisions.length === 1, "the last run's status to be checked");
+  const [{ messageID, revise }] = importer.revisions;
+  assert.strictEqual(messageID, '800');
+
+  const revised = revise(inProgress);
+  const [embed] = revised.embeds;
+  assert.strictEqual(revised.content, null);
+  assert.strictEqual(embed.title, title);
+  assert.deepStrictEqual(lines(embed), [
+    `Started <t:${Math.floor(Date.parse(earlier.startedAt) / 1000)}:f> · took **1m 32s** · commit \`abc1234\``,
+    ...shown
+  ]);
+  assert.strictEqual(
+    embed.footer.text,
+    'Ended · shown by the next run, from its record, as its last update did not reach Discord'
+  );
+  assert.strictEqual(embed.timestamp, '2026-10-15T06:01:31.500Z');
+  // It is done once, as the message no longer shows the run in progress.
+  assert.strictEqual(revise(revised), null);
+  gate.resolve();
+  assert.strictEqual(await run, 0);
+  assert.strictEqual(importer.revisions.length, 1);
+}
+
 {
   // Without a last message there is nothing to check, and a message posted only once the run is
   // ending is not saved, as the run says how it ended in it.
@@ -1753,5 +1906,5 @@ for (const exit of ['signal', 'time limit']) {
 }
 
 console.log(
-  'Importer run checks passed: exit codes, the run lock, signals, the time limit, the database wait, migrations, the run record, the end within 45 seconds, a run left waiting, staleness, posted lines, and the run status on every way a run ends.'
+  'Importer run checks passed: exit codes, the run lock, signals, the time limit, the database wait, migrations, the run record, the end within 45 seconds, a run left waiting, staleness, posted lines, the run status on every way a run ends, and the last run status corrected from its record or marked.'
 );

@@ -1,7 +1,7 @@
 // How a run looks in the log channel: one Discord embed, which the run posts once it holds the run
 // lock, keeps up to date while it goes, and edits a last time to show how it ended. This draws that
-// embed from what the run has done so far, and marks the embed of a run that ended without its
-// last edit. It only draws, so anything that shows a run's status can use it.
+// embed from what the run has done so far, and corrects the embed of a run whose last edit did not
+// reach Discord. It only draws, so anything that shows a run's status can use it.
 //
 // This file has no imports, so it can be loaded on its own.
 
@@ -50,7 +50,8 @@ const MARKS = {
 
 // Discord allows an embed's description 4,096 characters, its footer 2,048, a field's name 256 and
 // its value 1,024, 25 fields, and 6,000 characters in all. The description is drawn in at most
-// 3,500, which leaves room to mark the embed of a run that ended without finishing.
+// 3,500, which leaves room to mark the embed of a run that ended without finishing, and never in
+// more than Discord allows, whatever this is set to.
 const DESCRIPTION_LENGTH = 3500;
 const MAX_DESCRIPTION = 4096;
 const MAX_FOOTER = 2048;
@@ -250,7 +251,8 @@ function phaseLines(state) {
 // steps, and of steps not run yet, is summed up in one line, so the phase under way, or the one the
 // run ended in, is still shown.
 function fitLines(lines, room, { running, phases }) {
-  const size = (entries) => entries.reduce((total, { text }) => total + text.length + 1, 0);
+  // The length of the lines, with a line break between each two.
+  const size = (entries) => entries.reduce((total, { text }) => total + text.length + 1, -1);
   if (size(lines) <= room) return lines.map(({ text }) => text);
 
   const groups = [];
@@ -327,8 +329,9 @@ export default function renderRunStatus(state) {
     counts: object(state.counts)
   };
 
-  const header = cutLines(headerLines(normal).join('\n'), DESCRIPTION_LENGTH / 2);
-  const lines = fitLines(phaseLines(normal), DESCRIPTION_LENGTH - header.length - 2, {
+  const room = Math.min(DESCRIPTION_LENGTH, MAX_DESCRIPTION);
+  const header = cutLines(headerLines(normal).join('\n'), Math.floor(room / 2));
+  const lines = fitLines(phaseLines(normal), room - header.length - 2, {
     running: outcome === 'running',
     phases: normal.phases
   });
@@ -341,13 +344,20 @@ export default function renderRunStatus(state) {
   };
 }
 
+// The embed of a message that shows a run in progress, or null for any other message, such as one
+// whose run ended as usual, or one marked already.
+function runningEmbed(message) {
+  const embed = Array.isArray(message?.embeds) ? message.embeds[0] : null;
+  return embed?.title === TITLES.running ? embed : null;
+}
+
 // Mark the embed of a run that ended without its last edit, e.g. as it was killed, as having ended
 // without finishing, keeping how far it had got. Returns the message to replace it with, or null
 // when its embed does not show a run in progress, as the run ended as usual or its embed was marked
 // already. foundAt is when the run that found it started.
 export function markUnfinished(message, { foundAt }) {
-  const embed = Array.isArray(message?.embeds) ? message.embeds[0] : null;
-  if (!embed || embed.title !== TITLES.running) return null;
+  const embed = runningEmbed(message);
+  if (!embed) return null;
 
   // Discord refuses a field without a name or a value, so an empty one gets a zero-width space.
   const fields = (Array.isArray(embed.fields) ? embed.fields : [])
@@ -383,4 +393,18 @@ export function markUnfinished(message, { foundAt }) {
     content: typeof message.content === 'string' && message.content ? message.content : null,
     embeds: [revised]
   };
+}
+
+// Show how a run ended on its embed when its last edit did not reach Discord, e.g. as Discord was
+// down while the run ended, but the run saved its record, so the embed still shows it in progress.
+// state is drawn as by renderRunStatus, from the run's record, and the footer says so. Returns the
+// message to replace it with, or null when its embed does not show a run in progress, as its last
+// edit reached Discord after all or it was marked already.
+export function markEnded(message, state) {
+  if (!runningEmbed(message)) return null;
+  const embed = renderRunStatus(state);
+  embed.footer = {
+    text: `${embed.footer.text} · shown by the next run, from its record, as its last update did not reach Discord`
+  };
+  return { content: null, embeds: [embed] };
 }
