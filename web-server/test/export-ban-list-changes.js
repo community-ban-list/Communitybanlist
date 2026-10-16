@@ -6,7 +6,8 @@ import vm from 'vm';
 // mutation/index.js puts on the mutations: changes need signing in, each user's are made one at a
 // time, and creating and deleting lists is limited. Part 2 checks that the resolvers in
 // mutation/resolver.js only look up and change the user's own lists and configs. Part 3 checks
-// that, through mutation/index.js, the resolvers' checks hold when a user makes changes at once.
+// that, through mutation/index.js, the resolvers' checks hold when a user makes changes at once,
+// and that the changes they refuse do not count towards the limits.
 
 const MUTATIONS = [
   'createExportBanList',
@@ -138,12 +139,13 @@ const finish = {};
 const allowed = {};
 for (const id of ['first', 'second', 'neighbour', 'third'])
   allowed[id] = new Promise((resolve) => (finish[id] = resolve));
-change = async (name, args) => {
+const finishWhenAllowed = async (name, args) => {
   events.push(`${args.id} started`);
   await allowed[args.id];
   events.push(`${args.id} finished`);
   return args.id;
 };
+change = finishWhenAllowed;
 const changes = [
   Mutation.updateExportBanList(null, { id: 'first' }, as('alice'), {}),
   Mutation.createExportBanListConfig(null, { id: 'second' }, as('alice'), {}),
@@ -181,6 +183,25 @@ const failing = Mutation.updateExportBanList(null, { id: 'failing' }, as('carol'
 const next = Mutation.deleteExportBanListConfig(null, { id: 'next' }, as('carol'), {});
 await assert.rejects(failing, (error) => error === failure);
 assert.strictEqual(await next, 'next');
+
+// A change waits for all of the user's changes in progress, not only the first. Here the user's
+// third change is asked for once their first has finished, while their second is being made.
+events.length = 0;
+for (const id of ['earlier', 'later', 'latest'])
+  allowed[id] = new Promise((resolve) => (finish[id] = resolve));
+change = finishWhenAllowed;
+const earlier = Mutation.updateExportBanList(null, { id: 'earlier' }, as('helen'), {});
+const later = Mutation.createExportBanListConfig(null, { id: 'later' }, as('helen'), {});
+finish.earlier();
+assert.strictEqual(await earlier, 'earlier');
+await settle();
+const latest = Mutation.deleteExportBanListConfig(null, { id: 'latest' }, as('helen'), {});
+finish.latest();
+await settle();
+assert.deepStrictEqual(events, ['earlier started', 'earlier finished', 'later started']);
+finish.later();
+assert.deepStrictEqual(await Promise.all([later, latest]), ['later', 'latest']);
+assert.deepStrictEqual(events.slice(3), ['later finished', 'latest started', 'latest finished']);
 
 // Creating and deleting lists count towards the limits, together, and other changes do not. These
 // changes use the real clock, so they all fall within a minute.
@@ -330,6 +351,132 @@ assert.deepStrictEqual(together, [
   ...Array(3).fill(minuteLimit('1 minute').message)
 ]);
 
+// A creation or deletion that resolver.js refuses before it changes anything does not count, so a
+// user who corrects their mistakes can try again at once. Any other failure counts, as it may have
+// come after requests to BattleMetrics. Each stand-in here waits until it is allowed to finish, if
+// it is given a promise to wait for, and fails with the error it is given.
+const mapsBeforeRefusing = maps.length;
+const refusing = guardChanges(
+  Object.fromEntries(
+    MUTATIONS.map((name) => [
+      name,
+      async (parent, { error, until }) => {
+        await settle();
+        await until;
+        if (error) throw new Error(error);
+        return name;
+      }
+    ])
+  ),
+  () => clock
+);
+const refusingMaps = maps.slice(mapsBeforeRefusing);
+const attempt = (time, name, user, error, until) => {
+  clock = time;
+  return refusing[name](null, { error, until }, as(user), {});
+};
+const createOrDelete = (i) => (i % 2 ? 'deleteExportBanList' : 'createExportBanList');
+const refusals = [
+  LIST_LIMIT,
+  'Export ban list does not exist!',
+  'Invalid export ban list type.',
+  'The max ban age must be a positive integer or zero.',
+  'Invalid Discord Webhook',
+  'We could not post a test message to your Discord webhook. Unknown Webhook.',
+  'Only one Discord webhook can be tested per request. Please save one export ban list at a time.',
+  'Discord webhooks can only be tested 5 times a minute. Please try again in 40 seconds.'
+];
+
+// The user is refused more often than the hourly limit allows changes, and can still make the
+// minute's worth.
+const refusedAt = start + 8 * HOUR;
+for (let i = 0; i <= PER_HOUR; i++)
+  for (const error of refusals)
+    await assert.rejects(attempt(refusedAt, createOrDelete(i), 'mistaken', error), {
+      message: error
+    });
+for (let i = 0; i < PER_MINUTE; i++)
+  assert.strictEqual(
+    await attempt(refusedAt + SECOND, createOrDelete(i), 'mistaken'),
+    createOrDelete(i)
+  );
+await assert.rejects(
+  attempt(refusedAt + 2 * SECOND, 'createExportBanList', 'mistaken'),
+  minuteLimit('59 seconds')
+);
+
+// Failures that are not refusals count, such as BattleMetrics or the database failing.
+const failures = [
+  'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.',
+  'BattleMetrics DELETE ban-lists/1 failed after 3 attempts: HTTP 502',
+  'Connection lost: The server closed the connection.'
+];
+const failedAt = refusedAt + MINUTE;
+for (let i = 0; i < PER_MINUTE; i++) {
+  const error = failures[i % failures.length];
+  await assert.rejects(attempt(failedAt, createOrDelete(i), 'unlucky', error), { message: error });
+}
+await assert.rejects(
+  attempt(failedAt + 10 * SECOND, 'createExportBanList', 'unlucky'),
+  minuteLimit('50 seconds')
+);
+
+// A refusal only takes back its own change, also among changes made at once.
+const hastyAt = refusedAt + 2 * MINUTE;
+const hasty = await Promise.allSettled([
+  attempt(hastyAt, 'createExportBanList', 'hasty', LIST_LIMIT),
+  ...Array.from({ length: PER_MINUTE - 1 }, () => attempt(hastyAt, 'createExportBanList', 'hasty'))
+]);
+assert.deepStrictEqual(outcomes(hasty), [
+  LIST_LIMIT,
+  ...Array(PER_MINUTE - 1).fill('createExportBanList')
+]);
+assert.strictEqual(
+  await attempt(hastyAt + SECOND, 'createExportBanList', 'hasty'),
+  'createExportBanList'
+);
+await assert.rejects(
+  attempt(hastyAt + SECOND, 'createExportBanList', 'hasty'),
+  minuteLimit('59 seconds')
+);
+
+// A refusal takes back its own change, not one counted while it was being made. Here the user's
+// second creation, 30 seconds after the first, counts, and so does the rest of the minute's worth,
+// so the limit allows another a minute after the second.
+const patientAt = refusedAt + 3 * MINUTE;
+let allowRefusal;
+const slowRefusal = attempt(
+  patientAt,
+  'createExportBanList',
+  'patient',
+  LIST_LIMIT,
+  new Promise((resolve) => (allowRefusal = resolve))
+);
+const meanwhile = attempt(patientAt + 30 * SECOND, 'createExportBanList', 'patient');
+allowRefusal();
+await assert.rejects(slowRefusal, { message: LIST_LIMIT });
+assert.strictEqual(await meanwhile, 'createExportBanList');
+for (let i = 1; i < PER_MINUTE; i++)
+  assert.strictEqual(
+    await attempt(patientAt + 31 * SECOND, 'createExportBanList', 'patient'),
+    'createExportBanList'
+  );
+await assert.rejects(
+  attempt(patientAt + 61 * SECOND, 'createExportBanList', 'patient'),
+  minuteLimit('29 seconds')
+);
+
+// A user whose changes were all refused is not kept.
+await assert.rejects(
+  attempt(refusedAt + 4 * MINUTE, 'deleteExportBanList', 'careful', refusals[1]),
+  { message: refusals[1] }
+);
+await settle();
+assert.ok(
+  refusingMaps.every((map) => !map.has('careful')),
+  'A user whose changes were all refused is kept.'
+);
+
 // Once changes have finished, the guard keeps nothing for them, only the times of the lists users
 // created and deleted, and an hour after a user's last one, it forgets those too.
 await settle();
@@ -405,7 +552,25 @@ function database(pause = async () => {}) {
   return { rows, queries, writes, models };
 }
 
-const utils = { isDiscordWebhookUrl: () => true, async testDiscordWebhook() {} };
+// The Discord webhook checks from scbl-lib, with Discord refusing every test message.
+const webhookContext = vm.createContext({ URL });
+const discordRefuses = {
+  async default() {
+    throw new Error('Unknown Webhook');
+  }
+};
+const utils = {
+  isDiscordWebhookUrl: (
+    await load('../../scbl-lib/utils/discord-webhook-url.js', {}, webhookContext)
+  ).default,
+  testDiscordWebhook: (
+    await load(
+      '../../scbl-lib/utils/test-discord-webhook.js',
+      { './discord-webhook.js': discordRefuses },
+      webhookContext
+    )
+  ).default
+};
 const list = (id, owner, name = `List ${id}`) => ({
   id,
   owner,
@@ -555,6 +720,76 @@ assert.strictEqual(
   'Saved'
 );
 assert.strictEqual(raced.rows.ExportBanList[0].name, 'Saved');
+
+// Creations and deletions that resolver.js refuses before it changes anything do not count. Here a
+// user with 3 lists makes more such mistakes than the hourly limit allows changes, and nothing is
+// written for them.
+for (let id = 301; id <= 303; id++) raced.rows.ExportBanList.push(list(id, 'fixer'));
+raced.rows.ExportBanList.push(list(304, 'someone'));
+const fixer = () => as('fixer');
+const writesBefore = raced.writes.length;
+const mistakes = [
+  ['createExportBanList', { ...newList, type: 'remot' }, 'Invalid export ban list type.'],
+  [
+    'createExportBanList',
+    { ...newList, maxBanAge: -1 },
+    'The max ban age must be a positive integer or zero.'
+  ],
+  [
+    'createExportBanList',
+    { ...newList, discordWebhook: 'https://example.com/webhook' },
+    'Invalid Discord Webhook'
+  ],
+  ['deleteExportBanList', { id: 999 }, 'Export ban list does not exist!'],
+  ['deleteExportBanList', { id: 304 }, 'Export ban list does not exist!']
+];
+for (let i = 0; i <= PER_HOUR; i++)
+  for (const [name, args, message] of mistakes)
+    await assert.rejects(Guarded[name](null, args, fixer(), {}), { message });
+// A webhook that fails its test is refused too, as is testing more webhooks than the user may, or
+// a second webhook in one request, where mutation/test-webhook.js limits webhook tests. Here two
+// creations share a request, and then the webhook is tried as often as the mistakes above.
+const failingWebhook = { ...newList, discordWebhook: 'https://discord.com/api/webhooks/1/token' };
+const webhookRefusals = [
+  /^We could not post a test message to your Discord webhook\. Unknown Webhook\.$/,
+  /^Only one Discord webhook can be tested per request\. Please save one export ban list at a time\.$/,
+  /^Discord webhooks can only be tested \d+ times a minute\. Please try again in .+\.$/
+];
+const webhookRefused = ({ message }) => webhookRefusals.some((refusal) => refusal.test(message));
+const oneRequest = fixer();
+for (let i = 0; i < 2; i++)
+  await assert.rejects(
+    Guarded.createExportBanList(null, failingWebhook, oneRequest, {}),
+    webhookRefused
+  );
+for (let i = 0; i <= PER_HOUR; i++)
+  await assert.rejects(
+    Guarded.createExportBanList(null, failingWebhook, fixer(), {}),
+    webhookRefused
+  );
+assert.strictEqual(raced.writes.length, writesBefore);
+
+// The user can still make the minute's worth of creations and deletions, and being refused a
+// fifth list, while the limits allow another change, does not count either.
+const fixerLists = [];
+for (let i = 0; i < PER_MINUTE; i++) {
+  if (i % 2) {
+    await Guarded.deleteExportBanList(null, { id: fixerLists.pop() }, fixer(), {});
+    continue;
+  }
+  fixerLists.push((await Guarded.createExportBanList(null, newList, fixer(), {})).id);
+  if (i < PER_MINUTE - 1)
+    await assert.rejects(Guarded.createExportBanList(null, newList, fixer(), {}), {
+      message: LIST_LIMIT
+    });
+}
+await assert.rejects(Guarded.createExportBanList(null, newList, fixer(), {}), {
+  message: minuteLimitNow
+});
+assert.strictEqual(
+  raced.rows.ExportBanList.filter((row) => row.owner === 'fixer').length,
+  3 + (PER_MINUTE % 2)
+);
 
 console.log(
   'Export ban list change checks passed: signing in, one change at a time, limits, and owners.'

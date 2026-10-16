@@ -1,6 +1,8 @@
 // How many export ban lists each user can create and delete, together. Creating or deleting a
 // BattleMetrics export ban list takes several requests to BattleMetrics, and the web server can
-// only make a few of those a minute for all its users.
+// only make a few of those a minute for all its users. The limits are for each user. All users'
+// requests together stay within the web server's BattleMetrics budget, BATTLEMETRICS_API_RESERVOIR,
+// which queues any beyond it.
 export const CREATES_AND_DELETES_PER_MINUTE = 3;
 export const CREATES_AND_DELETES_PER_HOUR = 10;
 
@@ -8,6 +10,26 @@ const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
 
 const CREATES_AND_DELETES = ['createExportBanList', 'deleteExportBanList'];
+
+// The errors resolver.js gives when it refuses to create or delete a list before it saves anything
+// or makes a request to BattleMetrics: the limit of 4 lists, a list that does not exist, and
+// mistakes in a new list's settings, including a Discord webhook that fails its test or cannot be
+// tested now. These do not count towards the limits, so a user who corrects a mistake can try
+// again at once. Any other failure counts, as it may have come after requests to BattleMetrics.
+const REFUSALS = [
+  'You are limited to 4 export ban lists.',
+  'Export ban list does not exist!',
+  'Invalid export ban list type.',
+  'The max ban age must be a positive integer or zero.',
+  'Invalid Discord Webhook',
+  'Only one Discord webhook can be tested per request. Please save one export ban list at a time.'
+];
+// How the errors start for a test message that could not be posted to a webhook, and for a user
+// who has tested as many webhooks as they may for now. Each goes on to say why, or how long to wait.
+const REFUSAL_STARTS = [
+  'We could not post a test message to your Discord webhook.',
+  'Discord webhooks can only be tested '
+];
 
 // Wrap the export ban list mutations, so that a change is only made for a signed-in user, after
 // the same user's previous change has finished, and creating and deleting lists counts towards the
@@ -27,7 +49,8 @@ export default function guardChanges(mutations, now = Date.now) {
 
   // Count a creation or deletion for a user, or throw the error to show them if they cannot make
   // one now. Nothing here waits, so changes made at the same time cannot both take the last one
-  // left, and refused changes do not count, so trying again when told works.
+  // left, and changes the limits refuse do not count, so trying again when told works. Gives the
+  // time it counted the change at.
   function countCreateOrDelete(user) {
     const time = now();
 
@@ -49,6 +72,18 @@ export default function guardChanges(mutations, now = Date.now) {
       throw tooManyChanges(CREATES_AND_DELETES_PER_MINUTE, 'a minute', minuteWait);
 
     recentCreatesAndDeletes.set(user, [...times, time]);
+    return time;
+  }
+
+  // Take back a creation or deletion counted at a time, as it was refused before it changed
+  // anything. It is gone already if it was counted over an hour ago.
+  function uncountCreateOrDelete(user, time) {
+    const times = recentCreatesAndDeletes.get(user) || [];
+    const index = times.indexOf(time);
+    if (index === -1) return;
+    const rest = times.toSpliced(index, 1);
+    if (rest.length > 0) recentCreatesAndDeletes.set(user, rest);
+    else recentCreatesAndDeletes.delete(user);
   }
 
   // Make a change once the user's last change has finished, whether or not that succeeded.
@@ -69,18 +104,31 @@ export default function guardChanges(mutations, now = Date.now) {
       const user = context.user?.id;
       if (!user) throw new Error('Please sign in again to change your export ban lists.');
 
-      if (CREATES_AND_DELETES.includes(name)) countCreateOrDelete(user);
+      const counted = CREATES_AND_DELETES.includes(name) ? countCreateOrDelete(user) : undefined;
 
       // Checks such as the limit of 4 export ban lists, or of one config for each ban list, look
       // up the user's rows and then change them, so two changes by the user at once could both
       // pass them. Other users' changes are still made alongside.
-      return afterLastChange(user, () => mutation(parent, args, context, info));
+      try {
+        return await afterLastChange(user, () => mutation(parent, args, context, info));
+      } catch (error) {
+        // A creation or deletion refused before it changed anything does not count.
+        if (counted !== undefined && isRefusal(error)) uncountCreateOrDelete(user, counted);
+        throw error;
+      }
     };
   }
 
   return Object.fromEntries(
     Object.entries(mutations).map(([name, mutation]) => [name, guard(name, mutation)])
   );
+}
+
+// Whether a change failed with one of the refusals above, so it changed nothing.
+function isRefusal(error) {
+  const message = error?.message;
+  if (typeof message !== 'string') return false;
+  return REFUSALS.includes(message) || REFUSAL_STARTS.some((start) => message.startsWith(start));
 }
 
 // How long until a limit of so many changes in a period allows another, given the times of the
