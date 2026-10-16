@@ -8,6 +8,8 @@ import { Button } from 'reactstrap';
 
 import { ErrorModal, LoadingModal } from '../';
 
+import removeFromCache from './remove-from-cache.js';
+
 const DELETE_EXPORT_BAN_LIST_CONFIG = gql`
   mutation DeleteExportBanListConfig($id: Int!) {
     deleteExportBanListConfig(id: $id) {
@@ -18,20 +20,6 @@ const DELETE_EXPORT_BAN_LIST_CONFIG = gql`
     }
   }
 `;
-
-function removeFromCache(cache, { data: { deleteExportBanListConfig } }) {
-  cache.modify({
-    id: cache.identify(deleteExportBanListConfig.exportBanList),
-    fields: {
-      exportBanListConfigs(exportBanListConfigs = [], { readField }) {
-        return exportBanListConfigs.filter(
-          (exportBanListConfig) =>
-            deleteExportBanListConfig.id !== readField('id', exportBanListConfig)
-        );
-      }
-    }
-  });
-}
 
 export default function (props) {
   const [deleteExportBanListConfig, { loading, error }] = useMutation(

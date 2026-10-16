@@ -6,6 +6,7 @@ import graphQLErrors from '../../utils/graphql-errors.js';
 
 import { ErrorModal, LoadingModal } from '../';
 
+import addToCache from './add-to-cache.js';
 import Form from './form';
 
 const CREATE_EXPORT_BAN_LIST_CONFIG = gql`
@@ -32,38 +33,6 @@ const CREATE_EXPORT_BAN_LIST_CONFIG = gql`
     }
   }
 `;
-
-function addToCache(cache, { data: { createExportBanListConfig } }) {
-  cache.modify({
-    id: cache.identify(createExportBanListConfig.exportBanList),
-    fields: {
-      exportBanListConfigs(exportBanListConfigs = [], { readField }) {
-        const newExportBanListConfig = cache.writeFragment({
-          data: createExportBanListConfig,
-          fragment: gql`
-            fragment NewExportBanListConfig on ExportBanListConfig {
-              id
-              activePoints
-              expiredPoints
-
-              exportBanList {
-                id
-                name
-              }
-            }
-          `
-        });
-
-        if (
-          exportBanListConfigs.some((ref) => readField('id', ref) === createExportBanListConfig.id)
-        )
-          return exportBanListConfigs;
-
-        return [...exportBanListConfigs, newExportBanListConfig];
-      }
-    }
-  });
-}
 
 export default function (props) {
   const [createExportBanListConfig, { loading, error }] = useMutation(
