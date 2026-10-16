@@ -1,6 +1,6 @@
-import { Op } from 'scbl-lib/db/sequelize';
 import { Ban, BanList, Organisation, SteamUser } from 'scbl-lib/db/models';
 
+import { listOrder } from '../core/list-order.js';
 import { PAGE_SIZE, pageArgs } from '../core/page-size.js';
 
 export default {
@@ -17,21 +17,14 @@ export default {
     },
     bans: (parent, filter) => {
       return Ban.paginate({
-        order: [[filter.orderBy || 'created', filter.orderDirection || 'DESC']],
+        ...listOrder('bans', filter),
         ...pageArgs(filter, PAGE_SIZE.list)
       });
     },
     steamUsers: (parent, filter) => {
-      const order = [[filter.orderBy || 'id', filter.orderDirection || 'DESC']];
-
-      // Dirty temporary way to sort multiple fields for this query.
-      if (filter.orderBy === 'reputationPointsMonthChange') order.push(['reputationRank', 'ASC']);
-
       return SteamUser.paginate({
-        order,
-        ...pageArgs(filter, PAGE_SIZE.list),
-        where:
-          filter.orderBy === 'reputationRank' ? { reputationRank: { [Op.ne]: null } } : undefined
+        ...listOrder('steamUsers', filter),
+        ...pageArgs(filter, PAGE_SIZE.list)
       });
     },
     steamUser: async (parent, filter) => {

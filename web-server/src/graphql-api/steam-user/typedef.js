@@ -25,6 +25,7 @@ export default gql`
       after: String
       last: Int
       before: String
+      "The order to list the player's bans in: created, the default."
       orderBy: String
       orderDirection: OrderDirection
       expired: Boolean
