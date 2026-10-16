@@ -4,7 +4,7 @@
 // Steam answer. Anything else is answered here, without asking Steam about it. This module imports
 // nothing so the routes can register its middlewares directly.
 
-// The sign-in answer carries a bearer token, so this keeps it out of any shared HTTP cache.
+// The sign-in answer carries a bearer token, so the browser should not keep it in its cache.
 const NO_STORE = 'no-store';
 
 // Steam's fixed OpenID values. A genuine positive answer always carries exactly these: the login
@@ -13,8 +13,10 @@ const STEAM_OP_ENDPOINT = 'https://steamcommunity.com/openid/login';
 const STEAM_IDENTITY = /^https:\/\/steamcommunity\.com\/openid\/id\/[0-9]{17}$/;
 const OPENID_2_NAMESPACE = 'http://specs.openid.net/auth/2.0';
 
-// A Steam answer carries about ten OpenID fields. Capping the count keeps Koa and the OpenID library
-// reading the same values and keeps each in-progress sign-in holding only a little state.
+// A Steam answer carries about ten OpenID fields. Capping how many parts the query has keeps Koa and
+// the OpenID library reading the same values, and keeps each in-progress sign-in holding only a
+// little state. Empty parts count too: Koa skips them, but the OpenID library's parser counts them
+// towards its own limit.
 const MAX_ANSWER_FIELDS = 20;
 
 // How long to wait for Steam before answering the visitor anyway, so a slow Steam never leaves a
@@ -43,7 +45,7 @@ export function checkSteamAnswer(ctx, next) {
   // A cancelled sign-in has no answer to check; Passport turns it into a plain sign-in failure.
   if (ctx.query['openid.mode'] === 'cancel') return runWithinDeadline(ctx, next);
 
-  if (looksLikeSteamAnswer(ctx.query)) return runWithinDeadline(ctx, next);
+  if (looksLikeSteamAnswer(ctx.querystring, ctx.query)) return runWithinDeadline(ctx, next);
 
   ctx.status = 400;
   ctx.body = SIGN_IN_FAILED_MESSAGE;
@@ -51,11 +53,10 @@ export function checkSteamAnswer(ctx, next) {
 
 // Whether the query is shaped like a genuine positive Steam answer. These are the same values
 // Passport confirms after the fact, checked up front so the lookup Passport does can only go to Steam.
-function looksLikeSteamAnswer(query) {
-  const fields = Object.keys(query);
-  if (fields.length > MAX_ANSWER_FIELDS) return false;
+function looksLikeSteamAnswer(querystring, query) {
+  if (querystring.split('&').length > MAX_ANSWER_FIELDS) return false;
   // A repeated parameter arrives as an array, which Koa and the OpenID library would read differently.
-  if (fields.some((field) => typeof query[field] !== 'string')) return false;
+  if (Object.values(query).some((value) => typeof value !== 'string')) return false;
 
   if (query['openid.mode'] !== 'id_res') return false;
   if (query['openid.ns'] !== OPENID_2_NAMESPACE) return false;
@@ -84,19 +85,15 @@ function isOpenID2Nonce(nonce) {
 }
 
 // Run the rest of the sign-in, but not for longer than the deadline: if Steam has not answered by
-// then, answer the visitor now. The sign-in may still finish in the background, so its outcome is
-// handled here too rather than being left to surface on its own.
+// then, answer the visitor now. The sign-in may still finish in the background; the race below
+// still handles its outcome then, so a late failure is not left to surface on its own.
 function runWithinDeadline(ctx, next) {
   let timer;
   const deadline = new Promise((resolve) => {
     timer = setTimeout(() => resolve(TIMED_OUT), signInDeadline.milliseconds);
   });
 
-  const chain = next();
-  // A late failure, after the deadline has already answered, is handled rather than left dangling.
-  chain.catch(() => {});
-
-  return Promise.race([chain, deadline]).then(
+  return Promise.race([next(), deadline]).then(
     (result) => {
       clearTimeout(timer);
       if (result === TIMED_OUT) {

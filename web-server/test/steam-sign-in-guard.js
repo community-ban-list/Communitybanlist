@@ -46,9 +46,11 @@ function steamAnswer(overrides = {}) {
   };
 }
 
+// A query string for these fields. A field set to undefined is left out.
 function queryString(fields) {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined) continue;
     for (const one of Array.isArray(value) ? value : [value]) search.append(key, one);
   }
   const string = search.toString();
@@ -65,7 +67,7 @@ signInDeadline.milliseconds = 15000;
 // genuine Steam answer: a start-style identifier (in the query or a body), a mode that is not a
 // positive answer, a provider or identity that is not Steam, an identity that does not match the
 // claim, the wrong number of identity digits, a repeated parameter, too many parameters, an
-// over-long nonce, or a missing namespace.
+// over-long nonce, or a missing or different namespace.
 const rejectedAnswers = {
   'openid_identifier in the query': { openid_identifier: 'http://example.test/' },
   'a non-answer mode': steamAnswer({ 'openid.mode': 'checkid_setup' }),
@@ -90,7 +92,8 @@ const rejectedAnswers = {
     'openid.identity': 'https://steamcommunity.com/openid/id/765611980000000012'
   }),
   'a 300-character nonce': steamAnswer({ 'openid.response_nonce': freshNonce('u'.repeat(300)) }),
-  'a missing namespace': steamAnswer({ 'openid.ns': undefined })
+  'a missing namespace': steamAnswer({ 'openid.ns': undefined }),
+  'a different namespace': steamAnswer({ 'openid.ns': 'http://openid.net/signon/1.1' })
 };
 
 for (const [name, fields] of Object.entries(rejectedAnswers)) {
@@ -105,9 +108,11 @@ for (const [name, fields] of Object.entries(rejectedAnswers)) {
   assert.strictEqual(ctx.response.get('Cache-Control'), 'no-store', `Cache-Control: ${name}`);
 }
 
-// A repeated parameter arrives as an array and is rejected as well.
+// A repeated parameter arrives as an array and is rejected as well, even in a Steam-shaped answer.
 {
-  const ctx = contextFor('/steam/return?openid.mode=id_res&openid.mode=id_res');
+  const ctx = contextFor(
+    '/steam/return' + queryString(steamAnswer({ 'openid.sig': ['AAAA', 'BBBB'] }))
+  );
   let reached = false;
   await checkSteamAnswer(ctx, async () => {
     reached = true;
@@ -129,8 +134,31 @@ for (const [name, fields] of Object.entries(rejectedAnswers)) {
   assert.strictEqual(reached, false, 'Too many parameters does not continue');
 }
 
+// Empty parts of the query count towards the twenty as well.
+{
+  const ctx = contextFor('/steam/return' + queryString(steamAnswer()) + '&'.repeat(20));
+  let reached = false;
+  await checkSteamAnswer(ctx, async () => {
+    reached = true;
+  });
+  assert.strictEqual(ctx.status, 400, 'Empty parts count towards the limit');
+  assert.strictEqual(reached, false, 'Too many parts does not continue');
+}
+
+// A start-style identifier in a body, with no answer in the query, is rejected as well.
+{
+  const ctx = contextFor('/steam/return');
+  ctx.request.body = { openid_identifier: 'http://example.test/' };
+  let reached = false;
+  await checkSteamAnswer(ctx, async () => {
+    reached = true;
+  });
+  assert.strictEqual(ctx.status, 400, 'An identifier in a body is rejected');
+  assert.strictEqual(reached, false, 'An identifier in a body does not continue');
+}
+
 // A genuine Steam answer continues to the rest of the chain, with its query untouched, and the
-// answer is kept out of any shared cache.
+// browser is told not to keep the answer in its cache.
 {
   const answer = steamAnswer();
   const ctx = contextFor('/steam/return' + queryString(answer));
@@ -224,10 +252,12 @@ const recordingPassport = {
 };
 
 const routesUrl = new URL('../src/auth/routes.js', import.meta.url);
+// Signing the token is stubbed whether routes.js does it itself or through ./sign-in-token.js.
 const routesStubs = {
   '@koa/router': { default: Router },
   jsonwebtoken: { default: { sign: () => 'stub-token' } },
   'scbl-lib/config': { JWT_AUTH: { SECRET: 'secret', ALGORITHM: 'HS256' } },
+  './sign-in-token.js': { createSignInToken: () => 'stub-token' },
   './passport.js': { default: recordingPassport }
 };
 const routesModule = new vm.SourceTextModule(await readFile(routesUrl, 'utf8'), {
@@ -314,12 +344,11 @@ passport.use(
   )
 );
 
-function buildStack(withGuard) {
+// The sign-in routes as routes.js registers them, with the guards first.
+function buildStack() {
   const router = new Router();
-  if (withGuard) {
-    router.get('/steam', startSteamSignIn);
-    router.get('/steam/return', checkSteamAnswer);
-  }
+  router.get('/steam', startSteamSignIn);
+  router.get('/steam/return', checkSteamAnswer);
   router.get('/steam', passport.authenticate('steam'));
   router.get('/steam/return', passport.authenticate('steam', { session: false }), (ctx) => {
     ctx.body = 'signed in';
@@ -337,21 +366,7 @@ function buildStack(withGuard) {
   };
 }
 
-const guarded = buildStack(true);
-const unguarded = buildStack(false);
-
-// A start that names another host to look up, and a return whose claimed identity and endpoint are
-// on another host.
-const otherHostStart = '/steam?openid_identifier=http://127.0.0.1:9/discovery';
-const otherHostReturn =
-  '/steam/return' +
-  queryString(
-    steamAnswer({
-      'openid.op_endpoint': 'http://127.0.0.1:9/op',
-      'openid.claimed_id': 'http://127.0.0.1:9/claimed',
-      'openid.identity': 'http://127.0.0.1:9/claimed'
-    })
-  );
+const guarded = buildStack();
 
 const toHost = (url) => {
   try {
@@ -362,25 +377,32 @@ const toHost = (url) => {
 };
 const nonSteam = (url) => toHost(url) !== 'steamcommunity.com';
 
-// Through the guarded routes, neither request reaches any host but Steam.
+// A Steam-shaped answer goes on to Passport, and the OpenID library looks it up at Steam only.
 contacted.length = 0;
-await guarded(otherHostReturn);
-assert.deepStrictEqual(contacted.filter(nonSteam), [], 'Guarded return contacts only Steam');
+await guarded('/steam/return' + queryString(steamAnswer()));
+assert.ok(contacted.length > 0, 'A Steam answer is looked up');
+assert.deepStrictEqual(contacted.filter(nonSteam), [], 'A Steam answer is looked up at Steam only');
 
+// An answer whose provider and claimed identity are not Steam's is turned away before any lookup.
 contacted.length = 0;
-await guarded(otherHostStart);
-assert.deepStrictEqual(contacted.filter(nonSteam), [], 'Guarded start contacts only Steam');
+const turnedAway = await guarded(
+  '/steam/return' +
+    queryString(
+      steamAnswer({
+        'openid.op_endpoint': 'http://example.test/login',
+        'openid.claimed_id': 'http://example.test/id',
+        'openid.identity': 'http://example.test/id'
+      })
+    )
+);
+assert.strictEqual(turnedAway.status, 400, 'An answer not from Steam is turned away');
+assert.deepStrictEqual(contacted, [], 'An answer not from Steam is not looked up');
+
+// A start that names a provider of its own still looks up Steam, and only Steam.
+contacted.length = 0;
+await guarded('/steam?openid_identifier=http://example.test/');
 assert.ok(contacted.length > 0, 'The guarded start still looks Steam up');
-
-// Through an unguarded copy, the same requests do reach the named host, which shows the test can see
-// a request when one is made.
-contacted.length = 0;
-await unguarded(otherHostReturn);
-assert.ok(contacted.some(nonSteam), 'Unguarded return reaches the named host');
-
-contacted.length = 0;
-await unguarded(otherHostStart);
-assert.ok(contacted.some(nonSteam), 'Unguarded start reaches the named host');
+assert.deepStrictEqual(contacted.filter(nonSteam), [], 'Guarded start contacts only Steam');
 
 console.log(
   'Steam sign-in guard checks passed: only Steam answers continue, the start is pinned to Steam, ' +
