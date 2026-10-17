@@ -224,6 +224,24 @@ assert.deepStrictEqual(form.errors(), {
 await form.type('maxBanAge', '365');
 await form.type('threshold', '4');
 assert.deepStrictEqual(form.errors(), {});
+// The settings' bounds come only from the limits, so a value typed below 0, left empty or not a
+// number gets the web server's message for it.
+await form.type('threshold', '-1');
+assert.deepStrictEqual(form.errors(), { threshold: MESSAGES.threshold });
+await form.type('threshold', '');
+assert.deepStrictEqual(form.errors(), { threshold: MESSAGES.threshold });
+await form.type('threshold', '4');
+await form.type('maxBanAge', '-1');
+assert.deepStrictEqual(form.errors(), { maxBanAge: MESSAGES.maxBanAge });
+await form.type('maxBanAge', 'a year');
+assert.deepStrictEqual(form.errors(), { maxBanAge: MESSAGES.maxBanAge });
+await form.type('maxBanAge', ' ');
+assert.deepStrictEqual(form.errors(), { maxBanAge: MESSAGES.maxBanAge });
+await form.type('maxBanAge', '365');
+await form.type('defaultExpiredPoints', '');
+assert.deepStrictEqual(form.errors(), { defaultExpiredPoints: MESSAGES.points });
+await form.type('defaultExpiredPoints', '1');
+assert.deepStrictEqual(form.errors(), {});
 // The form's own rules for the name, server and webhook still apply, and a form with problems is
 // not submitted.
 assert.strictEqual(await form.submit(), undefined);
@@ -421,6 +439,29 @@ assert.deepStrictEqual(await form.submit(), {
   name: 'Renamed'
 });
 assert.deepStrictEqual(form.errors(), {});
+// So can a list with a threshold or max ban age below 0, or a value missing, which is sent back as
+// it was saved, so the web server leaves it alone.
+for (const saved of [{ threshold: -1 }, { maxBanAge: -1 }, { maxBanAge: null }]) {
+  const list = listOf(saved);
+  form = listForm(list);
+  await form.type('name', 'Renamed');
+  assert.deepStrictEqual(
+    await form.submit(),
+    { ...forms.listFormOptions(list, limits).defaultValues, ...saved, name: 'Renamed' },
+    JSON.stringify(saved)
+  );
+  assert.deepStrictEqual(form.errors(), {}, JSON.stringify(saved));
+}
+// Its values can be changed to ones within the limits, which any change must bring the whole list
+// within, as it could make the list bigger.
+form = listForm(listOf({ threshold: -1 }));
+await form.type('threshold', '4');
+assert.deepStrictEqual(form.errors(), {
+  threshold: MESSAGES.activePlusExpired(4, '3 for an active ban', '1 for an expired ban', 5)
+});
+await form.type('threshold', '5');
+assert.deepStrictEqual(form.errors(), {});
+assert.strictEqual((await form.submit()).threshold, 5);
 
 // A list with a value outside the bounds can still be saved, and its other values changed. The
 // values a change sets must be within them.

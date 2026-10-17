@@ -121,11 +121,29 @@ function limitsTest(findProblems) {
   };
 }
 
-// The list form's schema: the format rules every list meets (scbl-lib/validators.js), and then the
-// limits.
+// The rule for each of the list form's settings, which need only be numbers there. Their bounds,
+// and the points rules, come from the limits, as the web server checks them: on every value of a
+// new list, and on the values a change sets on a saved one, so a list saved with values outside
+// them can still be renamed. A setting left empty is null, which the limits refuse unless the list
+// was saved without it, and text that is not a number gets the web server's message for the
+// setting.
+const settingRule = (name) =>
+  yup
+    .number()
+    .nullable()
+    .transform((value, original) =>
+      typeof original === 'string' && original.trim() === '' ? null : value
+    )
+    .typeError(checkBounds({ [name]: NaN })[0].message);
+
+// The list form's schema: the format rules every list meets for its name, server, type and webhook
+// (scbl-lib/validators.js), its settings as numbers, and then the limits.
 const listSchema = yup
   .object()
-  .shape(Validators.ExportBanList)
+  .shape({
+    ...Validators.ExportBanList,
+    ...Object.fromEntries(SETTINGS.map((name) => [name, settingRule(name)]))
+  })
   .test(
     limitsTest((values, { exportBanList, limits }) => listProblems(values, exportBanList, limits))
   );
