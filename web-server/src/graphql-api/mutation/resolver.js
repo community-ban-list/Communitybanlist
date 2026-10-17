@@ -160,13 +160,10 @@ export default {
         // Check the export ban list exists.
         if (!exportBanList) throw new Error('Export ban list does not exist!');
 
-        // Delete the export ban list.
-        if (exportBanList.type === 'battlemetrics') {
-          stage = 'battlemetrics';
-          await exportBanList.deleteBattlemetricsBanList();
-        }
-        stage = 'database deletion';
-        await exportBanList.destroy();
+        // Delete the export ban list, and its BattleMetrics ban list if it has one. Its error
+        // says which of these failed.
+        stage = 'deletion';
+        await exportBanList.deleteExportBanList();
 
         return exportBanList;
       } catch (error) {
@@ -175,7 +172,7 @@ export default {
         const errors = response && response.data && response.data.errors;
         console.error('Failed to delete export ban list:', {
           exportBanListID: args.id,
-          stage,
+          stage: error.stage || stage,
           name: error.name,
           message: error.message,
           status: response && response.status,

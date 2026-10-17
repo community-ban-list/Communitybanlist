@@ -3,11 +3,33 @@ import Sequelize from 'sequelize';
 import sequelize from '../sequelize.js';
 
 import { battlemetrics } from '../../apis/index.js';
-import deleteBattlemetricsBanList from '../../apis/delete-battlemetrics-ban-list.js';
+import {
+  checkOwnership,
+  removeInvitesAndSubscribers,
+  removeOwner
+} from '../../apis/delete-battlemetrics-ban-list.js';
 import { Logger } from '../../utils/index.js';
 import { BATTLEMETRICS_ORGANIZATION } from '../../config.js';
 
 const { DataTypes } = Sequelize;
+
+// Record an export ban list's BattleMetrics ban list and invite, or null for none, and save them.
+// A list that fails to save is left as it was, as the database still has it.
+async function saveBattlemetricsBanList(exportBanList, battlemetricsID, battlemetricsInvite) {
+  const previous = {
+    battlemetricsID: exportBanList.battlemetricsID,
+    battlemetricsInvite: exportBanList.battlemetricsInvite
+  };
+  exportBanList.battlemetricsID = battlemetricsID;
+  exportBanList.battlemetricsInvite = battlemetricsInvite;
+  try {
+    await exportBanList.save();
+  } catch (error) {
+    exportBanList.battlemetricsID = previous.battlemetricsID;
+    exportBanList.battlemetricsInvite = previous.battlemetricsInvite;
+    throw error;
+  }
+}
 
 class ExportBanList extends Sequelize.Model {
   // Create the BattleMetrics ban list and its invite.
@@ -102,19 +124,73 @@ class ExportBanList extends Sequelize.Model {
     await this.save();
   }
 
+  // Delete the export ban list: its BattleMetrics ban list, for a BattleMetrics list that has one,
+  // and then its row, which takes its export bans and configs with it. No one is told. The
+  // website's Delete button uses this, and the Discord bot can delete any list the same way. It
+  // gives what happened on BattleMetrics: 'deleted', 'gone' when BattleMetrics no longer had the
+  // ban list, or 'none' when there was none to delete. When it fails, the list is kept, so it can
+  // be deleted again, and the error's stage says what failed: 'battlemetrics' while deleting the
+  // BattleMetrics ban list, or 'database deletion' while deleting the row.
+  async deleteExportBanList() {
+    let stage = 'battlemetrics';
+    try {
+      const outcome =
+        this.type === 'battlemetrics' ? await this.deleteBattlemetricsBanList() : 'none';
+      stage = 'database deletion';
+      await this.destroy();
+      return outcome;
+    } catch (error) {
+      error.stage = stage;
+      throw error;
+    }
+  }
+
+  // Delete the list's BattleMetrics ban list, and save the list without it. Gives 'deleted', 'gone'
+  // or 'none', as deleteExportBanList does.
   async deleteBattlemetricsBanList() {
-    if (!this.battlemetricsID) {
+    const { battlemetricsID: id, battlemetricsInvite: invite } = this;
+    if (!id) {
       Logger.verbose('ExportBanList', 1, 'No Battlemetrics ban list to delete.');
-      return;
+      return 'none';
     }
 
     Logger.verbose('ExportBanList', 1, 'Deleting Battlemetrics ban list...');
-    await deleteBattlemetricsBanList(this.battlemetricsID);
+    if (!(await checkOwnership(id))) {
+      // Without this, a list whose ban list is gone could never be deleted, e.g. one whose
+      // deletion lost BattleMetrics' answer to its last step.
+      Logger.verbose(
+        'ExportBanList',
+        1,
+        `BattleMetrics does not know ban list ${id} of export ban list ${this.id} (HTTP 404, Unknown ban list), so it is taken to be deleted already.`
+      );
+      await saveBattlemetricsBanList(this, null, null);
+      return 'gone';
+    }
 
-    this.battlemetricsID = null;
-    this.battlemetricsInvite = null;
+    await removeInvitesAndSubscribers(id);
 
-    await this.save();
+    // The list is saved without its ban list before the last step, after which CBL can no longer
+    // reach the ban list. So nothing that fails after that step leaves the list recording a ban
+    // list it can never delete, and if this save fails, deleting the list again takes the step.
+    await saveBattlemetricsBanList(this, null, null);
+    try {
+      await removeOwner(id);
+    } catch (error) {
+      // CBL's organisation may still own the ban list, so the list records it again, and deleting
+      // the list again removes it.
+      try {
+        await saveBattlemetricsBanList(this, id, invite);
+      } catch (saveError) {
+        Logger.verbose(
+          'ExportBanList',
+          1,
+          `Export ban list ${this.id} no longer records BattleMetrics ban list ${id}, which CBL's organisation may still own, as removing the organisation failed and the list could not be saved with it again. Remove the ban list on BattleMetrics by hand.`,
+          saveError
+        );
+      }
+      throw error;
+    }
+    return 'deleted';
   }
 }
 
