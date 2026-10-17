@@ -111,10 +111,10 @@ function describeExportBanList(exportBanList) {
 // What removing the list deletes, for the confirmation.
 function describeRemoval(exportBanList) {
   if (exportBanList.type !== 'battlemetrics')
-    return 'This deletes the list, with its export bans and points settings, so its address serves no players.';
+    return 'This deletes the list, with its export bans and configs, so its address serves no players.';
   if (!exportBanList.battlemetricsID)
-    return 'It has no BattleMetrics ban list, so this deletes only the list, with its export bans and points settings.';
-  return 'This deletes its BattleMetrics ban list, which the organisations subscribed to it lose, and then the list, with its export bans and points settings.';
+    return 'It has no BattleMetrics ban list, so this deletes only the list, with its export bans and configs.';
+  return 'This deletes its BattleMetrics ban list, which the organisations subscribed to it lose, and then the list, with its export bans and configs.';
 }
 
 // Why a list could not be removed. deleteExportBanList's error says which BattleMetrics step
@@ -312,7 +312,7 @@ function previewFileEntry({ check, left }) {
     `#${exportBanList.id} ${formatBanListType(exportBanList.type)} list "${exportBanList.name}"`,
     `  Owner: ${owner}`,
     `  Players: ${players.toLocaleString('en-US')}`,
-    `  Settings: threshold ${exportBanList.threshold}, ${exportBanList.defaultActivePoints} points for an active ban and ${exportBanList.defaultExpiredPoints} for an expired ban, max ban age ${exportBanList.maxBanAge} days (0 for any), ${plural(configs.length, 'points setting')}`
+    `  Settings: threshold ${exportBanList.threshold}, ${exportBanList.defaultActivePoints} points for an active ban and ${exportBanList.defaultExpiredPoints} for an expired ban, max ban age ${exportBanList.maxBanAge} days (0 for any), ${plural(configs.length, 'config')}`
   ];
   if (exportBanList.type === 'battlemetrics')
     lines.push(`  BattleMetrics ban list: ${exportBanList.battlemetricsID || 'none'}`);
@@ -472,7 +472,7 @@ async function removeAllOutsideLimits(interaction) {
   const confirmed = await confirm(
     interaction,
     truncate(
-      `${found} Remove ${which}? This deletes each list with its export bans and points settings, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.${uncheckedNote}\n${notes}`,
+      `${found} Remove ${which}? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.${uncheckedNote}\n${notes}`,
       MESSAGE_LENGTH
     ),
     `Remove ${plural(removable.length, 'export ban list')}`,

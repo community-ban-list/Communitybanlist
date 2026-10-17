@@ -267,7 +267,7 @@ await run('remove', { id: 12 });
 let shown = prompt();
 assert.strictEqual(
   contentOf(shown.reply),
-  'Remove export ban list **List 12** (#12)? This deletes its BattleMetrics ban list, which the organisations subscribed to it lose, and then the list, with its export bans and points settings. Its owner is not told.'
+  'Remove export ban list **List 12** (#12)? This deletes its BattleMetrics ban list, which the organisations subscribed to it lose, and then the list, with its export bans and configs. Its owner is not told.'
 );
 assert.strictEqual(shown.label, 'Remove export ban list');
 assert.strictEqual(shown.embed.title, 'List 12');
@@ -299,7 +299,7 @@ await run('remove', { id: 13 });
 shown = prompt();
 assert.strictEqual(
   contentOf(shown.reply),
-  'Remove export ban list **List 13** (#13)? This deletes the list, with its export bans and points settings, so its address serves no players. Its owner is not told.'
+  'Remove export ban list **List 13** (#13)? This deletes the list, with its export bans and configs, so its address serves no players. Its owner is not told.'
 );
 assert.deepStrictEqual(fieldsOf(shown.embed), [
   ['ID', '13'],
@@ -448,7 +448,7 @@ await run('remove_outside_limits');
 shown = prompt();
 assert.strictEqual(
   contentOf(shown.reply),
-  `**3 export ban lists are outside today's limits.** Remove them? This deletes each list with its export bans and points settings, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.\nCBL's BattleMetrics key can see 2 of the 2 BattleMetrics ban lists CBL's export ban lists record.\n${LIMITS_TEXT}`
+  `**3 export ban lists are outside today's limits.** Remove them? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.\nCBL's BattleMetrics key can see 2 of the 2 BattleMetrics ban lists CBL's export ban lists record.\n${LIMITS_TEXT}`
 );
 assert.strictEqual(shown.label, 'Remove 3 export ban lists');
 assert.strictEqual(shown.embed.title, "Export ban lists outside today's limits (3)");
@@ -782,7 +782,7 @@ assert.match(
 assert.ok(text.includes(`\n${LIMITS_TEXT}\n`));
 assert.ok(
   text.includes(
-    `\n#129 Remote list "List 129"\n  Owner: Owner 129 (Steam ID 765611980000000129)\n  Players: 0\n  Settings: threshold 5, 5 points for an active ban and 1 for an expired ban, max ban age 0 days (0 for any), 0 points settings\n  Outside the limits: ${long}\n  To be removed.`
+    `\n#129 Remote list "List 129"\n  Owner: Owner 129 (Steam ID 765611980000000129)\n  Players: 0\n  Settings: threshold 5, 5 points for an active ban and 1 for an expired ban, max ban age 0 days (0 for any), 0 configs\n  Outside the limits: ${long}\n  To be removed.`
   )
 );
 // Each reason is cut short in the embed, and in full in the file.
