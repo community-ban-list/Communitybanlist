@@ -370,6 +370,58 @@ await assert.rejects(
   /Unsupported ban list type/
 );
 
+// Only a player's SteamID64 is taken from a ban: exactly 17 digits, not part of a longer number,
+// on its own or in a profile's address, and in the range of players' accounts. A ban with anything
+// else is skipped, as one without a SteamID is, rather than making a player Steam never knows.
+reset();
+const steamIDs = (...values) => values.map((identifier) => ({ type: 'steamID', identifier }));
+book({
+  first: {
+    data: [
+      ban('f', steamIDs(`https://steamcommunity.com/profiles/${steamID(6)}/`)),
+      ban('g', steamIDs(`http://steamcommunity.com/profiles/${steamID(7)}`)),
+      ban('h', steamIDs(` ${steamID(8)} `)),
+      ban('i', steamIDs(`${steamID(9)}1`)),
+      ban('j', steamIDs(steamID(10).slice(1))),
+      ban('k', steamIDs('76561197960265728')),
+      ban('l', steamIDs('76561202255233024')),
+      ban('m', steamIDs('12345678901234567')),
+      ban('n', steamIDs('76561197960265729')),
+      ban('o', steamIDs('76561202255233023')),
+      ban('p', steamIDs('1', steamID(11)))
+    ],
+    links: { next: null }
+  }
+});
+list = await fetcher.fetchBanList(banList);
+assert.deepStrictEqual(
+  Array.from(list.bans, (ban) => [ban.id, ban.steamUser]),
+  [
+    ['3,f', steamID(6)],
+    ['3,g', steamID(7)],
+    ['3,h', steamID(8)],
+    ['3,n', '76561197960265729'],
+    ['3,o', '76561202255233023'],
+    ['3,p', steamID(11)]
+  ]
+);
+assert.strictEqual(list.rawCount, 11);
+
+// The same goes for a remote list's lines: one whose SteamID is part of a longer number, or is not a
+// player's account, is skipped like a line with no ban on it.
+reset();
+answers(
+  [
+    '76561198000000001:0 //Cheating',
+    '176561198000000002:0 //Eighteen digits',
+    '76561197960265728:0 //Not an account',
+    '12345678901234567:0 //Not Steam',
+    ' 76561198000000003:0 //After a space'
+  ].join('\n')
+);
+list = await fetcher.fetchBanList(remoteList);
+assert.deepStrictEqual(ids(list.bans), ['7,76561198000000001,null', '7,76561198000000003,null']);
+
 console.log(
-  'Ban list fetch checks passed: remote bodies, limits and retries, and BattleMetrics paging.'
+  'Ban list fetch checks passed: remote bodies, limits and retries, BattleMetrics paging, and SteamIDs.'
 );
