@@ -36,7 +36,7 @@ Changes take effect on the next ban importer run. When a ban list is removed or 
 
 Deleting a BattleMetrics list takes a ban list that BattleMetrics does not know to be already gone, and an API key from an account outside CBL's organisation would get that answer for every one of CBL's ban lists. So before it removes any BattleMetrics list, `remove_outside_limits` reads the ban lists the key can see from BattleMetrics. When the key can see none of the ban lists CBL's export ban lists record, or BattleMetrics cannot be asked, no list with a BattleMetrics ban list is removed, and a list whose own ban list the key cannot see is left, to be checked on BattleMetrics and removed with `/exportbanlist remove`. A ban list that the key could see but that is gone when its list is removed stops the removal there, as the key may have lost its access.
 
-Removing a BattleMetrics list takes several BattleMetrics requests within the bot's own budget, so removing many can take longer than the 15 minutes Discord lets the bot update its reply for. The reply then stops updating, and the removal carries on: each list removed, each failure and the summary are posted to the log webhook too.
+Removing a BattleMetrics list takes several BattleMetrics requests within the bot's own budget, so removing many can take longer than the 15 minutes Discord lets the bot update its reply for. The reply then stops updating, and the removal carries on: each list removed, each failure and the summary are posted to the log webhook too, in the order they happened.
 
 ## Setup
 

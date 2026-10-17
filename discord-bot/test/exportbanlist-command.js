@@ -483,11 +483,14 @@ assert.deepStrictEqual(calls, [
   ['delete', 33]
 ]);
 assert.deepStrictEqual([...rows.keys()], [32]);
+// Every line is important, the results as well as the start and the summary. Lines of the same
+// importance reach the log channel in the order they were logged, so there the summary comes after
+// every result, even when results are still waiting to be sent as the removal ends.
 assert.deepStrictEqual(audits, [
   "[important] admin (1) started removing 3 export ban lists outside today's limits.",
-  'admin (1) removed export ban list "List 30" (ID: 30, BattleMetrics, BattleMetrics ID: bm-30) of Steam user "Owner 30" (ID: 76561198000000030), outside today\'s limits with 25,000 players: its BattleMetrics ban list was deleted.',
-  'admin (1) removed export ban list "List 31" (ID: 31, Remote) of Steam user "Owner 31" (ID: 76561198000000031), outside today\'s limits with 4,206 players: there was nothing to delete on BattleMetrics.',
-  'admin (1) removed export ban list "List 33" (ID: 33, BattleMetrics) of Steam user "Owner 33" (ID: 76561198000000033), outside today\'s limits with 0 players: there was nothing to delete on BattleMetrics.',
+  '[important] admin (1) removed export ban list "List 30" (ID: 30, BattleMetrics, BattleMetrics ID: bm-30) of Steam user "Owner 30" (ID: 76561198000000030), outside today\'s limits with 25,000 players: its BattleMetrics ban list was deleted.',
+  '[important] admin (1) removed export ban list "List 31" (ID: 31, Remote) of Steam user "Owner 31" (ID: 76561198000000031), outside today\'s limits with 4,206 players: there was nothing to delete on BattleMetrics.',
+  '[important] admin (1) removed export ban list "List 33" (ID: 33, BattleMetrics) of Steam user "Owner 33" (ID: 76561198000000033), outside today\'s limits with 0 players: there was nothing to delete on BattleMetrics.',
   "[important] admin (1) removed 3 of the 3 export ban lists outside today's limits: 1 with its BattleMetrics ban list and 2 with nothing to delete on BattleMetrics."
 ]);
 let summary = replies.at(-1);
@@ -629,13 +632,15 @@ assert.strictEqual(
 assert.deepStrictEqual(
   audits.map((line) =>
     line
-      .replace(/^(\[important\] )?admin \(1\) /, '')
+      .replace(/^\[important\] admin \(1\) /, '')
       .split(' ')
       .slice(0, 2)
       .join(' ')
   ),
   ['started removing', 'removed export', 'could not', 'removed export', 'removed 2']
 );
+// The failure is important too, so it keeps its place before the summary in the log channel.
+assert.ok(audits.every((line) => line.startsWith('[important] admin (1) ')));
 assert.match(audits[2], /: BattleMetrics deletion failed while removing owner: HTTP 503\./);
 
 // BattleMetrics lists are only removed once BattleMetrics shows that CBL's API key can see CBL's
@@ -759,11 +764,11 @@ assert.strictEqual(
 );
 assert.match(
   audits[1],
-  /^admin \(1\) removed export ban list "List 83" \(ID: 83, BattleMetrics, BattleMetrics ID: bm-83\) of /
+  /^\[important\] admin \(1\) removed export ban list "List 83" \(ID: 83, BattleMetrics, BattleMetrics ID: bm-83\) of /
 );
 assert.match(
   audits[2],
-  /^admin \(1\) could not remove export ban list "List 84" \(ID: 84, BattleMetrics, BattleMetrics ID: bm-84\) .*: Removing the owner failed\.$/
+  /^\[important\] admin \(1\) could not remove export ban list "List 84" \(ID: 84, BattleMetrics, BattleMetrics ID: bm-84\) .*: Removing the owner failed\.$/
 );
 
 // Lists that do not fit in the preview are in an attached file, with every detail, as are the

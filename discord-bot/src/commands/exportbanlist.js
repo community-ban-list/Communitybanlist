@@ -493,7 +493,10 @@ async function removeAllOutsideLimits(interaction) {
 
   // Removing a BattleMetrics list takes several requests within the bot's BattleMetrics budget, so
   // the removal can outlast the 15 minutes for which Discord lets the reply be edited. So each
-  // list's result and the summary also go to the log channel.
+  // list's result and the summary also go to the log channel, all as important lines, as the
+  // start is. Lines of the same importance reach the channel in the order they were logged, so the
+  // summary never goes ahead of a result still waiting to be sent, and none is dropped for other
+  // lines.
   const reply = new ReplyUpdater(interaction);
   reply.update({ content: describeProgress(removable.length, []) });
 
@@ -518,9 +521,11 @@ async function removeAllOutsideLimits(interaction) {
     results.push(result);
     const description = result.description ?? describeExportBanList(result.check.exportBanList);
     if (result.status === 'removed')
-      audit(interaction, `removed ${description}: ${OUTCOMES[result.outcome] ?? result.outcome}.`);
+      audit(interaction, `removed ${description}: ${OUTCOMES[result.outcome] ?? result.outcome}.`, {
+        important: true
+      });
     else if (result.status === 'failed')
-      audit(interaction, `could not remove ${description}: ${result.reason}`);
+      audit(interaction, `could not remove ${description}: ${result.reason}`, { important: true });
     reply.update({ content: describeProgress(removable.length, results) });
 
     // BattleMetrics listed the list's ban list when the removal started, so its being gone now
