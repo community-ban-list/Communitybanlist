@@ -2,15 +2,28 @@ import assert from 'assert';
 import { readFile } from 'fs/promises';
 import vm from 'vm';
 
+import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
+import Validators from '../../scbl-lib/validators.js';
+
 const logs = [];
 const calls = [];
 let list;
 let lookupError;
 const context = vm.createContext({ console: { error: (...args) => logs.push(args) } });
 const dependencies = {
+  // The limits on export ban lists, with no limit on their players.
+  'scbl-lib/config': {
+    EXPORT_LIST_LIMITS: exportListLimits.readLimits({
+      EXPORT_BM_MAX_PLAYERS: '0',
+      EXPORT_REMOTE_MAX_PLAYERS: '0'
+    }).limits
+  },
+  'scbl-lib/export-list-limits': exportListLimits,
+  'scbl-lib/validators': { default: Validators },
   'scbl-lib/db/models': {
     BanList: {},
     ExportBanListConfig: {},
+    Organisation: {},
     ExportBanList: {
       async findOne({ where }) {
         assert.strictEqual(where.id, 42);

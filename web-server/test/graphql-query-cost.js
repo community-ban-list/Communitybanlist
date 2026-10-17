@@ -13,6 +13,8 @@ import graphql from 'graphql';
 import { gql } from 'graphql-tag';
 import jwt from 'jsonwebtoken';
 
+import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
+import Validators from '../../scbl-lib/validators.js';
 import { largestPage } from '../src/graphql-api/core/page-size.js';
 import {
   PAGE_DEFAULTS,
@@ -36,6 +38,10 @@ const rows = {
     name: 'List',
     server: 'Server',
     type: 'remote',
+    threshold: 9,
+    defaultActivePoints: 3,
+    defaultExpiredPoints: 1,
+    maxBanAge: 0,
     owner: playerID,
     async save() {},
     async destroy() {},
@@ -45,8 +51,17 @@ const rows = {
       return 'none';
     }
   },
-  ExportBanListConfig: { id: 1, exportBanList: 1, banList: 1, activePoints: 1, async destroy() {} }
+  ExportBanListConfig: {
+    id: 1,
+    exportBanList: 1,
+    banList: 1,
+    activePoints: 1,
+    expiredPoints: 1,
+    async destroy() {}
+  }
 };
+// A config is looked up with its list when it is deleted.
+rows.ExportBanListConfig.ExportBanList = rows.ExportBanList;
 const models = {};
 for (const [model, row] of Object.entries(rows)) {
   const answers = {
@@ -91,8 +106,15 @@ const packages = {
   // and the sign-in-token values are supplied, so the API loads whichever way it reads them.
   'scbl-lib/config': {
     JWT_AUTH: { ALGORITHM: 'HS256', SECRET: 'a-secret-only-these-checks-use' },
-    SIGN_IN_TOKEN_LIFETIME: 30 * 24 * 60 * 60
+    SIGN_IN_TOKEN_LIFETIME: 30 * 24 * 60 * 60,
+    // The limits on export ban lists, with no limit on their players.
+    EXPORT_LIST_LIMITS: exportListLimits.readLimits({
+      EXPORT_BM_MAX_PLAYERS: '0',
+      EXPORT_REMOTE_MAX_PLAYERS: '0'
+    }).limits
   },
+  'scbl-lib/export-list-limits': exportListLimits,
+  'scbl-lib/validators': { default: Validators },
   'scbl-lib/db/models': models,
   'scbl-lib/db/sequelize': {
     DATABASE_UNAVAILABLE_MESSAGE: 'The database is unavailable.',

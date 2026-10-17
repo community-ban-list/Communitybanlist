@@ -10,12 +10,14 @@ export default sequelize.define('ExportBanListConfig', {
     primaryKey: true,
     autoIncrement: true
   },
+  // A config always has both its points, so Sequelize refuses to save one without them. Tables
+  // created before this keep their columns, as sync() does not alter existing tables.
   activePoints: {
     type: DataTypes.INTEGER,
-    notNull: true
+    allowNull: false
   },
   expiredPoints: {
     type: DataTypes.INTEGER,
-    notNull: true
+    allowNull: false
   }
 });

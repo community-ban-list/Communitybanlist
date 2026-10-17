@@ -5,7 +5,9 @@ import vm from 'vm';
 import { ApolloServer } from '@apollo/server';
 import { makeExecutableSchema } from '@graphql-tools/schema';
 
+import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
 import isDiscordWebhookUrl from '../../scbl-lib/utils/discord-webhook-url.js';
+import Validators from '../../scbl-lib/validators.js';
 import mutationTypeDefs from '../src/graphql-api/mutation/typedef.js';
 
 // Load a module with its package imports replaced by stand-ins. Relative imports load the real
@@ -224,7 +226,16 @@ const ExportBanList = {
 const listsOf = (user) => [...stored.values()].filter((list) => list.owner === user);
 const mutations = discord();
 const { default: resolver } = await load('../src/graphql-api/mutation/resolver.js', {
-  'scbl-lib/db/models': { BanList: {}, ExportBanList, ExportBanListConfig: {} },
+  // The limits on export ban lists, with no limit on their players.
+  'scbl-lib/config': {
+    EXPORT_LIST_LIMITS: exportListLimits.readLimits({
+      EXPORT_BM_MAX_PLAYERS: '0',
+      EXPORT_REMOTE_MAX_PLAYERS: '0'
+    }).limits
+  },
+  'scbl-lib/export-list-limits': exportListLimits,
+  'scbl-lib/validators': { default: Validators },
+  'scbl-lib/db/models': { BanList: {}, ExportBanList, ExportBanListConfig: {}, Organisation: {} },
   'scbl-lib/utils': mutations.utils
 });
 const server = new ApolloServer({
