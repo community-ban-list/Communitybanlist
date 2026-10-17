@@ -847,11 +847,13 @@ assert.match(audits.at(-1), /^\[important\] admin \(1\) removed 2 of the 2 expor
 // Only one removal of the lists outside the limits runs at a time.
 reset();
 addList(95, 'remote');
-// The first removal waits for the admin's answer, which comes once the second has been refused.
+// The first removal waits for the admin's answer, which comes once the second has been refused. A
+// second removal that went ahead would be answered at once.
 let answerNow;
 let asked;
 const asking = new Promise((resolve) => (asked = resolve));
 whileConfirming = () => {
+  whileConfirming = null;
   asked();
   return new Promise((resolve) => (answerNow = resolve));
 };
@@ -861,7 +863,6 @@ await assert.rejects(run('remove_outside_limits'), {
   message:
     'The export ban lists outside the limits are already being removed. Try again once that has finished.'
 });
-whileConfirming = null;
 answerNow();
 await first;
 assert.deepStrictEqual(deleted(), [95]);
