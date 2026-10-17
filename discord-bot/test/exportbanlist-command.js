@@ -63,6 +63,9 @@ let notifications;
 // removes the list, unless the list's answer in `deletions` is an error.
 let rows;
 let deletions;
+// The query that loaded each list deleted, in turn, e.g. 'find 12' for findByPk(12), as each query
+// gives instances of its own, as Sequelize's do.
+let deletedFrom;
 // Answers to isRunLockHeld, in turn: whether a run holds the lock, or an error. Once they run out,
 // no run holds it.
 let lockAnswers;
@@ -80,6 +83,7 @@ function reset() {
   notifications = [];
   rows = new Map();
   deletions = new Map();
+  deletedFrom = [];
   lockAnswers = [];
   visible = new Set();
   answer = 'confirm';
@@ -112,6 +116,7 @@ function addList(
     // list.
     async deleteExportBanList() {
       calls.push(['delete', id]);
+      deletedFrom.push(this.loadedBy);
       const result = deletions.get(id);
       if (result instanceof Error) throw result;
       rows.delete(id);
@@ -130,18 +135,36 @@ function addList(
   return exportBanList;
 }
 
+// A list as a query gives it: an instance of its own, which says which query loaded it. Its webhook
+// stays a getter, so reading it is still recorded.
+const instance = (exportBanList, query) =>
+  Object.defineProperties(
+    {},
+    {
+      ...Object.getOwnPropertyDescriptors(exportBanList),
+      loadedBy: { value: query, enumerable: true }
+    }
+  );
+
 const ExportBanList = {
   async checkLimits({ ids } = {}) {
     calls.push(['check', ids === undefined ? 'all' : [...ids]]);
+    const query = `check ${ids === undefined ? 'all' : ids.join(',')}`;
     const lists = [...rows.values()]
       .filter((row) => ids === undefined || ids.includes(row.exportBanList.id))
       .sort((a, b) => a.exportBanList.id - b.exportBanList.id)
-      .map((row) => ({ ...row, configs: [], problems: [...row.problems] }));
+      .map((row) => ({
+        ...row,
+        exportBanList: instance(row.exportBanList, query),
+        configs: [],
+        problems: [...row.problems]
+      }));
     return { limits: LIMITS, lists };
   },
   async findByPk(id) {
     calls.push(['find', id]);
-    return rows.get(id)?.exportBanList ?? null;
+    const row = rows.get(id);
+    return row ? instance(row.exportBanList, `find ${id}`) : null;
   },
   async findVisibleBattlemetricsBanLists() {
     calls.push(['visible']);
@@ -285,6 +308,8 @@ assert.deepStrictEqual(fieldsOf(shown.embed), [
   ["Today's limits", discord.escapeMarkdown(RULE)]
 ]);
 assert.deepStrictEqual(calls, [['lock'], ['check', [12]], ['lock'], ['find', 12], ['delete', 12]]);
+// The list is deleted as it was read after the confirmation, not as the preview showed it.
+assert.deepStrictEqual(deletedFrom, ['find 12']);
 assert.strictEqual(
   contentOf(replies.at(-1)),
   'Removed export ban list **List 12** (#12) and its BattleMetrics ban list.'
@@ -482,6 +507,8 @@ assert.deepStrictEqual(calls, [
   ['check', [33]],
   ['delete', 33]
 ]);
+// Each list is deleted as it was read again just before, not as the preview showed it.
+assert.deepStrictEqual(deletedFrom, ['check 30', 'check 31', 'check 33']);
 assert.deepStrictEqual([...rows.keys()], [32]);
 // Every line is important, the results as well as the start and the summary. Lines of the same
 // importance reach the log channel in the order they were logged, so there the summary comes after

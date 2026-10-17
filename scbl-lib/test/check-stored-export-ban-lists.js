@@ -57,7 +57,10 @@ const lists = [
   // A type the limits do not cover.
   list(8, null, 1, 1, 1),
   // A list whose owner has no Steam user row.
-  list(9, 'battlemetrics', 9, 3, 1, { battlemetricsID: null })
+  list(9, 'battlemetrics', 9, 3, 1, { battlemetricsID: null }),
+  // Exactly as many players as a BattleMetrics list, and then a remote list, can have.
+  list(10, 'battlemetrics', 9, 3, 1),
+  list(11, 'remote', 9, 3, 1)
 ];
 const configs = [
   { id: 1, exportBanList: 5, banList: 7, activePoints: 5, expiredPoints: 1 },
@@ -74,7 +77,11 @@ const exportBans = [
   [3, 'TO_BE_CREATED', 337],
   [3, 'TO_BE_DELETED', 5000],
   [4, 'CREATED', 40001],
-  [5, 'TO_BE_DELETED', 3]
+  [5, 'TO_BE_DELETED', 3],
+  [10, 'CREATED', 19000],
+  [10, 'TO_BE_CREATED', 1000],
+  [10, 'TO_BE_DELETED', 50],
+  [11, 'CREATED', 40000]
 ];
 
 // A stand-in for Sequelize's Model, whose findAll gives the matching rows as instances, with the
@@ -246,7 +253,10 @@ const expected = {
   6: { players: 0, problems: ruleProblems(6, 'remote') },
   7: { players: 0, problems: ruleProblems(7, 'remote') },
   8: { players: 0, problems: [], checked: false },
-  9: { players: 0, problems: [] }
+  9: { players: 0, problems: [] },
+  // A list may have as many players as its type's cap, but no more.
+  10: { players: 20000, problems: [] },
+  11: { players: 40000, problems: [] }
 };
 assert.deepStrictEqual(
   summary(result),
