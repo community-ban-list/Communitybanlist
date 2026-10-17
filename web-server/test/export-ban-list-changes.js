@@ -516,8 +516,13 @@ function database(pause = async () => {}) {
         writes.push(`destroy ${model} ${this.id}`);
         rows[model].splice(rows[model].indexOf(row), 1);
       },
-      // The lists here are remote ones, which have no BattleMetrics invite to create.
-      async createBattlemetricsInvite() {}
+      // The lists here are remote ones, which have no BattleMetrics invite to create, and no
+      // BattleMetrics ban list to delete along with them.
+      async createBattlemetricsInvite() {},
+      async deleteExportBanList() {
+        await this.destroy();
+        return 'none';
+      }
     };
     return Object.assign(Object.create(methods), row);
   }

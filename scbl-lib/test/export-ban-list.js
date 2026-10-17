@@ -28,7 +28,12 @@ const dependencies = {
   sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
   '../sequelize.js': { default: {} },
   '../../apis/index.js': { battlemetrics },
-  '../../apis/delete-battlemetrics-ban-list.js': { default: async () => {} },
+  // Deleting lists is checked in delete-export-ban-list.js.
+  '../../apis/delete-battlemetrics-ban-list.js': {
+    checkOwnership: async () => true,
+    removeInvitesAndSubscribers: async () => {},
+    removeOwner: async () => {}
+  },
   '../../utils/index.js': { Logger: { verbose() {} } },
   '../../config.js': { BATTLEMETRICS_ORGANIZATION: '42' }
 };

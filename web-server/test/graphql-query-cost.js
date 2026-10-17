@@ -39,8 +39,11 @@ const rows = {
     owner: playerID,
     async save() {},
     async destroy() {},
-    // A remote list has no BattleMetrics invite to make.
-    async createBattlemetricsInvite() {}
+    // A remote list has no BattleMetrics invite to make, and no BattleMetrics ban list to delete.
+    async createBattlemetricsInvite() {},
+    async deleteExportBanList() {
+      return 'none';
+    }
   },
   ExportBanListConfig: { id: 1, exportBanList: 1, banList: 1, activePoints: 1, async destroy() {} }
 };

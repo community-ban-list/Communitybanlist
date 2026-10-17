@@ -7,6 +7,10 @@ let calls;
 let failAt;
 // The requests, as method and endpoint, that BattleMetrics answers 404, as the record is gone.
 let goneAt;
+// What BattleMetrics answers when the ban list itself is looked up: an answer, or an error.
+let banListAnswer;
+// An error for the ownership check to fail with.
+let ownershipError;
 let wrongOwner;
 let invalidSubscription;
 let loop;
@@ -16,6 +20,11 @@ const subscription = (id) => ({
   id: 'test-list',
   relationships: { organization: { data: { id } } }
 });
+// An error as the BattleMetrics client throws one for an answer with this status and these errors.
+const apiError = (status, errors) =>
+  Object.assign(new Error(`BattleMetrics GET failed: HTTP ${status}`), {
+    response: { status, data: { errors } }
+  });
 const request = async (method, endpoint, params) => {
   calls.push([method, endpoint]);
   if (method === 'delete' && endpoint === failAt) {
@@ -29,10 +38,16 @@ const request = async (method, endpoint, params) => {
     throw error;
   }
   if (method === 'delete') return { status: 204 };
-  if (endpoint === `${base}/organizations/42`)
+  if (endpoint === 'ban-lists/test-list') {
+    if (banListAnswer instanceof Error) throw banListAnswer;
+    return banListAnswer;
+  }
+  if (endpoint === `${base}/organizations/42`) {
+    if (ownershipError) throw ownershipError;
     return {
       data: { data: { relationships: { owner: { data: { id: wrongOwner ? '99' : '42' } } } } }
     };
+  }
   const second = params['page[key]'] === 'next';
   const invites = endpoint.endsWith('/invites');
   const records = invites
@@ -74,11 +89,20 @@ await module.link(async (specifier) => {
   );
 });
 await module.evaluate();
-const remove = module.namespace.default;
+const { checkOwnership, removeInvitesAndSubscribers, removeOwner } = module.namespace;
+// The steps in the order ExportBanList's deleteExportBanList takes them, without its saves.
+const remove = async (id) => {
+  if (!(await checkOwnership(id))) return 'gone';
+  await removeInvitesAndSubscribers(id);
+  await removeOwner(id);
+  return 'deleted';
+};
 const reset = () => {
   calls = [];
   failAt = null;
   goneAt = [];
+  banListAnswer = { data: { data: { type: 'banList', id: 'test-list' } } };
+  ownershipError = null;
   wrongOwner = false;
   invalidSubscription = false;
   loop = false;
@@ -91,7 +115,7 @@ const deletions = [
   ['delete', `${base}/organizations/42`]
 ];
 reset();
-await remove('test-list');
+assert.strictEqual(await remove('test-list'), 'deleted');
 assert.deepStrictEqual(
   calls.filter(([method]) => method === 'delete'),
   deletions
@@ -106,18 +130,73 @@ goneAt = [
   `delete ${base}/organizations/77`,
   `delete ${base}/organizations/42`
 ];
-await remove('test-list');
+assert.strictEqual(await remove('test-list'), 'deleted');
 assert.deepStrictEqual(
   calls.filter(([method]) => method === 'delete'),
   deletions
 );
 
-// A 404 when checking ownership still fails, and the local list is kept, as it could also mean
-// that the list's ID is wrong.
+// A 404 when checking ownership means CBL's organisation is not on the ban list. The ban list is
+// then looked up, and it is only gone when BattleMetrics answers that it does not know it, whether
+// it says so in the error's title or its detail. Nothing is removed either way.
+const ownership = ['get', `${base}/organizations/42`];
+const lookUp = ['get', 'ban-lists/test-list'];
+for (const unknown of [
+  { status: '404', title: 'Not Found', detail: 'Unknown ban list.' },
+  { status: '404', title: 'Unknown ban list' }
+]) {
+  reset();
+  goneAt = [`get ${base}/organizations/42`];
+  banListAnswer = apiError(404, [unknown]);
+  assert.strictEqual(await remove('test-list'), 'gone');
+  assert.deepStrictEqual(calls, [ownership, lookUp]);
+}
+
+// A ban list that BattleMetrics still has is kept, as the configured organisation may be wrong.
 reset();
 goneAt = [`get ${base}/organizations/42`];
-await assert.rejects(remove('test-list'), /while checking ownership: Not Found/);
-assert.deepStrictEqual(calls, [['get', `${base}/organizations/42`]]);
+await assert.rejects(
+  remove('test-list'),
+  /^Error: BattleMetrics deletion failed while checking ownership: The BattleMetrics list still exists, but the configured CBL organization does not own it, so the configured organization may be wrong\./
+);
+assert.deepStrictEqual(calls, [ownership, lookUp]);
+
+// So is one whose look-up gets any other answer: a refused key, a refusal, a rate limit, a
+// failure, no answer in time, an answer that is not a ban list, or a 404 that does not say that
+// the ban list is unknown.
+for (const [answer, message] of [
+  [apiError(401, [{ title: 'Unauthorized' }]), /Unauthorized/],
+  [apiError(403, [{ title: 'Forbidden', detail: 'Unknown ban list.' }]), /Unknown ban list/],
+  [apiError(429, [{ title: 'Too Many Requests' }]), /Too Many Requests/],
+  [apiError(503, undefined), /HTTP 503/],
+  [
+    Object.assign(new Error('BattleMetrics GET ban-lists/test-list failed: timed out after 30s'), {
+      code: 'ECONNABORTED'
+    }),
+    /timed out after 30s/
+  ],
+  [{ data: '<html>Not JSON</html>' }, /Invalid BattleMetrics ban list response/],
+  [apiError(404, undefined), /HTTP 404/],
+  [apiError(404, [{ title: 'Not Found', detail: 'Route not found.' }]), /Route not found/]
+]) {
+  reset();
+  goneAt = [`get ${base}/organizations/42`];
+  banListAnswer = answer;
+  await assert.rejects(remove('test-list'), (error) => {
+    assert.match(error.message, /^BattleMetrics deletion failed while checking ownership: /);
+    assert.match(error.message, message);
+    return true;
+  });
+  assert.deepStrictEqual(calls, [ownership, lookUp]);
+}
+
+// Any other failure of the ownership check fails without looking the ban list up.
+for (const status of [401, 403, 429, 500]) {
+  reset();
+  ownershipError = apiError(status, [{ title: `HTTP ${status} title` }]);
+  await assert.rejects(remove('test-list'), new RegExp(`while checking ownership: HTTP ${status}`));
+  assert.deepStrictEqual(calls, [ownership]);
+}
 
 for (const endpoint of [
   `${base}/invites/invite-two`,
@@ -129,6 +208,12 @@ for (const endpoint of [
   await assert.rejects(remove('test-list'), /Ownership transfer required/);
   assert.strictEqual(calls[calls.length - 1][1], endpoint);
 }
+reset();
+failAt = `${base}/organizations/42`;
+await assert.rejects(
+  removeOwner('test-list'),
+  /^Error: BattleMetrics deletion failed while removing owner: Ownership transfer required\./
+);
 reset();
 wrongOwner = true;
 await assert.rejects(remove('test-list'), /does not own/);
