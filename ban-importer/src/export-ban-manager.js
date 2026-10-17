@@ -1,6 +1,7 @@
 import { sequelize } from 'scbl-lib/db';
+import { membershipForPlayers } from 'scbl-lib/db/export-membership';
 import { ExportBan, ExportBanList, SteamUser } from 'scbl-lib/db/models';
-import { Op, QueryTypes, Transaction } from 'scbl-lib/db/sequelize';
+import { Op, Transaction } from 'scbl-lib/db/sequelize';
 import { Logger } from 'scbl-lib/utils';
 
 import { reportProgress, stopIfRequested } from './run-control.js';
@@ -123,61 +124,15 @@ export default class ExportBanManager {
         } remaining)... Batch time: ${((Date.now() - currentRunTime) / 1000).toFixed(2)}s`
       );
 
-      // Generate the export bans.
+      // Generate the export bans, by the rule in scbl-lib/db/export-membership.js.
       const generatedBans = await sequelize.transaction(
         {
           isolationLevel: Transaction.ISOLATION_LEVELS.SERIALIZABLE
         },
         async (t) => {
-          return sequelize.query(
-            `
-              SELECT
-                CONCAT(steamUser, ",", exportBanList) AS "id",
-                "TO_BE_CREATED" AS "status",
-                steamUser,
-                exportBanList
-              FROM (
-                SELECT
-                  EBL.id AS "exportBanList",
-                  B.steamUser AS "steamUser",
-                  EBL.threshold AS "threshold",
-                  MAX(
-                    IF(
-                      B.expired,
-                      0,
-                      IFNULL(
-                        EBLC.activePoints,
-                        EBL.defaultActivePoints
-                      )
-                    )
-                  ) AS "activePoints",
-                  SUM(
-                    IF(
-                      B.expired,
-                      IFNULL(
-                        EBLC.expiredPoints,
-                        EBL.defaultExpiredPoints
-                      ),
-                      0
-                    )
-                  ) AS "expiredPoints"
-                FROM Bans B
-                CROSS JOIN ExportBanLists EBL
-                LEFT JOIN ExportBanListConfigs EBLC ON EBL.id = EBLC.exportBanList AND B.banList = EBLC.banList
-                WHERE (
-                  EBL.maxBanAge = 0 OR
-                  EBL.maxBanAge >= DATEDIFF(NOW(), B.created)
-                ) AND B.steamUser IN (?)
-                GROUP BY EBL.id, B.steamUser, B.banList
-              ) A
-              GROUP BY exportBanList, steamUser
-              HAVING SUM(activePoints) + SUM(expiredPoints) >= MAX(threshold)
-            `,
-            {
-              type: QueryTypes.SELECT,
-              transaction: t,
-              replacements: [batch.map((steamUser) => steamUser.id)]
-            }
+          return membershipForPlayers(
+            batch.map((steamUser) => steamUser.id),
+            { transaction: t }
           );
         }
       );

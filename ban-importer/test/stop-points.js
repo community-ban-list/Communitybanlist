@@ -758,12 +758,14 @@ for (const lock of [lostLock, null]) {
   const manager = await load('../src/export-ban-manager.js', {
     'scbl-lib/db': {
       sequelize: {
-        transaction: async (options, work) => work({}),
-        query: async () => {
-          events.push('generate');
-          manager.control.requestStop('it received SIGTERM');
-          return [1, 2, 3, 4].map(generated);
-        }
+        transaction: async (options, work) => work({})
+      }
+    },
+    'scbl-lib/db/export-membership': {
+      membershipForPlayers: async () => {
+        events.push('generate');
+        manager.control.requestStop('it received SIGTERM');
+        return [1, 2, 3, 4].map(generated);
       }
     },
     'scbl-lib/db/models': {
@@ -799,7 +801,6 @@ for (const lock of [lostLock, null]) {
     },
     'scbl-lib/db/sequelize': {
       Op: { in: 'in', notIn: 'notIn', not: 'not', ne: 'ne', or: 'or' },
-      QueryTypes: { SELECT: 'SELECT', BULKUPDATE: 'BULKUPDATE' },
       Transaction: { ISOLATION_LEVELS: { SERIALIZABLE: 'SERIALIZABLE' } }
     },
     'scbl-lib/utils': { Logger }
