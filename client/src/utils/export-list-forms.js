@@ -8,7 +8,8 @@ import {
   checkBounds,
   checkChange,
   checkRules,
-  defaultThreshold
+  defaultThreshold,
+  readGivenLimits
 } from 'scbl-lib/export-list-limits';
 import Validators from 'scbl-lib/validators';
 
@@ -22,14 +23,17 @@ const SETTINGS = Object.keys(DEFAULT_SETTINGS);
 
 const settingsOf = (values) => Object.fromEntries(SETTINGS.map((name) => [name, values[name]]));
 
-// Whether there are limits for a type of list. When the web server gave none for it, the forms
-// leave the checks to the web server.
-const hasLimits = (limits, type) =>
-  Object.hasOwn(DEFAULT_LIMITS, type) &&
-  limits != null &&
-  Object.hasOwn(limits, type) &&
-  typeof limits[type] === 'object' &&
-  limits[type] !== null;
+// Whether there are limits for a type of list that the forms can check against: every limit for
+// the type, each as the web server would read it. scbl-lib/config.js reads the client's limits so,
+// and when there are none for a type, or some are missing or cannot be used, the forms leave the
+// checks to the web server.
+function hasLimits(limits, type) {
+  if (!Object.hasOwn(DEFAULT_LIMITS, type) || limits == null || !Object.hasOwn(limits, type))
+    return false;
+  const given = limits[type];
+  const read = readGivenLimits({ [type]: given }).limits[type];
+  return Object.entries(read).every(([limit, value]) => given?.[limit] === value);
+}
 
 // An export ban list from the site's queries as the limits take it: its settings, and its configs
 // in the order the web server checks them, with their ban lists' and organisations' names for the

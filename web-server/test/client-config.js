@@ -126,7 +126,8 @@ for (const value of ['', '   ', '9'.repeat(400), '\t\n', 'NaN', 'undefined'])
     JSON.stringify(value)
   );
 
-// The client reads the limits the web server served, as they are: a limit of 0 players stays 0.
+// The client reads the limits the web server served, as the web server reads them: a limit of 0
+// players stays 0.
 assert.deepStrictEqual(await clientLimits(served), setLimits);
 const served0 = run(await bodyFrom({ EXPORT_BM_MAX_PLAYERS: '0', EXPORT_REMOTE_MAX_PLAYERS: '0' }));
 assert.deepStrictEqual(await clientLimits(served0), {
@@ -137,6 +138,39 @@ assert.deepStrictEqual(await clientLimits(served0), {
 // client uses the defaults, and the web server's checks still apply.
 assert.deepStrictEqual(await clientLimits(undefined), DEFAULT_LIMITS);
 assert.deepStrictEqual(await clientLimits({ DISCORD_INVITE: set.DISCORD_INVITE }), DEFAULT_LIMITS);
+// Each limit /config.js gives is read as the web server reads its variable, so one that is left
+// out, or cannot be used, is the default, and the others are kept as they were given.
+const servedLimits = (EXPORT_LIST_LIMITS) => clientLimits({ EXPORT_LIST_LIMITS });
+for (const odd of [
+  null,
+  'limits',
+  {},
+  { remote: {} },
+  { battlemetrics: 'x', remote: null },
+  {
+    battlemetrics: { maxPlayers: -1, minThreshold: 1001, neverEnough: 'two-bans' },
+    remote: { maxPlayers: 1.5, minThreshold: 0, neverEnough: null }
+  },
+  {
+    battlemetrics: { maxPlayers: true, minThreshold: [6], neverEnough: { rule: 'none' } },
+    remote: { maxPlayers: '', minThreshold: Number.NaN, neverEnough: '' }
+  }
+])
+  assert.deepStrictEqual(await servedLimits(odd), DEFAULT_LIMITS, JSON.stringify(odd));
+assert.deepStrictEqual(
+  await servedLimits({
+    battlemetrics: { ...DEFAULT_LIMITS.battlemetrics, neverEnough: 'ONE-BAN' },
+    remote: { maxPlayers: 0, minThreshold: 'x', neverEnough: 'none' }
+  }),
+  {
+    battlemetrics: { ...DEFAULT_LIMITS.battlemetrics, neverEnough: 'one-ban' },
+    remote: { maxPlayers: 0, minThreshold: 4, neverEnough: 'none' }
+  }
+);
+assert.deepStrictEqual(await servedLimits({ remote: { maxPlayers: '30000', minThreshold: 6 } }), {
+  ...DEFAULT_LIMITS,
+  remote: { ...DEFAULT_LIMITS.remote, maxPlayers: 30000, minThreshold: 6 }
+});
 // Elsewhere, where /config.js is never run, the limits come from the environment as before.
 assert.deepStrictEqual((await configFrom({ EXPORT_BM_MAX_PLAYERS: '0' })).EXPORT_LIST_LIMITS, {
   ...DEFAULT_LIMITS,
@@ -146,5 +180,5 @@ assert.deepStrictEqual((await configFrom({ EXPORT_BM_MAX_PLAYERS: '0' })).EXPORT
 for (const variable of VARIABLES) delete process.env[variable];
 
 console.log(
-  'Client config checks passed: /config.js gives the links and the limits the web server reads, never fails on values it cannot use, and the client reads the limits as given.'
+  'Client config checks passed: /config.js gives the links and the limits the web server reads, never fails on values it cannot use, and the client reads each limit as the web server does, with the default for one it cannot use.'
 );

@@ -578,15 +578,32 @@ assert.deepStrictEqual(form.errors(), {
     "With these points, one active ban on Partner Org 1's Ban List 4 could give 6 points, which reaches this list's threshold of 6. Use fewer points, or raise the list's threshold to 7 or more first."
 });
 
-// Without limits for a list's type, as when /config.js gave none, the forms leave the checks to
-// the web server, and never fail.
-for (const odd of [undefined, null, {}, { remote: undefined }, { battlemetrics: limits.remote }]) {
+// Without limits for a list's type that can be used, every one of them as the web server would
+// read it, the forms leave the checks to the web server, and never fail.
+for (const odd of [
+  undefined,
+  null,
+  {},
+  { remote: undefined },
+  { battlemetrics: limits.remote },
+  { remote: {} },
+  { remote: 'remote' },
+  { remote: { ...limits.remote, neverEnough: 'ACTIVE-PLUS-EXPIRED' } },
+  { remote: { ...limits.remote, minThreshold: 0 } },
+  { remote: { ...limits.remote, maxPlayers: '40000' } },
+  { remote: { minThreshold: 4, neverEnough: 'active-plus-expired' } }
+]) {
+  const which = JSON.stringify(odd);
   assert.deepStrictEqual(
     forms.listProblems({ ...listOf({}), threshold: 1 }, undefined, odd),
     [],
-    String(odd)
+    which
   );
-  assert.deepStrictEqual(forms.listProblems({ ...listOf({}), threshold: 1 }, listOf({}), odd), []);
+  assert.deepStrictEqual(
+    forms.listProblems({ ...listOf({}), threshold: 1 }, listOf({}), odd),
+    [],
+    which
+  );
   assert.deepStrictEqual(
     forms.configProblems(
       { banList: 2, activePoints: 50, expiredPoints: 50 },
@@ -594,9 +611,27 @@ for (const odd of [undefined, null, {}, { remote: undefined }, { battlemetrics: 
       banLists,
       odd
     ),
-    []
+    [],
+    which
   );
-  assert.deepStrictEqual(forms.outsideLimits(older, odd), []);
+  assert.deepStrictEqual(forms.outsideLimits(older, odd), [], which);
+
+  // The client never gives the forms such limits: it reads those /config.js gives as the web
+  // server reads its environment variables (scbl-lib/config.js), so each limit that is missing or
+  // cannot be used is the default, and the forms check with it.
+  const read = exportListLimits.readGivenLimits(odd).limits;
+  assert.deepStrictEqual(read.remote, DEFAULT_LIMITS.remote, which);
+  assert.deepStrictEqual(
+    forms.listProblems({ ...listOf({}), threshold: 4 }, undefined, read),
+    [
+      {
+        rule: 'never-enough',
+        field: 'threshold',
+        message: MESSAGES.activePlusExpired(4, '3 for an active ban', '1 for an expired ban', 5)
+      }
+    ],
+    which
+  );
 }
 for (const type of ['constructor', '__proto__', 'toString', undefined])
   assert.deepStrictEqual(
