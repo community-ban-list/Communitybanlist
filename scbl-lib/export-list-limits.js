@@ -437,8 +437,9 @@ function pointsText(value) {
   return `${formatNumber(value)} ${value === 1 ? 'point' : 'points'}`;
 }
 
-// A whole number as the messages write it, with commas: 20,000.
-function formatNumber(value) {
+// A whole number as the messages write it, with commas: 20,000. The web server's messages about
+// the players on a list write numbers the same way.
+export function formatNumber(value) {
   return Number.isInteger(value)
     ? String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
     : String(value);

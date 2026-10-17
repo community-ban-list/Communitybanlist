@@ -235,6 +235,15 @@ const { default: resolver } = await load('../src/graphql-api/mutation/resolver.j
   },
   'scbl-lib/export-list-limits': exportListLimits,
   'scbl-lib/validators': { default: Validators },
+  // With no limit, no list's players are counted.
+  'scbl-lib/db/export-membership': {
+    countMembers() {
+      throw new Error('A list was counted with no limit on its players.');
+    },
+    countPlayersWithBans() {
+      throw new Error('Players were counted with no limit on lists.');
+    }
+  },
   'scbl-lib/db/models': { BanList: {}, ExportBanList, ExportBanListConfig: {}, Organisation: {} },
   'scbl-lib/utils': mutations.utils
 });
