@@ -83,30 +83,37 @@ function checkBatch(ids) {
     );
 }
 
+// A transaction is open while its work runs, and ends when the work has finished.
 const sequelize = {
-  transaction: async (options, work) => work({ isolationLevel: options.isolationLevel }),
-  async query(text, { type, transaction, replacements }) {
-    const statement = text.replace(/\s+/g, ' ').trim();
-    assert.match(statement, /^SELECT CONCAT\(steamUser, ",", exportBanList\) AS "id"/);
-    assert.match(
-      statement,
-      /AND B\.steamUser IN \(\?\) GROUP BY EBL\.id, B\.steamUser, B\.banList/
-    );
-    assert.strictEqual(type, 'SELECT');
-    // The membership query runs on its own, in a SERIALIZABLE transaction.
-    assert.deepStrictEqual(transaction, { isolationLevel: 'SERIALIZABLE' });
-    [batch] = replacements;
-    events.push(`GENERATE for ${batch.join(' ')}`);
-    return batch.flatMap((steamUser) =>
-      (qualifies[steamUser] || []).map((list) => ({
-        id: `${steamUser},${list}`,
-        status: 'TO_BE_CREATED',
-        steamUser,
-        exportBanList: list
-      }))
-    );
+  async transaction(options, work) {
+    const transaction = { isolationLevel: options.isolationLevel, open: true };
+    events.push(`BEGIN ${transaction.isolationLevel}`);
+    try {
+      return await work(transaction);
+    } finally {
+      transaction.open = false;
+      events.push('COMMIT');
+    }
   }
 };
+
+// The statement that says which export bans the batch's players qualify for, which scbl-lib holds.
+// It runs on its own, in a SERIALIZABLE transaction that is still open when it is made.
+async function membershipForPlayers(steamUserIDs, { transaction, ...rest }) {
+  assert.deepStrictEqual(rest, {});
+  assert.strictEqual(transaction.isolationLevel, 'SERIALIZABLE');
+  assert.strictEqual(transaction.open, true);
+  batch = [...steamUserIDs];
+  events.push(`GENERATE for ${batch.join(' ')}`);
+  return batch.flatMap((steamUser) =>
+    (qualifies[steamUser] || []).map((list) => ({
+      id: `${steamUser},${list}`,
+      status: 'TO_BE_CREATED',
+      steamUser,
+      exportBanList: list
+    }))
+  );
+}
 
 const ExportBan = {
   async findAll({ attributes, where: conditions, raw, ...rest }) {
@@ -162,6 +169,7 @@ const ExportBan = {
 
 const dependencies = {
   'scbl-lib/db': { sequelize },
+  'scbl-lib/db/export-membership': { membershipForPlayers },
   'scbl-lib/db/models': {
     ExportBan,
     ExportBanList: {
@@ -186,7 +194,6 @@ const dependencies = {
   },
   'scbl-lib/db/sequelize': {
     Op,
-    QueryTypes: { SELECT: 'SELECT', BULKUPDATE: 'BULKUPDATE' },
     Transaction: { ISOLATION_LEVELS: { SERIALIZABLE: 'SERIALIZABLE' } }
   },
   'scbl-lib/utils': {
@@ -330,7 +337,11 @@ assert.deepStrictEqual(events, [
   'LOG Fetched 2 Steam users to update. Took X.XXs',
   'SELECT id, type FROM ExportBanLists',
   "LOG Updating batch of 2 Steam users' export bans (0 remaining)... Batch time: X.XXs",
+  // Which export bans the batch's players qualify for is worked out in a transaction of its own,
+  // which ends before the batch's export bans are read and written.
+  'BEGIN SERIALIZABLE',
   'GENERATE for A B',
+  'COMMIT',
   'LOG Saving 9 export bans... Batch time: X.XXs',
   // The batch's export bans are read once, by player.
   'SELECT WHERE steamUser IN (A B)',
@@ -493,7 +504,9 @@ assert.deepStrictEqual(
   events.filter((event) => !event.startsWith('LOG ')),
   [
     'SELECT id, type FROM ExportBanLists',
+    'BEGIN SERIALIZABLE',
     'GENERATE for A B C',
+    'COMMIT',
     'SELECT WHERE steamUser IN (A B C)',
     'STAMP A B C'
   ]
@@ -542,14 +555,19 @@ for (const type of ['battlemetrics', 'remote']) {
     [3, 3, 'players']
   ]);
   assert.deepStrictEqual({ ...counts }, { players: 3 });
+  // Each batch works out its export bans in a transaction of its own.
   assert.deepStrictEqual(
-    events.filter((event) => /^(SELECT|GENERATE|STAMP)/.test(event)),
+    events.filter((event) => /^(SELECT|BEGIN|GENERATE|COMMIT|STAMP)/.test(event)),
     [
       'SELECT id, type FROM ExportBanLists',
+      'BEGIN SERIALIZABLE',
       'GENERATE for A B',
+      'COMMIT',
       'SELECT WHERE steamUser IN (A B)',
       'STAMP A B',
+      'BEGIN SERIALIZABLE',
       'GENERATE for C',
+      'COMMIT',
       'SELECT WHERE steamUser IN (C)',
       'STAMP C'
     ]
