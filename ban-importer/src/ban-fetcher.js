@@ -56,19 +56,32 @@ function pageAddress(params) {
   return url.href;
 }
 
-// Get the SteamID of the player banned from a BattleMetrics ban's identifiers.
+// The SteamID64s of players' Steam accounts: account numbers 1 to 4,294,967,295 in Steam's public
+// universe.
+const MIN_STEAM_ID = 76561197960265729n;
+const MAX_STEAM_ID = 76561202255233023n;
+
+// The SteamID64 in a value, such as a SteamID on its own or in a profile's address, or null. It is a
+// run of exactly 17 digits, not part of a longer number, that is a player's account. Anything else,
+// e.g. a longer number or one outside that range, is not a SteamID Steam can know, and would only
+// make a player that is never found.
+export function findSteamIDIn(value) {
+  const match = /(?<![0-9])[0-9]{17}(?![0-9])/.exec(String(value ?? ''));
+  if (!match) return null;
+  const steamID = BigInt(match[0]);
+  return steamID >= MIN_STEAM_ID && steamID <= MAX_STEAM_ID ? match[0] : null;
+}
+
+// Get the SteamID of the player banned from a BattleMetrics ban's identifiers. A ban without a
+// valid one is skipped.
 function findSteamID(identifiers) {
-  // Loop through identifiers to get steamID.
   for (const identifier of Array.isArray(identifiers) ? identifiers : []) {
-    // Ignore none SteamID identifiers.
+    // Ignore identifiers other than SteamIDs.
     if (!identifier || identifier.type !== 'steamID') continue;
 
-    // Some show steam url instead of usual format so handle that case.
-    const steamUser = identifier.identifier
-      ? String(identifier.identifier).replace('https://steamcommunity.com/profiles/', '')
-      : identifier.metadata?.profile?.steamid;
-
-    if (steamUser && /[0-9]{17}/.test(steamUser)) return String(steamUser).trim();
+    // The SteamID is on its own or in the profile's address, or else in the profile's details.
+    const steamUser = findSteamIDIn(identifier.identifier || identifier.metadata?.profile?.steamid);
+    if (steamUser) return steamUser;
   }
   return null;
 }
@@ -148,10 +161,11 @@ export default class BanFetcher {
     // Loop over each line of the ban file.
     for (const line of data.split('\n')) {
       // Split the line to get the steam user, expiry data and reason.
-      const match = line.match(/([0-9]{17}):([0-9]+) ?\/\/(.+)/);
+      const match = line.match(/(?<![0-9])([0-9]{17}):([0-9]+) ?\/\/(.+)/);
 
-      // Skip the line if there's no match, i.e. no ban is contained on the line.
-      if (!match) continue;
+      // Skip the line if there's no match, i.e. no ban is contained on the line, or if its SteamID
+      // is not a player's account.
+      if (!match || !findSteamIDIn(match[1])) continue;
 
       let [, steamUser, expires, reason] = match;
 
