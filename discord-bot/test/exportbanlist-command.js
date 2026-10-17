@@ -4,6 +4,8 @@ import vm from 'vm';
 
 import * as discord from 'discord.js';
 
+import * as scblUtils from '../../scbl-lib/utils/index.js';
+
 // Run /exportbanlist without Discord, the database or BattleMetrics. Package imports are replaced
 // by the stand-ins below, and relative imports load the real files, once each, as Node would, so
 // the command, confirm(), audit() and the reply updater are the real ones. The modules run in this
@@ -169,7 +171,10 @@ const stubs = {
     Organisation: {}
   },
   'scbl-lib/db/sequelize': { Op: {} },
+  // The real utils, so the bot's other helpers find what they import, but a logger that records
+  // what the command logs rather than sending it.
   'scbl-lib/utils': {
+    ...scblUtils,
     Logger: {
       verbose: (module, level, line) => audits.push(line),
       important: (module, line) => audits.push(`[important] ${line}`)
