@@ -382,6 +382,17 @@ assert.deepStrictEqual(form.errors(), {
   threshold: MESSAGES.activePlusExpired(6, '5 for an active ban', '1 for an expired ban', 7)
 });
 
+// A list with a value below 0, which any change to its settings could make bigger, can still be
+// saved as it is and renamed, as the web server only checks the settings a change sets.
+const belowZero = listOf({ threshold: 3, defaultExpiredPoints: -1 });
+form = listForm(belowZero);
+await form.type('name', 'Renamed');
+assert.deepStrictEqual(await form.submit(), {
+  ...forms.listFormOptions(belowZero, limits).defaultValues,
+  name: 'Renamed'
+});
+assert.deepStrictEqual(form.errors(), {});
+
 // A list with a value outside the bounds can still be saved, and its other values changed. The
 // values a change sets must be within them.
 const outOfBounds = listOf({ maxBanAge: 5000 });
