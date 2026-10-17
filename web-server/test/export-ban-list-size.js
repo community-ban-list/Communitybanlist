@@ -191,12 +191,14 @@ const rateLimit = (wait) =>
 {
   const { check, counts, logged } = await sizeChecks({});
   time = 0;
+  const finished = [];
   const together = [
     check('a', 'battlemetrics', null, listOf({ threshold: 9 })),
     check('b', 'remote', null, listOf({ threshold: 6 }))
-  ];
+  ].map((checking, i) => checking.finally(() => finished.push(i)));
   await settle();
   assert.deepStrictEqual(counts.calls, [twoBans]);
+  assert.deepStrictEqual(finished, [], 'Both changes wait for the count.');
   counts.finish(13289);
   assert.deepStrictEqual(await Promise.all(together), ['allowed', 'allowed']);
 
