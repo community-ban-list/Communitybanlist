@@ -1,3 +1,5 @@
+import { readLimits } from './export-list-limits.js';
+
 // Web
 const HOST = process.env.HOST || 'http://localhost';
 const LOCALSTORAGE_VERSION = 'v1.3.4'; // Change this to wipe clients local storage
@@ -41,6 +43,18 @@ const DISCORD_INVITE = CLIENT_CONFIG.DISCORD_INVITE || process.env.DISCORD_INVIT
 // Form for communities applying to become partner organisations.
 const INTAKE_FORM = CLIENT_CONFIG.INTAKE_FORM || process.env.INTAKE_FORM;
 
+// The limits on export ban lists for each type, which changes to lists are checked against: the
+// most players a list can have, its lowest threshold, and what must never be enough to put a player
+// on it. export-list-limits.js describes them and their defaults. They are set with the variables
+// EXPORT_BM_MAX_PLAYERS, EXPORT_BM_MIN_THRESHOLD and EXPORT_BM_NEVER_ENOUGH for BattleMetrics lists,
+// and the same with EXPORT_REMOTE_ for remote lists. An empty variable counts as unset, and a value
+// that cannot be used is replaced with the default and listed in EXPORT_LIST_LIMIT_PROBLEMS, which
+// the web server warns about when it starts. Reading them never throws, as every service and the
+// client load this file.
+const { limits: EXPORT_LIST_LIMITS, problems: EXPORT_LIST_LIMIT_PROBLEMS } = readLimits(
+  process.env
+);
+
 export {
   HOST,
   BATTLEMETRICS_API_KEY,
@@ -52,5 +66,7 @@ export {
   JWT_AUTH,
   SIGN_IN_TOKEN_LIFETIME,
   DISCORD_INVITE,
-  INTAKE_FORM
+  INTAKE_FORM,
+  EXPORT_LIST_LIMITS,
+  EXPORT_LIST_LIMIT_PROBLEMS
 };

@@ -1,6 +1,82 @@
-import { BanList, ExportBanList, ExportBanListConfig } from 'scbl-lib/db/models';
+import { EXPORT_LIST_LIMITS } from 'scbl-lib/config';
+import { BanList, ExportBanList, ExportBanListConfig, Organisation } from 'scbl-lib/db/models';
+import {
+  DEFAULT_SETTINGS,
+  checkBounds,
+  checkChange,
+  defaultThreshold
+} from 'scbl-lib/export-list-limits';
+import Validators from 'scbl-lib/validators';
 
+import refusal from './refusal.js';
 import testWebhook from './test-webhook.js';
+
+// The settings that decide who is on an export ban list, with its configs: its threshold, default
+// points and max ban age.
+const SETTINGS = Object.keys(DEFAULT_SETTINGS);
+
+// A list's settings, from its stored row or a change's arguments. Only the arguments given are
+// taken, so a change leaves the others as they are.
+const storedSettings = (exportBanList) =>
+  Object.fromEntries(SETTINGS.map((name) => [name, exportBanList[name]]));
+const givenSettings = (args) =>
+  Object.fromEntries(SETTINGS.filter((name) => name in args).map((name) => [name, args[name]]));
+
+// Refuse a change with the first of its problems, as { message }.
+function refuseProblems(problems) {
+  if (problems.length > 0) throw refusal(problems[0].message);
+}
+
+// Check the name, server and Discord webhook a change sets with the forms' rules
+// (scbl-lib/validators.js). Values the same as the list's are left alone, as the edit form sends
+// every value on each save, so lists saved before the checks can still be changed. An empty
+// webhook, or none, removes the list's webhook.
+function checkFormats(args, exportBanList = {}) {
+  for (const field of ['name', 'server', 'discordWebhook']) {
+    const value = args[field];
+    if (!(field in args) || value === exportBanList[field]) continue;
+    if (field === 'discordWebhook' && !value) continue;
+    try {
+      Validators.ExportBanList[field].validateSync(value, { strict: true });
+    } catch (error) {
+      throw refusal(error.message);
+    }
+  }
+}
+
+// Check a change that can change who is on a list against the limits on export ban lists
+// (scbl-lib/export-list-limits.js): its creation, a change to its settings, or a config added or
+// deleted. before is the list as stored, or null for a new list, and after is the whole list after
+// the change, each as { settings, configs }. A change that can only make the list smaller, or keep
+// it the same, is allowed, so lists saved before the limits keep working. One that could make the
+// list bigger must leave the whole list within the points rules.
+//
+// Every such change comes here before anything is saved, a webhook is tested or BattleMetrics is
+// asked for anything, so any other check of a change that could make a list bigger
+// (change.mayGrow), such as of the players it would list, belongs here too.
+async function checkListChange(type, before, after) {
+  const change = checkChange(type, before, after, EXPORT_LIST_LIMITS);
+  refuseProblems(change.problems);
+  return change;
+}
+
+// A list's configs as the checks take them, with their ban lists' and organisations' names for the
+// messages.
+async function loadConfigs(exportBanList) {
+  const configs = await ExportBanListConfig.findAll({
+    where: { exportBanList },
+    include: [{ model: BanList, include: [Organisation] }],
+    order: [['id', 'ASC']]
+  });
+  return configs.map((config) => ({
+    id: config.id,
+    banList: config.banList,
+    activePoints: config.activePoints,
+    expiredPoints: config.expiredPoints,
+    banListName: config.BanList?.name,
+    organisationName: config.BanList?.Organisation?.name
+  }));
+}
 
 // What is logged of a failed BattleMetrics request for an export ban list: the BattleMetrics client
 // says in the message what failed and whether BattleMetrics may have carried it out anyway, and the
@@ -31,8 +107,17 @@ export default {
       // Validate arguments.
       if (!['remote', 'battlemetrics'].includes(args.type))
         throw new Error('Invalid export ban list type.');
-      if (args.maxBanAge !== undefined && args.maxBanAge < 0)
-        throw new Error('The max ban age must be a positive integer or zero.');
+      checkFormats(args);
+
+      // Settings that are not given take the defaults the form starts with. Every setting is
+      // stored, so the list is saved as it was checked.
+      const settings = {
+        ...DEFAULT_SETTINGS,
+        threshold: defaultThreshold(EXPORT_LIST_LIMITS),
+        ...givenSettings(args)
+      };
+      await checkListChange(args.type, null, { settings, configs: [] });
+
       if (args.discordWebhook) await testWebhook(context, args.discordWebhook);
 
       // Create export ban list.
@@ -40,10 +125,7 @@ export default {
         name: args.name,
         server: args.server,
         type: args.type,
-        threshold: args.threshold,
-        defaultActivePoints: args.defaultActivePoints,
-        defaultExpiredPoints: args.defaultExpiredPoints,
-        maxBanAge: args.maxBanAge,
+        ...settings,
         discordWebhook: args.discordWebhook,
         owner: context.user.id
       });
@@ -100,23 +182,30 @@ export default {
       // Check export ban list exists.
       if (!exportBanList) throw new Error('Export ban list does not exist!');
 
-      // Validate arguments.
-      if (args.maxBanAge !== undefined && args.maxBanAge < 0)
-        throw new Error('The max ban age must be a positive integer or zero.');
-      if (args.discordWebhook && args.discordWebhook !== exportBanList.discordWebhook)
-        await testWebhook(context, args.discordWebhook);
+      // Validate the values the change sets. The edit form sends every value on each save, so
+      // only those that differ from the list's are checked.
+      checkFormats(args, exportBanList);
+      const stored = storedSettings(exportBanList);
+      const settings = { ...stored, ...givenSettings(args) };
+      const changed = SETTINGS.filter((name) => settings[name] !== stored[name]);
+      refuseProblems(
+        checkBounds(Object.fromEntries(changed.map((name) => [name, settings[name]])))
+      );
 
-      // Check whether the ban list needs generating.
-      if (
-        ('threshold' in args && args.threshold !== exportBanList.threshold) ||
-        ('defaultActivePoints' in args &&
-          args.defaultActivePoints !== exportBanList.defaultActivePoints) ||
-        ('defaultExpiredPoints' in args &&
-          args.defaultExpiredPoints !== exportBanList.defaultExpiredPoints) ||
-        ('maxBanAge' in args && args.maxBanAge !== exportBanList.maxBanAge)
-      ) {
+      // A change to the settings can change who is on the list, so it is checked with the list's
+      // configs, and the ban list needs generating again. Renames and webhook changes need neither.
+      if (changed.length > 0) {
+        const configs = await loadConfigs(exportBanList.id);
+        await checkListChange(
+          exportBanList.type,
+          { settings: stored, configs },
+          { settings, configs }
+        );
         exportBanList.generated = false;
       }
+
+      if (args.discordWebhook && args.discordWebhook !== exportBanList.discordWebhook)
+        await testWebhook(context, args.discordWebhook);
 
       // Update arguments if specified
       if ('name' in args) exportBanList.name = args.name;
@@ -192,7 +281,8 @@ export default {
       if (!exportBanList) throw new Error('Export ban list does not exist!');
 
       const banList = await BanList.findOne({
-        where: { id: args.banList }
+        where: { id: args.banList },
+        include: [Organisation]
       });
 
       if (!banList) throw new Error('Ban list does not exist!');
@@ -204,11 +294,28 @@ export default {
       if (exportBanListConfig)
         throw new Error('Export ban list config already exists for this ban list.');
 
+      // A config needs both its points. More points than the list's defaults could make the list
+      // bigger, so the change is checked with the list's other configs.
+      const points = { activePoints: args.activePoints, expiredPoints: args.expiredPoints };
+      refuseProblems(checkBounds(points));
+      const settings = storedSettings(exportBanList);
+      const configs = await loadConfigs(exportBanList.id);
+      const added = {
+        banList: banList.id,
+        ...points,
+        banListName: banList.name,
+        organisationName: banList.Organisation?.name
+      };
+      await checkListChange(
+        exportBanList.type,
+        { settings, configs },
+        { settings, configs: [...configs, added] }
+      );
+
       return ExportBanListConfig.create({
         exportBanList: args.exportBanList,
         banList: args.banList,
-        activePoints: args.activePoints,
-        expiredPoints: args.expiredPoints
+        ...points
       });
     },
 
@@ -219,6 +326,17 @@ export default {
       });
 
       if (!exportBanListConfig) throw new Error('Export ban list config does not exist!');
+
+      // Without the config, its ban list gives the list's default points, or those of another
+      // config for it, which could make the list bigger.
+      const exportBanList = exportBanListConfig.ExportBanList;
+      const settings = storedSettings(exportBanList);
+      const configs = await loadConfigs(exportBanList.id);
+      await checkListChange(
+        exportBanList.type,
+        { settings, configs },
+        { settings, configs: configs.filter((config) => config.id !== exportBanListConfig.id) }
+      );
 
       await exportBanListConfig.destroy();
       return exportBanListConfig;

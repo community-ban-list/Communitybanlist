@@ -15,12 +15,13 @@ const CREATES_AND_DELETES = ['createExportBanList', 'deleteExportBanList'];
 // or makes a request to BattleMetrics: the limit of 4 lists, a list that does not exist, and
 // mistakes in a new list's settings, including a Discord webhook that fails its test or cannot be
 // tested now. These do not count towards the limits, so a user who corrects a mistake can try
-// again at once. Any other failure counts, as it may have come after requests to BattleMetrics.
+// again at once, and nor do errors marked as refusals (see refusal.js), such as settings outside
+// the limits on export ban lists. Any other failure counts, as it may have come after requests to
+// BattleMetrics.
 const REFUSALS = [
   'You are limited to 4 export ban lists.',
   'Export ban list does not exist!',
   'Invalid export ban list type.',
-  'The max ban age must be a positive integer or zero.',
   'Invalid Discord Webhook',
   'Only one Discord webhook can be tested per request. Please save one export ban list at a time.'
 ];
@@ -124,8 +125,10 @@ export default function guardChanges(mutations, now = Date.now) {
   );
 }
 
-// Whether a change failed with one of the refusals above, so it changed nothing.
+// Whether a change failed with one of the refusals above, or an error marked as a refusal, so it
+// changed nothing.
 function isRefusal(error) {
+  if (error?.refusal === true) return true;
   const message = error?.message;
   if (typeof message !== 'string') return false;
   return REFUSALS.includes(message) || REFUSAL_STARTS.some((start) => message.startsWith(start));

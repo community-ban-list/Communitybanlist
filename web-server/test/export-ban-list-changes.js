@@ -2,6 +2,9 @@ import assert from 'assert';
 import { readFile } from 'fs/promises';
 import vm from 'vm';
 
+import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
+import Validators from '../../scbl-lib/validators.js';
+
 // Checks for changes to export ban lists and their configs. Part 1 checks the guard that
 // mutation/index.js puts on the mutations: changes need signing in, each user's are made one at a
 // time, and creating and deleting lists is limited. Part 2 checks that the resolvers in
@@ -354,16 +357,17 @@ assert.deepStrictEqual(together, [
 // A creation or deletion that resolver.js refuses before it changes anything does not count, so a
 // user who corrects their mistakes can try again at once. Any other failure counts, as it may have
 // come after requests to BattleMetrics. Each stand-in here waits until it is allowed to finish, if
-// it is given a promise to wait for, and fails with the error it is given.
+// it is given a promise to wait for, and fails with the error it is given, which it marks as a
+// refusal, as refusal.js does, when told to.
 const mapsBeforeRefusing = maps.length;
 const refusing = guardChanges(
   Object.fromEntries(
     MUTATIONS.map((name) => [
       name,
-      async (parent, { error, until }) => {
+      async (parent, { error, until, marked }) => {
         await settle();
         await until;
-        if (error) throw new Error(error);
+        if (error) throw Object.assign(new Error(error), marked ? { refusal: true } : {});
         return name;
       }
     ])
@@ -371,30 +375,42 @@ const refusing = guardChanges(
   () => clock
 );
 const refusingMaps = maps.slice(mapsBeforeRefusing);
-const attempt = (time, name, user, error, until) => {
+const attempt = (time, name, user, error, until, marked) => {
   clock = time;
-  return refusing[name](null, { error, until }, as(user), {});
+  return refusing[name](null, { error, until, marked }, as(user), {});
 };
 const createOrDelete = (i) => (i % 2 ? 'deleteExportBanList' : 'createExportBanList');
 const refusals = [
   LIST_LIMIT,
   'Export ban list does not exist!',
   'Invalid export ban list type.',
-  'The max ban age must be a positive integer or zero.',
   'Invalid Discord Webhook',
   'We could not post a test message to your Discord webhook. Unknown Webhook.',
   'Only one Discord webhook can be tested per request. Please save one export ban list at a time.',
   'Discord webhooks can only be tested 5 times a minute. Please try again in 40 seconds.'
 ];
+// Errors marked as refusals, such as settings outside the limits on export ban lists, are refusals
+// whatever they say.
+const markedRefusals = [
+  'The threshold must be a whole number from 1 to 1,000.',
+  "A remote export ban list's threshold must be at least 4.",
+  'A refusal with any message.'
+];
 
 // The user is refused more often than the hourly limit allows changes, and can still make the
 // minute's worth.
 const refusedAt = start + 8 * HOUR;
-for (let i = 0; i <= PER_HOUR; i++)
+for (let i = 0; i <= PER_HOUR; i++) {
   for (const error of refusals)
     await assert.rejects(attempt(refusedAt, createOrDelete(i), 'mistaken', error), {
       message: error
     });
+  for (const error of markedRefusals)
+    await assert.rejects(
+      attempt(refusedAt, createOrDelete(i), 'mistaken', error, undefined, true),
+      { message: error }
+    );
+}
 for (let i = 0; i < PER_MINUTE; i++)
   assert.strictEqual(
     await attempt(refusedAt + SECOND, createOrDelete(i), 'mistaken'),
@@ -489,9 +505,15 @@ assert.deepStrictEqual(kept, ['last']);
 
 // Stand-ins for the models, over rows kept here. Like the database, lookups only find the rows
 // that match the whole where clause, and like Sequelize, they hand out copies of the rows, which
-// only save and destroy write back. `pause` stands for the time each query takes.
+// only save and destroy write back. A config looked up with its list includes a copy of the list.
+// `pause` stands for the time each query takes.
 function database(pause = async () => {}) {
-  const rows = { BanList: [{ id: 1 }, { id: 2 }], ExportBanList: [], ExportBanListConfig: [] };
+  const rows = {
+    BanList: [{ id: 1 }, { id: 2 }],
+    ExportBanList: [],
+    ExportBanListConfig: [],
+    Organisation: []
+  };
   const queries = [];
   const writes = [];
   let nextID = 100;
@@ -539,7 +561,18 @@ function database(pause = async () => {}) {
         assert.ok(include && include.includes(models.ExportBanList), 'The list is included.');
       await pause();
       const row = rows[name].find((row) => matches(row, where));
-      return row ? copy(name, row) : null;
+      if (!row) return null;
+      const found = copy(name, row);
+      if (name === 'ExportBanListConfig' && include?.includes(models.ExportBanList)) {
+        const list = rows.ExportBanList.find((list) => list.id === row.exportBanList);
+        found.ExportBanList = copy('ExportBanList', list);
+      }
+      return found;
+    },
+    async findAll({ where }) {
+      queries.push([`${name}.findAll`, { ...where }]);
+      await pause();
+      return rows[name].filter((row) => matches(row, where)).map((row) => copy(name, row));
     },
     async create(values) {
       await pause();
@@ -552,10 +585,23 @@ function database(pause = async () => {}) {
   const models = {
     BanList: model('BanList'),
     ExportBanList: model('ExportBanList'),
-    ExportBanListConfig: model('ExportBanListConfig')
+    ExportBanListConfig: model('ExportBanListConfig'),
+    Organisation: model('Organisation')
   };
   return { rows, queries, writes, models };
 }
+
+// The limits on export ban lists, with no limit on their players, and the rules for each value.
+const limits = {
+  'scbl-lib/config': {
+    EXPORT_LIST_LIMITS: exportListLimits.readLimits({
+      EXPORT_BM_MAX_PLAYERS: '0',
+      EXPORT_REMOTE_MAX_PLAYERS: '0'
+    }).limits
+  },
+  'scbl-lib/export-list-limits': exportListLimits,
+  'scbl-lib/validators': { default: Validators }
+};
 
 // The Discord webhook checks from scbl-lib, with Discord refusing every test message.
 const webhookContext = vm.createContext({ URL });
@@ -595,7 +641,7 @@ const db = database();
 const { Mutation: Resolvers } = (
   await load(
     '../src/graphql-api/mutation/resolver.js',
-    { 'scbl-lib/db/models': db.models, 'scbl-lib/utils': utils },
+    { ...limits, 'scbl-lib/db/models': db.models, 'scbl-lib/utils': utils },
     vm.createContext({ console: { error() {} } })
   )
 ).default;
@@ -683,6 +729,7 @@ const { Mutation: Guarded } = (
   await load(
     '../src/graphql-api/mutation/index.js',
     {
+      ...limits,
       './typedef.js': { default: typedef },
       'scbl-lib/db/models': raced.models,
       'scbl-lib/utils': utils
@@ -738,7 +785,7 @@ const mistakes = [
   [
     'createExportBanList',
     { ...newList, maxBanAge: -1 },
-    'The max ban age must be a positive integer or zero.'
+    'The max ban age must be a whole number of days from 0 to 3,650. Use 0 to count bans of any age.'
   ],
   [
     'createExportBanList',

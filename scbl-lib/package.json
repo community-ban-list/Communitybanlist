@@ -11,6 +11,7 @@
     "./db/export-membership": "./db/export-membership.js",
     "./db/models": "./db/models/index.js",
     "./db/importer-models": "./db/models/importer/index.js",
+    "./export-list-limits": "./export-list-limits.js",
     "./utils": "./utils/index.js",
     "./validators": "./validators.js"
   },
