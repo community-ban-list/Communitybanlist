@@ -331,7 +331,8 @@ function describeResult({ status, outcome, reason }) {
 }
 
 // Remove one list outside the limits, as it is now: it is read and checked again first, as its
-// owner may have changed or deleted it since the preview.
+// owner may have changed or deleted it since the preview. Gives what happened, with the list
+// described for the log as it was before it was removed, as removing it clears its BattleMetrics ID.
 async function removeOne(check, access) {
   let current;
   try {
@@ -347,11 +348,12 @@ async function removeOne(check, access) {
   const left = leftReason(current.exportBanList, access);
   if (left) return { check: current, status: 'skipped', reason: left };
 
+  const description = `${describeExportBanList(current.exportBanList)}, outside today's limits with ${plural(current.players, 'player')}`;
   try {
     const outcome = await current.exportBanList.deleteExportBanList();
-    return { check: current, status: 'removed', outcome };
+    return { check: current, status: 'removed', outcome, description };
   } catch (error) {
-    return { check: current, status: 'failed', reason: failureReason(error) };
+    return { check: current, status: 'failed', reason: failureReason(error), description };
   }
 }
 
@@ -372,7 +374,7 @@ function describeProgress(total, results) {
     failed > 0 && `${failed} failed`,
     skipped > 0 && `${skipped} not removed`
   ].filter(Boolean);
-  return `Removing ${plural(total, 'export ban list')} outside today's limits: ${results.length} done${parts.length > 0 ? ` (${parts.join(', ')})` : ''}.\nDiscord stops updating this reply 15 minutes after the command, so each result and the summary also go to the CBL log channel.`;
+  return `Removing ${plural(total, 'export ban list')} outside today's limits: ${results.length} done${parts.length > 0 ? ` (${parts.join(', ')})` : ''}.\nThis reply can only be updated for 15 minutes after the command, so each result and the summary also go to the CBL log channel.`;
 }
 
 function describeSummary(total, results, notTried, left) {
@@ -384,15 +386,16 @@ function describeSummary(total, results, notTried, left) {
       `${counts.gone} whose BattleMetrics ban ${counts.gone === 1 ? 'list was' : 'lists were'} already gone`,
     counts.none > 0 && `${counts.none} with nothing to delete on BattleMetrics`
   ].filter(Boolean);
+  // The lists not removed, a sentence each.
   const others = [
-    counts.failed > 0 && `${counts.failed.toLocaleString('en-US')} failed`,
+    counts.failed > 0 && `${counts.failed.toLocaleString('en-US')} failed.`,
     counts.skipped > 0 &&
-      `${was(counts.skipped)} not removed, as ${counts.skipped === 1 ? 'it' : 'they'} had changed`,
-    notTried > 0 && `${was(notTried)} not tried, as the removal stopped`,
-    left > 0 && `${was(left)} left from the start`
+      `${was(counts.skipped)} not removed, as ${counts.skipped === 1 ? 'it' : 'they'} had changed.`,
+    notTried > 0 && `${was(notTried)} not tried, as the removal stopped.`,
+    left > 0 && `${was(left)} left from the start.`
   ].filter(Boolean);
   const removed = `Removed ${counts.removed.toLocaleString('en-US')} of the ${plural(total, 'export ban list')} outside today's limits${ways.length > 0 ? `: ${joinList(ways)}` : ''}.`;
-  return others.length > 0 ? `${removed} ${joinList(others)}.` : removed;
+  return [removed, ...others].join(' ');
 }
 
 // Only one removal of the lists outside the limits runs at a time, so two admins never work through
@@ -513,7 +516,7 @@ async function removeAllOutsideLimits(interaction) {
 
     const result = await removeOne(check, access);
     results.push(result);
-    const description = `${describeExportBanList(result.check.exportBanList)}, outside today's limits with ${plural(result.check.players, 'player')}`;
+    const description = result.description ?? describeExportBanList(result.check.exportBanList);
     if (result.status === 'removed')
       audit(interaction, `removed ${description}: ${OUTCOMES[result.outcome] ?? result.outcome}.`);
     else if (result.status === 'failed')

@@ -45,7 +45,7 @@ const LIMITS_TEXT =
 const RUNNING =
   'The ban importer is running, so nothing was changed. Try again once the run has finished.';
 const PROGRESS_NOTE =
-  'Discord stops updating this reply 15 minutes after the command, so each result and the summary also go to the CBL log channel.';
+  'This reply can only be updated for 15 minutes after the command, so each result and the summary also go to the CBL log channel.';
 // A message from the website's rules, as checkLimits gives them.
 const RULE =
   'One active ban plus one expired ban must not be enough to put a player on an export ban list. Here they can give 6 points (5 for an active ban, plus 1 for an expired ban), so the threshold must be 7 or more. Raise the threshold or lower the points.';
@@ -106,13 +106,16 @@ function addList(
       notifications.push(id);
       return 'https://discord.com/api/webhooks/1/token';
     },
+    // Like the shared deletion, a list that is removed no longer records its BattleMetrics ban
+    // list.
     async deleteExportBanList() {
       calls.push(['delete', id]);
       const result = deletions.get(id);
       if (result instanceof Error) throw result;
       rows.delete(id);
-      if (result) return result;
-      return type === 'battlemetrics' && battlemetricsID ? 'deleted' : 'none';
+      const outcome = result ?? (this.battlemetricsID ? 'deleted' : 'none');
+      this.battlemetricsID = null;
+      return outcome;
     },
     ...more
   };
@@ -726,6 +729,37 @@ assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n').slice(0, 
   "**List 80** (#80): not removed, as it is now within today's limits",
   '**List 81** (#81): not removed, as it no longer exists'
 ]);
+
+// The summary says how many lists ended each way, and the log has each BattleMetrics list's ban
+// list as it was before the list was removed.
+reset();
+addList(83, 'battlemetrics', { battlemetricsID: 'bm-83' });
+addList(84, 'battlemetrics', { battlemetricsID: 'bm-84' });
+addList(85, 'remote');
+addList(86, 'battlemetrics', { battlemetricsID: 'bm-86' });
+addList(87, 'remote');
+visible = new Set(['bm-83', 'bm-84']);
+deletions.set(
+  84,
+  Object.assign(new Error('Removing the owner failed.'), { stage: 'battlemetrics' })
+);
+whileConfirming = async () => {
+  rows.get(85).problems = [];
+};
+await run('remove_outside_limits');
+assert.deepStrictEqual(deleted(), [83, 84, 87]);
+assert.strictEqual(
+  replies.at(-1).content,
+  "Removed 2 of the 5 export ban lists outside today's limits: 1 with its BattleMetrics ban list and 1 with nothing to delete on BattleMetrics. 1 failed. 1 was not removed, as it had changed. 1 was left from the start."
+);
+assert.match(
+  audits[1],
+  /^admin \(1\) removed export ban list "List 83" \(ID: 83, BattleMetrics, BattleMetrics ID: bm-83\) of /
+);
+assert.match(
+  audits[2],
+  /^admin \(1\) could not remove export ban list "List 84" \(ID: 84, BattleMetrics, BattleMetrics ID: bm-84\) .*: Removing the owner failed\.$/
+);
 
 // Lists that do not fit in the preview are in an attached file, with every detail, as are the
 // results that do not fit in the summary.
