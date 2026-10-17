@@ -3,7 +3,8 @@ import { gql } from '@apollo/client';
 import { useQuery } from '@apollo/client/react';
 import { Input } from 'reactstrap';
 
-const GET_BAN_LISTS = gql`
+// Also read by the config form, to name the ban list chosen.
+export const GET_BAN_LISTS = gql`
   query GetBanLists {
     banLists {
       id

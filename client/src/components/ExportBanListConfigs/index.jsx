@@ -5,11 +5,17 @@ import { Table } from 'reactstrap';
 
 import { CreateExportBanListConfig, DeleteExportBanListConfig } from '../';
 
+// The list's settings are for the config form, which checks a config against them.
 const GET_EXPORT_BAN_LIST_CONFIGS = gql`
   query GetExportBanListConfigs($exportBanListID: Int!) {
     loggedInSteamUser {
       exportBanList(id: $exportBanListID) {
         id
+        type
+        threshold
+        defaultActivePoints
+        defaultExpiredPoints
+        maxBanAge
 
         exportBanListConfigs {
           id
@@ -48,7 +54,8 @@ export default function (props) {
           </tr>
         </thead>
         <tbody>
-          {loading && (
+          {/* The edit form's query may have cached the configs already. */}
+          {loading && !data && (
             <tr>
               <td colSpan={4} className="text-center">
                 <div className="text-center mt-2 mb-3">Loading...</div>
@@ -99,7 +106,10 @@ export default function (props) {
           )}
         </tbody>
       </Table>
-      <CreateExportBanListConfig exportBanListID={props.exportBanListID} />
+      <CreateExportBanListConfig
+        exportBanListID={props.exportBanListID}
+        exportBanList={data?.loggedInSteamUser?.exportBanList}
+      />
     </>
   );
 }

@@ -1,0 +1,529 @@
+import assert from 'assert';
+import { readFile } from 'fs/promises';
+import vm from 'vm';
+
+import * as hookformYup from '@hookform/resolvers/yup';
+import { createFormControl } from 'react-hook-form';
+import * as yup from 'yup';
+
+import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
+import Validators from '../../scbl-lib/validators.js';
+
+// Checks the export ban list forms' checks against the limits on export ban lists. The forms show
+// the problems the web server gives for a change, from the same scbl-lib/export-list-limits.js,
+// under the fields they are about as the owner types. The client's module is loaded with the real
+// limits and form packages, and each form runs in react-hook-form's form control with the options
+// useForm gets, without a page.
+
+// Load one of the client's modules, with its package imports from these.
+const packages = {
+  yup,
+  '@hookform/resolvers/yup': hookformYup,
+  'scbl-lib/export-list-limits': exportListLimits,
+  'scbl-lib/validators': { default: Validators }
+};
+async function loadClient(path) {
+  const url = new URL(path, import.meta.url);
+  const module = new vm.SourceTextModule(await readFile(url, 'utf8'), { identifier: url.href });
+  await module.link((specifier) => {
+    assert.ok(Object.hasOwn(packages, specifier), `Unexpected dependency: ${specifier}`);
+    const exports = packages[specifier];
+    return new vm.SyntheticModule(Object.keys(exports), function () {
+      for (const [name, value] of Object.entries(exports)) this.setExport(name, value);
+    });
+  });
+  await module.evaluate();
+  return module.namespace;
+}
+
+const forms = await loadClient('../../client/src/utils/export-list-forms.js');
+
+const { readLimits } = exportListLimits;
+const limitsWith = (env) => readLimits(env).limits;
+const limits = limitsWith({});
+
+// The web server's messages, as web-server/test/export-ban-list-values.js has them.
+const typeName = (type) => (type === 'remote' ? 'remote' : 'BattleMetrics');
+const MESSAGES = {
+  threshold: 'The threshold must be a whole number from 1 to 1,000.',
+  points: 'Points must be whole numbers from 0 to 100.',
+  maxBanAge:
+    'The max ban age must be a whole number of days from 0 to 3,650. Use 0 to count bans of any age.',
+  activePlusExpired: (total, active, expired, lowest) =>
+    `One active ban plus one expired ban must not be enough to put a player on an export ban list. Here they can give ${total} points (${active}, plus ${expired}), so the threshold must be ${lowest} or more. Raise the threshold or lower the points.`,
+  minimum: (type, minimum) =>
+    `A ${typeName(type)} export ban list's threshold must be at least ${minimum}.`
+};
+
+// Ban lists, and export ban lists with their configs, as the site's queries give them. The ban
+// lists belong to the same organisations as in the web server's test.
+const ORGANISATIONS = { 1: 1, 2: 2, 3: 2, 4: 1, 5: 1 };
+const banLists = Object.entries(ORGANISATIONS).map(([id, organisation]) => ({
+  id: Number(id),
+  name: `Ban List ${id}`,
+  organisation: { id: organisation, name: `Partner Org ${organisation}` }
+}));
+let configIDs = 1000;
+const configOf = (banList, activePoints, expiredPoints) => ({
+  id: configIDs++,
+  activePoints,
+  expiredPoints,
+  banList: banLists.find(({ id }) => id === banList)
+});
+const listOf = (values, configs = []) => ({
+  id: 1,
+  name: 'List 1',
+  server: 'Server',
+  type: 'remote',
+  threshold: 9,
+  defaultActivePoints: 3,
+  defaultExpiredPoints: 1,
+  maxBanAge: 0,
+  discordWebhook: null,
+  exportBanListConfigs: configs,
+  ...values
+});
+
+// A form as useForm runs it, with these options and its fields registered as the form registers
+// them. typing sets a field's value as an input does, and waits for the checks that starts.
+const LIST_FORM_FIELDS = Object.keys(Validators.ExportBanList);
+const CONFIG_FORM_FIELDS = ['banList', 'activePoints', 'expiredPoints'];
+const settled = () => new Promise((resolve) => setImmediate(resolve));
+function formOf(options, names, fieldOptions) {
+  const form = createFormControl(options);
+  const fields = Object.fromEntries(
+    names.map((name) => [name, form.register(name, fieldOptions[name])])
+  );
+  return {
+    async type(name, value) {
+      await fields[name].onChange({ target: { name, value }, type: 'change' });
+      await settled();
+      await settled();
+    },
+    errors() {
+      return Object.fromEntries(
+        Object.entries(form.control._formState.errors).map(([name, { message }]) => [name, message])
+      );
+    },
+    // The values the form would submit, or none if its checks stop it.
+    async submit() {
+      let submitted;
+      await form.handleSubmit((values) => {
+        submitted = values;
+      })();
+      return submitted;
+    },
+    // useForm takes its options again each time the form renders.
+    render(options) {
+      form.control._options = options;
+    }
+  };
+}
+const listForm = (exportBanList, withLimits = limits) =>
+  formOf(forms.listFormOptions(exportBanList, withLimits), LIST_FORM_FIELDS, forms.LIST_FIELDS);
+const configForm = (exportBanList, withLimits = limits) =>
+  formOf(
+    forms.configFormOptions(exportBanList, banLists, withLimits),
+    CONFIG_FORM_FIELDS,
+    forms.CONFIG_FIELDS
+  );
+
+// A list's configs are taken as the web server takes them: in the order of their IDs, with their
+// ban lists' and organisations' names, and nothing else of the list.
+assert.deepStrictEqual(
+  forms.storedList(
+    listOf({}, [configOf(3, 6, 3), { id: 7, activePoints: null, expiredPoints: 2, banList: null }])
+  ),
+  {
+    settings: { threshold: 9, defaultActivePoints: 3, defaultExpiredPoints: 1, maxBanAge: 0 },
+    configs: [
+      {
+        id: 7,
+        banList: null,
+        activePoints: null,
+        expiredPoints: 2,
+        banListName: undefined,
+        organisationName: undefined
+      },
+      {
+        id: 1000,
+        banList: 3,
+        activePoints: 6,
+        expiredPoints: 3,
+        banListName: 'Ban List 3',
+        organisationName: 'Partner Org 2'
+      }
+    ]
+  }
+);
+
+// Creating a list. The form starts with the model's defaults and the lowest threshold allowed for
+// either type, which are within the limits, and every value is checked as it is typed.
+assert.deepStrictEqual(forms.listFormOptions(undefined, limits).defaultValues, {
+  type: 'remote',
+  threshold: 9,
+  defaultActivePoints: 3,
+  defaultExpiredPoints: 1,
+  maxBanAge: 0
+});
+assert.strictEqual(
+  forms.listFormOptions(undefined, limitsWith({ EXPORT_BM_MIN_THRESHOLD: '12' })).defaultValues
+    .threshold,
+  12
+);
+assert.strictEqual(forms.listFormOptions(undefined, limits).mode, 'onChange');
+
+let form = listForm(undefined);
+assert.deepStrictEqual(form.errors(), {});
+// One active ban plus one expired ban must not be enough, so 3/1 points need a threshold of 5.
+await form.type('threshold', '4');
+assert.deepStrictEqual(form.errors(), {
+  threshold: MESSAGES.activePlusExpired(4, '3 for an active ban', '1 for an expired ban', 5)
+});
+await form.type('threshold', '5');
+assert.deepStrictEqual(form.errors(), {});
+// The rules' problems show under the threshold, and changing the points checks it again.
+await form.type('defaultActivePoints', '5');
+assert.deepStrictEqual(form.errors(), {
+  threshold: MESSAGES.activePlusExpired(6, '5 for an active ban', '1 for an expired ban', 7)
+});
+// Values outside their bounds come first, under their own fields, as the web server refuses them
+// first.
+await form.type('defaultActivePoints', '101');
+assert.deepStrictEqual(form.errors(), { defaultActivePoints: MESSAGES.points });
+await form.type('defaultActivePoints', '2.5');
+assert.deepStrictEqual(form.errors(), { defaultActivePoints: MESSAGES.points });
+await form.type('defaultActivePoints', '1');
+await form.type('defaultExpiredPoints', '1');
+// 1/1 points need only the minimum threshold of 4.
+await form.type('threshold', '3');
+assert.deepStrictEqual(form.errors(), { threshold: MESSAGES.minimum('remote', 4) });
+await form.type('threshold', '0');
+assert.deepStrictEqual(form.errors(), { threshold: MESSAGES.threshold });
+await form.type('threshold', '1001');
+assert.deepStrictEqual(form.errors(), { threshold: MESSAGES.threshold });
+await form.type('maxBanAge', '3651');
+assert.deepStrictEqual(form.errors(), {
+  threshold: MESSAGES.threshold,
+  maxBanAge: MESSAGES.maxBanAge
+});
+await form.type('maxBanAge', '365');
+await form.type('threshold', '4');
+assert.deepStrictEqual(form.errors(), {});
+// The form's own rules for the name, server and webhook still apply, and a form with problems is
+// not submitted.
+assert.strictEqual(await form.submit(), undefined);
+assert.deepStrictEqual(Object.keys(form.errors()).sort(), ['name', 'server']);
+await form.type('name', 'New');
+await form.type('server', 'Server');
+assert.deepStrictEqual(await form.submit(), {
+  type: 'remote',
+  threshold: 4,
+  defaultActivePoints: 1,
+  defaultExpiredPoints: 1,
+  maxBanAge: 365,
+  name: 'New',
+  server: 'Server'
+});
+// Each type has its own limits, so changing the type checks the threshold again.
+form = listForm(undefined, limitsWith({ EXPORT_BM_MIN_THRESHOLD: '12' }));
+await form.type('name', 'New');
+await form.type('server', 'Server');
+await form.type('threshold', '11');
+assert.deepStrictEqual(form.errors(), {});
+await form.type('type', 'battlemetrics');
+assert.deepStrictEqual(form.errors(), { threshold: MESSAGES.minimum('battlemetrics', 12) });
+assert.strictEqual(await form.submit(), undefined);
+await form.type('type', 'remote');
+assert.deepStrictEqual(form.errors(), {});
+// Under the rule that only one ban must not be enough, 3/1 points at threshold 4 are allowed.
+form = listForm(undefined, limitsWith({ EXPORT_REMOTE_NEVER_ENOUGH: 'one-ban' }));
+await form.type('threshold', '4');
+assert.deepStrictEqual(form.errors(), {});
+await form.type('threshold', '3');
+assert.deepStrictEqual(form.errors(), {
+  threshold:
+    'One ban must not be enough to put a player on an export ban list. Here one ban can give 3 points (an active ban), so the threshold must be 4 or more. Raise the threshold or lower the points.'
+});
+
+// Saving a list. The form starts with its saved values, without its configs or anything else of
+// it, and checks the settings that differ from them with its configs, as the web server does.
+const withConfig = listOf({ id: 4 }, [configOf(3, 6, 3)]);
+assert.deepStrictEqual(forms.listFormOptions(withConfig, limits).defaultValues, {
+  name: 'List 1',
+  server: 'Server',
+  threshold: 9,
+  type: 'remote',
+  defaultActivePoints: 3,
+  defaultExpiredPoints: 1,
+  maxBanAge: 0,
+  discordWebhook: ''
+});
+form = listForm(withConfig);
+await form.type('threshold', '8');
+assert.deepStrictEqual(form.errors(), {
+  threshold: MESSAGES.activePlusExpired(
+    9,
+    "6 for an active ban on Partner Org 2's Ban List 3",
+    "3 for an expired ban on Partner Org 2's Ban List 3",
+    10
+  )
+});
+await form.type('threshold', '10');
+assert.deepStrictEqual(form.errors(), {});
+assert.deepStrictEqual(await form.submit(), {
+  name: 'List 1',
+  server: 'Server',
+  threshold: 10,
+  type: 'remote',
+  defaultActivePoints: 3,
+  defaultExpiredPoints: 1,
+  maxBanAge: 0,
+  discordWebhook: ''
+});
+
+// A list saved before these limits, and outside them: one active ban plus one expired ban is
+// enough for it, with 2/1 and configs of 3/1 for two ban lists at threshold 4. The form says so
+// above its fields, and why.
+const older = listOf({ threshold: 4, defaultActivePoints: 2 }, [
+  configOf(1, 3, 1),
+  configOf(2, 3, 1)
+]);
+assert.deepStrictEqual(
+  forms.outsideLimits(older, limits).map(({ message }) => message),
+  [
+    MESSAGES.activePlusExpired(
+      4,
+      "3 for an active ban on Partner Org 1's Ban List 1",
+      '1 for an expired ban',
+      5
+    )
+  ]
+);
+assert.strictEqual(
+  forms.OUTSIDE_LIMITS_NOTE,
+  "This list's settings are outside today's limits. You can keep them, and changes that make the list smaller are always allowed. Other changes must bring the whole list within the limits, so once you change these settings you may not be able to set them back."
+);
+for (const within of [listOf({}), listOf({ threshold: 5 }), { ...withConfig, threshold: 10 }])
+  assert.deepStrictEqual(forms.outsideLimits(within, limits), []);
+// A new list has no note.
+assert.deepStrictEqual(forms.outsideLimits(undefined, limits), []);
+// The list with a 6/3 config at threshold 9 above was outside the rules too.
+assert.strictEqual(forms.outsideLimits(withConfig, limits).length, 1);
+// It can be saved as it is, renamed and given another server or webhook, with no problems from
+// the limits.
+form = listForm(older);
+assert.deepStrictEqual(await form.submit(), forms.listFormOptions(older, limits).defaultValues);
+await form.type('name', 'Renamed');
+await form.type('server', 'Another server');
+await form.type('discordWebhook', 'https://discord.com/api/webhooks/11/token-11');
+assert.deepStrictEqual(form.errors(), {});
+assert.strictEqual((await form.submit()).name, 'Renamed');
+// Changes that can only make it smaller have no problems: a higher threshold, and lower points.
+await form.type('threshold', '5');
+await form.type('defaultActivePoints', '1');
+assert.deepStrictEqual(form.errors(), {});
+await form.type('defaultActivePoints', '2');
+await form.type('threshold', '4');
+assert.deepStrictEqual(form.errors(), {});
+// A change that could make it bigger must bring the whole list within the rules, configs
+// included.
+await form.type('threshold', '3');
+assert.deepStrictEqual(form.errors(), {
+  threshold: MESSAGES.activePlusExpired(
+    4,
+    "3 for an active ban on Partner Org 1's Ban List 1",
+    '1 for an expired ban',
+    5
+  )
+});
+await form.type('threshold', '4');
+await form.type('defaultExpiredPoints', '2');
+assert.deepStrictEqual(form.errors(), {
+  threshold: MESSAGES.activePlusExpired(
+    5,
+    "3 for an active ban on Partner Org 1's Ban List 1",
+    '2 for an expired ban',
+    6
+  )
+});
+// Counting older bans could make it bigger too.
+await form.type('defaultExpiredPoints', '1');
+assert.deepStrictEqual(form.errors(), {});
+const olderWithAge = { ...older, maxBanAge: 730 };
+form = listForm(olderWithAge);
+await form.type('maxBanAge', '365');
+assert.deepStrictEqual(form.errors(), {});
+await form.type('maxBanAge', '0');
+assert.deepStrictEqual(Object.keys(form.errors()), ['threshold']);
+await form.type('threshold', '6');
+assert.deepStrictEqual(form.errors(), {});
+
+// A BattleMetrics list with 5/5/0 can only put its expired points back with a threshold that
+// brings it within the rules.
+const fiveFive = listOf({ type: 'battlemetrics', threshold: 5, defaultActivePoints: 5 }, []);
+fiveFive.defaultExpiredPoints = 0;
+form = listForm(fiveFive);
+await form.type('defaultExpiredPoints', '1');
+assert.deepStrictEqual(form.errors(), {
+  threshold: MESSAGES.activePlusExpired(6, '5 for an active ban', '1 for an expired ban', 7)
+});
+await form.type('threshold', '7');
+assert.deepStrictEqual(form.errors(), {});
+// The limits are those of its saved type, whatever the form's type field holds. Here remote lists
+// have no points rules.
+form = listForm(fiveFive, limitsWith({ EXPORT_REMOTE_NEVER_ENOUGH: 'none' }));
+await form.type('type', 'remote');
+await form.type('defaultExpiredPoints', '1');
+assert.deepStrictEqual(form.errors(), {
+  threshold: MESSAGES.activePlusExpired(6, '5 for an active ban', '1 for an expired ban', 7)
+});
+
+// A list with a value outside the bounds can still be saved, and its other values changed. The
+// values a change sets must be within them.
+const outOfBounds = listOf({ maxBanAge: 5000 });
+form = listForm(outOfBounds);
+await form.type('threshold', '10');
+assert.deepStrictEqual(form.errors(), {});
+await form.type('maxBanAge', '4000');
+assert.deepStrictEqual(form.errors(), { maxBanAge: MESSAGES.maxBanAge });
+
+// Adding a config. Its points must be within their bounds, and points that could make the list
+// bigger must leave the whole list within the rules. The rules' problems are about both points,
+// so they show under both, and the ban list chosen is named in them.
+const adding = listOf({ id: 10 }, [configOf(1, 5, 2)]);
+assert.deepStrictEqual(forms.configFormOptions(adding, banLists, limits).defaultValues, {
+  banList: null,
+  activePoints: 3,
+  expiredPoints: 1
+});
+form = configForm(adding);
+await form.type('banList', '2');
+assert.deepStrictEqual(form.errors(), {});
+await form.type('activePoints', '6');
+assert.deepStrictEqual(form.errors(), {});
+await form.type('expiredPoints', '3');
+assert.deepStrictEqual(form.errors(), {
+  points:
+    "With these points, an active ban on Partner Org 2's Ban List 2 plus an expired ban on Partner Org 2's Ban List 2 could give 9 points, which reaches this list's threshold of 9. Use fewer points, or raise the list's threshold to 10 or more first."
+});
+assert.strictEqual(await form.submit(), undefined);
+await form.type('expiredPoints', '2');
+assert.deepStrictEqual(form.errors(), {});
+assert.deepStrictEqual(await form.submit(), { banList: 2, activePoints: 6, expiredPoints: 2 });
+// Choosing another ban list names it in the message.
+await form.type('expiredPoints', '3');
+await form.type('banList', '5');
+assert.deepStrictEqual(form.errors(), {
+  points:
+    "With these points, an active ban on Partner Org 1's Ban List 5 plus an expired ban on Partner Org 1's Ban List 5 could give 9 points, which reaches this list's threshold of 9. Use fewer points, or raise the list's threshold to 10 or more first."
+});
+// Points outside their bounds come first, under their own fields.
+await form.type('activePoints', '101');
+assert.deepStrictEqual(form.errors(), { activePoints: MESSAGES.points });
+await form.type('activePoints', '-1');
+assert.deepStrictEqual(form.errors(), { activePoints: MESSAGES.points });
+await form.type('activePoints', '6');
+assert.deepStrictEqual(Object.keys(form.errors()), ['points']);
+// The web server refuses a second config for a ban list before it checks the points, so the form
+// leaves that to it.
+await form.type('banList', '1');
+assert.deepStrictEqual(form.errors(), {});
+// Once a config has been added, the form checks the next one with it.
+await form.type('banList', '2');
+assert.deepStrictEqual(Object.keys(form.errors()), ['points']);
+form.render(
+  forms.configFormOptions(
+    { ...adding, exportBanListConfigs: [...adding.exportBanListConfigs, configOf(2, 6, 2)] },
+    banLists,
+    limits
+  )
+);
+await form.type('expiredPoints', '4');
+assert.deepStrictEqual(form.errors(), {});
+// Until the list or the ban lists have loaded, only the bounds are checked.
+for (const [list, choices] of [
+  [undefined, banLists],
+  [adding, undefined]
+]) {
+  form = formOf(
+    forms.configFormOptions(list, choices, limits),
+    CONFIG_FORM_FIELDS,
+    forms.CONFIG_FIELDS
+  );
+  await form.type('banList', '2');
+  await form.type('activePoints', '50');
+  assert.deepStrictEqual(form.errors(), {});
+  await form.type('expiredPoints', '101');
+  assert.deepStrictEqual(form.errors(), { expiredPoints: MESSAGES.points });
+}
+
+// A list outside the rules can be given a config with points of at most its defaults, but not one
+// that could make it bigger.
+form = configForm(listOf({ id: 11, threshold: 3 }));
+await form.type('banList', '3');
+assert.deepStrictEqual(form.errors(), {});
+await form.type('activePoints', '0');
+await form.type('expiredPoints', '0');
+assert.deepStrictEqual(form.errors(), {});
+await form.type('banList', '5');
+await form.type('activePoints', '4');
+await form.type('expiredPoints', '1');
+assert.deepStrictEqual(form.errors(), {
+  points:
+    "With these points, an active ban on Partner Org 1's Ban List 5 plus an expired ban could give 5 points, which reaches this list's threshold of 3. Use fewer points, or raise the list's threshold to 6 or more first."
+});
+// When the list's other configs already put it outside the rules, the message says so and names
+// them. Here two copies of a 2/2 config for Ban List 2 give an expired ban 4 points.
+form = configForm(listOf({ id: 14, threshold: 6 }, [configOf(2, 2, 2), configOf(2, 2, 2)]));
+await form.type('banList', '3');
+await form.type('expiredPoints', '2');
+assert.deepStrictEqual(form.errors(), {
+  points:
+    "This list's settings are outside today's limits. One active ban plus one expired ban can already give 7 points (3 for an active ban, plus 4 for an expired ban on Partner Org 2's Ban List 2), which reaches the list's threshold of 6. Use points no higher than the list's defaults (3 for an active ban, 1 for an expired ban), or raise the list's threshold to 8 or more first."
+});
+await form.type('expiredPoints', '1');
+assert.deepStrictEqual(form.errors(), {});
+// The limits are those of the list's type.
+form = configForm(
+  listOf({ id: 15, type: 'battlemetrics', threshold: 6 }),
+  limitsWith({ EXPORT_BM_NEVER_ENOUGH: 'one-ban' })
+);
+await form.type('banList', '4');
+await form.type('expiredPoints', '3');
+assert.deepStrictEqual(form.errors(), {});
+await form.type('activePoints', '6');
+assert.deepStrictEqual(form.errors(), {
+  points:
+    "With these points, one active ban on Partner Org 1's Ban List 4 could give 6 points, which reaches this list's threshold of 6. Use fewer points, or raise the list's threshold to 7 or more first."
+});
+
+// Without limits for a list's type, as when /config.js gave none, the forms leave the checks to
+// the web server, and never fail.
+for (const odd of [undefined, null, {}, { remote: undefined }, { battlemetrics: limits.remote }]) {
+  assert.deepStrictEqual(
+    forms.listProblems({ ...listOf({}), threshold: 1 }, undefined, odd),
+    [],
+    String(odd)
+  );
+  assert.deepStrictEqual(forms.listProblems({ ...listOf({}), threshold: 1 }, listOf({}), odd), []);
+  assert.deepStrictEqual(
+    forms.configProblems(
+      { banList: 2, activePoints: 50, expiredPoints: 50 },
+      adding,
+      banLists,
+      odd
+    ),
+    []
+  );
+  assert.deepStrictEqual(forms.outsideLimits(older, odd), []);
+}
+for (const type of ['constructor', '__proto__', 'toString', undefined])
+  assert.deepStrictEqual(
+    forms.listProblems({ ...listOf({}), threshold: 1, type }, undefined, limits),
+    []
+  );
+
+console.log(
+  'Export list form checks passed: the list and config forms show the web server problems as values are typed, older lists, and the edit form note.'
+);
