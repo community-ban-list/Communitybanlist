@@ -432,6 +432,35 @@ const rateLimit = (wait) =>
     rateLimit(`${COUNTS_PERIOD / SECOND} seconds`)
   ]);
   assert.strictEqual(counts.waiting.length, 0);
+
+  // A user who has started all the counts they can for now is refused as soon as their change
+  // arrives, rather than when its turn would come: here while another user's count runs. The
+  // refused change takes no place among those waiting, and the user is told when to try again
+  // even when every place is taken.
+  const another = check('someone', 'remote', listOf(), lower);
+  await settle();
+  const refusedAtOnce = [];
+  check('eager', 'remote', listOf(), lower).then((result) => refusedAtOnce.push(result));
+  await settle();
+  assert.deepStrictEqual(refusedAtOnce, [rateLimit(`${COUNTS_PERIOD / SECOND} seconds`)]);
+  const waiting = Array.from({ length: COUNTS_WAITING }, (_, i) =>
+    check(`waiting ${i}`, 'remote', listOf(), lower)
+  );
+  await settle();
+  assert.strictEqual(await check('busy', 'remote', listOf(), lower), BUSY);
+  assert.strictEqual(
+    await check('eager', 'remote', listOf(), lower),
+    rateLimit(`${COUNTS_PERIOD / SECOND} seconds`)
+  );
+  for (let i = 0; i <= COUNTS_WAITING; i++) {
+    counts.finish(100);
+    await settle();
+  }
+  assert.deepStrictEqual(
+    await Promise.all([another, ...waiting]),
+    Array(COUNTS_WAITING + 1).fill('allowed')
+  );
+  assert.strictEqual(counts.waiting.length, 0);
 }
 
 // One count runs at a time, server-wide, and COUNTS_WAITING can wait for it. A change that would
