@@ -25,13 +25,13 @@ import refusal from './refusal.js';
 // a list within the rules can only pass its limit by the players who get a second ban.
 export const POPULATION_KEPT = 10 * 60 * 1000;
 
-// How many counts of the players a list would hold each user can start in a period, in
+// How many counts of the players a list would hold each user can start in a period, given in
 // milliseconds. Creating a list and then adding its configs can take a few.
 export const COUNTS_PER_USER = 3;
 export const COUNTS_PERIOD = 30 * 1000;
 
-// How many counts can wait for the one running, server-wide. A change that needs a count beyond
-// that is refused rather than kept waiting.
+// How many counts can wait while one runs, server-wide. A change that needs a count beyond that is
+// refused rather than kept waiting.
 export const COUNTS_WAITING = 5;
 
 // How long MySQL may take over each count, in milliseconds.
@@ -72,9 +72,10 @@ const overLimit = new Set();
 // in memory, so the limit starts afresh when the web server restarts.
 const recentCounts = new Map();
 
-// The last count to run or wait for its turn, which the next one waits for, and how many wait.
+// The last count to run or wait for its turn, which the next one waits for, and how many counts
+// have not finished: the one running and those waiting.
 let lastCount = Promise.resolve();
-let waiting = 0;
+let unfinished = 0;
 
 // Check a change that could make an export ban list bigger against its type's limit on players, and
 // refuse it if it would put the list over the limit. check describes the change:
@@ -97,8 +98,8 @@ export default async function checkSize(context, check, now = Date.now) {
 
   if (neverEnough !== 'none' && change.withinRules) {
     const players = await playersWithTwoBans(now);
-    // When they have not been counted yet, as the count failed, the change is allowed, as within
-    // the rules the list is still no bigger than these players. The failure was logged.
+    // With no count of them yet, as it failed, which was logged, the change is allowed: within the
+    // rules, the list is still no bigger than these players.
     if (players === undefined || players <= maxPlayers) return;
   }
 
@@ -115,11 +116,12 @@ export default async function checkSize(context, check, now = Date.now) {
 // list exists, the players it would hold as it is, so a change that leaves it no bigger is
 // allowed. Together they take one of the user's counts and one turn.
 async function countPlayers(user, { type, exportBanList, before, after }, now) {
-  // A user who has started all the counts they can for now, or a change that would wait too long,
-  // is refused before it waits for a turn, and neither takes one of the user's counts.
+  // A user who has started all the counts they can for now is refused before the change waits for
+  // a turn, and so is any change while one count runs and COUNTS_WAITING wait. Neither takes one
+  // of the user's counts.
   const wait = waitForCount(user, now());
   if (wait > 0) throw tooManyCounts(wait);
-  if (waiting >= COUNTS_WAITING) throw refusal(BUSY);
+  if (unfinished > COUNTS_WAITING) throw refusal(BUSY);
 
   try {
     return await oneAtATime(async () => {
@@ -166,15 +168,12 @@ function waitForCount(user, time) {
 // Run a count once those before it have finished, whether or not they worked, so only one runs at
 // a time, server-wide.
 function oneAtATime(count) {
-  waiting += 1;
-  const result = lastCount.then(() => {
-    waiting -= 1;
-    return count();
-  });
-  lastCount = result.then(
-    () => {},
-    () => {}
-  );
+  unfinished += 1;
+  const result = lastCount.then(count);
+  const finished = () => {
+    unfinished -= 1;
+  };
+  lastCount = result.then(finished, finished);
   return result;
 }
 
@@ -212,8 +211,9 @@ function playersWithTwoBans(now) {
 }
 
 // Log when the players with two or more bans go over a type's limit, from when changes to that
-// type's lists are counted one by one, and when they are back within it. A type with no limit, or
-// with its rules turned off, has its lists' changes counted either way.
+// type's lists are counted one by one, and when they are back within it. These players decide
+// nothing for a type with no limit, whose lists are never counted, or with its rules turned off,
+// whose lists always are, so those types are left out.
 function logLimitsPassed(players) {
   for (const [type, { maxPlayers, neverEnough }] of Object.entries(EXPORT_LIST_LIMITS)) {
     if (!maxPlayers || neverEnough === 'none') continue;
