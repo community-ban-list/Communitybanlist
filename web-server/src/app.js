@@ -15,7 +15,7 @@ import { passport, routes as routesAuth } from './auth/index.js';
 import GraphQL from './graphql-api/index.js';
 import ExportBanLists from './export-ban-lists.js';
 
-import { DISCORD_INVITE, INTAKE_FORM } from 'scbl-lib/config';
+import { DISCORD_INVITE, EXPORT_LIST_LIMIT_PROBLEMS, INTAKE_FORM } from 'scbl-lib/config';
 import { sequelize } from 'scbl-lib/db';
 import { DATABASE_UNAVAILABLE_MESSAGE, isDatabaseUnavailable } from 'scbl-lib/db/sequelize';
 
@@ -87,6 +87,8 @@ if (!INTAKE_FORM)
   console.warn(
     'Warning: INTAKE_FORM is not set, so the partner organisation form link on the site does nothing.'
   );
+// Limits on export ban lists set to values that cannot be used, which have their defaults instead.
+for (const problem of EXPORT_LIST_LIMIT_PROBLEMS) console.warn(`Warning: ${problem}`);
 
 // The client is built before the server runs, so it loads the links that can be set with
 // environment variables from here. Only add settings that are safe to make public.
