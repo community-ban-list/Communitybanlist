@@ -500,7 +500,10 @@ const rateLimit = (wait) =>
 
   // The count of the players with two or more bans takes its turn too, but is never refused. Here
   // BattleMetrics lists have their rules turned off, so their changes are counted, and fill the
-  // turns while a change to a remote list waits for that count.
+  // turns while a change to a remote list waits for that count. Those players are over the
+  // BattleMetrics limit and within the remote one. The log leaves the BattleMetrics limit out, as
+  // BattleMetrics lists are counted one by one however many there are, and the remote list is not
+  // counted.
   const mixed = await sizeChecks({ EXPORT_BM_NEVER_ENOUGH: 'none' });
   const full = Array.from({ length: COUNTS_WAITING + 1 }, (_, i) =>
     mixed.check(`user ${i}`, 'battlemetrics', ...growing)
@@ -513,11 +516,13 @@ const rateLimit = (wait) =>
     await settle();
   }
   assert.deepStrictEqual(mixed.counts.calls.at(-1), twoBans);
-  mixed.counts.finish(13289);
+  mixed.counts.finish(21034);
   assert.deepStrictEqual(
     await Promise.all([...full, remote]),
     Array(COUNTS_WAITING + 2).fill('allowed')
   );
+  assert.strictEqual(mixed.counts.calls.length, COUNTS_WAITING + 2);
+  assert.deepStrictEqual(mixed.logged, []);
 }
 
 // Lists of a type with no limit, or changes that can only make a list smaller, are not counted.
@@ -530,6 +535,14 @@ const rateLimit = (wait) =>
     'allowed'
   );
   assert.strictEqual(counts.calls.length, 0);
+
+  // Nor does the log compare the players with two or more bans with a type that has no limit.
+  const noRemoteLimit = await sizeChecks({ EXPORT_REMOTE_MAX_PLAYERS: '0' });
+  noRemoteLimit.counts.answer = inTurn(45120, 9000);
+  assert.strictEqual(await noRemoteLimit.check('a', 'battlemetrics', null, listOf()), 'allowed');
+  assert.deepStrictEqual(noRemoteLimit.logged, [
+    POPULATION('45,120', 'BattleMetrics', '20,000', true)
+  ]);
 }
 
 // Part 2: changes through mutation/index.js to the real resolvers.
