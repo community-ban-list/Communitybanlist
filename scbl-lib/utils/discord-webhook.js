@@ -47,9 +47,12 @@ function getRetryAfter(data, headers) {
 // A webhook's address on version 10 of Discord's API, without a trailing slash and keeping its
 // thread_id query. The addresses Discord gives out have no version, and Discord documents those as
 // answered by its old default version, where retry_after and Retry-After may be in milliseconds.
-// Version 10 gives them in seconds.
+// Version 10 gives them in seconds. Discord's old domain, discordapp.com, and its test clients'
+// hosts on it, refuse version 10 ("Invalid API version", code 50041), so webhooks saved with those
+// addresses are sent to the same webhook on discord.com.
 function webhookAddress(webhook) {
   const url = new URL(webhook);
+  url.hostname = url.hostname.replace(/(^|\.)discordapp\.com$/, '$1discord.com');
   url.pathname = url.pathname.replace(/^\/api(?:\/v\d+)?\//, '/api/v10/').replace(/\/$/, '');
   return url;
 }

@@ -140,18 +140,38 @@ assert.strictEqual(
   'https://discord.com/api/v10/webhooks/1/token?thread_id=42&wait=true'
 );
 
-// An address with another version is sent to version 10 too, on the host it names.
+// An address with another version is sent to version 10 too. One on Discord's old domain,
+// discordapp.com, which refuses version 10, is sent to the same webhook on discord.com, keeping a
+// test client's host and the thread.
 for (const [address, expected] of [
-  ['https://discord.com/api/v9/webhooks/1/token', 'https://discord.com/api/v10/webhooks/1/token'],
-  ['https://discord.com/api/v10/webhooks/1/token', 'https://discord.com/api/v10/webhooks/1/token'],
+  [
+    'https://discord.com/api/v9/webhooks/1/token',
+    'https://discord.com/api/v10/webhooks/1/token?wait=true'
+  ],
+  [
+    'https://discord.com/api/v10/webhooks/1/token',
+    'https://discord.com/api/v10/webhooks/1/token?wait=true'
+  ],
+  [
+    'https://discordapp.com/api/webhooks/1/token',
+    'https://discord.com/api/v10/webhooks/1/token?wait=true'
+  ],
+  [
+    'https://ptb.discordapp.com/api/webhooks/1/token',
+    'https://ptb.discord.com/api/v10/webhooks/1/token?wait=true'
+  ],
   [
     'https://canary.discordapp.com/api/v6/webhooks/1/token/',
-    'https://canary.discordapp.com/api/v10/webhooks/1/token'
+    'https://canary.discord.com/api/v10/webhooks/1/token?wait=true'
+  ],
+  [
+    'https://discordapp.com/api/webhooks/1/token?thread_id=42',
+    'https://discord.com/api/v10/webhooks/1/token?thread_id=42&wait=true'
   ]
 ]) {
   requests.length = 0;
   await send(address);
-  assert.strictEqual(requests[0].url, `${expected}?wait=true`);
+  assert.strictEqual(requests[0].url, expected);
 }
 
 // A caller that does not wait for the answer, such as the logger posting a run's status, can give
@@ -251,6 +271,9 @@ assert.strictEqual(
 );
 await edit('https://discord.com/api/v9/webhooks/1/token', '123', { content: 'x' });
 assert.strictEqual(requests[2].url, 'https://discord.com/api/v10/webhooks/1/token/messages/123');
+// A message posted through a webhook saved on discordapp.com is edited on discord.com.
+await edit('https://discordapp.com/api/webhooks/1/token', '123', { content: 'x' });
+assert.strictEqual(requests[3].url, 'https://discord.com/api/v10/webhooks/1/token/messages/123');
 
 // Edits fail like sends, with Discord's error and how long to wait.
 reply = () => ({ status: 429, data: { message: 'Slow down', retry_after: 0.25 } });
