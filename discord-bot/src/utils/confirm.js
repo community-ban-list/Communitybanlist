@@ -2,11 +2,13 @@ import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } from 'dis
 
 const CONFIRM_TIMEOUT = 60 * 1000;
 
-// Ask the user to confirm a destructive change. Resolves to whether they confirmed it in time.
-export default async function confirm(interaction, content, confirmLabel) {
+// Ask the user to confirm a destructive change. extra can add embeds and files to the question,
+// e.g. what the change would remove. Resolves to whether they confirmed it in time.
+export default async function confirm(interaction, content, confirmLabel, extra = {}) {
   const message = await interaction.editReply({
-    content,
     embeds: [],
+    ...extra,
+    content,
     components: [
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
