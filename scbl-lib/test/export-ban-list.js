@@ -28,14 +28,17 @@ const dependencies = {
   sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
   '../sequelize.js': { default: {} },
   '../../apis/index.js': { battlemetrics },
-  // Deleting lists is checked in delete-export-ban-list.js.
+  // Deleting lists is checked in delete-export-ban-list.js, and checking stored lists against the
+  // limits in check-stored-export-ban-lists.js.
   '../../apis/delete-battlemetrics-ban-list.js': {
     checkOwnership: async () => true,
+    findVisibleBanLists: async () => new Set(),
     removeInvitesAndSubscribers: async () => {},
     removeOwner: async () => {}
   },
+  '../../export-list-limits.js': { checkRules: () => [], DEFAULT_SETTINGS: {} },
   '../../utils/index.js': { Logger: { verbose() {} } },
-  '../../config.js': { BATTLEMETRICS_ORGANIZATION: '42' }
+  '../../config.js': { BATTLEMETRICS_ORGANIZATION: '42', EXPORT_LIST_LIMITS: {} }
 };
 const context = vm.createContext({});
 const module = new vm.SourceTextModule(
