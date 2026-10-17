@@ -9,11 +9,11 @@ import * as yup from 'yup';
 import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
 import Validators from '../../scbl-lib/validators.js';
 
-// Checks the export ban list forms' checks against the limits on export ban lists. The forms show
-// the problems the web server gives for a change, from the same scbl-lib/export-list-limits.js,
-// under the fields they are about as the owner types. The client's module is loaded with the real
-// limits and form packages, and each form runs in react-hook-form's form control with the options
-// useForm gets, without a page.
+// Checks the export ban list forms' checks against the limits on export ban lists, and the FAQ's
+// answer about the limits. The forms show the problems the web server gives for a change, from the
+// same scbl-lib/export-list-limits.js, under the fields they are about as the owner types. The
+// client's modules are loaded with the real limits and form packages, and each form runs in
+// react-hook-form's form control with the options useForm gets, without a page.
 
 // Load one of the client's modules, with its package imports from these.
 const packages = {
@@ -37,8 +37,11 @@ async function loadClient(path) {
 }
 
 const forms = await loadClient('../../client/src/utils/export-list-forms.js');
+const { default: exportListLimitsAnswer } = await loadClient(
+  '../../client/src/views/pages/faq-export-list-limits.js'
+);
 
-const { readLimits } = exportListLimits;
+const { DEFAULT_LIMITS, readLimits } = exportListLimits;
 const limitsWith = (env) => readLimits(env).limits;
 const limits = limitsWith({});
 
@@ -524,6 +527,86 @@ for (const type of ['constructor', '__proto__', 'toString', undefined])
     []
   );
 
+// The FAQ's answer, with the default limits.
+assert.strictEqual(
+  exportListLimitsAnswer(DEFAULT_LIMITS),
+  'So that one active ban and one expired ban are never enough to put a player on an export ban list, its threshold must be higher than the most points they can give together, whichever ban lists they are on, and at least 4. ' +
+    'With the default points of 3 for an active ban and 1 for an expired ban, that is a threshold of 5 or more. ' +
+    'A remote export ban list can have at most 40,000 players, and a BattleMetrics export ban list at most 20,000, as each player on a BattleMetrics export ban list is added to BattleMetrics separately. ' +
+    'Points can be whole numbers from 0 to 100, thresholds from 1 to 1,000, and max ban ages from 0 to 3,650 days, where 0 counts bans of any age. ' +
+    'Export ban lists saved before these limits keep working as they are, and you can always rename them or make them smaller, for example by raising the threshold. Changes that could make one bigger must bring the whole list within the limits.'
+);
+const OLDER_LISTS =
+  'Export ban lists saved before these limits keep working as they are, and you can always rename them or make them smaller, for example by raising the threshold. Changes that could make one bigger must bring the whole list within the limits.';
+const answerWith = (env) => exportListLimitsAnswer(limitsWith(env));
+// It follows the limits set: here one ban must not be enough for either type, with a higher
+// minimum, and lists of each type can be as big as each other.
+assert.strictEqual(
+  answerWith({
+    EXPORT_BM_NEVER_ENOUGH: 'one-ban',
+    EXPORT_REMOTE_NEVER_ENOUGH: 'one-ban',
+    EXPORT_BM_MIN_THRESHOLD: '12',
+    EXPORT_REMOTE_MIN_THRESHOLD: '12',
+    EXPORT_BM_MAX_PLAYERS: '30000',
+    EXPORT_REMOTE_MAX_PLAYERS: '30000'
+  }).split('. Points can')[0],
+  'So that one ban is never enough to put a player on an export ban list, its threshold must be higher than the most points one ban can give, whichever ban list it is on, and at least 12. With the default points of 3 for an active ban and 1 for an expired ban, that is a threshold of 12 or more. An export ban list can have at most 30,000 players'
+);
+// Each type is described on its own when their rules differ.
+assert.strictEqual(
+  answerWith({
+    EXPORT_BM_MIN_THRESHOLD: '6',
+    EXPORT_REMOTE_NEVER_ENOUGH: 'none',
+    EXPORT_REMOTE_MIN_THRESHOLD: '1',
+    EXPORT_BM_MAX_PLAYERS: '0'
+  }),
+  'So that one active ban and one expired ban are never enough to put a player on a BattleMetrics export ban list, its threshold must be higher than the most points they can give together, whichever ban lists they are on, and at least 6. ' +
+    'With the default points of 3 for an active ban and 1 for an expired ban, that is a threshold of 6 or more. ' +
+    'A remote export ban list can have at most 40,000 players. ' +
+    'Points can be whole numbers from 0 to 100, thresholds from 1 to 1,000, and max ban ages from 0 to 3,650 days, where 0 counts bans of any age. ' +
+    OLDER_LISTS
+);
+assert.match(
+  answerWith({ EXPORT_REMOTE_NEVER_ENOUGH: 'none', EXPORT_REMOTE_MAX_PLAYERS: '0' }),
+  /^So that one active ban and one expired ban are never enough to put a player on a BattleMetrics export ban list, .*, and at least 4\. With the default points .* that is a threshold of 5 or more\. A remote export ban list's threshold must be at least 4\. A BattleMetrics export ban list can have at most 20,000 players, as each player on a BattleMetrics export ban list is added to BattleMetrics separately\. Points can/
+);
+assert.match(
+  answerWith({ EXPORT_BM_MAX_PLAYERS: '50000' }),
+  / A remote export ban list can have at most 40,000 players, and a BattleMetrics export ban list at most 50,000\. Points can/
+);
+// With no rules and no caps, it says what is left.
+const unlimited = {
+  EXPORT_BM_NEVER_ENOUGH: 'none',
+  EXPORT_REMOTE_NEVER_ENOUGH: 'none',
+  EXPORT_BM_MIN_THRESHOLD: '1',
+  EXPORT_REMOTE_MIN_THRESHOLD: '1',
+  EXPORT_BM_MAX_PLAYERS: '0',
+  EXPORT_REMOTE_MAX_PLAYERS: '0'
+};
+assert.strictEqual(
+  answerWith(unlimited),
+  'Points can be whole numbers from 0 to 100, thresholds from 1 to 1,000, and max ban ages from 0 to 3,650 days, where 0 counts bans of any age. ' +
+    OLDER_LISTS
+);
+// The lowest threshold it gives is the one the forms allow for the default points.
+for (const env of [
+  {},
+  { EXPORT_BM_NEVER_ENOUGH: 'one-ban', EXPORT_REMOTE_NEVER_ENOUGH: 'one-ban' },
+  { EXPORT_BM_MIN_THRESHOLD: '7', EXPORT_REMOTE_MIN_THRESHOLD: '7' }
+]) {
+  const lowest = Number(answerWith(env).match(/that is a threshold of (\d+) or more/)[1]);
+  const at = (threshold) =>
+    forms.listProblems(
+      { ...exportListLimits.DEFAULT_SETTINGS, threshold, type: 'remote' },
+      undefined,
+      limitsWith(env)
+    );
+  assert.deepStrictEqual([at(lowest).length, at(lowest - 1).length], [0, 1], JSON.stringify(env));
+}
+// It never fails, whatever /config.js gave.
+for (const odd of [undefined, null, {}, { remote: null }, { battlemetrics: 'x' }, { remote: {} }])
+  assert.match(exportListLimitsAnswer(odd), /Points can be whole numbers/);
+
 console.log(
-  'Export list form checks passed: the list and config forms show the web server problems as values are typed, older lists, and the edit form note.'
+  'Export list form checks passed: the list and config forms show the web server problems as values are typed, older lists, the edit form note, and the FAQ answer.'
 );
