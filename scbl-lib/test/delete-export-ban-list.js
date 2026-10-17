@@ -355,6 +355,29 @@ assert.strictEqual(await find(8).deleteExportBanList(), 'gone');
 assert.deepStrictEqual(calls, [ownership('list-8'), lookUp('list-8'), cleared, ['destroy']]);
 assert.ok(!rows.has(8));
 
+// When such a list cannot be saved without its ban list, it is kept as it was, and deleting it
+// again finds the ban list gone again and finishes, with the list looked up again and with the
+// same list.
+for (const sameList of [false, true]) {
+  reset();
+  addList(12);
+  const saveError = new Error('Lock wait timeout exceeded; try restarting transaction');
+  saveFailures.push(saveError);
+  list = find(12);
+  await assert.rejects(list.deleteExportBanList(), (error) => error === saveError);
+  assert.strictEqual(saveError.stage, 'battlemetrics');
+  assert.deepStrictEqual(calls, [ownership('list-12'), lookUp('list-12'), cleared]);
+  const kept = { battlemetricsID: 'list-12', battlemetricsInvite: inviteURL('code-12') };
+  assert.deepStrictEqual(stored(12), kept);
+  const { battlemetricsID, battlemetricsInvite } = list;
+  assert.deepStrictEqual({ battlemetricsID, battlemetricsInvite }, kept);
+
+  reset();
+  assert.strictEqual(await (sameList ? list : find(12)).deleteExportBanList(), 'gone');
+  assert.deepStrictEqual(calls, [ownership('list-12'), lookUp('list-12'), cleared, ['destroy']]);
+  assert.ok(!rows.has(12));
+}
+
 // A ban list that BattleMetrics still has, but without the configured organisation on it, is not
 // deleted, nor is the list, as the configured organisation may be wrong.
 reset();
@@ -362,7 +385,7 @@ addList(9);
 addBanList('list-9', { owner: '56746' });
 await assert.rejects(find(9).deleteExportBanList(), {
   message:
-    /^BattleMetrics deletion failed while checking ownership: The BattleMetrics list still exists, but the configured CBL organization does not own it/,
+    /^BattleMetrics deletion failed while checking ownership: The BattleMetrics list still exists, but the configured CBL organization does not own it, so the configured organization may be wrong\. The local list was retained;/,
   stage: 'battlemetrics'
 });
 assert.deepStrictEqual(calls, [ownership('list-9'), lookUp('list-9')]);

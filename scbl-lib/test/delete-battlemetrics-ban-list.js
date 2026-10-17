@@ -153,11 +153,12 @@ for (const unknown of [
 }
 
 // A ban list that BattleMetrics still has is kept, as the configured organisation may be wrong.
+// The error ends its reason with one full stop.
 reset();
 goneAt = [`get ${base}/organizations/42`];
 await assert.rejects(
   remove('test-list'),
-  /^Error: BattleMetrics deletion failed while checking ownership: The BattleMetrics list still exists, but the configured CBL organization does not own it, so the configured organization may be wrong\./
+  /^Error: BattleMetrics deletion failed while checking ownership: The BattleMetrics list still exists, but the configured CBL organization does not own it, so the configured organization may be wrong\. The local list was retained;/
 );
 assert.deepStrictEqual(calls, [ownership, lookUp]);
 
@@ -185,6 +186,8 @@ for (const [answer, message] of [
   await assert.rejects(remove('test-list'), (error) => {
     assert.match(error.message, /^BattleMetrics deletion failed while checking ownership: /);
     assert.match(error.message, message);
+    // A reason that ends in a full stop, such as "Unknown ban list.", is not given a second one.
+    assert.match(error.message, /[^.]\. The local list was retained;/);
     return true;
   });
   assert.deepStrictEqual(calls, [ownership, lookUp]);
@@ -216,11 +219,17 @@ await assert.rejects(
 );
 reset();
 wrongOwner = true;
-await assert.rejects(remove('test-list'), /does not own/);
+await assert.rejects(
+  remove('test-list'),
+  /: The configured CBL organization does not own this BattleMetrics list\. The local list was retained;/
+);
 assert.strictEqual(calls.length, 1);
 reset();
 invalidSubscription = true;
-await assert.rejects(remove('test-list'), /Invalid BattleMetrics subscription/);
+await assert.rejects(
+  remove('test-list'),
+  /while listing subscribers: Invalid BattleMetrics subscription response\. The local list was retained;/
+);
 assert.ok(calls.every(([method]) => method === 'get'));
 reset();
 loop = true;

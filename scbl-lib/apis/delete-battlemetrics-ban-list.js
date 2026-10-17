@@ -16,8 +16,9 @@ const relationships = (id) => `ban-lists/${encodeURIComponent(id)}/relationships
 
 // Remove an invite or subscription. BattleMetrics answers 404 when it is already gone, e.g. when a
 // removal it carried out answered too late, was cut off and was made again, which is what the
-// deletion wants. Without this, a late answer to the owner's removal would leave a list that can
-// never be deleted, as the ownership check fails once the owner has left.
+// deletion wants. Without this, a late answer to the owner's removal would fail a deletion that
+// BattleMetrics carried out, and only a later attempt, which finds that BattleMetrics no longer
+// knows the ban list, would delete the list.
 async function remove(endpoint) {
   try {
     await battlemetrics('delete', endpoint);
@@ -36,7 +37,8 @@ function isUnknownBanList(error) {
   );
 }
 
-// Say in an error which step failed and what BattleMetrics answered.
+// Say in an error which step failed and what BattleMetrics answered. A reason that ends in a full
+// stop loses it, as the message adds one.
 function failed(stage, error) {
   const errors = error.response && error.response.data && error.response.data.errors;
   const detail = Array.isArray(errors)
@@ -45,8 +47,9 @@ function failed(stage, error) {
         .filter(Boolean)
         .join('; ')
     : '';
+  const reason = String(detail || error.message).replace(/\.$/, '');
   error.message =
-    `BattleMetrics deletion failed while ${stage}: ${detail || error.message}. ` +
+    `BattleMetrics deletion failed while ${stage}: ${reason}. ` +
     'The local list was retained; any invites or subscriptions already removed remain removed.';
   return error;
 }
