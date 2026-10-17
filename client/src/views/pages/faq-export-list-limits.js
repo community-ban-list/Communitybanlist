@@ -72,8 +72,10 @@ function rules(types, limits) {
   });
 }
 
-// The most players a list of each type can have. Each player on a BattleMetrics list is added to
-// BattleMetrics separately, which is why those lists can be kept smaller.
+// The most players a list of each type can be given. They limit new lists and changes that make a
+// list bigger, but a list is never cut down to them, so lists saved before them, or that grow as
+// new bans are added, can have more. Each player on a BattleMetrics list is added to BattleMetrics
+// separately, which is why those lists can be kept smaller.
 function caps(limits) {
   const cap = (type) => (limits[type]?.maxPlayers > 0 ? limits[type].maxPlayers : 0);
   const battlemetrics = cap('battlemetrics');
@@ -81,18 +83,22 @@ function caps(limits) {
   const why =
     'as each player on a BattleMetrics export ban list is added to BattleMetrics separately';
 
+  let refused;
   if (battlemetrics && remote) {
-    if (battlemetrics === remote)
-      return [`An export ban list can have at most ${number(remote)} players.`];
-    const both = `A remote export ban list can have at most ${number(remote)} players, and a BattleMetrics export ban list at most ${number(battlemetrics)}`;
-    return [battlemetrics < remote ? `${both}, ${why}.` : `${both}.`];
-  }
-  if (battlemetrics)
-    return [
-      `A BattleMetrics export ban list can have at most ${number(battlemetrics)} players, ${why}.`
-    ];
-  if (remote) return [`A remote export ban list can have at most ${number(remote)} players.`];
-  return [];
+    const most =
+      battlemetrics === remote
+        ? `${number(remote)} players`
+        : `${number(remote)} players, or ${number(battlemetrics)} for a BattleMetrics export ban list`;
+    refused = `A new export ban list, or a change that makes a list bigger, is refused if the list would then have more than ${most}${battlemetrics < remote ? `, ${why}` : ''}.`;
+  } else if (battlemetrics)
+    refused = `A new BattleMetrics export ban list, or a change that makes one bigger, is refused if the list would then have more than ${number(battlemetrics)} players, ${why}.`;
+  else if (remote)
+    refused = `A new remote export ban list, or a change that makes one bigger, is refused if the list would then have more than ${number(remote)} players.`;
+  else return [];
+  return [
+    refused,
+    'Lists are never cut down to fit, so a list can still grow past its limit as new bans are added.'
+  ];
 }
 
 export default function exportListLimitsAnswer(limits) {

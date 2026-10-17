@@ -639,12 +639,16 @@ for (const type of ['constructor', '__proto__', 'toString', undefined])
     []
   );
 
-// The FAQ's answer, with the default limits.
+// The FAQ's answer, with the default limits. The most players a list can have limit new lists and
+// changes that make a list bigger, as lists are never cut down to them.
+const NEVER_CUT =
+  'Lists are never cut down to fit, so a list can still grow past its limit as new bans are added.';
 assert.strictEqual(
   exportListLimitsAnswer(DEFAULT_LIMITS),
   'So that one active ban and one expired ban are never enough to put a player on an export ban list, its threshold must be higher than the most points they can give together, whichever ban lists they are on, and at least 4. ' +
     'With the default points of 3 for an active ban and 1 for an expired ban, that is a threshold of 5 or more. ' +
-    'A remote export ban list can have at most 40,000 players, and a BattleMetrics export ban list at most 20,000, as each player on a BattleMetrics export ban list is added to BattleMetrics separately. ' +
+    'A new export ban list, or a change that makes a list bigger, is refused if the list would then have more than 40,000 players, or 20,000 for a BattleMetrics export ban list, as each player on a BattleMetrics export ban list is added to BattleMetrics separately. ' +
+    `${NEVER_CUT} ` +
     'Points can be whole numbers from 0 to 100, thresholds from 1 to 1,000, and max ban ages from 0 to 3,650 days, where 0 counts bans of any age. ' +
     'Export ban lists saved before these limits keep working as they are, and you can always rename them or make them smaller, for example by raising the threshold. Changes that could make one bigger must bring the whole list within the limits.'
 );
@@ -661,8 +665,9 @@ assert.strictEqual(
     EXPORT_REMOTE_MIN_THRESHOLD: '12',
     EXPORT_BM_MAX_PLAYERS: '30000',
     EXPORT_REMOTE_MAX_PLAYERS: '30000'
-  }).split('. Points can')[0],
-  'So that one ban is never enough to put a player on an export ban list, its threshold must be higher than the most points one ban can give, whichever ban list it is on, and at least 12. With the default points of 3 for an active ban and 1 for an expired ban, that is a threshold of 12 or more. An export ban list can have at most 30,000 players'
+  }).split(' Points can')[0],
+  'So that one ban is never enough to put a player on an export ban list, its threshold must be higher than the most points one ban can give, whichever ban list it is on, and at least 12. With the default points of 3 for an active ban and 1 for an expired ban, that is a threshold of 12 or more. ' +
+    `A new export ban list, or a change that makes a list bigger, is refused if the list would then have more than 30,000 players. ${NEVER_CUT}`
 );
 // Each type is described on its own when their rules differ.
 assert.strictEqual(
@@ -674,17 +679,18 @@ assert.strictEqual(
   }),
   'So that one active ban and one expired ban are never enough to put a player on a BattleMetrics export ban list, its threshold must be higher than the most points they can give together, whichever ban lists they are on, and at least 6. ' +
     'With the default points of 3 for an active ban and 1 for an expired ban, that is a threshold of 6 or more. ' +
-    'A remote export ban list can have at most 40,000 players. ' +
+    'A new remote export ban list, or a change that makes one bigger, is refused if the list would then have more than 40,000 players. ' +
+    `${NEVER_CUT} ` +
     'Points can be whole numbers from 0 to 100, thresholds from 1 to 1,000, and max ban ages from 0 to 3,650 days, where 0 counts bans of any age. ' +
     OLDER_LISTS
 );
 assert.match(
   answerWith({ EXPORT_REMOTE_NEVER_ENOUGH: 'none', EXPORT_REMOTE_MAX_PLAYERS: '0' }),
-  /^So that one active ban and one expired ban are never enough to put a player on a BattleMetrics export ban list, .*, and at least 4\. With the default points .* that is a threshold of 5 or more\. A remote export ban list's threshold must be at least 4\. A BattleMetrics export ban list can have at most 20,000 players, as each player on a BattleMetrics export ban list is added to BattleMetrics separately\. Points can/
+  /^So that one active ban and one expired ban are never enough to put a player on a BattleMetrics export ban list, .*, and at least 4\. With the default points .* that is a threshold of 5 or more\. A remote export ban list's threshold must be at least 4\. A new BattleMetrics export ban list, or a change that makes one bigger, is refused if the list would then have more than 20,000 players, as each player on a BattleMetrics export ban list is added to BattleMetrics separately\. Lists are never cut down to fit, .*\. Points can/
 );
 assert.match(
   answerWith({ EXPORT_BM_MAX_PLAYERS: '50000' }),
-  / A remote export ban list can have at most 40,000 players, and a BattleMetrics export ban list at most 50,000\. Points can/
+  / A new export ban list, or a change that makes a list bigger, is refused if the list would then have more than 40,000 players, or 50,000 for a BattleMetrics export ban list\. Lists are never cut down to fit, .*\. Points can/
 );
 // With no rules and no caps, it says what is left.
 const unlimited = {
