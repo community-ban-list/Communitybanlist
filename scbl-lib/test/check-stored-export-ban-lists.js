@@ -275,8 +275,8 @@ assert.strictEqual(
 );
 
 // One query of each: the lists with their owners' Steam IDs and names, the lists' configs with the
-// ban lists and organisations that name them, and the lists' players: their export bans being
-// added or added, which /export/:id serves.
+// ban lists and organisations that name them, and the lists' players: their export bans waiting to
+// be added or already added, which /export/:id serves.
 const allIDs = lists.map((row) => row.id);
 assert.deepStrictEqual(queries, [
   [

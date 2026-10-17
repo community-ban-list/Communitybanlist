@@ -244,7 +244,7 @@ async function remove(interaction) {
 }
 
 // Whether CBL's BattleMetrics API key can see the ban lists of the lists to remove. Deleting a list
-// takes a ban list that BattleMetrics does not know to be gone, so with a key from an account
+// treats a ban list BattleMetrics does not know as already gone, so with a key from an account
 // outside CBL's organisation, every list would be deleted while its ban list stayed on
 // BattleMetrics. So the key must see at least one of the ban lists CBL's export ban lists record,
 // and a list whose own ban list it cannot see is left. Gives null when no list to remove has a ban

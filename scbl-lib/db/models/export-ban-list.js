@@ -18,8 +18,8 @@ const { DataTypes } = Sequelize;
 // The settings that decide who is on a list, with its configs.
 const SETTINGS = Object.keys(DEFAULT_SETTINGS);
 
-// The export bans of the players on a list: those being added and those added. /export/:id serves
-// these, and a BattleMetrics list holds them once the importer has added them.
+// The export bans of the players on a list: those waiting to be added and those already added.
+// /export/:id serves these, and a BattleMetrics list holds them once the importer has added them.
 const PLAYER_STATUSES = ['TO_BE_CREATED', 'CREATED'];
 
 // How the messages name each type of list, as export-list-limits.js names them.
@@ -77,8 +77,9 @@ class ExportBanList extends Sequelize.Model {
   // under its type's points rules, as checkRules gives them for the whole list, and one when it has
   // more players than its type's cap. Its configs are loaded as the website loads them to check a
   // change, with their ban lists' and organisations' names for the messages. players counts its
-  // export bans being added or added, which /export/:id serves. A list of a type the limits do not
-  // cover is not checked, and has no problems.
+  // export bans waiting to be added or already added (TO_BE_CREATED or CREATED), which
+  // /export/:id serves. A list of a type the limits do not cover is not checked, and has no
+  // problems.
   static async checkLimits({ ids, limits = EXPORT_LIST_LIMITS } = {}) {
     if (ids !== undefined && ids.length === 0) return { limits, lists: [] };
     const { BanList, ExportBan, ExportBanListConfig, Organisation, SteamUser } = sequelize.models;
@@ -132,8 +133,8 @@ class ExportBanList extends Sequelize.Model {
     };
   }
 
-  // The IDs of every BattleMetrics ban list CBL's API key can see. Deleting a list takes a ban
-  // list that BattleMetrics does not know to be gone, so anything that deletes many lists at once
+  // The IDs of every BattleMetrics ban list CBL's API key can see. Deleting a list treats a ban
+  // list BattleMetrics does not know as already gone, so anything that deletes many lists at once
   // can check first that the key sees CBL's ban lists. See findVisibleBanLists.
   static findVisibleBattlemetricsBanLists() {
     return findVisibleBanLists();

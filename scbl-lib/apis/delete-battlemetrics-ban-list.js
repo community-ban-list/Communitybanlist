@@ -143,9 +143,9 @@ export async function removeOwner(id) {
 }
 
 // The IDs of every ban list the API key can see, from BattleMetrics' list of ban lists, read in
-// full: CBL's own and those it subscribes to. checkOwnership takes a ban list BattleMetrics does
-// not know to be gone, and an API key from an account outside CBL's organisation would get that
-// answer for every one of CBL's ban lists. So before deleting many lists at once, e.g. with the
+// full: CBL's own and those it subscribes to. checkOwnership treats a ban list BattleMetrics does
+// not know as already gone, and an API key from an account outside CBL's organisation would get
+// that answer for every one of CBL's ban lists. So before deleting many lists at once, e.g. with the
 // Discord bot, this shows whether the key can see CBL's ban lists, and which.
 export async function findVisibleBanLists() {
   const banLists = await readBattlemetricsPages('ban-lists');
