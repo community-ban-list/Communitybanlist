@@ -88,11 +88,14 @@ const listOf = (values, configs = []) => ({
 });
 
 // A form as useForm runs it, with these options and its fields registered as the form registers
-// them. typing sets a field's value as an input does, and waits for the checks that starts.
+// them. typing sets a field's value as an input does, and waits for the checks that starts. errors
+// gives the messages the form shows, by the names it shows them under: each field's own, and for
+// the config form, the points rules' problems under 'points'.
 const LIST_FORM_FIELDS = Object.keys(Validators.ExportBanList);
 const CONFIG_FORM_FIELDS = ['banList', 'activePoints', 'expiredPoints'];
+const CONFIG_FORM_ERRORS = [...CONFIG_FORM_FIELDS, 'points'];
 const settled = () => new Promise((resolve) => setImmediate(resolve));
-function formOf(options, names, fieldOptions) {
+function formOf(options, names, fieldOptions, shown = names) {
   const form = createFormControl(options);
   const fields = Object.fromEntries(
     names.map((name) => [name, form.register(name, fieldOptions[name])])
@@ -105,7 +108,10 @@ function formOf(options, names, fieldOptions) {
     },
     errors() {
       return Object.fromEntries(
-        Object.entries(form.control._formState.errors).map(([name, { message }]) => [name, message])
+        shown.flatMap((name) => {
+          const message = form.getFieldState(name).error?.message;
+          return message === undefined ? [] : [[name, message]];
+        })
       );
     },
     // The values the form would submit, or none if its checks stop it.
@@ -116,7 +122,9 @@ function formOf(options, names, fieldOptions) {
       })();
       return submitted;
     },
-    // useForm takes its options again each time the form renders.
+    // The form rendered again with new options. useForm gives the form control its options this
+    // way each time the form renders, which is how the config form gets the list's configs once
+    // they have changed.
     render(options) {
       form.control._options = options;
     }
@@ -124,12 +132,15 @@ function formOf(options, names, fieldOptions) {
 }
 const listForm = (exportBanList, withLimits = limits) =>
   formOf(forms.listFormOptions(exportBanList, withLimits), LIST_FORM_FIELDS, forms.LIST_FIELDS);
-const configForm = (exportBanList, withLimits = limits) =>
+const configFormWith = (exportBanList, choices, withLimits = limits) =>
   formOf(
-    forms.configFormOptions(exportBanList, banLists, withLimits),
+    forms.configFormOptions(exportBanList, choices, withLimits),
     CONFIG_FORM_FIELDS,
-    forms.CONFIG_FIELDS
+    forms.CONFIG_FIELDS,
+    CONFIG_FORM_ERRORS
   );
+const configForm = (exportBanList, withLimits = limits) =>
+  configFormWith(exportBanList, banLists, withLimits);
 
 // A list's configs are taken as the web server takes them: in the order of their IDs, with their
 // ban lists' and organisations' names, and nothing else of the list.
@@ -313,6 +324,24 @@ for (const within of [listOf({}), listOf({ threshold: 5 }), { ...withConfig, thr
 assert.deepStrictEqual(forms.outsideLimits(undefined, limits), []);
 // The list with a 6/3 config at threshold 9 above was outside the rules too.
 assert.strictEqual(forms.outsideLimits(withConfig, limits).length, 1);
+// The note follows the limits for the list's own type. With a higher minimum threshold for one
+// type, a list with 3/1 at threshold 10 is outside the limits as that type, and within them as the
+// other.
+for (const [type, variable] of [
+  ['battlemetrics', 'EXPORT_BM_MIN_THRESHOLD'],
+  ['remote', 'EXPORT_REMOTE_MIN_THRESHOLD']
+]) {
+  const typeLimits = limitsWith({ [variable]: '12' });
+  const other = type === 'remote' ? 'battlemetrics' : 'remote';
+  assert.deepStrictEqual(
+    forms.outsideLimits(listOf({ type, threshold: 10 }), typeLimits).map(({ message }) => message),
+    [MESSAGES.minimum(type, 12)]
+  );
+  assert.deepStrictEqual(
+    forms.outsideLimits(listOf({ type: other, threshold: 10 }), typeLimits),
+    []
+  );
+}
 // It can be saved as it is, renamed and given another server or webhook, with no problems from
 // the limits.
 form = listForm(older);
@@ -460,11 +489,7 @@ for (const [list, choices] of [
   [undefined, banLists],
   [adding, undefined]
 ]) {
-  form = formOf(
-    forms.configFormOptions(list, choices, limits),
-    CONFIG_FORM_FIELDS,
-    forms.CONFIG_FIELDS
-  );
+  form = configFormWith(list, choices);
   await form.type('banList', '2');
   await form.type('activePoints', '50');
   assert.deepStrictEqual(form.errors(), {});
