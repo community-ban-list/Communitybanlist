@@ -6,6 +6,7 @@ import { CardBody } from 'reactstrap';
 
 import MutateExportBanList from './mutate-export-ban-list';
 
+// The list's configs are for the form, which checks changes to the list's settings with them.
 const GET_EXPORT_BAN_LIST = gql`
   query GetExportBanList($id: Int!) {
     loggedInSteamUser {
@@ -19,6 +20,22 @@ const GET_EXPORT_BAN_LIST = gql`
         defaultExpiredPoints
         maxBanAge
         discordWebhook
+
+        exportBanListConfigs {
+          id
+          activePoints
+          expiredPoints
+
+          banList {
+            id
+            name
+
+            organisation {
+              id
+              name
+            }
+          }
+        }
       }
     }
   }

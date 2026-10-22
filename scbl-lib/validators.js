@@ -35,7 +35,11 @@ export default {
       )
   },
   ExportBanListConfig: {
-    banList: yup.number().required('A ban list must be specified.'),
+    // The config form's "Select a ban list..." option is not a number, so it is no ban list.
+    banList: yup
+      .number()
+      .typeError('A ban list must be specified.')
+      .required('A ban list must be specified.'),
     activePoints: yup.number().required('A number of points per active ban is required.'),
     expiredPoints: yup.number().required('A number of points per expired ban is required.')
   }

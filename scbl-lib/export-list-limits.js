@@ -131,6 +131,27 @@ export function readLimits(env) {
   return { limits, problems };
 }
 
+// Read limits given as values rather than environment variables, as the web server gives the
+// client its limits through /config.js, by the same rules: each limit is read as its variable
+// would be, and one that is missing or cannot be used keeps its default. This never throws, as the
+// client reads them when it loads scbl-lib/config.js.
+export function readGivenLimits(given) {
+  const env = {};
+  for (const [type, variables] of Object.entries(VARIABLES)) {
+    for (const [limit, variable] of Object.entries(variables)) {
+      let value;
+      try {
+        value = given?.[type]?.[limit];
+      } catch {
+        value = undefined;
+      }
+      // A variable's value is text, so only numbers and text can be read as one.
+      if (typeof value === 'number' || typeof value === 'string') env[variable] = value;
+    }
+  }
+  return readLimits(env);
+}
+
 // The threshold a new list starts with: the model's default, or a minimum threshold above it, so
 // it is allowed whichever type the list is.
 export function defaultThreshold(limits) {

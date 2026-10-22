@@ -4,9 +4,11 @@ import md5 from 'md5';
 
 import { Card, CardBody, Container } from 'reactstrap';
 
-import { DISCORD_INVITE } from 'scbl-lib/config';
+import { DISCORD_INVITE, EXPORT_LIST_LIMITS } from 'scbl-lib/config';
 
 import Layout from '../layout/layout.jsx';
+
+import exportListLimitsAnswer from './faq-export-list-limits.js';
 
 const sections = [
   {
@@ -184,6 +186,11 @@ const sections = [
             lists each user can create to 4.
           </>
         )
+      },
+      {
+        question: 'What limits are there on export ban list settings and sizes?',
+        // Written from the limits the web server checks changes against.
+        answer: exportListLimitsAnswer(EXPORT_LIST_LIMITS)
       }
     ]
   }

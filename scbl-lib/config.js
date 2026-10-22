@@ -1,4 +1,4 @@
-import { readLimits } from './export-list-limits.js';
+import { readGivenLimits, readLimits } from './export-list-limits.js';
 
 // Web
 const HOST = process.env.HOST || 'http://localhost';
@@ -51,9 +51,19 @@ const INTAKE_FORM = CLIENT_CONFIG.INTAKE_FORM || process.env.INTAKE_FORM;
 // that cannot be used is replaced with the default and listed in EXPORT_LIST_LIMIT_PROBLEMS, which
 // the web server warns about when it starts. Reading them never throws, as every service and the
 // client load this file.
-const { limits: EXPORT_LIST_LIMITS, problems: EXPORT_LIST_LIMIT_PROBLEMS } = readLimits(
+//
+// In the browser, the limits come from the web server through /config.js, so the forms check
+// changes against the same limits as the web server. Each is read as its variable is, so a limit of
+// 0 players stays 0 (no limit), and one that /config.js left out or gave in a form that cannot be
+// used is the default. When /config.js gave no limits, as when it did not load, the client uses the
+// defaults, as the browser has no environment variables.
+const { limits: limitsFromEnvironment, problems: EXPORT_LIST_LIMIT_PROBLEMS } = readLimits(
   process.env
 );
+const EXPORT_LIST_LIMITS =
+  CLIENT_CONFIG.EXPORT_LIST_LIMITS == null
+    ? limitsFromEnvironment
+    : readGivenLimits(CLIENT_CONFIG.EXPORT_LIST_LIMITS).limits;
 
 export {
   HOST,

@@ -1,8 +1,7 @@
 import React from 'react';
-import * as yup from 'yup';
-import { yupResolver } from '@hookform/resolvers/yup';
 import { useForm } from 'react-hook-form';
 import {
+  Alert,
   Button,
   CardBody,
   Col,
@@ -15,48 +14,46 @@ import {
   Row
 } from 'reactstrap';
 
-import Validators from 'scbl-lib/validators';
+import { EXPORT_LIST_LIMITS } from 'scbl-lib/config';
+
+import {
+  LIST_FIELDS,
+  OUTSIDE_LIMITS_NOTE,
+  listFormOptions,
+  outsideLimits
+} from '../../utils/export-list-forms.js';
 
 import { ExportBanListConfigs } from '../';
 
-const schema = yup.object().shape(Validators.ExportBanList);
-
-// Use only the form's own fields as defaults, so the submitted data does not carry the rest of the
-// export ban list. Missing values start as empty strings, as an empty input would give.
-function formValues(exportBanList) {
-  return Object.fromEntries(
-    Object.keys(Validators.ExportBanList).map((field) => [field, exportBanList[field] ?? ''])
-  );
-}
-
 export default function (props) {
+  // The form checks its values against the limits on export ban lists as the owner types, as the
+  // web server will: a new list's every setting, or the changes to a saved list.
   const {
     register,
     handleSubmit,
     formState: { errors }
-  } = useForm({
-    resolver: yupResolver(schema),
-    defaultValues: props.exportBanList
-      ? formValues(props.exportBanList)
-      : {
-          type: 'remote',
-          threshold: 9,
-          defaultActivePoints: 3,
-          defaultExpiredPoints: 1,
-          maxBanAge: 0
-        }
-  });
+  } = useForm(listFormOptions(props.exportBanList, EXPORT_LIST_LIMITS));
 
   // reactstrap's Input takes the ref as innerRef.
   const registerInput = (name) => {
-    const { ref, ...rest } = register(name);
+    const { ref, ...rest } = register(name, LIST_FIELDS[name]);
     return { ...rest, innerRef: ref };
   };
+
+  // A saved list outside today's limits keeps working, but the owner should know that some changes
+  // cannot be undone, and why.
+  const outside = outsideLimits(props.exportBanList, EXPORT_LIST_LIMITS);
 
   return (
     <>
       <CardBody>
         <Form onSubmit={handleSubmit(props.onSubmit)}>
+          {outside.length > 0 && (
+            <Alert color="warning">
+              <p>{OUTSIDE_LIMITS_NOTE}</p>
+              <p className="mb-0">{outside[0].message}</p>
+            </Alert>
+          )}
           <Row>
             <Col xs="12">
               <FormGroup>

@@ -12,6 +12,7 @@ import { send } from '@koa/send';
 
 import bodyParser from './body-parser.js';
 import { passport, routes as routesAuth } from './auth/index.js';
+import clientConfig from './client-config.js';
 import GraphQL from './graphql-api/index.js';
 import ExportBanLists from './export-ban-lists.js';
 
@@ -90,12 +91,12 @@ if (!INTAKE_FORM)
 // Limits on export ban lists set to values that cannot be used, which have their defaults instead.
 for (const problem of EXPORT_LIST_LIMIT_PROBLEMS) console.warn(`Warning: ${problem}`);
 
-// The client is built before the server runs, so it loads the links that can be set with
-// environment variables from here. Only add settings that are safe to make public.
+// The client is built before the server runs, so it loads the settings that can be set with
+// environment variables from here (client-config.js).
 router.get('/config.js', (ctx) => {
   ctx.type = 'application/javascript';
   ctx.set('Cache-Control', 'no-cache');
-  ctx.body = `window.CBL_CONFIG = ${JSON.stringify({ DISCORD_INVITE, INTAKE_FORM })};\n`;
+  ctx.body = clientConfig;
 });
 
 if (inProduction) {
