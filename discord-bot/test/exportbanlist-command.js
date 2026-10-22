@@ -1467,8 +1467,8 @@ for (const [name, change, owner] of [
   assert.deepStrictEqual(audits, [], name);
 }
 
-// Let every step that waits for nothing else run: the stand-ins answer at once, so only an update
-// held back by the test is still waiting afterwards.
+// Let everything run that does not wait for an update the test holds back: the stand-ins answer at
+// once.
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const listsOf = (owner) =>
   [...rows.values()]
