@@ -759,7 +759,9 @@ async function transferIfUnchanged(exportBanList, newOwner) {
 //
 // Unlike a removal, a transfer is not refused while the ban importer runs: nothing the importer or
 // the exports do reads or writes a list's owner, so a run goes on the same whoever owns the list.
-// Like the website's own changes, the update may wait a few seconds for rows a run has locked.
+// Like the website's own changes, the update can wait for rows a run has locked, such as the new
+// owner's Steam user while the run recalculates every player's reputation, which can take most of
+// a minute after a big import. If MySQL gives up waiting, nothing is changed.
 async function transfer(interaction) {
   const id = interaction.options.getInteger('id', true);
   const owner = parseSteamID(interaction.options.getString('owner', true));
