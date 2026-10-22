@@ -50,13 +50,14 @@ async function loadIndex({ dryRun = false } = {}) {
     'scbl-lib/utils': { describeError, stackTrace },
     './src/core.js': {
       default: {
-        updateSteamUserInfo: step('updateSteamUserInfo'),
         clearOrphanedUsers: step('clearOrphanedUsers'),
         updateReputationPoints: step('updateReputationPoints'),
         updateReputationRank: step('updateReputationRank'),
         exportExportBans: step('exportExportBans')
       }
     },
+    './src/expiry.js': { expireBans: step('expireBans') },
+    './src/steam-profiles.js': { updateSteamUserInfo: step('updateSteamUserInfo') },
     './src/ban-importer.js': {
       default: class {
         constructor() {
@@ -118,13 +119,16 @@ async function loadIndex({ dryRun = false } = {}) {
 }
 
 // The run is given every step, in order, each named after what it runs, as the run record names
-// them. The import reports its counts for the record, and the Steam step, the export
-// recalculation and the export push count what they do in an object they are given, which the
-// record keeps, also when the step fails part-way. Each run of a step counts afresh.
+// them. Bans whose expiry has passed are marked expired after the import and before the steps that
+// recalculate players. The import reports its counts for the record, and the expiry step, the Steam
+// step, the export recalculation and the export push count what they do in an object they are
+// given, which the record keeps, also when the step fails part-way. Each run of a step counts
+// afresh.
 {
   const index = await loadIndex();
   const names = [
     'importBans',
+    'expireBans',
     'updateSteamUserInfo',
     'clearOrphanedUsers',
     'updateReputationPoints',
@@ -146,6 +150,7 @@ async function loadIndex({ dryRun = false } = {}) {
       .filter((step) => step.counts && step.name !== 'importBans')
       .map((step) => [step.name, step.counts()]),
     [
+      ['expireBans', undefined],
       ['updateSteamUserInfo', undefined],
       ['updateExportBans', undefined],
       ['exportExportBans', undefined]
@@ -155,13 +160,16 @@ async function loadIndex({ dryRun = false } = {}) {
   assert.deepStrictEqual(index.calls, names);
   assert.deepStrictEqual(counted(), [
     ['importBans', { lists: 2 }],
+    ['expireBans', { step: 'expireBans' }],
     ['updateSteamUserInfo', { step: 'updateSteamUserInfo' }],
     ['updateExportBans', { step: 'updateExportBans' }],
     ['exportExportBans', { step: 'exportExportBans' }]
   ]);
-  const first = steps[1].counts();
-  await steps[1].run();
-  assert.notStrictEqual(steps[1].counts(), first);
+  for (const step of [steps[1], steps[2]]) {
+    const first = step.counts();
+    await step.run();
+    assert.notStrictEqual(step.counts(), first);
+  }
 }
 
 // A dry run only imports, as every other step writes.

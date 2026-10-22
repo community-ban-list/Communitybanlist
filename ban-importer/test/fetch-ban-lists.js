@@ -49,9 +49,13 @@ const context = vm.createContext({
     setImmediate(callback);
   }
 });
-const source = await readFile(new URL('../src/ban-fetcher.js', import.meta.url), 'utf8');
-const module = new vm.SourceTextModule(source, { context });
+const load = async (path) =>
+  new vm.SourceTextModule(await readFile(new URL(path, import.meta.url), 'utf8'), { context });
+const module = await load('../src/ban-fetcher.js');
+// The fetcher finds SteamIDs with the real steam-id.js.
+const steamIDModule = await load('../src/steam-id.js');
 await module.link((specifier) => {
+  if (specifier === './steam-id.js') return steamIDModule;
   const exports = dependencies[specifier];
   assert.ok(exports, `Unexpected dependency: ${specifier}`);
   return new vm.SyntheticModule(

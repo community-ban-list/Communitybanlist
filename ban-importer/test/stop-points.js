@@ -40,7 +40,8 @@ async function load(path, dependencies, globals = {}) {
   const context = vm.createContext({
     console: { log() {} },
     process: { env: {} },
-    // Long timeouts, such as the Steam step's 50 seconds, must not keep the test running.
+    // Long timeouts, such as the wait before a ban list is tried again, must not keep the test
+    // running.
     setTimeout: (callback, ms) => {
       const timer = setTimeout(callback, ms);
       if (ms > 1000) timer.unref();
@@ -82,7 +83,11 @@ async function load(path, dependencies, globals = {}) {
     );
   });
   await module.evaluate();
-  return { exports: module.namespace.default, control: control.namespace };
+  return {
+    exports: module.namespace.default,
+    namespace: module.namespace,
+    control: control.namespace
+  };
 }
 
 const heldLock = { isHeld: async () => true };
@@ -733,10 +738,9 @@ async function loadBanFetcher({ battlemetrics, get }) {
   assert.deepStrictEqual(requests, ['https://bans.example/2.txt']);
 }
 
-// Load core.js with stand-ins for the models and the Steam client.
-async function loadCore(models, steam = () => {}) {
+// Load core.js with stand-ins for the models.
+async function loadCore(models) {
   return load('../src/core.js', {
-    'scbl-lib/apis': { steam },
     'scbl-lib/db': { sequelize: {} },
     'scbl-lib/db/models': { ExportBan: {}, ExportBanList: {}, SteamUser: {}, ...models },
     'scbl-lib/db/sequelize': { Op: { in: 'in', or: 'or', lt: 'lt' } },
@@ -861,25 +865,84 @@ for (const lock of [lostLock, null]) {
   ]);
 }
 
-// The Steam step stops between batches of 50 players.
+// The stand-ins for Sequelize and its errors that apply-list.js needs, with query() and
+// transaction() given.
+function database(query, transaction = async (work) => work({})) {
+  class DatabaseError extends Error {}
+  return {
+    'scbl-lib/db': { sequelize: { query, transaction } },
+    'scbl-lib/db/sequelize': {
+      ForeignKeyConstraintError: DatabaseError,
+      QueryTypes: { SELECT: 'SELECT' },
+      ValidationError: DatabaseError,
+      isDatabaseUnavailable: () => false
+    }
+  };
+}
+
+// The Steam step stops between calls of 100 players, once the profiles of the call under way are
+// saved.
 {
   const events = [];
-  const core = await loadCore(
-    {
-      SteamUser: {
-        findAll: async () => Array.from({ length: 120 }, (_, index) => ({ id: `${index}` })),
-        update: async ({ name }) => events.push(`update ${name}`)
-      }
+  const players = Array.from({ length: 250 }, (_, index) => ({ id: steamID(index + 1) }));
+  const profiles = await load('../src/steam-profiles.js', {
+    ...database(async (sql) => {
+      if (sql.startsWith('SELECT COUNT(*)')) return [{ due: 250, new: 250 }];
+      if (sql.startsWith('SELECT id FROM SteamUsers WHERE lastRefreshedInfo IS NULL'))
+        return players;
+      if (sql.startsWith('INSERT INTO SteamUsers')) events.push('save');
+      return [{ affectedRows: 0 }, { affectedRows: 0 }];
+    }),
+    crypto: { createHash },
+    'scbl-lib/apis': {
+      async steam(method, path, { steamids }) {
+        const ids = steamids.split(',');
+        events.push(`request ${ids.length}`);
+        profiles.control.requestStop('it received SIGTERM');
+        return { data: { response: { players: ids.map((steamid) => ({ steamid })) } } };
+      },
+      readBattlemetricsPages: async () => []
     },
-    async (method, path, { steamids }) => {
-      events.push(`request ${steamids.split(',').length}`);
-      core.control.requestStop('it received SIGTERM');
-      return { data: { response: { players: [{ steamid: '0', personaname: 'Player' }] } } };
-    }
-  );
-  const error = await ended(core.exports.updateSteamUserInfo(), 'the Steam step');
+    'scbl-lib/db/importer-models': {
+      ImporterState: { findByPk: async () => null, upsert: async () => {} }
+    },
+    'scbl-lib/utils': { describeError, Logger, normaliseBattlemetricsID }
+  });
+  const error = await ended(profiles.namespace.updateSteamUserInfo(), 'the Steam step');
   assert.strictEqual(error.name, 'RunStopped');
-  assert.deepStrictEqual(events, ['request 50', 'update Player']);
+  assert.deepStrictEqual(events, ['request 100', 'save']);
+}
+
+// The expiry step stops between transactions of 500 bans, each of which marks its bans and queues
+// their players.
+{
+  const events = [];
+  const bans = Array.from({ length: 700 }, (_, index) => ({
+    id: `1,${index}`,
+    steamUser: steamID(index + 1)
+  }));
+  const expiry = await load('../src/expiry.js', {
+    ...database(
+      async (sql, { replacements }) => {
+        if (sql.startsWith('SELECT')) return bans;
+        if (sql.startsWith('UPDATE Bans')) {
+          events.push(`mark ${replacements[1].length}`);
+          expiry.control.requestStop('it received SIGTERM');
+        } else events.push(`queue ${replacements[0].length}`);
+        return [{ affectedRows: 0 }, { affectedRows: 0 }];
+      },
+      async (work) => {
+        events.push('begin');
+        const value = await work({});
+        events.push('commit');
+        return value;
+      }
+    ),
+    'scbl-lib/utils': { describeError, Logger }
+  });
+  const error = await ended(expiry.namespace.expireBans(), 'the expiry step');
+  assert.strictEqual(error.name, 'RunStopped');
+  assert.deepStrictEqual(events, ['begin', 'mark 500', 'queue 500', 'commit']);
 }
 
 // Updating export bans stops between batches of players, after a batch's last statement. The first

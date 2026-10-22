@@ -1,4 +1,3 @@
-import { steam } from 'scbl-lib/apis';
 import { sequelize } from 'scbl-lib/db';
 import { ExportBan, ExportBanList, SteamUser } from 'scbl-lib/db/models';
 import { Op } from 'scbl-lib/db/sequelize';
@@ -13,12 +12,6 @@ import { HOST } from 'scbl-lib/config';
 
 import { checkRunLock, reportProgress, stopIfRequested } from './run-control.js';
 
-const UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000;
-const UPDATE_STEAM_USER_INFO_BATCH_SIZE = 50;
-const UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT = 50000;
-// The Steam step stops once this many batches in a row have failed, as Steam is then most likely
-// down and the rest would fail too. The users left stay due, so the next run updates them.
-const UPDATE_STEAM_USER_INFO_MAX_FAILED_BATCHES = 3;
 const DISCORD_ALERT_CAP = 50;
 // Once this many of a BattleMetrics export ban list's requests in a row have failed, its other
 // export bans wait for the next run, as BattleMetrics would most likely refuse them too.
@@ -36,147 +29,7 @@ const deletedWebhooks = new Set();
 // is only reported once.
 const invalidWebhookLists = new Set();
 
-async function withTimeout(promise) {
-  const myError = new Error(`timeout`);
-  const timeout = new Promise((resolve, reject) =>
-    setTimeout(() => reject(myError), UPDATE_STEAM_USER_INFO_BATCH_TIMEOUT)
-  );
-
-  return await Promise.race([promise, timeout]);
-}
-
-async function doSleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export default class Core {
-  // Update the Steam profiles that are due, counting in counts how many were due and how many were
-  // updated, also when the step stops part-way.
-  static async updateSteamUserInfo(counts = {}) {
-    Logger.verbose('Core', 2, 'Fetching Steam users to update...');
-    const profileStartTime = Date.now();
-    const users = await SteamUser.findAll({
-      attributes: ['id'],
-      where: {
-        [Op.or]: [
-          { lastRefreshedInfo: null },
-          {
-            lastRefreshedInfo: {
-              [Op.lt]: new Date(new Date() - UPDATE_STEAM_USER_INFO_REFRESH_INTERVAL)
-            }
-          }
-        ]
-      }
-    });
-
-    Logger.verbose('Core', 2, `Updating ${users.length} Steam users...`);
-    const startingLength = users.length;
-    Object.assign(counts, { due: startingLength, updated: 0 });
-
-    let failedBatches = 0;
-    while (users.length > 0) {
-      reportProgress(startingLength - users.length, startingLength, 'Steam users');
-      // A run that is asked to stop does so between batches.
-      stopIfRequested();
-      const batch = users.splice(0, Math.min(UPDATE_STEAM_USER_INFO_BATCH_SIZE, users.length));
-
-      let data = null;
-
-      Logger.verbose(
-        'Core',
-        2,
-        `Updating batch of ${batch.length} Steam users (${users.length} remaining)...`
-      );
-      try {
-        const myData = await steam('get', 'ISteamUser/GetPlayerSummaries/v2', {
-          steamids: batch.map((user) => user.id).join(',')
-        });
-        data = myData.data;
-      } catch (err) {
-        // Steam refused the key, so it would refuse every other batch too, and
-        // partner.steam-api.com limits the whole IP address after repeated refusals.
-        if (err.auth) {
-          Logger.verbose(
-            'Core',
-            1,
-            `Stopped updating Steam users, as Steam refused the API key: ${err.message}`
-          );
-          break;
-        }
-
-        // Steam is still limiting requests after the client's retries and minute-long pauses, so
-        // every other batch would wait out the same pauses. The users left stay due, so the next
-        // run updates them, and the later steps do not need fresh Steam data.
-        if (err.status === 429) {
-          Logger.verbose(
-            'Core',
-            1,
-            `Stopped updating Steam users, as Steam is still limiting requests: ${err.message}`
-          );
-          break;
-        }
-
-        failedBatches++;
-        if (failedBatches >= UPDATE_STEAM_USER_INFO_MAX_FAILED_BATCHES) {
-          Logger.verbose(
-            'Core',
-            1,
-            `Stopped updating Steam users, as ${failedBatches} batches in a row failed: ${err.message}`
-          );
-          break;
-        }
-
-        // The Steam client throws ApiErrors, which never hold the key, so the error is logged
-        // whole.
-        Logger.verbose(
-          'Core',
-          1,
-          `Failed to update batch of ${batch.length} Steam users due to Error: `,
-          err
-        );
-        await doSleep(5000);
-        continue;
-      }
-      failedBatches = 0;
-
-      Logger.verbose(
-        'Core',
-        2,
-        `Done fetching SteamUsers. Updating DB ${data.response.players
-          .map((user) => user.steamid)
-          .join(',')}`
-      );
-      for (const user of data.response.players) {
-        try {
-          await withTimeout(
-            SteamUser.update(
-              {
-                name: user.personaname,
-                profileURL: user.profileurl,
-                avatar: user.avatar,
-                avatarMedium: user.avatarmedium,
-                avatarFull: user.avatarfull,
-                lastRefreshedInfo: Date.now()
-              },
-              { where: { id: user.steamid } }
-            )
-          );
-          counts.updated++;
-        } catch (err) {
-          Logger.verbose('Core', 1, `Failed to update Steam user: `, err);
-          continue;
-        }
-      }
-    }
-    reportProgress(startingLength - users.length, startingLength, 'Steam users');
-
-    Logger.verbose(
-      'Core',
-      2,
-      `Finished updating Steam users. Took ${((Date.now() - profileStartTime) / 1000).toFixed(2)}s`
-    );
-  }
-
   static async clearOrphanedUsers() {
     Logger.verbose('Core', 2, 'Clearing reputation points of orphaned Steam users...');
     const profileStartTime = Date.now();

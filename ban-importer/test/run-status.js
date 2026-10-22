@@ -65,6 +65,7 @@ const UNIX = Math.floor(START / 1000);
 const SECOND = 1000;
 const STEPS = [
   'importBans',
+  'expireBans',
   'updateSteamUserInfo',
   'clearOrphanedUsers',
   'updateReputationPoints',
@@ -74,6 +75,7 @@ const STEPS = [
 ];
 const LABELS = [
   'Import',
+  'Expired bans',
   'Steam profiles',
   'Orphaned players',
   'Reputation points',
@@ -89,6 +91,7 @@ const PHASES = {
   connect: 0.01,
   migrate: 0.02,
   importBans: 499.93,
+  expireBans: 0.08,
   updateSteamUserInfo: 14.2,
   clearOrphanedUsers: 0.12,
   updateReputationPoints: 0.66,
@@ -96,7 +99,7 @@ const PHASES = {
   updateExportBans: 52.4,
   exportExportBans: 1.48
 };
-const DURATIONS = ['8m 20s', '14s', '0.1s', '0.7s', '5.3s', '52s', '1.5s'];
+const DURATIONS = ['8m 20s', '0.1s', '14s', '0.1s', '0.7s', '5.3s', '52s', '1.5s'];
 // What the steps count, and how far they get, in such a run.
 const COUNTS = {
   importBans: {
@@ -110,6 +113,7 @@ const COUNTS = {
     failedLists: 0,
     banLists: [{ id: 3, fetched: 7641 }]
   },
+  expireBans: { due: 12, expired: 12, players: 11 },
   updateSteamUserInfo: { due: 498, updated: 497 },
   updateExportBans: { players: 145155 },
   exportExportBans: { queued: 8, created: 5, deleted: 3, failed: 0 }
@@ -117,18 +121,21 @@ const COUNTS = {
 const DETAILS = {
   importBans:
     '> 20 ban lists: 87,026 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed',
+  expireBans: '> 12 bans marked expired, 11 players queued',
   updateSteamUserInfo: '> 497 of 498 updated',
   updateExportBans: '> 145,155 players',
   exportExportBans: '> 5 created, 3 deleted of 8 export bans'
 };
 const PROGRESS = {
   importBans: { done: 7, total: 20, unit: 'ban lists' },
+  expireBans: { done: 0, total: 12, unit: 'bans' },
   updateSteamUserInfo: { done: 250, total: 498, unit: 'Steam users' },
   updateExportBans: { done: 18250, total: 145155, unit: 'players' },
   exportExportBans: { done: 2, total: 8, unit: 'export bans' }
 };
 const BARS = {
   importBans: '> ``[███████             ]`` 7 / 20 ban lists',
+  expireBans: '> ``[                    ]`` 0 / 12 bans',
   updateSteamUserInfo: '> ``[██████████          ]`` 250 / 498 Steam users',
   updateExportBans: '> ``[██                  ]`` 18,250 / 145,155 players',
   exportExportBans: '> ``[█████               ]`` 2 / 8 export bans'
@@ -171,6 +178,8 @@ function running(current, { progress = true, migrations = [] } = {}) {
       '',
       '✅ **Import** · 8m 20s',
       DETAILS.importBans,
+      '✅ **Expired bans** · 0.1s',
+      DETAILS.expireBans,
       '✅ **Steam profiles** · 14s',
       DETAILS.updateSteamUserInfo,
       '✅ **Orphaned players** · 0.1s',
@@ -294,6 +303,8 @@ function ended(outcome, { phase = 'exportExportBans', completed = STEPS, reason,
       '',
       '✅ **Import** · 8m 20s',
       DETAILS.importBans,
+      '✅ **Expired bans** · 0.1s',
+      DETAILS.expireBans,
       '✅ **Steam profiles** · 14s',
       DETAILS.updateSteamUserInfo,
       '✅ **Orphaned players** · 0.1s',
@@ -314,7 +325,7 @@ function ended(outcome, { phase = 'exportExportBans', completed = STEPS, reason,
 // done, and the steps after it were not run.
 const recalculation = {
   phase: 'updateExportBans',
-  completed: STEPS.slice(0, 5),
+  completed: STEPS.slice(0, 6),
   counts: { ...COUNTS, updateExportBans: { players: 18250 }, exportExportBans: undefined }
 };
 for (const [outcome, title, color, mark, reason] of [
@@ -345,6 +356,8 @@ for (const [outcome, title, color, mark, reason] of [
     '',
     '✅ **Import** · 8m 20s',
     DETAILS.importBans,
+    '✅ **Expired bans** · 0.1s',
+    DETAILS.expireBans,
     '✅ **Steam profiles** · 14s',
     DETAILS.updateSteamUserInfo,
     '✅ **Orphaned players** · 0.1s',
@@ -363,12 +376,12 @@ for (const [outcome, title, color, mark, reason] of [
   const steam = render(
     ended('failed', {
       phase: 'updateSteamUserInfo',
-      completed: STEPS.slice(0, 1),
-      counts: { importBans: COUNTS.importBans },
+      completed: STEPS.slice(0, 2),
+      counts: { importBans: COUNTS.importBans, expireBans: COUNTS.expireBans },
       reason: 'Error: Steam is down'
     })
   );
-  assert.deepStrictEqual(lines(steam).slice(6, 9), [
+  assert.deepStrictEqual(lines(steam).slice(8, 11), [
     '❌ **Steam profiles** · 14s',
     '> got to 250 / 498 Steam users',
     '▫️ Orphaned players · not run'
@@ -410,14 +423,16 @@ for (const [outcome, title, color, mark, reason] of [
     '',
     '✅ **Import** · 8m 20s',
     DETAILS.importBans,
-    '▫️ Steam profiles · not run',
-    '▫️ Orphaned players · not run'
+    '▫️ Expired bans · not run',
+    '▫️ Steam profiles · not run'
   ]);
 }
 
 // The steps' counts are described in their own words: the import as in its summary line, also when
-// it stopped part-way, the Steam profiles updated, the players recalculated and the export bans
-// created and deleted. Other counts are listed as they are.
+// it stopped part-way, the bans marked expired and the players queued for them, the Steam profiles
+// updated, and those Steam did not have, that were skipped, not saved or left for later runs, the
+// players recalculated and the export bans created and deleted. Other counts are listed as they
+// are.
 for (const [name, counts, expected, progress] of [
   [
     'importBans',
@@ -430,8 +445,27 @@ for (const [name, counts, expected, progress] of [
     { ...COUNTS.importBans, dryRun: true },
     '20 ban lists: 87,026 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed, in a dry run that wrote nothing'
   ],
+  ['expireBans', { due: 0, expired: 0, players: 0 }, 'none had expired'],
+  ['expireBans', { due: 1, expired: 1, players: 1 }, '1 ban marked expired, 1 player queued'],
+  // A step that stopped part-way says of how many.
+  [
+    'expireBans',
+    { due: 1200, expired: 500, players: 480 },
+    '500 of 1,200 bans marked expired, 480 players queued'
+  ],
+  ['expireBans', { due: 3 }, null],
   ['updateSteamUserInfo', { due: 0, updated: 0 }, 'none were due'],
   ['updateSteamUserInfo', { due: 1, updated: 1 }, '1 of 1 updated'],
+  [
+    'updateSteamUserInfo',
+    { due: 5243, new: 12, updated: 493, missing: 3, skipped: 4, unsaved: 0, left: 4743, calls: 5 },
+    '493 of 5,243 updated, 3 not found on Steam, 4 skipped as not SteamIDs, 4,743 left for later runs'
+  ],
+  [
+    'updateSteamUserInfo',
+    { due: 300, updated: 0, missing: 0, skipped: 0, unsaved: 1, left: 299 },
+    '0 of 300 updated, 1 not saved, 299 left for later runs'
+  ],
   ['updateExportBans', { players: 1 }, '1 player'],
   [
     'exportExportBans',

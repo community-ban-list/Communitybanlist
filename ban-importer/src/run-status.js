@@ -30,6 +30,7 @@ const LABELS = {
   connect: 'Database connection',
   migrate: 'Migrations',
   importBans: 'Import',
+  expireBans: 'Expired bans',
   updateSteamUserInfo: 'Steam profiles',
   clearOrphanedUsers: 'Orphaned players',
   updateReputationPoints: 'Reputation points',
@@ -164,9 +165,28 @@ const DETAILS = {
     const dryRun = counts.dryRun === true ? ', in a dry run that wrote nothing' : '';
     return `${banLists}: ${plural(fetched, 'ban')} fetched, ${formatCount(counts.new)} new, ${formatCount(updated)} updated, ${formatCount(removed)} removed, ${formatCount(held)} held, ${plural(failedLists, 'list')} failed${dryRun}`;
   },
-  updateSteamUserInfo: ({ due, updated }) => {
+  // The bans marked expired, of those found, and the players queued for a recalculation.
+  expireBans: ({ due, expired, players }) => {
+    if (![due, expired, players].every(isCount)) return null;
+    if (due === 0) return 'none had expired';
+    const bans =
+      expired < due ? `${formatCount(expired)} of ${plural(due, 'ban')}` : plural(due, 'ban');
+    return `${bans} marked expired, ${plural(players, 'player')} queued`;
+  },
+  // Of the profiles due, how many were updated, and how many Steam did not have, were skipped as
+  // their IDs are not SteamIDs, could not be saved, or are left for later runs, when there were any.
+  updateSteamUserInfo: ({ due, updated, missing, skipped, unsaved, left }) => {
     if (!isCount(due) || !isCount(updated)) return null;
-    return due === 0 ? 'none were due' : `${formatCount(updated)} of ${formatCount(due)} updated`;
+    if (due === 0) return 'none were due';
+    const others = [
+      [missing, 'not found on Steam'],
+      [skipped, 'skipped as not SteamIDs'],
+      [unsaved, 'not saved'],
+      [left, 'left for later runs']
+    ]
+      .filter(([count]) => isCount(count) && count > 0)
+      .map(([count, what]) => `, ${formatCount(count)} ${what}`);
+    return `${formatCount(updated)} of ${formatCount(due)} updated${others.join('')}`;
   },
   // A recalculation that stopped part-way says of how many.
   updateExportBans: ({ players }, progress) => {
