@@ -90,8 +90,9 @@ export default class BanFetcher {
   // Fetch all of a ban list, or throw if any part of it cannot be fetched, so the bans that could
   // not be read never look removed. Returns the bans, the number of records the list gave
   // (including those without a SteamID), and BattleMetrics' count of the list's bans, or null. A
-  // run that is asked to stop throws RunStopped before the next request, as nothing of the list has
-  // been saved yet.
+  // BattleMetrics list that gives no bans but counts some throws an error marked bansHidden, with
+  // the count as metaTotal. A run that is asked to stop throws RunStopped before the next request,
+  // as nothing of the list has been saved yet.
   async fetchBanList(banList) {
     Logger.verbose('BanFetcher', 2, `Fetching ban list (ID: ${banList.id})...`);
     let list;
@@ -226,6 +227,17 @@ export default class BanFetcher {
       // The list's ban count, if BattleMetrics gives one, is returned with its bans.
       const total = data.meta && data.meta.total;
       if (page === 1 && Number.isInteger(total) && total >= 0) firstMetaTotal = total;
+
+      // BattleMetrics answers a list that CBL may see, but not its bans, with no bans that it still
+      // counts. Such a list has not emptied, so it fails as hidden bans rather than look empty.
+      if (page === 1 && data.data.length === 0 && firstMetaTotal > 0) {
+        const error = new Error(
+          `BattleMetrics counts ${firstMetaTotal.toLocaleString('en-US')} bans on the list but gave none of them, so CBL may no longer be allowed to see its bans.`
+        );
+        error.bansHidden = true;
+        error.metaTotal = firstMetaTotal;
+        throw error;
+      }
 
       // Loop over each ban in the page's data.
       rawCount += data.data.length;

@@ -351,6 +351,40 @@ assert.deepStrictEqual(ids(list.bans).slice(-2), ['3,v118', '3,v119']);
 assert.strictEqual(list.firstMetaTotal, 1);
 assert.strictEqual(battlemetricsRequests.length, 120);
 
+// A list whose first page has no bans, but whose count says it has some, is not an empty list:
+// BattleMetrics answers so for a list CBL may see but not its bans. Its fetch fails as hidden bans,
+// with the count. A list with no bans that counts none, or gives no count, is empty, and a later
+// page without bans is read past as before.
+reset();
+book({ first: { meta: { active: 4376, expired: 7392, total: 11768 }, data: [], links: {} } });
+await assert.rejects(fetcher.fetchBanList(banList), (err) => {
+  assert.strictEqual(
+    err.message,
+    'BattleMetrics counts 11,768 bans on the list but gave none of them, so CBL may no longer be allowed to see its bans.'
+  );
+  assert.strictEqual(err.bansHidden, true);
+  assert.strictEqual(err.metaTotal, 11768);
+  return true;
+});
+assert.strictEqual(battlemetricsRequests.length, 1);
+for (const meta of [{ total: 0 }, undefined, { total: 'many' }]) {
+  reset();
+  book({ first: { meta, data: [], links: { next: null } } });
+  list = await fetcher.fetchBanList(banList);
+  assert.deepStrictEqual(
+    [list.bans.length, list.rawCount, list.firstMetaTotal],
+    [0, 0, meta?.total === 0 ? 0 : null],
+    JSON.stringify(meta)
+  );
+}
+reset();
+book({
+  first: { meta: { total: 2 }, data: [ban('a', steam(1))], links: { next: link('two') } },
+  two: { data: [], links: { next: link('three') } },
+  three: { data: [ban('b', steam(2))], links: {} }
+});
+assert.deepStrictEqual(ids((await fetcher.fetchBanList(banList)).bans), ['3,a', '3,b']);
+
 // Links that never end stop at 2,000 pages, whatever the list's ban count.
 let pageNumber = 0;
 const endless = (meta) => () => ({
@@ -423,5 +457,5 @@ list = await fetcher.fetchBanList(remoteList);
 assert.deepStrictEqual(ids(list.bans), ['7,76561198000000001,null', '7,76561198000000003,null']);
 
 console.log(
-  'Ban list fetch checks passed: remote bodies, limits and retries, BattleMetrics paging, and SteamIDs.'
+  'Ban list fetch checks passed: remote bodies, limits and retries, BattleMetrics paging, SteamIDs and hidden bans.'
 );

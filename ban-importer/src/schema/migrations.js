@@ -12,6 +12,9 @@
 //   at once, so a migration cut short is run again in full by the next run, and each statement must
 //   be safe to run again.
 // - New tables use the character set and collation of the CBL's existing tables.
+// - Foreign keys only refer to INT keys, such as BanLists.id. A column that refers to a VARCHAR key,
+//   such as a Steam user's ID, is a plain column with the character set and collation of the
+//   column it refers to, and is compared in JavaScript, never joined on.
 // - A rollback to an older importer leaves the tables in place, and the older importer ignores
 //   them.
 //
@@ -44,6 +47,22 @@ async function tableOptions(query) {
   return `ENGINE=InnoDB DEFAULT CHARSET=${characterSet} COLLATE=${collationName}`;
 }
 
+// An integer column type as information_schema writes it, e.g. int or int unsigned.
+const INTEGER_TYPE = /^(tiny|small|medium|big)?int(\(\d+\))?( unsigned)?$/i;
+
+// The type of an existing table's INT key, which a foreign key to it must have too, as Sequelize
+// made it: int for the CBL's own tables.
+async function keyType(query, table) {
+  const [[{ columnType } = {}]] = await query(
+    `SELECT COLUMN_TYPE AS columnType FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'id'`,
+    [table]
+  );
+  if (!INTEGER_TYPE.test(columnType ?? ''))
+    throw new Error(`Could not read the type of ${table}.id, which a foreign key refers to.`);
+  return columnType;
+}
+
 export default [
   {
     // The table of applied migrations, and ImporterState, which holds the importer's own state,
@@ -64,6 +83,47 @@ export default [
           value JSON NOT NULL,
           updatedAt DATETIME(3) NOT NULL,
           PRIMARY KEY (name)
+        ) ${options}`
+      );
+    }
+  },
+  {
+    // BanListSyncs, which keeps each ban list's sync state between runs: the state of its import,
+    // how its latest attempts went and how many bans it has, with the columns later versions need
+    // to read only what changed on a list. A list's row is deleted with the list, as the bot
+    // deletes ban lists without knowing of this table, so banList has the type of BanLists.id,
+    // which its foreign key needs. The state is a VARCHAR rather than an ENUM, so a new state needs
+    // no change to the table.
+    id: '002-ban-list-syncs',
+    async up(query) {
+      const options = await tableOptions(query);
+      const banListType = await keyType(query, 'BanLists');
+      await query(
+        `CREATE TABLE IF NOT EXISTS BanListSyncs (
+          banList ${banListType} NOT NULL,
+          sourceKey CHAR(64) NULL,
+          state VARCHAR(16) NOT NULL DEFAULT 'ok',
+          lastAttemptAt DATETIME(3) NULL,
+          lastSuccessAt DATETIME(3) NULL,
+          lastHeadPollAt DATETIME(3) NULL,
+          lastFullScanAt DATETIME(3) NULL,
+          nextFullScanAt DATETIME(3) NULL,
+          scanReason VARCHAR(32) NULL,
+          consecutiveFailures INT UNSIGNED NOT NULL DEFAULT 0,
+          incompleteScans INT UNSIGNED NOT NULL DEFAULT 0,
+          lastError VARCHAR(500) NULL,
+          storedCount INT UNSIGNED NULL,
+          headTotal INT UNSIGNED NULL,
+          headUids TEXT NULL,
+          replacePending TINYINT(1) NOT NULL DEFAULT 0,
+          allowFullRemovalUntil DATETIME(3) NULL,
+          remoteEtag VARCHAR(255) NULL,
+          remoteLastModified VARCHAR(64) NULL,
+          remoteBodyHash CHAR(64) NULL,
+          updatedAt DATETIME(3) NOT NULL,
+          PRIMARY KEY (banList),
+          CONSTRAINT BanListSyncs_banList FOREIGN KEY (banList) REFERENCES BanLists (id)
+            ON DELETE CASCADE
         ) ${options}`
       );
     }

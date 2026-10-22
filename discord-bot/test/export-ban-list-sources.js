@@ -4,9 +4,12 @@ import vm from 'vm';
 
 import * as discord from 'discord.js';
 
+import isSameBattlemetricsID from '../../scbl-lib/utils/battlemetrics-id.js';
+
 // Run the bot's commands without Discord, the database or BattleMetrics. Package imports are
 // replaced by the stand-ins below, and relative imports load the real files, once each, as Node
 // would. The modules run in this test's own context, so their errors and objects compare directly.
+// The IDs are compared with scbl-lib's real comparison, which the ban importer shares.
 const loaded = new Map();
 function moduleAt(url) {
   if (!loaded.has(url))
@@ -149,7 +152,10 @@ const stubs = {
     }
   },
   'scbl-lib/db/sequelize': { Op },
-  'scbl-lib/utils': { Logger: { verbose: (...args) => audits.push(args.slice(2).join('')) } }
+  'scbl-lib/utils': {
+    isSameBattlemetricsID,
+    Logger: { verbose: (...args) => audits.push(args.slice(2).join('')) }
+  }
 };
 
 const { default: commands } = await load('../src/commands/index.js');

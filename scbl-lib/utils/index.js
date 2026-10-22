@@ -1,3 +1,4 @@
+import isSameBattlemetricsID, { normaliseBattlemetricsID } from './battlemetrics-id.js';
 import calculateRiskRating from './calculate-risk-rating.js';
 import classifyBanReason from './classify-ban-reason.js';
 import createDiscordWebhookMessage from './create-discord-webhook-message.js';
@@ -20,7 +21,9 @@ export {
   editDiscordWebhookMessage,
   getDiscordWebhookMessage,
   isDiscordWebhookUrl,
+  isSameBattlemetricsID,
   Logger,
+  normaliseBattlemetricsID,
   sendDiscordWebhook,
   stackTrace,
   testDiscordWebhook

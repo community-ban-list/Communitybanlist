@@ -1,5 +1,6 @@
 import { BanList, ExportBanList, Organisation } from 'scbl-lib/db/models';
 import { Op } from 'scbl-lib/db/sequelize';
+import { isSameBattlemetricsID } from 'scbl-lib/utils';
 
 import { checkBanListSource } from './ban-list-source.js';
 import { formatBanListName } from './format.js';
@@ -27,14 +28,9 @@ export function skipCheckOption(option) {
     .setDescription('Save without test fetching the ban list first.');
 }
 
-// BattleMetrics ban list IDs are UUIDs, so compare them ignoring case, hyphens and spaces.
-function isSameBattlemetricsID(a, b) {
-  const normalise = (id) => id.replace(/[\s-]/g, '').toLowerCase();
-  return normalise(a) !== '' && normalise(a) === normalise(b);
-}
-
 // CBL's own BattleMetrics export ban lists can be read like a partner's ban list, but importing one
 // would feed the players CBL exports back in as new bans, which keeps them on the export ban lists.
+// The IDs are compared ignoring case, hyphens and spaces, as the ban importer compares them.
 async function checkNotExportBanList(source) {
   const exportBanLists = await ExportBanList.findAll({
     attributes: ['id', 'battlemetricsID'],

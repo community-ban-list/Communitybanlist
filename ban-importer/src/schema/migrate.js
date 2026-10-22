@@ -5,9 +5,13 @@ import { describeError } from 'scbl-lib/utils';
 import MIGRATIONS from './migrations.js';
 
 // A schema change waits at most this many seconds for a table that another connection is using,
-// e.g. in a long transaction, and then fails, rather than holding up every other query on that
-// table while it waits.
-const LOCK_WAIT_TIMEOUT = 10;
+// e.g. in a long transaction, and then fails. While it waits, every other query on that table
+// waits behind it, such as the website's and the bot's on BanLists while a foreign key to it is
+// made, so the wait is kept short. The next run tries the migration again.
+const LOCK_WAIT_TIMEOUT = 3;
+
+// The error a schema change fails with when that wait runs out: MySQL's ER_LOCK_WAIT_TIMEOUT.
+const LOCK_WAIT_TIMEOUT_ERROR = 1205;
 
 // A statement that takes longer than this has stopped working, so the run fails rather than wait
 // for it any longer.
@@ -43,6 +47,14 @@ async function close(connection) {
   } catch {
     connection.destroy();
   }
+}
+
+// Why a migration failed, for the run's failure: the error, and for a lock wait timeout, what kept
+// the migration waiting and how to find it.
+function migrationFailure(err) {
+  const reason = describeError(err);
+  if (err?.errno !== LOCK_WAIT_TIMEOUT_ERROR) return reason;
+  return `${reason}. Another connection has a transaction open on a table the migration needs, e.g. one left open in phpMyAdmin, which SELECT * FROM information_schema.innodb_trx shows. The next run tries the migration again.`;
 }
 
 // The ids of the migrations the database has, which is none before the first migration has made
@@ -121,7 +133,7 @@ export default async function migrate({
           [id]
         );
       } catch (err) {
-        throw new MigrationError(`Importer migration ${id} failed: ${describeError(err)}`, id);
+        throw new MigrationError(`Importer migration ${id} failed: ${migrationFailure(err)}`, id);
       }
       applied.push(id);
       onApplied(id);
