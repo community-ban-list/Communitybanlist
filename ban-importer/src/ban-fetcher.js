@@ -35,6 +35,11 @@ const BATTLEMETRICS_EXTRA_PAGES = 50;
 // first page, plus however much that count changed by its last page.
 const COUNT_TOLERANCE = 2;
 
+// A read may also find more bans than BattleMetrics counts, by this many, or this share of the
+// count if that is more (see checkCount).
+const OVER_READ_BANS = 5;
+const OVER_READ_SHARE = 0.005;
+
 // Bans added or removed while a list is read change BattleMetrics' count of them on later pages,
 // but by little: counts on the pages of one read that differ by more than this many, or this share
 // of the first page's count if that is more, are taken to be wrong, so the read cannot be checked.
@@ -110,6 +115,11 @@ function sha256(text) {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
+// A count BattleMetrics gave, or null when it gave none, or something else.
+function countOf(value) {
+  return Number.isInteger(value) && value >= 0 ? value : null;
+}
+
 // A response header to keep, if it fits its column and is plain text, or null.
 function keptHeader(response, name, maxLength) {
   const value = response?.headers?.[name];
@@ -121,9 +131,21 @@ function keptHeader(response, name, maxLength) {
 export default class BanFetcher {
   // countCheck turns on the check that a read of all of a BattleMetrics list read every ban
   // BattleMetrics counts on it, for every list but those whose IDs, as text, countCheckSkip has.
-  constructor({ countCheck = true, countCheckSkip = new Set() } = {}) {
+  // newestFirst asks BattleMetrics for each list's newest bans first, which head polls need: a
+  // read's first page is then the list's newest page. Without it, lists are read in BattleMetrics'
+  // own order, as before head polls. The BattleMetrics requests the fetcher makes are counted in
+  // requests, by what they were for: a list's newest page (head), the pages a head poll follows
+  // after it (follow), and the other pages of a read of all of a list (full).
+  constructor({
+    countCheck = true,
+    countCheckSkip = new Set(),
+    newestFirst = true,
+    requests = { head: 0, follow: 0, full: 0 }
+  } = {}) {
     this.countCheck = countCheck;
     this.countCheckSkip = countCheckSkip;
+    this.newestFirst = newestFirst;
+    this.requests = requests;
   }
 
   // Fetch all of a ban list, or throw if any part of it cannot be fetched, so the bans that could
@@ -139,11 +161,16 @@ export default class BanFetcher {
   // - for a remote list, remote: its ETag and Last-Modified, if it has them, and the SHA-256 of
   //   the file, and unchanged: whether the file is the one the list was last imported from, by
   //   those of previous, the ones the list was last imported with, if given. A list whose file is
-  //   unchanged is not read again, so it has no bans here.
-  // A BattleMetrics list that gives no bans but counts some throws an error marked bansHidden, with
-  // the count as metaTotal, whether the count check is on or not. A run that is asked to stop
-  // throws RunStopped before the next request, as nothing of the list has been saved yet.
-  async fetchBanList(banList, { previous = null } = {}) {
+  //   unchanged is not read again, so it has no bans here;
+  // - for a BattleMetrics list, head: when it was read newest first, the IDs of all the bans on its
+  //   first page, its newest, with or without a SteamID (uids), and BattleMetrics' count on it
+  //   (total), which later head polls compare their pages with, and otherwise null.
+  // A BattleMetrics list whose read a head poll began (read, see fetchBattlemetricsHead) is read on
+  // from where the poll stopped, so the pages it read are not read again. A BattleMetrics list that
+  // gives no bans but counts some throws an error marked bansHidden, with the count as metaTotal,
+  // whether the count check is on or not. A run that is asked to stop throws RunStopped before the
+  // next request, as nothing of the list has been saved yet.
+  async fetchBanList(banList, { previous = null, read = null } = {}) {
     Logger.verbose('BanFetcher', 2, `Fetching ban list (ID: ${banList.id})...`);
     let list;
     switch (banList.type) {
@@ -151,7 +178,7 @@ export default class BanFetcher {
         list = await this.fetchRemoteBanList(banList, previous);
         break;
       case 'battlemetrics':
-        list = await this.fetchBattlemetricsBanList(banList);
+        list = await this.fetchBattlemetricsBanList(banList, read);
         break;
       default:
         throw new Error('Unsupported ban list type.');
@@ -297,9 +324,16 @@ export default class BanFetcher {
   // read (scanned) and BattleMetrics' counts of the list's bans: on its first page (first), its
   // last (last), and the lowest and highest on any page. With the count check off (countCheck), a
   // read that reached the list's last page is complete. With it on, the counts must differ by no
-  // more than COUNT_DRIFT_BANS, or COUNT_DRIFT_SHARE of the first, and the number read must be
-  // within COUNT_TOLERANCE of the first count, plus however much the count changed by the last
-  // page. A list without a count cannot be checked.
+  // more than COUNT_DRIFT_BANS, or COUNT_DRIFT_SHARE of the first, and then:
+  // - a read that found fewer bans than the first count may be short by no more than
+  //   COUNT_TOLERANCE, plus however much the count changed by the last page, as bans added or
+  //   removed while the list is read explain no more. Being short by more means pages may have been
+  //   skipped, and their bans would look removed;
+  // - a read that found more bans than the first count may also be over by OVER_READ_BANS, or
+  //   OVER_READ_SHARE of the count if that is more. Bans read are there, so a read that found more
+  //   cannot be hiding any that are missing. BattleMetrics' count of one list is 3 below the bans
+  //   it gives on every read, which would otherwise fail every read of it.
+  // A list without a count cannot be checked.
   checkCount(scanned, { first, last, lowest, highest }, countCheck = this.countCheck) {
     if (!countCheck) return { complete: true };
     if (first === null)
@@ -317,137 +351,203 @@ export default class BanFetcher {
       };
     }
     const tolerance = Math.abs(last - first) + COUNT_TOLERANCE;
-    if (Math.abs(scanned - first) <= tolerance) return { complete: true };
+    const allowed =
+      scanned > first
+        ? tolerance + Math.max(OVER_READ_BANS, Math.ceil(first * OVER_READ_SHARE))
+        : tolerance;
+    if (Math.abs(scanned - first) <= allowed) return { complete: true };
     return {
       complete: false,
       incomplete: `BattleMetrics counts ${format(first)} bans on the list, but ${format(scanned)} were read`
     };
   }
 
-  async fetchBattlemetricsBanList(banList) {
-    // Setup the initial parameters for the first fetch.
-    let params = { 'filter[banList]': banList.source, 'page[size]': BATTLEMETRICS_PAGE_SIZE };
-    const visited = new Set([pageAddress(params)]);
-    // The count check is on for the list unless it is off, or off for the list.
-    const countCheck = this.countCheck && !this.countCheckSkip.has(String(banList.id));
-    // BattleMetrics' counts of the list's bans: on its first page, its last, and the lowest and
-    // highest on any page.
-    const counts = { first: null, last: null, lowest: null, highest: null };
-    let maxPages = BATTLEMETRICS_MAX_PAGES;
-    let rawCount = 0;
-    // The IDs of the bans read, with or without a SteamID, which the count check counts.
-    const uids = new Set();
-    const bans = [];
+  // Begin a read of a BattleMetrics list, which readBattlemetricsPage then reads a page at a time,
+  // from its first page: 100 bans of the list, expired or not, the newest first with newestFirst.
+  // BattleMetrics' links lead from each page to the bans after its last one, so a page read later
+  // still follows on from the one before it. The read keeps the pages read, BattleMetrics' counts of
+  // the list's bans, the next page to read, the pages it has been to, so it never reads one twice,
+  // and how many pages it may read.
+  startBattlemetricsRead(banList) {
+    const params = { 'filter[banList]': banList.source };
+    if (this.newestFirst) params.sort = '-timestamp';
+    params['page[size]'] = BATTLEMETRICS_PAGE_SIZE;
+    return {
+      banList,
+      // The count check is on for the list unless it is off, or off for the list.
+      countCheck: this.countCheck && !this.countCheckSkip.has(String(banList.id)),
+      pages: [],
+      // BattleMetrics' counts of the list's bans: on its first page, its last, and the lowest and
+      // highest on any page.
+      counts: { first: null, last: null, lowest: null, highest: null },
+      next: params,
+      visited: new Set([pageAddress(params)]),
+      maxPages: BATTLEMETRICS_MAX_PAGES
+    };
+  }
 
-    // Loop until there's no more pages to fetch. A page that cannot be fetched, after the
-    // BattleMetrics client's own retries, fails the whole list.
-    for (let page = 1; ; page++) {
-      // A run that is asked to stop does so between pages, as the largest lists take over a minute
-      // to read.
-      stopIfRequested();
+  // Read the next page of a read of a BattleMetrics list, as startBattlemetricsRead began it, with
+  // one request, counted as kind: head, follow or full. Returns the page, which the read keeps too:
+  // - bans: its bans that have a SteamID, each with its SteamIDs (steamIDs) and the player a new ban
+  //   is for (steamUser);
+  // - uids: the IDs of all its bans, with or without a SteamID, in its order;
+  // - rawCount: how many bans it gave;
+  // - total, active and expired: BattleMetrics' counts of the list's bans, of those still running
+  //   and of those that have expired, or null for any it did not give;
+  // - next: the parameters of the page after it, or null on the list's last page.
+  // Throws if the page cannot be fetched, after the BattleMetrics client's own retries, is not a
+  // page of bans, or links to a page the read has been to, or elsewhere. A list with no bans on its
+  // first page that still counts some throws as hidden bans. A run that is asked to stop throws
+  // RunStopped before the request.
+  async readBattlemetricsPage(read, kind) {
+    // A run that is asked to stop does so between pages, as the largest lists take over a minute to
+    // read.
+    stopIfRequested();
+    const { banList, counts } = read;
+    if (!read.next) throw new Error('The BattleMetrics list has no more pages to read.');
+    if (read.pages.length >= read.maxPages)
+      throw new Error(`BattleMetrics gave more than ${read.maxPages} pages of bans for the list.`);
 
-      // Get the ban page's data.
-      Logger.verbose(
-        'BanFetcher',
-        2,
-        `Fetching Battlemetrics ban list data for ban list (ID: ${banList.id})...`
-      );
-      const { data } = await battlemetrics('get', 'bans', params);
-      if (!data || !Array.isArray(data.data) || !data.links)
-        throw new Error('BattleMetrics returned an invalid page of bans.');
+    // Get the ban page's data.
+    Logger.verbose(
+      'BanFetcher',
+      2,
+      `Fetching Battlemetrics ban list data for ban list (ID: ${banList.id})...`
+    );
+    this.requests[kind] = (this.requests[kind] ?? 0) + 1;
+    const { data } = await battlemetrics('get', 'bans', read.next);
+    if (!data || !Array.isArray(data.data) || !data.links)
+      throw new Error('BattleMetrics returned an invalid page of bans.');
 
-      // The list's ban count, if BattleMetrics gives one, is returned with its bans, and with the
-      // count check on, it limits the pages read.
-      const total = data.meta && data.meta.total;
-      const count = Number.isInteger(total) && total >= 0 ? total : null;
-      if (page === 1 && count !== null) {
-        counts.first = count;
-        if (countCheck)
-          maxPages = Math.min(
-            BATTLEMETRICS_MAX_PAGES,
-            Math.ceil(count / BATTLEMETRICS_PAGE_SIZE) + BATTLEMETRICS_EXTRA_PAGES
-          );
-      }
-      if (count !== null)
-        Object.assign(counts, {
-          last: count,
-          lowest: Math.min(counts.lowest ?? count, count),
-          highest: Math.max(counts.highest ?? count, count)
-        });
-
-      // BattleMetrics answers a list that CBL may see, but not its bans, with no bans that it still
-      // counts. Such a list has not emptied, so it fails as hidden bans rather than look empty.
-      if (page === 1 && data.data.length === 0 && counts.first > 0) {
-        const error = new Error(
-          `BattleMetrics counts ${counts.first.toLocaleString('en-US')} bans on the list but gave none of them, so CBL may no longer be allowed to see its bans.`
+    // The list's ban count, if BattleMetrics gives one, is returned with its bans, and with the
+    // count check on, it limits the pages read.
+    const first = read.pages.length === 0;
+    const total = countOf(data.meta && data.meta.total);
+    if (first && total !== null) {
+      counts.first = total;
+      if (read.countCheck)
+        read.maxPages = Math.min(
+          BATTLEMETRICS_MAX_PAGES,
+          Math.ceil(total / BATTLEMETRICS_PAGE_SIZE) + BATTLEMETRICS_EXTRA_PAGES
         );
-        error.bansHidden = true;
-        error.metaTotal = counts.first;
-        throw error;
-      }
+    }
+    if (total !== null)
+      Object.assign(counts, {
+        last: total,
+        lowest: Math.min(counts.lowest ?? total, total),
+        highest: Math.max(counts.highest ?? total, total)
+      });
 
-      // Loop over each ban in the page's data.
-      rawCount += data.data.length;
-      for (const ban of data.data) {
-        const attributes = ban && ban.attributes;
-        if (!attributes || !attributes.uid)
-          throw new Error('BattleMetrics returned a ban without an ID.');
-        uids.add(attributes.uid);
+    // BattleMetrics answers a list that CBL may see, but not its bans, with no bans that it still
+    // counts. Such a list has not emptied, so it fails as hidden bans rather than look empty.
+    if (first && data.data.length === 0 && counts.first > 0) {
+      const error = new Error(
+        `BattleMetrics counts ${counts.first.toLocaleString('en-US')} bans on the list but gave none of them, so CBL may no longer be allowed to see its bans.`
+      );
+      error.bansHidden = true;
+      error.metaTotal = counts.first;
+      throw error;
+    }
 
-        // Get the SteamIDs of the player banned.
-        const steamIDs = findSteamIDs(attributes.identifiers);
+    const page = {
+      bans: [],
+      uids: [],
+      rawCount: data.data.length,
+      total,
+      active: countOf(data.meta && data.meta.active),
+      expired: countOf(data.meta && data.meta.expired),
+      next: null
+    };
 
-        // Sometimes there is no SteamID in the response. If this is the case we ignore the ban.
-        if (steamIDs.length === 0) continue;
+    // Loop over each ban in the page's data.
+    for (const ban of data.data) {
+      const attributes = ban && ban.attributes;
+      if (!attributes || !attributes.uid)
+        throw new Error('BattleMetrics returned a ban without an ID.');
+      page.uids.push(attributes.uid);
 
-        // Turn the dates into date objects or null if permanent ban.
-        const created = new Date(attributes.timestamp);
-        const expires = attributes.expires ? new Date(attributes.expires) : null;
+      // Get the SteamIDs of the player banned.
+      const steamIDs = findSteamIDs(attributes.identifiers);
 
-        // Store the ban.
-        bans.push({
-          id: `${banList.id},${attributes.uid}`,
+      // Sometimes there is no SteamID in the response. If this is the case we ignore the ban.
+      if (steamIDs.length === 0) continue;
 
-          steamUser: firstChoice(steamIDs),
-          steamIDs,
+      // Turn the dates into date objects or null if permanent ban.
+      const created = new Date(attributes.timestamp);
+      const expires = attributes.expires ? new Date(attributes.expires) : null;
 
-          created,
-          expires,
-          expired: expires !== null && expires.getTime() <= Date.now(),
+      // Store the ban.
+      page.bans.push({
+        id: `${banList.id},${attributes.uid}`,
 
-          reason: classifyBanReason(attributes.reason, attributes.note),
-          rawReason: attributes.reason,
-          rawNote: attributes.note,
+        steamUser: firstChoice(steamIDs),
+        steamIDs,
 
-          banList
-        });
-      }
+        created,
+        expires,
+        expired: expires !== null && expires.getTime() <= Date.now(),
 
-      // If that is the last page then break out the loop.
-      const next = data.links.next;
-      if (!next) break;
-      if (page >= maxPages)
-        throw new Error(`BattleMetrics gave more than ${maxPages} pages of bans for the list.`);
+        reason: classifyBanReason(attributes.reason, attributes.note),
+        rawReason: attributes.reason,
+        rawNote: attributes.note,
 
-      // Store the parameters for the next page fetch. The link must stay on the list's bans and
-      // must not lead back to a page already fetched.
+        banList
+      });
+    }
+
+    // Store the parameters for the next page fetch, unless this is the last page. The link must
+    // stay on the list's bans and must not lead back to a page already fetched.
+    const next = data.links.next;
+    if (next) {
       const link = new URL(typeof next === 'string' ? next : next.href, BATTLEMETRICS_BANS);
-      params = Object.fromEntries(link.searchParams);
+      const params = Object.fromEntries(link.searchParams);
       const address = pageAddress(params);
       if (
         link.origin !== BATTLEMETRICS_BANS.origin ||
         link.pathname !== BATTLEMETRICS_BANS.pathname ||
-        visited.has(address)
+        read.visited.has(address)
       )
         throw new Error('Invalid BattleMetrics pagination link.');
-      visited.add(address);
+      read.visited.add(address);
+      page.next = params;
     }
+    read.next = page.next;
+    read.pages.push(page);
+    return page;
+  }
 
+  // Read a BattleMetrics list's newest page of bans, with one request: its bans, BattleMetrics'
+  // counts of the list's bans, and the link to the next page, as readBattlemetricsPage gives them.
+  // Returns the read, whose first page that is, for followBattlemetrics to read on from, or for
+  // fetchBanList to read the rest of the list.
+  async fetchBattlemetricsHead(banList) {
+    const read = this.startBattlemetricsRead(banList);
+    await this.readBattlemetricsPage(read, 'head');
+    return read;
+  }
+
+  // Read the page after the last one a head poll read, as a head poll that has found only new bans
+  // so far does.
+  followBattlemetrics(read) {
+    return this.readBattlemetricsPage(read, 'follow');
+  }
+
+  // Read all of a BattleMetrics list, from its first page, or on from the last page of a read that a
+  // head poll began. Every page is read by following BattleMetrics' links to the list's last page,
+  // and a page that cannot be fetched fails the whole list.
+  async fetchBattlemetricsBanList(banList, read = null) {
+    read ??= this.startBattlemetricsRead(banList);
+    while (read.next) await this.readBattlemetricsPage(read, 'full');
+
+    // The count check counts the different bans read, with or without a SteamID.
+    const uids = new Set(read.pages.flatMap((page) => page.uids));
+    const [newest] = read.pages;
     return {
-      bans,
-      rawCount,
-      firstMetaTotal: counts.first,
-      ...this.checkCount(uids.size, counts, countCheck)
+      bans: read.pages.flatMap((page) => page.bans),
+      rawCount: read.pages.reduce((count, page) => count + page.rawCount, 0),
+      firstMetaTotal: read.counts.first,
+      head: this.newestFirst ? { uids: newest.uids, total: newest.total } : null,
+      ...this.checkCount(uids.size, read.counts, read.countCheck)
     };
   }
 }
