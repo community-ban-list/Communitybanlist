@@ -166,6 +166,19 @@ const ExportBanList = {
     const row = rows.get(id);
     return row ? instance(row.exportBanList, `find ${id}`) : null;
   },
+  // Only the lists whose columns equal the query's, in ID order. The BattleMetrics ban lists CBL's
+  // lists record are read this way, so the query must load each list's type and ban list.
+  async findAll({ attributes, where }) {
+    calls.push(['find all', where]);
+    assert.ok(attributes.includes('type') && attributes.includes('battlemetricsID'));
+    return [...rows.values()]
+      .map((row) => row.exportBanList)
+      .filter((exportBanList) =>
+        Object.entries(where).every(([column, value]) => exportBanList[column] === value)
+      )
+      .sort((a, b) => a.id - b.id)
+      .map((exportBanList) => instance(exportBanList, 'find all'));
+  },
   async findVisibleBattlemetricsBanLists() {
     calls.push(['visible']);
     if (visible instanceof Error) throw visible;
@@ -286,11 +299,16 @@ assert.deepStrictEqual(
 assert.strictEqual(json.options[0].options.length, 1);
 assert.deepStrictEqual(json.options[1].options, []);
 
-// Removing one list shows its name, type, owner, players, BattleMetrics ID and why it is outside
-// today's limits, asks first, and then deletes it as the website does, once no ban importer run is
-// under way. The removal is logged, and the owner is not told.
+// The query that reads the BattleMetrics ban lists CBL's lists record.
+const FIND_RECORDED = ['find all', { type: 'battlemetrics' }];
+
+// Removing one list shows its name, type, owner, players, BattleMetrics ID, whether CBL's
+// BattleMetrics key can see its ban list, and why it is outside today's limits, asks first, and
+// then deletes it as the website does, once no ban importer run is under way. The removal is
+// logged, and the owner is not told.
 reset();
 addList(12, 'battlemetrics', { battlemetricsID: 'bm-12', players: 1234 });
+visible = new Set(['bm-12', 'partner-list']);
 await run('remove', { id: 12 });
 let shown = prompt();
 assert.strictEqual(
@@ -304,10 +322,18 @@ assert.deepStrictEqual(fieldsOf(shown.embed), [
   ['Type', 'BattleMetrics'],
   ['Players', '1,234'],
   ['Owner', '**Owner 12** (`76561198000000012`)'],
-  ['BattleMetrics ID', '`bm-12`'],
+  ['BattleMetrics ID', "`bm-12`, which CBL's BattleMetrics key can see."],
   ["Today's limits", discord.escapeMarkdown(RULE)]
 ]);
-assert.deepStrictEqual(calls, [['lock'], ['check', [12]], ['lock'], ['find', 12], ['delete', 12]]);
+assert.deepStrictEqual(calls, [
+  ['lock'],
+  ['check', [12]],
+  FIND_RECORDED,
+  ['visible'],
+  ['lock'],
+  ['find', 12],
+  ['delete', 12]
+]);
 // The list is deleted as it was read after the confirmation, not as the preview showed it.
 assert.deepStrictEqual(deletedFrom, ['find 12']);
 assert.strictEqual(
@@ -322,7 +348,10 @@ assert.ok(!rows.has(12));
 
 // A remote list is only deleted from the database. A BattleMetrics list without a ban list, and
 // one whose ban list BattleMetrics no longer had, say so. A list within the limits can be removed
-// too.
+// too. BattleMetrics is only asked which ban lists CBL's key can see for a list with a ban list.
+const askedBattlemetrics = () =>
+  calls.some(([call]) => call === 'visible' || call === FIND_RECORDED[0]);
+
 reset();
 addList(13, 'remote', { players: 0, problems: [] });
 await run('remove', { id: 13 });
@@ -340,6 +369,7 @@ assert.deepStrictEqual(fieldsOf(shown.embed), [
 ]);
 assert.strictEqual(contentOf(replies.at(-1)), 'Removed export ban list **List 13** (#13).');
 assert.match(audits[0], /, which had 0 players: there was nothing to delete on BattleMetrics\.$/);
+assert.ok(!askedBattlemetrics());
 
 reset();
 addList(14, 'battlemetrics', { SteamUser: null });
@@ -358,9 +388,12 @@ assert.strictEqual(
   'Removed export ban list **List 14** (#14). It had no BattleMetrics ban list.'
 );
 assert.match(audits[0], /of Steam user 76561198000000014, which had 0 players:/);
+assert.ok(!askedBattlemetrics());
 
+// BattleMetrics not knowing a ban list CBL's key could see before the removal means it is gone.
 reset();
 addList(15, 'battlemetrics', { battlemetricsID: 'bm-15' });
+visible = new Set(['bm-15']);
 deletions.set(15, 'gone');
 await run('remove', { id: 15 });
 assert.strictEqual(
@@ -368,6 +401,116 @@ assert.strictEqual(
   'Removed export ban list **List 15** (#15). BattleMetrics no longer had its ban list, so there was nothing to delete there.'
 );
 assert.match(audits[0], /: BattleMetrics no longer had its ban list\.$/);
+
+// A key that cannot see a ban list gets the answer BattleMetrics gives for one it does not have, so
+// the removal would take the ban list to be gone and leave it on BattleMetrics. So the confirmation
+// says when CBL's key cannot see the list's ban list, or sees none of the ban lists CBL's lists
+// record, or BattleMetrics could not be asked, and the list can still be removed. Then BattleMetrics
+// not knowing the ban list is reported as something to check on BattleMetrics, not as its being
+// gone. Remote lists, and BattleMetrics lists without a ban list, are not counted as recording one.
+const UNSEEN =
+  'the removal takes it to be gone already: it deletes only the list, with its export bans and configs, and the ban list stays on BattleMetrics with its subscribers.';
+for (const { case: name, key, content, field, gone } of [
+  {
+    case: 'the key cannot see the ban list',
+    key: new Set(['bm-22', 'partner-list']),
+    content: `**CBL's BattleMetrics key cannot see its BattleMetrics ban list**, though it can see 1 of the 2 BattleMetrics ban lists CBL's export ban lists record, so BattleMetrics may have deleted it already. If it has not, ${UNSEEN} Check it on BattleMetrics first.`,
+    field: "`bm-21`, which CBL's BattleMetrics key cannot see.",
+    gone: "CBL's BattleMetrics key could not see it before the removal"
+  },
+  {
+    case: "the key sees none of CBL's ban lists",
+    key: new Set(['partner-list']),
+    content: `**CBL's BattleMetrics key can see 0 of the 2 BattleMetrics ban lists CBL's export ban lists record**, so it may belong to an account outside CBL's organisation: check BATTLEMETRICS_API_KEY. If BattleMetrics still has this list's ban list, ${UNSEEN}`,
+    field: "`bm-21`, which CBL's BattleMetrics key cannot see.",
+    gone: "CBL's BattleMetrics key could not see it before the removal"
+  },
+  {
+    case: 'BattleMetrics cannot be asked',
+    key: new Error('BattleMetrics GET ban-lists failed: HTTP 503'),
+    content: `This deletes its BattleMetrics ban list, which the organisations subscribed to it lose, and then the list, with its export bans and configs. **BattleMetrics could not be asked whether CBL's BattleMetrics key can see the ban list** (BattleMetrics GET ban-lists failed: HTTP 503). If the key cannot see it, ${UNSEEN}`,
+    field:
+      "`bm-21`. Whether CBL's BattleMetrics key can see it was not checked, as BattleMetrics could not be asked.",
+    gone: "BattleMetrics could not be asked whether CBL's BattleMetrics key could see it"
+  }
+]) {
+  for (const outcome of ['gone', 'deleted']) {
+    reset();
+    addList(21, 'battlemetrics', { battlemetricsID: 'bm-21', players: 3 });
+    addList(22, 'battlemetrics', { battlemetricsID: 'bm-22' });
+    addList(23, 'remote');
+    addList(24, 'battlemetrics');
+    visible = key;
+    deletions.set(21, outcome);
+    await run('remove', { id: 21 });
+    shown = prompt();
+    assert.strictEqual(
+      contentOf(shown.reply),
+      `Remove export ban list **List 21** (#21)? ${content} Its owner is not told.`,
+      name
+    );
+    assert.deepStrictEqual(fieldsOf(shown.embed)[4], ['BattleMetrics ID', field], name);
+    assert.deepStrictEqual(
+      calls,
+      [
+        ['lock'],
+        ['check', [21]],
+        FIND_RECORDED,
+        ['visible'],
+        ['lock'],
+        ['find', 21],
+        ['delete', 21]
+      ],
+      name
+    );
+    const removed =
+      'admin (1) removed export ban list "List 21" (ID: 21, BattleMetrics, BattleMetrics ID: bm-21) of Steam user "Owner 21" (ID: 76561198000000021), which had 3 players';
+    if (outcome === 'gone') {
+      assert.strictEqual(
+        contentOf(replies.at(-1)),
+        `Removed export ban list **List 21** (#21), but BattleMetrics did not know its ban list, and ${gone}, so it may still be on BattleMetrics with its subscribers: check it there.`,
+        name
+      );
+      assert.deepStrictEqual(
+        audits,
+        [
+          `${removed}: BattleMetrics did not know its ban list, and ${gone}, so it may still be on BattleMetrics: check it there.`
+        ],
+        name
+      );
+    } else {
+      // BattleMetrics deleted it after all, e.g. as the key was given its access meanwhile.
+      assert.strictEqual(
+        contentOf(replies.at(-1)),
+        'Removed export ban list **List 21** (#21) and its BattleMetrics ban list.',
+        name
+      );
+      assert.deepStrictEqual(audits, [`${removed}: its BattleMetrics ban list was deleted.`], name);
+    }
+    assert.deepStrictEqual([...rows.keys()], [22, 23, 24], name);
+    assert.deepStrictEqual(notifications, [], name);
+  }
+}
+
+// A list given a ban list after the confirmation, as one still being made is, had no check of the
+// key, so BattleMetrics not knowing that ban list is reported as something to check too, and the
+// log names the ban list the removal took.
+reset();
+addList(25, 'battlemetrics');
+whileConfirming = async () => {
+  rows.get(25).exportBanList.battlemetricsID = 'bm-25';
+};
+deletions.set(25, 'gone');
+await run('remove', { id: 25 });
+assert.ok(!askedBattlemetrics());
+assert.strictEqual(
+  contentOf(replies.at(-1)),
+  "Removed export ban list **List 25** (#25), but BattleMetrics did not know its ban list, and whether CBL's BattleMetrics key could see it was not checked, so it may still be on BattleMetrics with its subscribers: check it there."
+);
+assert.match(
+  audits[0],
+  /^admin \(1\) removed export ban list "List 25" \(ID: 25, BattleMetrics, BattleMetrics ID: bm-25\) of .*: BattleMetrics did not know its ban list, and whether CBL's BattleMetrics key could see it was not checked, so it may still be on BattleMetrics: check it there\.$/
+);
 
 // When the deletion fails, the reply and the log say which step failed, and the list is kept.
 reset();
@@ -431,10 +574,11 @@ for (const [choice, reply] of [
 ]) {
   reset();
   addList(19, 'battlemetrics', { battlemetricsID: 'bm-19' });
+  visible = new Set(['bm-19']);
   answer = choice;
   await run('remove', { id: 19 });
   assert.strictEqual(contentOf(replies.at(-1)), reply);
-  assert.deepStrictEqual(calls, [['lock'], ['check', [19]]]);
+  assert.deepStrictEqual(calls, [['lock'], ['check', [19]], FIND_RECORDED, ['visible']]);
   assert.deepStrictEqual(audits, []);
   assert.ok(rows.has(19));
 }

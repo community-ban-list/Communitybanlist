@@ -95,11 +95,9 @@ function formatOwner(exportBanList) {
   return name ? `${bold(name)} (${id})` : id;
 }
 
-// Describe the list for the audit log.
-function describeExportBanList(exportBanList) {
-  const battlemetrics = exportBanList.battlemetricsID
-    ? `, BattleMetrics ID: ${exportBanList.battlemetricsID}`
-    : '';
+// Describe the list for the audit log, with the BattleMetrics ban list it records, or the one given.
+function describeExportBanList(exportBanList, battlemetricsID = exportBanList.battlemetricsID) {
+  const battlemetrics = battlemetricsID ? `, BattleMetrics ID: ${battlemetricsID}` : '';
   const name = exportBanList.SteamUser?.name;
   const owner = name
     ? `Steam user "${name}" (ID: ${exportBanList.owner})`
@@ -108,13 +106,84 @@ function describeExportBanList(exportBanList) {
   return `export ban list "${exportBanList.name}" (ID: ${exportBanList.id}, ${type}${battlemetrics}) of ${owner}`;
 }
 
-// What removing the list deletes, for the confirmation.
-function describeRemoval(exportBanList) {
+// The BattleMetrics ban lists the given export ban lists record.
+const recordedBanLists = (exportBanLists) =>
+  exportBanLists
+    .filter(hasBattlemetricsBanList)
+    .map((exportBanList) => exportBanList.battlemetricsID);
+
+// The BattleMetrics ban lists all of CBL's export ban lists record.
+async function findRecordedBanLists() {
+  const exportBanLists = await ExportBanList.findAll({
+    attributes: ['id', 'type', 'battlemetricsID'],
+    where: { type: 'battlemetrics' }
+  });
+  return recordedBanLists(exportBanLists);
+}
+
+// Which BattleMetrics ban lists CBL's BattleMetrics API key can see, compared with those CBL's
+// export ban lists record (recorded). Deleting a list treats a ban list BattleMetrics does not know
+// as already gone, so with a key from an account outside CBL's organisation, a list would be
+// deleted while its ban list stayed on BattleMetrics. Gives { error } when BattleMetrics could not
+// be asked, and otherwise the IDs of the ban lists the key can see, how many ban lists the export
+// ban lists record, and how many of those it can see.
+async function checkBattlemetricsAccess(recorded) {
+  let visible;
+  try {
+    visible = await ExportBanList.findVisibleBattlemetricsBanLists();
+  } catch (error) {
+    return { error };
+  }
+  return {
+    visible,
+    recorded: recorded.length,
+    seen: recorded.filter((id) => visible.has(id)).length
+  };
+}
+
+// Whether CBL's BattleMetrics key could see the BattleMetrics ban list with this ID, as access
+// (from checkBattlemetricsAccess) gives it.
+const keySees = (battlemetricsID, access) =>
+  Boolean(battlemetricsID && access?.visible?.has(battlemetricsID));
+
+// "CBL's BattleMetrics key can see 2 of the 3 BattleMetrics ban lists CBL's export ban lists
+// record".
+const describeSeen = ({ seen, recorded }) =>
+  `CBL's BattleMetrics key can see ${seen.toLocaleString('en-US')} of the ${plural(recorded, 'BattleMetrics ban list')} CBL's export ban lists record`;
+
+// What removing the list deletes, for the confirmation. For a list with a BattleMetrics ban list,
+// access says whether CBL's BattleMetrics key can see the ban list. A key that cannot see it gets
+// the answer BattleMetrics gives for a ban list it does not have, so the deletion would take the
+// ban list to be gone already and leave it on BattleMetrics, if it is still there.
+function describeRemoval(exportBanList, access) {
   if (exportBanList.type !== 'battlemetrics')
     return 'This deletes the list, with its export bans and configs, so its address serves no players.';
   if (!exportBanList.battlemetricsID)
     return 'It has no BattleMetrics ban list, so this deletes only the list, with its export bans and configs.';
-  return 'This deletes its BattleMetrics ban list, which the organisations subscribed to it lose, and then the list, with its export bans and configs.';
+  const removal =
+    'This deletes its BattleMetrics ban list, which the organisations subscribed to it lose, and then the list, with its export bans and configs.';
+  if (keySees(exportBanList.battlemetricsID, access)) return removal;
+
+  const unseen =
+    'the removal takes it to be gone already: it deletes only the list, with its export bans and configs, and the ban list stays on BattleMetrics with its subscribers.';
+  if (!access || access.error) {
+    const why = access
+      ? `**BattleMetrics could not be asked whether CBL's BattleMetrics key can see the ban list** (${truncate(access.error.message, REASON_LENGTH)})`
+      : "**Whether CBL's BattleMetrics key can see the ban list was not checked**";
+    return `${removal} ${why}. If the key cannot see it, ${unseen}`;
+  }
+  if (access.seen === 0)
+    return `**${describeSeen(access)}**, so it may belong to an account outside CBL's organisation: check BATTLEMETRICS_API_KEY. If BattleMetrics still has this list's ban list, ${unseen}`;
+  return `**CBL's BattleMetrics key cannot see its BattleMetrics ban list**, though it can see ${access.seen.toLocaleString('en-US')} of the ${plural(access.recorded, 'BattleMetrics ban list')} CBL's export ban lists record, so BattleMetrics may have deleted it already. If it has not, ${unseen} Check it on BattleMetrics first.`;
+}
+
+// Why a ban list BattleMetrics did not know when its list was removed may still be on BattleMetrics:
+// CBL's BattleMetrics key was not shown to see it before the removal.
+function unseenReason(access) {
+  if (!access) return "whether CBL's BattleMetrics key could see it was not checked";
+  if (access.error)
+    return "BattleMetrics could not be asked whether CBL's BattleMetrics key could see it";
+  return "CBL's BattleMetrics key could not see it before the removal";
 }
 
 // Why a list could not be removed. deleteExportBanList's error says which BattleMetrics step
@@ -145,7 +214,17 @@ function describeLimits(limits) {
   return `Limits used: ${types.join('; ')}. They come from the bot's EXPORT_* settings, which must match the website's.`;
 }
 
-function exportBanListEmbed(check) {
+// The list's BattleMetrics ban list, and whether CBL's BattleMetrics key can see it.
+function describeBattlemetricsBanList(exportBanList, access) {
+  if (!exportBanList.battlemetricsID) return 'None';
+  const id = `\`${exportBanList.battlemetricsID}\``;
+  if (!access) return id;
+  if (access.error)
+    return `${id}. Whether CBL's BattleMetrics key can see it was not checked, as BattleMetrics could not be asked.`;
+  return `${id}, which CBL's BattleMetrics key ${keySees(exportBanList.battlemetricsID, access) ? 'can' : 'cannot'} see.`;
+}
+
+function exportBanListEmbed(check, access = null) {
   const { exportBanList, players } = check;
   const embed = listEmbed(truncate(exportBanList.name || 'Unnamed', 256), null).addFields(
     { name: 'ID', value: String(exportBanList.id), inline: true },
@@ -156,9 +235,7 @@ function exportBanListEmbed(check) {
   if (exportBanList.type === 'battlemetrics')
     embed.addFields({
       name: 'BattleMetrics ID',
-      value: exportBanList.battlemetricsID
-        ? truncate(`\`${exportBanList.battlemetricsID}\``, 1024)
-        : 'None'
+      value: truncate(describeBattlemetricsBanList(exportBanList, access), 1024)
     });
   return embed.addFields({
     name: "Today's limits",
@@ -195,14 +272,21 @@ async function remove(interaction) {
   const { exportBanList, players } = check;
   const name = formatName(exportBanList);
 
+  // Whether CBL's BattleMetrics key can see the list's ban list, so the admin knows before
+  // confirming whether the removal can delete it. The list can be removed either way, as this is
+  // how a list whose ban list BattleMetrics really no longer has is removed.
+  const access = hasBattlemetricsBanList(exportBanList)
+    ? await checkBattlemetricsAccess(await findRecordedBanLists())
+    : null;
+
   const confirmed = await confirm(
     interaction,
     truncate(
-      `Remove export ban list ${name}? ${describeRemoval(exportBanList)} Its owner is not told.`,
+      `Remove export ban list ${name}? ${describeRemoval(exportBanList, access)} Its owner is not told.`,
       MESSAGE_LENGTH
     ),
     'Remove export ban list',
-    { embeds: [exportBanListEmbed(check)] }
+    { embeds: [exportBanListEmbed(check, access)] }
   );
   if (!confirmed) return;
 
@@ -219,7 +303,10 @@ async function remove(interaction) {
     return;
   }
 
-  const description = `${describeExportBanList(exportBanList)}, which had ${plural(players, 'player')}`;
+  // The ban list the removal deletes, which it clears from the list: the list's as it is now, which
+  // differs from the one shown only when the list was still being made.
+  const { battlemetricsID } = current;
+  const description = `${describeExportBanList(exportBanList, battlemetricsID)}, which had ${plural(players, 'player')}`;
   let outcome;
   try {
     outcome = await current.deleteExportBanList();
@@ -228,6 +315,24 @@ async function remove(interaction) {
     audit(interaction, `could not remove ${description}: ${reason}`);
     await interaction.editReply({
       content: truncate(`Could not remove export ban list ${name}. ${reason}`, MESSAGE_LENGTH),
+      embeds: []
+    });
+    return;
+  }
+
+  // BattleMetrics not knowing the ban list only shows that it is gone when CBL's key could see it
+  // before the removal. Otherwise the key may just not see it, and it may still be there.
+  if (outcome === 'gone' && !keySees(battlemetricsID, access)) {
+    const reason = unseenReason(access);
+    audit(
+      interaction,
+      `removed ${description}: BattleMetrics did not know its ban list, and ${reason}, so it may still be on BattleMetrics: check it there.`
+    );
+    await interaction.editReply({
+      content: truncate(
+        `Removed export ban list ${name}, but BattleMetrics did not know its ban list, and ${reason}, so it may still be on BattleMetrics with its subscribers: check it there.`,
+        MESSAGE_LENGTH
+      ),
       embeds: []
     });
     return;
@@ -243,40 +348,13 @@ async function remove(interaction) {
   await interaction.editReply({ content: truncate(result, MESSAGE_LENGTH), embeds: [] });
 }
 
-// Whether CBL's BattleMetrics API key can see the ban lists of the lists to remove. Deleting a list
-// treats a ban list BattleMetrics does not know as already gone, so with a key from an account
-// outside CBL's organisation, every list would be deleted while its ban list stayed on
-// BattleMetrics. So the key must see at least one of the ban lists CBL's export ban lists record,
-// and a list whose own ban list it cannot see is left. Gives null when no list to remove has a ban
-// list, { error } when BattleMetrics could not be asked, and otherwise the IDs of the ban lists the
-// key can see, how many ban lists the export ban lists record, and how many of those it can see.
-async function checkBattlemetricsAccess(lists, outside) {
-  if (!outside.some(({ exportBanList }) => hasBattlemetricsBanList(exportBanList))) return null;
-
-  let visible;
-  try {
-    visible = await ExportBanList.findVisibleBattlemetricsBanLists();
-  } catch (error) {
-    return { error };
-  }
-  const recorded = lists
-    .map(({ exportBanList }) => exportBanList)
-    .filter(hasBattlemetricsBanList)
-    .map((exportBanList) => exportBanList.battlemetricsID);
-  return {
-    visible,
-    recorded: recorded.length,
-    seen: recorded.filter((id) => visible.has(id)).length
-  };
-}
-
 // Why a list outside the limits is left as it is, or null when it can be removed.
 function leftReason(exportBanList, access) {
   if (!hasBattlemetricsBanList(exportBanList)) return null;
   if (!access) return 'its BattleMetrics ban list was not checked';
   if (access.error) return 'BattleMetrics could not be asked about its ban list';
   if (access.seen === 0) return "CBL's BattleMetrics key can see none of CBL's ban lists";
-  if (!access.visible.has(exportBanList.battlemetricsID))
+  if (!keySees(exportBanList.battlemetricsID, access))
     return "its BattleMetrics ban list is not among those CBL's BattleMetrics key can see";
   return null;
 }
@@ -285,7 +363,7 @@ function describeAccess(access, left) {
   if (!access) return '';
   if (access.error)
     return `BattleMetrics could not be asked which ban lists CBL's BattleMetrics key can see (${access.error.message}), so the lists with BattleMetrics ban lists are left. Try again later.`;
-  const seen = `CBL's BattleMetrics key can see ${access.seen.toLocaleString('en-US')} of the ${plural(access.recorded, 'BattleMetrics ban list')} CBL's export ban lists record.`;
+  const seen = `${describeSeen(access)}.`;
   if (access.seen === 0)
     return `${seen} It may belong to an account outside CBL's organisation, so the lists with BattleMetrics ban lists are left. Check BATTLEMETRICS_API_KEY.`;
   if (left === 0) return seen;
@@ -435,7 +513,13 @@ async function removeAllOutsideLimits(interaction) {
     return;
   }
 
-  const access = await checkBattlemetricsAccess(lists, outside);
+  // BattleMetrics is only asked which ban lists CBL's key can see when a list to remove has one.
+  // The key must see some of the ban lists all of CBL's lists record, and each list's own.
+  const access = outside.some(({ exportBanList }) => hasBattlemetricsBanList(exportBanList))
+    ? await checkBattlemetricsAccess(
+        recordedBanLists(lists.map(({ exportBanList }) => exportBanList))
+      )
+    : null;
   const plan = outside.map((check) => ({ check, left: leftReason(check.exportBanList, access) }));
   const removable = plan.filter((item) => !item.left).map((item) => item.check);
   const left = plan.length - removable.length;
