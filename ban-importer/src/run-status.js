@@ -152,7 +152,7 @@ function describeProgress(progress, { bar = false } = {}) {
 // What the counts of the steps that count what they do say, in a line, or null without them. Each
 // is also given the step's latest progress.
 const DETAILS = {
-  // The import's totals, as in its summary line.
+  // The import's totals, as in its summary line. Those of a dry run say what it would have done.
   importBans: (counts) => {
     const { lists, imported, fetched, updated, removed, held, failedLists } = counts;
     if (![imported, fetched, counts.new, updated, removed, held, failedLists].every(isCount))
@@ -161,7 +161,8 @@ const DETAILS = {
       isCount(lists) && imported < lists
         ? `${formatCount(imported)} of ${plural(lists, 'ban list')}`
         : plural(imported, 'ban list');
-    return `${banLists}: ${plural(fetched, 'ban')} fetched, ${formatCount(counts.new)} new, ${formatCount(updated)} updated, ${formatCount(removed)} removed, ${formatCount(held)} held, ${plural(failedLists, 'list')} failed`;
+    const dryRun = counts.dryRun === true ? ', in a dry run that wrote nothing' : '';
+    return `${banLists}: ${plural(fetched, 'ban')} fetched, ${formatCount(counts.new)} new, ${formatCount(updated)} updated, ${formatCount(removed)} removed, ${formatCount(held)} held, ${plural(failedLists, 'list')} failed${dryRun}`;
   },
   updateSteamUserInfo: ({ due, updated }) => {
     if (!isCount(due) || !isCount(updated)) return null;

@@ -19,7 +19,9 @@ export const STATES = {
   ACCESS_LOST: 'access_lost',
   // Its source is one of CBL's own export ban lists, so it is neither imported nor swept.
   SELF_IMPORT: 'self_import',
-  // It was imported, but removing the bans it no longer has waits for confirmation.
+  // It was imported, but some of the bans it no longer has were kept for now: until a later
+  // complete read of the list confirms that they are gone, or, for a list that lost all of its
+  // bans, until an admin confirms it.
   HELD: 'held'
 };
 
@@ -80,18 +82,52 @@ function plural(count, noun) {
   return `${formatCount(count)} ${noun}${count === 1 ? '' : 's'}`;
 }
 
-// Read IMPORTER_ACCESS_CHECK, which turns the access check off when it is 0, false, off or no. It is
-// on when the setting is not given, and an invalid value leaves it on, with a warning to log.
-export function readAccessCheck(value) {
+// A setting's value without the spaces around it, or one pair of matching quotes around it, as
+// docker run --env-file keeps quotes as part of the value. Anything else, such as a comment after
+// the value, is left in it.
+export function unquote(value) {
+  if (value === undefined || value === null) return '';
+  return String(value)
+    .trim()
+    .replace(/^(['"])(.*)\1$/s, '$2')
+    .trim();
+}
+
+// Read a setting that is turned on with 1, true, on or yes, and off with 0, false, off or no, in any
+// case, with spaces or quotes around it. A setting that is not given is as defaultOn says, and an
+// invalid value is as invalidOn says, the safer of the two, marked invalid, with a warning to log
+// that says what that means.
+export function readSwitch(name, value, { defaultOn, invalidOn = defaultOn, meaning }) {
   if (typeof value === 'boolean') return { on: value };
-  if (value === undefined || value === null || String(value).trim() === '') return { on: true };
-  const setting = String(value).trim().toLowerCase();
+  const setting = unquote(value).toLowerCase();
+  if (setting === '') return { on: defaultOn };
   if (['1', 'true', 'on', 'yes'].includes(setting)) return { on: true };
   if (['0', 'false', 'off', 'no'].includes(setting)) return { on: false };
   return {
-    on: true,
-    warning: `Warning: IMPORTER_ACCESS_CHECK must be 1 or 0, not "${value}", so the access check stays on.`
+    on: invalidOn,
+    invalid: true,
+    warning: `Warning: ${name} must be 1 or 0, not "${value}", so ${meaning}.`
   };
+}
+
+// Read a setting that names ban lists by their IDs, separated by commas, with spaces or quotes
+// around it, and give the IDs, as text.
+export function readBanListIDs(value) {
+  return new Set(
+    unquote(value)
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean)
+  );
+}
+
+// Read IMPORTER_ACCESS_CHECK, which turns the access check off when it is 0, false, off or no. It is
+// on when the setting is not given, and an invalid value leaves it on, with a warning to log.
+export function readAccessCheck(value) {
+  return readSwitch('IMPORTER_ACCESS_CHECK', value, {
+    defaultOn: true,
+    meaning: 'the access check stays on'
+  });
 }
 
 // The IDs of every BattleMetrics ban list the CBL organisation can see, its own and those it
@@ -156,8 +192,11 @@ export function stateOf({ selfImport, accessLost, error, held }) {
 // Work out a list's new row from its row as the run found it (before, or null for a list that has
 // none) and what the run's attempt at the list found (outcome): the list's ID and source key, the
 // time, the export ban list it imports (selfImport), why CBL cannot read it (accessLost), the
-// attempt's error, the bans it held, the bans the list has here, and BattleMetrics' count of its
-// bans, or undefined when the attempt got none. Returns:
+// attempt's error, the bans it held, the bans the list has here, BattleMetrics' count of its bans,
+// or undefined when the attempt got none, whether the attempt read all of the list (complete: true
+// or false, or undefined when it did not get that far), whether the bans of the list's old source
+// are still to be replaced (replacePending, or undefined to keep it), and for a remote list, the
+// ETag, Last-Modified and SHA-256 of the file to keep (remote, or undefined to keep them). Returns:
 // - values: the row's new values;
 // - fields: the columns to write. A list whose type or source was changed starts afresh, so all
 //   of its columns are written, and otherwise only those the import sets;
@@ -190,6 +229,11 @@ export function nextSync(before, outcome) {
       `${outcome.accessLost[0].toUpperCase()}${outcome.accessLost.slice(1)}, so its bans are not checked for removal.`
     );
 
+  // How many reads of all of the list in a row came back incomplete, which a complete one resets.
+  let incompleteScans = Number(previous.incompleteScans) || 0;
+  if (outcome.complete === false) incompleteScans++;
+  else if (outcome.complete === true) incompleteScans = 0;
+
   const values = {
     ...(reset ? FRESH : {}),
     banList: outcome.banList,
@@ -197,11 +241,20 @@ export function nextSync(before, outcome) {
     state,
     lastAttemptAt: attempted ? outcome.now : previous.lastAttemptAt,
     lastSuccessAt: attempted && !failed ? outcome.now : previous.lastSuccessAt,
+    lastFullScanAt: outcome.complete === true ? outcome.now : previous.lastFullScanAt,
     consecutiveFailures,
+    incompleteScans,
     lastError,
     storedCount: outcome.storedCount ?? previous.storedCount,
-    headTotal: outcome.headTotal === undefined ? previous.headTotal : outcome.headTotal
+    headTotal: outcome.headTotal === undefined ? previous.headTotal : outcome.headTotal,
+    replacePending: Boolean(outcome.replacePending ?? previous.replacePending)
   };
+  if (outcome.remote !== undefined)
+    Object.assign(values, {
+      remoteEtag: outcome.remote?.etag ?? null,
+      remoteLastModified: outcome.remote?.lastModified ?? null,
+      remoteBodyHash: outcome.remote?.bodyHash ?? null
+    });
 
   const alerts = [];
   if (state !== previous.state && [STATES.SELF_IMPORT, STATES.ACCESS_LOST].includes(state))

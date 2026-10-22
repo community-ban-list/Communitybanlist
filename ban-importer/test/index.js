@@ -26,8 +26,8 @@ const settle = () => new Promise(setImmediate);
 
 // Load index.js with stand-ins for the process, the console and the steps, which record their
 // calls, and for run.js, whose run, and ending of a run left waiting, settle as the test settles
-// them.
-async function loadIndex() {
+// them. The import is a dry run when dryRun is set, as IMPORTER_DRY_RUN makes it.
+async function loadIndex({ dryRun = false } = {}) {
   const calls = [];
   const output = [];
   const result = deferred();
@@ -59,6 +59,10 @@ async function loadIndex() {
     },
     './src/ban-importer.js': {
       default: class {
+        constructor() {
+          this.dryRun = dryRun;
+        }
+
         async importBans() {
           calls.push('importBans');
         }
@@ -160,6 +164,18 @@ async function loadIndex() {
   assert.notStrictEqual(steps[1].counts(), first);
 }
 
+// A dry run only imports, as every other step writes.
+{
+  const index = await loadIndex({ dryRun: true });
+  const steps = Array.from(index.steps());
+  assert.deepStrictEqual(
+    steps.map(({ name }) => name),
+    ['importBans']
+  );
+  await steps[0].run();
+  assert.deepStrictEqual(index.calls, ['importBans']);
+}
+
 // The importer exits with the run's code: 0 finished, 1 failed, 3 stopped part-way and 75 skipped.
 for (const code of [0, 1, 3, 75]) {
   const index = await loadIndex();
@@ -237,5 +253,5 @@ for (const [code, exit] of [
 }
 
 console.log(
-  'Importer entry point checks passed: the steps, exit codes, unhandled rejections and a run left waiting.'
+  'Importer entry point checks passed: the steps, the dry run step, exit codes, unhandled rejections and a run left waiting.'
 );

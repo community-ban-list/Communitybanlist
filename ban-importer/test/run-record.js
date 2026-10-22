@@ -311,8 +311,8 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 
 // A run only counts as a success when it exited 0 and its import imported at least one ban list,
 // if it had any, so runs during a BattleMetrics outage, when every list fails, never hold off the
-// stale alert. A list that was removed during the run was not imported either. A run whose import
-// gave no counts, or had no lists, is judged by its exit code.
+// stale alert. A list that was removed during the run was not imported either, and a dry run
+// imports nothing. A run whose import gave no counts, or had no lists, is judged by its exit code.
 {
   const database = fakeDatabase();
   const { default: RunRecord, saveRecord, succeeded, STATE, clock } = await loadRunRecord(database);
@@ -344,6 +344,12 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
   }
   assert.strictEqual(succeeded(record(imported([{ id: 2, fetched: 120 }]), 1)), false);
   assert.strictEqual(succeeded(record(null, 3)), false);
+
+  database.state.delete(STATE.LAST_SUCCESS_AT);
+  const dryRun = record({ ...imported([{ id: 2, fetched: 120 }]), dryRun: true });
+  assert.strictEqual(succeeded(dryRun), false);
+  await saveRecord(dryRun);
+  assert.ok(!database.state.has(STATE.LAST_SUCCESS_AT));
 }
 
 // The staleness check: no run has succeeded for 3 cadences. It compares when runs started.
@@ -422,6 +428,25 @@ const stalenessRows = (lastSuccessAt, extra = {}) => ({
   );
   assert.strictEqual(discord.length, 2);
   assert.strictEqual(database.transactions(), transactions + 1);
+}
+
+// An alert after a dry run, which finished but imported nothing, says it was one.
+{
+  const database = fakeDatabase({
+    rows: stalenessRows(START - 3 * CADENCE - 30 * MINUTE, {
+      lastRun: JSON.stringify({
+        endedAt: '2026-10-15T11:00:00.000Z',
+        exitCode: 0,
+        counts: { importBans: { lists: 20, dryRun: true, banLists: [{ id: 1, fetched: 9 }] } }
+      })
+    })
+  });
+  const { alertIfStale, discord } = await loadRunRecord(database);
+  assert.strictEqual(await alertIfStale({ cadenceSeconds, startedAt: START }), true);
+  assert.match(
+    discord[0],
+    / The last run ended at 2026-10-15T11:00:00\.000Z with exit code 0, but was a dry run, which imports nothing\.$/
+  );
 }
 
 // Walk the schedule, with a run starting every 6 hours, as the script that starts them does. Each

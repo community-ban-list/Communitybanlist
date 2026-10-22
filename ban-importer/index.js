@@ -35,26 +35,28 @@ function counted(name, work) {
 }
 
 // The run's steps, in order, each named for the run record, which also keeps the counts a step
-// gives. A run that is asked to stop does so between them.
+// gives. A run that is asked to stop does so between them. A dry run (IMPORTER_DRY_RUN) only
+// imports, writing nothing, as every other step writes.
 const steps = [];
+const writes = !banImporter.dryRun;
 if (TASKS_TO_COMPLETE.IMPORT_BANS)
   steps.push({
     name: 'importBans',
     run: () => banImporter.importBans(),
     counts: () => banImporter.report()
   });
-if (TASKS_TO_COMPLETE.UPDATE_STEAM_USER_INFO)
+if (TASKS_TO_COMPLETE.UPDATE_STEAM_USER_INFO && writes)
   steps.push(counted('updateSteamUserInfo', (counts) => Core.updateSteamUserInfo(counts)));
-if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_POINTS)
+if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_POINTS && writes)
   steps.push(
     { name: 'clearOrphanedUsers', run: () => Core.clearOrphanedUsers() },
     { name: 'updateReputationPoints', run: () => Core.updateReputationPoints() }
   );
-if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_RANK)
+if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_RANK && writes)
   steps.push({ name: 'updateReputationRank', run: () => Core.updateReputationRank() });
-if (TASKS_TO_COMPLETE.UPDATE_EXPORT_BANS)
+if (TASKS_TO_COMPLETE.UPDATE_EXPORT_BANS && writes)
   steps.push(counted('updateExportBans', (counts) => ExportBanManager.updateExportBans(counts)));
-if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS)
+if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS && writes)
   steps.push(counted('exportExportBans', (counts) => Core.exportExportBans(counts)));
 
 // Set once the run has ended, as the importer exits with the run's code.

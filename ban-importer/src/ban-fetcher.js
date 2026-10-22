@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { createHash } from 'crypto';
 
 import { battlemetrics } from 'scbl-lib/apis';
 import { classifyBanReason, Logger } from 'scbl-lib/utils';
@@ -13,13 +14,32 @@ const REMOTE_MAX_SIZE = 20 * 1024 * 1024;
 const REMOTE_ATTEMPTS = 3;
 const REMOTE_RETRY_DELAY = 2000; // doubled after each failed attempt
 
+// A remote list's ETag and Last-Modified are kept, to ask its host whether the file has changed,
+// only when they fit the columns that keep them and are plain text.
+const MAX_ETAG_LENGTH = 255;
+const MAX_LAST_MODIFIED_LENGTH = 64;
+
 const BATTLEMETRICS_BANS = new URL('https://api.battlemetrics.com/bans');
 const BATTLEMETRICS_PAGE_SIZE = 100;
 
 // A BattleMetrics list is read for at most this many pages, in case its links never end. The
-// largest lists need about 120. BattleMetrics' count of a list's bans does not lower the limit, as
-// it is not known yet whether the count includes expired bans.
+// largest lists need about 120. With the count check on for the list, it is read for at most as
+// many pages as BattleMetrics' count of its bans needs, and BATTLEMETRICS_EXTRA_PAGES more, as bans
+// may be added while it is read.
 const BATTLEMETRICS_MAX_PAGES = 2000;
+const BATTLEMETRICS_EXTRA_PAGES = 50;
+
+// A read of all of a BattleMetrics list is complete only if the number of different bans it read,
+// with or without a SteamID, is within this many of BattleMetrics' count of the list's bans on its
+// first page, plus however much that count changed by its last page.
+const COUNT_TOLERANCE = 2;
+
+// Bans added or removed while a list is read change BattleMetrics' count of them on later pages,
+// but by little: counts on the pages of one read that differ by more than this many, or this share
+// of the first page's count if that is more, are taken to be wrong, so the read cannot be checked.
+// A wrong count on the last page would otherwise widen the tolerance above to most of the list.
+const COUNT_DRIFT_BANS = 10;
+const COUNT_DRIFT_SHARE = 0.01;
 
 async function doSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -64,7 +84,8 @@ const MAX_STEAM_ID = 76561202255233023n;
 // The SteamID64 in a value, such as a SteamID on its own or in a profile's address, or null. It is a
 // run of exactly 17 digits, not part of a longer number, that is a player's account. Anything else,
 // e.g. a longer number or one outside that range, is not a SteamID Steam can know, and would only
-// make a player that is never found.
+// make a player that is never found. Spaces around the value, and the case of an address, make no
+// difference.
 export function findSteamIDIn(value) {
   const match = /(?<![0-9])[0-9]{17}(?![0-9])/.exec(String(value ?? ''));
   if (!match) return null;
@@ -72,33 +93,78 @@ export function findSteamIDIn(value) {
   return steamID >= MIN_STEAM_ID && steamID <= MAX_STEAM_ID ? match[0] : null;
 }
 
-// Get the SteamID of the player banned from a BattleMetrics ban's identifiers. A ban without a
-// valid one is skipped.
-function findSteamID(identifiers) {
+// The SteamIDs of the player banned, from a BattleMetrics ban's steamID identifiers: each valid one
+// once, in the order the ban gives them, as { steamID, manual }, where manual says whether an admin
+// added it by hand rather than BattleMetrics linking it to the player. A ban without any is
+// skipped.
+export function findSteamIDs(identifiers) {
+  const steamIDs = [];
   for (const identifier of Array.isArray(identifiers) ? identifiers : []) {
     // Ignore identifiers other than SteamIDs.
     if (!identifier || identifier.type !== 'steamID') continue;
 
     // The SteamID is on its own or in the profile's address, or else in the profile's details.
-    const steamUser = findSteamIDIn(identifier.identifier || identifier.metadata?.profile?.steamid);
-    if (steamUser) return steamUser;
+    const steamID =
+      findSteamIDIn(identifier.identifier) ?? findSteamIDIn(identifier.metadata?.profile?.steamid);
+    if (!steamID) continue;
+    const manual = identifier.manual === true;
+    const known = steamIDs.find((entry) => entry.steamID === steamID);
+    if (known) known.manual ||= manual;
+    else steamIDs.push({ steamID, manual });
   }
-  return null;
+  return steamIDs;
+}
+
+// The player a new ban is for, of its SteamIDs: the first that an admin added by hand, as that is
+// the account the admin meant, or else the first. A ban already saved keeps its player while that
+// is still one of its SteamIDs (see chooseSteamUser in apply-list.js).
+function firstChoice(steamIDs) {
+  return (steamIDs.find(({ manual }) => manual) ?? steamIDs[0]).steamID;
+}
+
+function sha256(text) {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+// A response header to keep, if it fits its column and is plain text, or null.
+function keptHeader(response, name, maxLength) {
+  const value = response?.headers?.[name];
+  if (typeof value !== 'string' || value.length > maxLength || !/^[\x20-\x7e]+$/.test(value))
+    return null;
+  return value;
 }
 
 export default class BanFetcher {
+  // countCheck turns on the check that a read of all of a BattleMetrics list read every ban
+  // BattleMetrics counts on it, for every list but those whose IDs, as text, countCheckSkip has.
+  constructor({ countCheck = true, countCheckSkip = new Set() } = {}) {
+    this.countCheck = countCheck;
+    this.countCheckSkip = countCheckSkip;
+  }
+
   // Fetch all of a ban list, or throw if any part of it cannot be fetched, so the bans that could
-  // not be read never look removed. Returns the bans, the number of records the list gave
-  // (including those without a SteamID), and BattleMetrics' count of the list's bans, or null. A
-  // BattleMetrics list that gives no bans but counts some throws an error marked bansHidden, with
-  // the count as metaTotal. A run that is asked to stop throws RunStopped before the next request,
-  // as nothing of the list has been saved yet.
-  async fetchBanList(banList) {
+  // not be read never look removed. Returns:
+  // - bans: the bans, each with its SteamIDs (steamIDs) and the player a new ban is for
+  //   (steamUser);
+  // - rawCount: the number of records the list gave, including those without a SteamID;
+  // - firstMetaTotal: BattleMetrics' count of the list's bans, or null;
+  // - complete: whether the read is complete, so that the bans it did not find may be removed, and
+  //   if it is not, why not (incomplete). A BattleMetrics list is read in full by following its
+  //   links to the end, and with the count check on for the list, the bans read must also match
+  //   BattleMetrics' count of them (see checkCount);
+  // - for a remote list, remote: its ETag and Last-Modified, if it has them, and the SHA-256 of
+  //   the file, and unchanged: whether the file is the one the list was last imported from, by
+  //   those of previous, the ones the list was last imported with, if given. A list whose file is
+  //   unchanged is not read again, so it has no bans here.
+  // A BattleMetrics list that gives no bans but counts some throws an error marked bansHidden, with
+  // the count as metaTotal, whether the count check is on or not. A run that is asked to stop
+  // throws RunStopped before the next request, as nothing of the list has been saved yet.
+  async fetchBanList(banList, { previous = null } = {}) {
     Logger.verbose('BanFetcher', 2, `Fetching ban list (ID: ${banList.id})...`);
     let list;
     switch (banList.type) {
       case 'remote':
-        list = await this.fetchRemoteBanList(banList);
+        list = await this.fetchRemoteBanList(banList, previous);
         break;
       case 'battlemetrics':
         list = await this.fetchBattlemetricsBanList(banList);
@@ -113,24 +179,37 @@ export default class BanFetcher {
     return { ...list, bans: [...bans.values()] };
   }
 
-  async fetchRemoteBanList(banList) {
+  // Fetch a remote list's file. When previous gives the ETag or Last-Modified the list was last
+  // imported with, its host is asked whether the file has changed since, and an answer of 304 Not
+  // Modified means it has not. A file whose SHA-256 is the one in previous has not changed either.
+  async fetchRemoteBanList(banList, previous = null) {
     // Fetch ban data.
     Logger.verbose(
       'BanFetcher',
       2,
       `Fetching remote ban list data for ban list (ID: ${banList.id})...`
     );
+    const headers = {};
+    if (previous?.etag) headers['If-None-Match'] = previous.etag;
+    if (previous?.lastModified) headers['If-Modified-Since'] = previous.lastModified;
+    const conditional = Object.keys(headers).length > 0;
+
     let data;
+    let response;
     for (let attempt = 1; ; attempt++) {
       // A run that is asked to stop does so before the next attempt.
       stopIfRequested();
       try {
-        const response = await axios.get(banList.source, {
+        response = await axios.get(banList.source, {
           responseType: 'text',
           timeout: REMOTE_TIMEOUT,
           signal: AbortSignal.timeout(REMOTE_DEADLINE),
           maxContentLength: REMOTE_MAX_SIZE,
-          maxBodyLength: REMOTE_MAX_SIZE
+          maxBodyLength: REMOTE_MAX_SIZE,
+          headers,
+          // 304 Not Modified is an answer only to a question asked.
+          validateStatus: (status) =>
+            (status >= 200 && status < 300) || (conditional && status === 304)
         });
         // Any successful response is final, whatever it holds.
         data = String(response.data ?? '');
@@ -154,8 +233,39 @@ export default class BanFetcher {
       }
     }
 
+    // A file that has not changed since the list was last imported is not read again. A host that
+    // answers 304 Not Modified may give a new ETag or Last-Modified, and otherwise the old ones are
+    // kept.
+    const unchanged = {
+      bans: [],
+      rawCount: 0,
+      firstMetaTotal: null,
+      complete: true,
+      unchanged: true
+    };
+    if (response.status === 304)
+      return {
+        ...unchanged,
+        remote: {
+          etag: keptHeader(response, 'etag', MAX_ETAG_LENGTH) ?? previous.etag ?? null,
+          lastModified:
+            keptHeader(response, 'last-modified', MAX_LAST_MODIFIED_LENGTH) ??
+            previous.lastModified ??
+            null,
+          bodyHash: previous.bodyHash ?? null
+        }
+      };
+    const remote = {
+      etag: keptHeader(response, 'etag', MAX_ETAG_LENGTH),
+      lastModified: keptHeader(response, 'last-modified', MAX_LAST_MODIFIED_LENGTH),
+      bodyHash: sha256(data)
+    };
+    if (previous?.bodyHash && previous.bodyHash === remote.bodyHash)
+      return { ...unchanged, remote };
+
     // An empty file is a list with no bans.
-    if (data.trim() === '') return { bans: [], rawCount: 0, firstMetaTotal: null };
+    if (data.trim() === '')
+      return { bans: [], rawCount: 0, firstMetaTotal: null, complete: true, remote };
 
     const bans = [];
 
@@ -196,15 +306,53 @@ export default class BanFetcher {
         'The remote ban list has no bans in the `steamID:expiry //reason` format, so it may be an error page.'
       );
 
-    return { bans, rawCount: bans.length, firstMetaTotal: null };
+    return { bans, rawCount: bans.length, firstMetaTotal: null, complete: true, remote };
+  }
+
+  // Whether a read of all of a BattleMetrics list is complete, by the number of different bans it
+  // read (scanned) and BattleMetrics' counts of the list's bans: on its first page (first), its
+  // last (last), and the lowest and highest on any page. With the count check off (countCheck), a
+  // read that reached the list's last page is complete. With it on, the counts must differ by no
+  // more than COUNT_DRIFT_BANS, or COUNT_DRIFT_SHARE of the first, and the number read must be
+  // within COUNT_TOLERANCE of the first count, plus however much the count changed by the last
+  // page. A list without a count cannot be checked.
+  checkCount(scanned, { first, last, lowest, highest }, countCheck = this.countCheck) {
+    if (!countCheck) return { complete: true };
+    if (first === null)
+      return {
+        complete: false,
+        incomplete:
+          "BattleMetrics gave no count of the list's bans, so it could not be checked that every ban was read"
+      };
+    const format = (count) => count.toLocaleString('en-US');
+    if (highest - lowest > Math.max(COUNT_DRIFT_BANS, Math.ceil(first * COUNT_DRIFT_SHARE))) {
+      const other = highest - first >= first - lowest ? highest : lowest;
+      return {
+        complete: false,
+        incomplete: `BattleMetrics counts ${format(first)} bans on the list's first page, but ${format(other)} on a later one, which bans added or removed while it was read cannot explain, so it could not be checked that every ban was read`
+      };
+    }
+    const tolerance = Math.abs(last - first) + COUNT_TOLERANCE;
+    if (Math.abs(scanned - first) <= tolerance) return { complete: true };
+    return {
+      complete: false,
+      incomplete: `BattleMetrics counts ${format(first)} bans on the list, but ${format(scanned)} were read`
+    };
   }
 
   async fetchBattlemetricsBanList(banList) {
     // Setup the initial parameters for the first fetch.
     let params = { 'filter[banList]': banList.source, 'page[size]': BATTLEMETRICS_PAGE_SIZE };
     const visited = new Set([pageAddress(params)]);
-    let firstMetaTotal = null;
+    // The count check is on for the list unless it is off, or off for the list.
+    const countCheck = this.countCheck && !this.countCheckSkip.has(String(banList.id));
+    // BattleMetrics' counts of the list's bans: on its first page, its last, and the lowest and
+    // highest on any page.
+    const counts = { first: null, last: null, lowest: null, highest: null };
+    let maxPages = BATTLEMETRICS_MAX_PAGES;
     let rawCount = 0;
+    // The IDs of the bans read, with or without a SteamID, which the count check counts.
+    const uids = new Set();
     const bans = [];
 
     // Loop until there's no more pages to fetch. A page that cannot be fetched, after the
@@ -224,18 +372,33 @@ export default class BanFetcher {
       if (!data || !Array.isArray(data.data) || !data.links)
         throw new Error('BattleMetrics returned an invalid page of bans.');
 
-      // The list's ban count, if BattleMetrics gives one, is returned with its bans.
+      // The list's ban count, if BattleMetrics gives one, is returned with its bans, and with the
+      // count check on, it limits the pages read.
       const total = data.meta && data.meta.total;
-      if (page === 1 && Number.isInteger(total) && total >= 0) firstMetaTotal = total;
+      const count = Number.isInteger(total) && total >= 0 ? total : null;
+      if (page === 1 && count !== null) {
+        counts.first = count;
+        if (countCheck)
+          maxPages = Math.min(
+            BATTLEMETRICS_MAX_PAGES,
+            Math.ceil(count / BATTLEMETRICS_PAGE_SIZE) + BATTLEMETRICS_EXTRA_PAGES
+          );
+      }
+      if (count !== null)
+        Object.assign(counts, {
+          last: count,
+          lowest: Math.min(counts.lowest ?? count, count),
+          highest: Math.max(counts.highest ?? count, count)
+        });
 
       // BattleMetrics answers a list that CBL may see, but not its bans, with no bans that it still
       // counts. Such a list has not emptied, so it fails as hidden bans rather than look empty.
-      if (page === 1 && data.data.length === 0 && firstMetaTotal > 0) {
+      if (page === 1 && data.data.length === 0 && counts.first > 0) {
         const error = new Error(
-          `BattleMetrics counts ${firstMetaTotal.toLocaleString('en-US')} bans on the list but gave none of them, so CBL may no longer be allowed to see its bans.`
+          `BattleMetrics counts ${counts.first.toLocaleString('en-US')} bans on the list but gave none of them, so CBL may no longer be allowed to see its bans.`
         );
         error.bansHidden = true;
-        error.metaTotal = firstMetaTotal;
+        error.metaTotal = counts.first;
         throw error;
       }
 
@@ -245,12 +408,13 @@ export default class BanFetcher {
         const attributes = ban && ban.attributes;
         if (!attributes || !attributes.uid)
           throw new Error('BattleMetrics returned a ban without an ID.');
+        uids.add(attributes.uid);
 
-        // Get the SteamID of the player banned.
-        const steamUser = findSteamID(attributes.identifiers);
+        // Get the SteamIDs of the player banned.
+        const steamIDs = findSteamIDs(attributes.identifiers);
 
         // Sometimes there is no SteamID in the response. If this is the case we ignore the ban.
-        if (steamUser === null) continue;
+        if (steamIDs.length === 0) continue;
 
         // Turn the dates into date objects or null if permanent ban.
         const created = new Date(attributes.timestamp);
@@ -260,7 +424,8 @@ export default class BanFetcher {
         bans.push({
           id: `${banList.id},${attributes.uid}`,
 
-          steamUser,
+          steamUser: firstChoice(steamIDs),
+          steamIDs,
 
           created,
           expires,
@@ -277,10 +442,8 @@ export default class BanFetcher {
       // If that is the last page then break out the loop.
       const next = data.links.next;
       if (!next) break;
-      if (page >= BATTLEMETRICS_MAX_PAGES)
-        throw new Error(
-          `BattleMetrics gave more than ${BATTLEMETRICS_MAX_PAGES} pages of bans for the list.`
-        );
+      if (page >= maxPages)
+        throw new Error(`BattleMetrics gave more than ${maxPages} pages of bans for the list.`);
 
       // Store the parameters for the next page fetch. The link must stay on the list's bans and
       // must not lead back to a page already fetched.
@@ -296,6 +459,11 @@ export default class BanFetcher {
       visited.add(address);
     }
 
-    return { bans, rawCount, firstMetaTotal };
+    return {
+      bans,
+      rawCount,
+      firstMetaTotal: counts.first,
+      ...this.checkCount(uids.size, counts, countCheck)
+    };
   }
 }

@@ -145,10 +145,10 @@ export default class RunRecord {
 
 // Whether a run counts as a success: it exited 0, and its import imported at least one ban list, if
 // it had any to import. A run while every list fails, e.g. during a BattleMetrics outage, does not,
-// so it cannot hold off the stale alert. A run whose import gave no counts is judged by its exit
-// code.
+// so it cannot hold off the stale alert, and nor does a dry run, which imports nothing. A run whose
+// import gave no counts is judged by its exit code.
 export function succeeded(record) {
-  if (record?.exitCode !== 0) return false;
+  if (record?.exitCode !== 0 || record.counts?.importBans?.dryRun === true) return false;
   const banLists = record.counts?.importBans?.banLists;
   return (
     !Array.isArray(banLists) ||
@@ -276,6 +276,8 @@ export async function alertIfStale({ cadenceSeconds, skipped = false, startedAt 
     if (lastRun?.endedAt) {
       let how = '';
       if (lastRun.reason) how = ` (${lastRun.reason})`;
+      else if (lastRun.exitCode === 0 && lastRun.counts?.importBans?.dryRun === true)
+        how = ', but was a dry run, which imports nothing';
       else if (lastRun.exitCode === 0 && !succeeded(lastRun))
         how = `, but imported none of its ${lastRun.counts.importBans.lists} ban lists`;
       parts.push(

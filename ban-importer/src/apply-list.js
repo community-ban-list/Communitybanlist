@@ -1,0 +1,464 @@
+import { sequelize } from 'scbl-lib/db';
+import {
+  ForeignKeyConstraintError,
+  QueryTypes,
+  ValidationError,
+  isDatabaseUnavailable
+} from 'scbl-lib/db/sequelize';
+import { describeError, Logger } from 'scbl-lib/utils';
+
+import { isStopping } from './run-control.js';
+
+// Bringing a ban list's bans in the database up to date with the bans its source gave, without
+// writing what has not changed. The list's stored bans are read with one query and compared with
+// the bans fetched, here in JavaScript, and only the bans that are new or changed are written, in
+// transactions of BATCH_SIZE bans that also add their players and queue those players for an
+// update. The bans the list no longer has are removed by the rules of planRemovals, also in
+// transactions of BATCH_SIZE bans. ban-importer.js decides what is applied to each list.
+
+// Thank god for this function.
+
+const MAX_RETRIES = 5;
+const RETRY_DELAY = 5000; // 5 seconds
+
+// MySQL's error numbers for a deadlock and a lock wait timeout, after which the statement, or the
+// transaction it was in, can be run again.
+const LOCK_ERRORS = [1213, 1205];
+
+// Sequelize reports a transaction that MySQL had already rolled back, e.g. for a deadlock, as this
+// error instead.
+const ROLLED_BACK = /finished with state: rollback/;
+
+// Whether a failed database operation could work if it is run again. Foreign key and validation
+// errors, like anything else not listed here, would only fail again.
+export function isRetryable(err) {
+  if (err instanceof ForeignKeyConstraintError || err instanceof ValidationError) return false;
+  return (
+    isDatabaseUnavailable(err) ||
+    LOCK_ERRORS.includes(err?.original?.errno) ||
+    ROLLED_BACK.test(err?.message)
+  );
+}
+
+// Run the operation, and run it again while it fails in a way that could pass, up to MAX_RETRIES
+// times in all. An operation that is a transaction is run again as a whole, as MySQL rolls back
+// all of a transaction that ends in a deadlock.
+export async function retryOperation(operation, retries = MAX_RETRIES) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await operation();
+    } catch (err) {
+      if (attempt >= retries || !isRetryable(err)) throw err;
+      Logger.verbose(
+        'BanImporter',
+        2,
+        `Attempt ${attempt} failed (${describeError(err)}). Retrying in ${RETRY_DELAY / 1000}s...`
+      );
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY));
+    }
+  }
+}
+
+// Whether a ban could not be saved because its ban list was not in the database.
+export function isMissingBanList(err) {
+  return err instanceof ForeignKeyConstraintError && (err.fields || []).includes('banList');
+}
+
+// A time to compare, in milliseconds since 1970, or null for none. MySQL's DATETIME columns come
+// back as Dates, and text in their format is read as UTC, as the CBL's connections use UTC. An
+// invalid time is NaN, which is the same only as another NaN.
+export function timeOf(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value.getTime === 'function') return value.getTime();
+  if (typeof value === 'number') return value;
+  const text = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(text))
+    return new Date(`${text.replace(' ', 'T')}Z`).getTime();
+  return new Date(text).getTime();
+}
+
+// Whether a ban has expired, as MySQL's TINYINT gives it (1 or 0) or as the fetcher does (true or
+// false), or null for none.
+export function flagOf(value) {
+  if (value === null || value === undefined) return null;
+  return Boolean(Number(value));
+}
+
+// Text to compare, with a missing value the same as NULL, as remote bans have no note.
+export function textOf(value) {
+  if (value === null || value === undefined) return null;
+  return String(value);
+}
+
+// The values of a ban that are compared with the stored ban, each with how it is read, and that
+// are written when they differ. A ban's created time is only written when it is new.
+const COMPARED = {
+  steamUser: textOf,
+  expires: timeOf,
+  expired: flagOf,
+  reason: textOf,
+  rawReason: textOf,
+  rawNote: textOf
+};
+export const COMPARED_FIELDS = Object.keys(COMPARED);
+
+function same(field, value, stored) {
+  return Object.is(COMPARED[field](value), COMPARED[field](stored));
+}
+
+// The player a fetched ban is for, given the player its stored ban has, if it has one: the stored
+// player while that is still one of the ban's SteamIDs, so a ban never moves only because its
+// SteamIDs are given in another order, and otherwise the player the fetcher chose for a new ban,
+// the first SteamID an admin added by hand, or else the first.
+export function chooseSteamUser(ban, storedSteamUser) {
+  const steamIDs = ban.steamIDs ?? [{ steamID: ban.steamUser }];
+  if (storedSteamUser !== undefined && steamIDs.some(({ steamID }) => steamID === storedSteamUser))
+    return storedSteamUser;
+  return ban.steamUser;
+}
+
+// The values of a fetched ban to write, for the player given.
+function toWrite(ban, steamUser) {
+  return {
+    id: ban.id,
+    steamUser,
+    created: ban.created ?? null,
+    expires: ban.expires ?? null,
+    expired: Boolean(ban.expired),
+    reason: ban.reason ?? null,
+    rawReason: ban.rawReason ?? null,
+    rawNote: ban.rawNote ?? null
+  };
+}
+
+// Compare the bans fetched for a list with the list's stored bans, as readStoredBans gives them.
+// Returns:
+// - added: the bans that are new, to write;
+// - changed: the bans whose values differ from the stored ones, to write, each with the fields that
+//   differ (fields) and the player its stored ban has (previousSteamUser);
+// - moves: the bans whose stored player is no longer one of their SteamIDs, each with that player
+//   (from) and the one it would move to (to). Only with applyMoves is a ban moved, which makes it
+//   changed, and otherwise it keeps its stored player;
+// - unchanged: how many bans are as they are stored, which are not written.
+// Dates are compared by their time, 1 and 0 as true and false, and a missing value as NULL.
+export function diffBans(fetched, stored, { applyMoves = false } = {}) {
+  const storedBans = new Map(stored.map((row) => [row.id, row]));
+  const added = [];
+  const changed = [];
+  const moves = [];
+  let unchanged = 0;
+  for (const ban of fetched) {
+    const old = storedBans.get(ban.id);
+    if (!old) {
+      added.push(toWrite(ban, chooseSteamUser(ban)));
+      continue;
+    }
+
+    let steamUser = old.steamUser;
+    const chosen = chooseSteamUser(ban, old.steamUser);
+    if (chosen !== old.steamUser) {
+      moves.push({ id: ban.id, from: old.steamUser, to: chosen });
+      if (applyMoves) steamUser = chosen;
+    }
+
+    const write = toWrite(ban, steamUser);
+    const fields = COMPARED_FIELDS.filter((field) => !same(field, write[field], old[field]));
+    if (fields.length === 0) unchanged++;
+    else changed.push({ ...write, fields, previousSteamUser: old.steamUser });
+  }
+  return { added, changed, moves, unchanged };
+}
+
+// How long a ban must have been missing from complete reads of its list, from the first that did
+// not have it to the latest, before it is removed, unless it is removed at once.
+export const CONFIRM_AFTER = 10 * 60 * 1000;
+
+// Missing bans are removed at once when fewer than this many, and this share of the bans the list
+// had before the read, would otherwise wait.
+export const REMOVE_AT_ONCE_BANS = 10;
+export const REMOVE_AT_ONCE_SHARE = 0.05;
+
+// A list of at least this many bans whose read found none of them keeps them until an admin
+// confirms that it lost them all.
+export const FULL_REMOVAL_BANS = 10;
+
+// Decide what to do with the bans missing from a complete read of a list: missing is their IDs,
+// stored and fetched the numbers of bans the list had before the read and the read found, pending
+// when each ban recorded as missing before was first missing, in milliseconds, by its ID, held the
+// IDs of the bans the list still has that an earlier run held for an admin, now the time of the
+// read in milliseconds, replace whether the bans are being replaced by those of the list's new
+// source, and confirmed whether the list may lose any number of bans at once. Returns:
+// - remove: the IDs of the bans to remove now;
+// - wait: the IDs of the bans to keep until a later complete read confirms they are gone;
+// - hold: why bans wait for an admin to confirm their removal, or null: 'empty' for a read that
+//   found no bans, and 'full' for one that found none of the bans of a list of at least
+//   FULL_REMOVAL_BANS bans, or none of those an earlier run held for that reason;
+// - held: the IDs of the bans that wait for an admin;
+// - released: the IDs of the bans an earlier run held that no longer wait for an admin, but for a
+//   later complete read, as if first missing now.
+// So with confirmed, every missing ban is removed at once. Otherwise a list that seems to have
+// lost all its bans keeps them, as its source more likely broke, unless its bans are being
+// replaced. A 'full' hold lasts until one of its bans comes back, or the bans are replaced: the
+// bans the list saved since are not its bans from before. Any other missing ban is removed once
+// complete reads have not had it for CONFIRM_AFTER, and waits until then, but when fewer than
+// REMOVE_AT_ONCE_BANS and REMOVE_AT_ONCE_SHARE of the list would wait, all of them are removed at
+// once.
+export function planRemovals({
+  missing,
+  stored,
+  fetched,
+  pending = new Map(),
+  held = new Set(),
+  now = Date.now(),
+  replace = false,
+  confirmed = false
+}) {
+  const none = { remove: [], wait: [], hold: null, held: [], released: [] };
+  if (missing.length === 0) return none;
+  if (confirmed) return { ...none, remove: [...missing] };
+  if (!replace && fetched === 0) return { ...none, hold: 'empty', held: [...missing] };
+  if (!replace && missing.length >= stored && stored >= FULL_REMOVAL_BANS)
+    return { ...none, hold: 'full', held: [...missing] };
+
+  // A list an earlier run held stays held while none of the bans held has come back. The other
+  // missing bans, which it saved since, are removed as usual.
+  const isMissing = new Set(missing);
+  const stillHeld = [...held].filter((id) => isMissing.has(id));
+  const holding = !replace && held.size > 0 && stillHeld.length === held.size;
+  const released = new Set(holding ? [] : stillHeld);
+  const others = holding ? missing.filter((id) => !held.has(id)) : missing;
+
+  const due = (id) =>
+    !released.has(id) && pending.has(id) && now - pending.get(id) >= CONFIRM_AFTER;
+  const wait = others.filter((id) => !due(id));
+  const plan =
+    wait.length < Math.max(REMOVE_AT_ONCE_BANS, stored * REMOVE_AT_ONCE_SHARE)
+      ? { remove: [...others], wait: [] }
+      : { remove: others.filter(due), wait };
+  return {
+    ...plan,
+    hold: holding ? 'full' : null,
+    held: holding ? stillHeld : [],
+    released: [...released]
+  };
+}
+
+// The bans written, and the bans removed, at most this many in one transaction.
+export const BATCH_SIZE = 500;
+
+// Queue players for an update of their Steam profile, export bans, and reputation points and rank,
+// which the later steps of the run make for players whose time of their last update is NULL.
+const QUEUE_PLAYERS =
+  'UPDATE SteamUsers SET lastRefreshedInfo = NULL, lastRefreshedExport = NULL, lastRefreshedReputationPoints = NULL, lastRefreshedReputationRank = NULL WHERE id IN (?)';
+
+// A ban, new or changed, is written with one statement, which never changes when the ban was
+// created. MySQL 8.0.19 and later take a row alias, here new, for the values given.
+const WRITE_BANS =
+  'INSERT INTO Bans (id, created, expires, expired, reason, rawReason, rawNote, steamUser, banList, createdAt, updatedAt) VALUES';
+const ON_DUPLICATE_BAN =
+  'AS new ON DUPLICATE KEY UPDATE steamUser = new.steamUser, expires = new.expires, expired = new.expired, reason = new.reason, rawReason = new.rawReason, rawNote = new.rawNote, updatedAt = new.updatedAt';
+
+// Placeholders for rows of values, e.g. (?, ?), (?, ?) for 2 rows of 2 values.
+function placeholders(rows, columns) {
+  const row = `(${Array(columns).fill('?').join(', ')})`;
+  return Array(rows).fill(row).join(', ');
+}
+
+// A time as MySQL's DATETIME columns take it, in UTC and to the millisecond, as the CBL's models
+// write times, or null. A Date given to a query as it is loses its milliseconds, so a ban written
+// that way would differ from its source on every run. Throws for an invalid time.
+export function sqlTime(value) {
+  if (value === null || value === undefined) return null;
+  return new Date(timeOf(value)).toISOString().replace('T', ' ').replace('Z', '');
+}
+
+// The number of rows a statement changed, from what Sequelize resolves with: [result, metadata],
+// or [insertId, affectedRows] for an INSERT.
+function affectedRows(result) {
+  if (!Array.isArray(result)) return 0;
+  if (typeof result[1] === 'number') return result[1];
+  return result[0]?.affectedRows ?? 0;
+}
+
+// The list's stored bans, with the values the import compares.
+export function readStoredBans(banList) {
+  return sequelize.query(
+    'SELECT id, steamUser, expires, expired, reason, rawReason, rawNote FROM Bans WHERE banList = ?',
+    { replacements: [banList], type: QueryTypes.SELECT }
+  );
+}
+
+// The list's bans that earlier complete reads did not have, by ID, each with when the first of them
+// did not (firstMissingAt), and when a run began holding it for an admin (heldAt), or null, in
+// milliseconds.
+export async function readPendingRemovals(banList) {
+  const rows = await sequelize.query(
+    'SELECT banId, firstMissingAt, heldAt FROM BanListPendingRemovals WHERE banList = ?',
+    { replacements: [banList], type: QueryTypes.SELECT }
+  );
+  return new Map(
+    rows.map(({ banId, firstMissingAt, heldAt }) => [
+      banId,
+      { firstMissingAt: timeOf(firstMissingAt), heldAt: timeOf(heldAt) }
+    ])
+  );
+}
+
+// Write a batch of bans in one transaction: add their players that are new, write the bans, and
+// queue for an update their players and, for a changed ban, the player it had before.
+async function writeBatch(banList, writes, now) {
+  const players = [...new Set(writes.map(({ steamUser }) => steamUser))];
+  const queued = [
+    ...new Set(
+      writes.flatMap(({ steamUser, previousSteamUser }) =>
+        previousSteamUser ? [steamUser, previousSteamUser] : [steamUser]
+      )
+    )
+  ];
+  await sequelize.transaction(async (transaction) => {
+    await sequelize.query(
+      `INSERT IGNORE INTO SteamUsers (id, createdAt, updatedAt) VALUES ${placeholders(players.length, 3)}`,
+      { replacements: players.flatMap((id) => [id, now, now]), transaction }
+    );
+    await sequelize.query(`${WRITE_BANS} ${placeholders(writes.length, 11)} ${ON_DUPLICATE_BAN}`, {
+      replacements: writes.flatMap((write) => [
+        write.id,
+        sqlTime(write.created ?? now),
+        sqlTime(write.expires),
+        write.expired,
+        write.reason,
+        write.rawReason,
+        write.rawNote,
+        write.steamUser,
+        banList,
+        now,
+        now
+      ]),
+      transaction
+    });
+    await sequelize.query(QUEUE_PLAYERS, { replacements: [queued], transaction });
+  });
+}
+
+// Write the list's bans, new and changed, as diffBans gives them, in transactions of batchSize
+// bans, each run again as a whole while it fails in a way that could pass. onWritten is given the
+// bans of each transaction once it is committed. A batch that fails in another way is written again
+// a ban at a time, so that only the bans that cannot be saved are left out, each of which is passed
+// to onFailed with its error. Once the run is asked to stop, no more batches are started. Throws if
+// the database stays unavailable, or the list is not in the database. Resolves with whether the
+// writes stopped part-way.
+export async function writeBans(
+  banList,
+  writes,
+  { batchSize = BATCH_SIZE, now = new Date(), onWritten = () => {}, onFailed = () => {} } = {}
+) {
+  for (let i = 0; i < writes.length; i += batchSize) {
+    if (isStopping()) return { stopped: true };
+    const batch = writes.slice(i, i + batchSize);
+    try {
+      await retryOperation(() => writeBatch(banList, batch, now));
+      onWritten(batch);
+      continue;
+    } catch (err) {
+      if (isRetryable(err) || isMissingBanList(err)) throw err;
+      if (batch.length === 1) {
+        onFailed(batch[0], err);
+        continue;
+      }
+    }
+    for (const write of batch) {
+      try {
+        await retryOperation(() => writeBatch(banList, [write], now));
+        onWritten([write]);
+      } catch (err) {
+        if (isRetryable(err) || isMissingBanList(err)) throw err;
+        onFailed(write, err);
+      }
+    }
+  }
+  return { stopped: false };
+}
+
+// Remove bans from the list, each given as { id, steamUser }, and optionally the player it had
+// before (previousSteamUser), in transactions of batchSize bans, each of which also queues the bans'
+// players for an update, as they lost a ban, and drops the bans' records in BanListPendingRemovals.
+// Resolves with the number of bans removed.
+export async function removeBans(banList, bans, { batchSize = BATCH_SIZE } = {}) {
+  let removed = 0;
+  for (let i = 0; i < bans.length; i += batchSize) {
+    const batch = bans.slice(i, i + batchSize);
+    const ids = batch.map(({ id }) => id);
+    const players = [
+      ...new Set(
+        batch.flatMap(({ steamUser, previousSteamUser }) =>
+          previousSteamUser ? [steamUser, previousSteamUser] : [steamUser]
+        )
+      )
+    ];
+    removed += await retryOperation(() =>
+      sequelize.transaction(async (transaction) => {
+        await sequelize.query(QUEUE_PLAYERS, { replacements: [players], transaction });
+        const result = await sequelize.query('DELETE FROM Bans WHERE banList = ? AND id IN (?)', {
+          replacements: [banList, ids],
+          transaction
+        });
+        await sequelize.query(
+          'DELETE FROM BanListPendingRemovals WHERE banList = ? AND banId IN (?)',
+          { replacements: [banList, ids], transaction }
+        );
+        return affectedRows(result);
+      })
+    );
+  }
+  return removed;
+}
+
+// Record that the bans, by ID, were missing from the complete read of the list at now: as first
+// missing then, if they are not recorded yet, and as last missing then. With held, they are held for
+// an admin, from now if they were not already.
+export async function savePendingRemovals(
+  banList,
+  ids,
+  { now, held = false, batchSize = BATCH_SIZE }
+) {
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const batch = ids.slice(i, i + batchSize);
+    await retryOperation(() =>
+      sequelize.query(
+        `INSERT INTO BanListPendingRemovals (banList, banId, firstMissingAt, lastMissingAt, heldAt) VALUES ${placeholders(batch.length, 5)} AS new ON DUPLICATE KEY UPDATE lastMissingAt = new.lastMissingAt, heldAt = COALESCE(BanListPendingRemovals.heldAt, new.heldAt)`,
+        {
+          replacements: batch.flatMap((id) => [
+            banList,
+            id,
+            sqlTime(now),
+            sqlTime(now),
+            held ? sqlTime(now) : null
+          ])
+        }
+      )
+    );
+  }
+}
+
+// Stop holding the list's held bans for an admin: they wait for a later complete read instead, as
+// if first missing at now.
+export async function releaseHeldRemovals(banList, { now }) {
+  await retryOperation(() =>
+    sequelize.query(
+      'UPDATE BanListPendingRemovals SET firstMissingAt = ?, lastMissingAt = ?, heldAt = NULL WHERE banList = ? AND heldAt IS NOT NULL',
+      { replacements: [sqlTime(now), sqlTime(now), banList] }
+    )
+  );
+}
+
+// Drop the records of bans, by ID, that a read found again, or that the list no longer has.
+export async function clearPendingRemovals(banList, ids, { batchSize = BATCH_SIZE } = {}) {
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const batch = ids.slice(i, i + batchSize);
+    await retryOperation(() =>
+      sequelize.query('DELETE FROM BanListPendingRemovals WHERE banList = ? AND banId IN (?)', {
+        replacements: [banList, batch]
+      })
+    );
+  }
+}

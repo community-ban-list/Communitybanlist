@@ -55,12 +55,13 @@ async function load(path, dependencies, globals = {}) {
     identifier: url.href
   });
   let control;
+  let loadControl;
   await module.link(async (specifier, referencingModule) => {
     if (specifier === './run-control.js') {
-      control = new vm.SourceTextModule(
-        await readFile(new URL(specifier, referencingModule.identifier), 'utf8'),
-        { context }
+      loadControl ??= readFile(new URL(specifier, referencingModule.identifier), 'utf8').then(
+        (source) => new vm.SourceTextModule(source, { context })
       );
+      control = await loadControl;
       return control;
     }
     const exports = dependencies[specifier];
@@ -102,15 +103,15 @@ function failsOnce(bans) {
   };
 }
 
-// Load ban-importer.js with stand-ins for the database and the fetcher. lists gives each ban
-// list's stored bans and the bans the fetcher returns for it, as numbers, or a function that
-// returns them or throws, and optionally its source, which a test can change. The fetcher calls
-// onFetch(banList, control) before it returns, each ban's save calls hooks.onSave(id) and then
-// waits for its gate in saves.gates, if it has one, and each chunk of bans removed calls
-// hooks.onRemove(). The waits the importer starts and clears are recorded in waits, and take no
-// time once waits.instant is set. The lists' rows are read from syncs, and each row saved is
-// recorded in syncSaves. The check of which BattleMetrics ban lists CBL can see is off, as
-// import-bans.js tests it and the rows.
+// Load ban-importer.js, with the real apply-list.js, and stand-ins for the database and the
+// fetcher. lists gives each ban list's stored bans and the bans the fetcher returns for it, as
+// numbers, or a function that returns them or throws, and optionally its source, which a test can
+// change. The fetcher calls onFetch(banList, control) before it returns. Each statement that writes
+// bans calls hooks.onSave(id) for each of them and then waits for their gates in saves.gates, if
+// they have any, and each batch of bans removed calls hooks.onRemove(). The waits the importer
+// starts and clears are recorded in waits, and take no time once waits.instant is set. The lists'
+// rows are read from syncs, and each row saved is recorded in syncSaves. The check of which
+// BattleMetrics ban lists CBL can see is off, as import-bans.js tests it and the rows.
 async function loadBanImporter(lists, { onFetch = () => {}, options, syncs = [] } = {}) {
   const events = [];
   const lines = [];
@@ -129,9 +130,59 @@ async function loadBanImporter(lists, { onFetch = () => {}, options, syncs = [] 
         expired: false,
         banList
       }));
-      return { bans, rawCount: bans.length, firstMetaTotal: null };
+      return { bans, rawCount: bans.length, firstMetaTotal: null, complete: true };
     }
   }
+  // The statements apply-list.js sends, by their start.
+  const query = async (sql, { replacements } = {}) => {
+    if (sql.startsWith('SELECT id, steamUser,')) {
+      const [id] = replacements;
+      events.push(`read stored bans of ${id}`);
+      return lists[id].stored.map((n) => ({
+        id: `${id},${n}`,
+        steamUser: steamID(n),
+        expires: null,
+        expired: 0,
+        reason: null,
+        rawReason: null,
+        rawNote: null
+      }));
+    }
+    if (sql.startsWith('SELECT banId,')) {
+      events.push(`read missing bans of ${replacements[0]}`);
+      return [];
+    }
+    if (sql.startsWith('INSERT IGNORE INTO SteamUsers')) {
+      events.push('add Steam users');
+      return [{}, {}];
+    }
+    if (sql.startsWith('INSERT INTO Bans')) {
+      const ids = replacements.filter((value, i) => i % 11 === 0);
+      for (const id of ids) {
+        events.push(`save ${id}`);
+        hooks.onSave(id);
+      }
+      await Promise.all(ids.map((id) => saves.gates[id]));
+      for (const id of ids) events.push(`saved ${id}`);
+      return [0, ids.length];
+    }
+    if (sql.startsWith('UPDATE SteamUsers')) {
+      events.push('reset Steam users');
+      return [{}, {}];
+    }
+    if (sql.startsWith('DELETE FROM Bans')) {
+      const [, ids] = replacements;
+      events.push(`remove ${ids.length} bans`);
+      await hooks.onRemove();
+      return [{ affectedRows: ids.length }, {}];
+    }
+    if (sql.startsWith('DELETE FROM BanListPendingRemovals')) return [{ affectedRows: 0 }, {}];
+    if (sql.startsWith('INSERT INTO BanListPendingRemovals')) {
+      events.push('save missing bans');
+      return [0, 0];
+    }
+    throw new Error(`Unexpected statement: ${sql}`);
+  };
   const imported = await load(
     '../src/ban-importer.js',
     {
@@ -143,10 +194,7 @@ async function loadBanImporter(lists, { onFetch = () => {}, options, syncs = [] 
       },
       'scbl-lib/db': {
         sequelize: {
-          query: async (sql, { replacements: [id] }) => {
-            events.push(`read stored bans of ${id}`);
-            return lists[id].stored.map((n) => ({ id: `${id},${n}`, steamUser: steamID(n) }));
-          },
+          query,
           transaction: async (work) => {
             events.push('begin');
             const value = await work({});
@@ -172,23 +220,7 @@ async function loadBanImporter(lists, { onFetch = () => {}, options, syncs = [] 
             return { id, type: 'battlemetrics', source: lists[id].source ?? `bm-${id}` };
           }
         },
-        SteamUser: {
-          bulkCreate: async () => events.push('add Steam users'),
-          update: async () => events.push('reset Steam users')
-        },
         Ban: {
-          findOrCreate: async ({ where }) => {
-            events.push(`save ${where.id}`);
-            hooks.onSave(where.id);
-            await saves.gates[where.id];
-            events.push(`saved ${where.id}`);
-            return [{}, true];
-          },
-          destroy: async ({ where }) => {
-            events.push(`remove ${where.id.length} bans`);
-            await hooks.onRemove();
-            return where.id.length;
-          },
           count: async ({ where }) => lists[where.banList].stored.length
         }
       },
@@ -257,7 +289,7 @@ const savedRows = (syncSaves) =>
 const summary = (lines) => lines.filter((line) => /^Got /.test(line.message));
 
 // The import stops between ban lists. A stop requested while a list's missing bans are being
-// removed lets the removal finish, chunk by chunk, and the next list is not started.
+// removed lets the removal finish, batch by batch, and the next list is not started.
 {
   const stored = Array.from({ length: 2500 }, (_, n) => n);
   const { importer, control, events, hooks } = await loadBanImporter(
@@ -270,44 +302,40 @@ const summary = (lines) => lines.filter((line) => /^Got /.test(line.message));
   assert.strictEqual(error.name, 'RunStopped');
   assert.deepStrictEqual(
     events.filter((event) => event.startsWith('remove')),
-    ['remove 1000 bans', 'remove 1000 bans', 'remove 499 bans']
+    [...Array(4).fill('remove 500 bans'), 'remove 499 bans']
   );
   assert.strictEqual(events.at(-1), 'commit');
   assert.ok(!events.includes('read list 2'));
 }
 
-// A run asked to stop while a list's bans are being saved finishes the saves under way, each with
-// its player's update, and starts no more. The import ends only once all of them have finished,
-// and none of the list's bans are removed, as the bans it did not save would look removed. The
-// next list is not started.
+// A run asked to stop while a list's bans are being saved finishes the batch under way, with its
+// players' updates, in its transaction, and starts no other. The import ends only once that batch
+// is saved, and none of the list's bans are removed, as the bans it did not save would look
+// removed. The next list is not started.
 {
-  const open = {};
-  const { importer, control, events, saves } = await loadBanImporter({
-    1: { stored: [7, 8], fetched: [0, 1, 2, 3, 4] },
-    2: { stored: [], fetched: [0] }
-  });
+  let open;
+  const { importer, control, events, saves } = await loadBanImporter(
+    {
+      1: { stored: [7, 8], fetched: [0, 1, 2, 3, 4] },
+      2: { stored: [], fetched: [0] }
+    },
+    { options: { batchSize: 2 } }
+  );
   control.setRunLock(heldLock);
-  for (const id of ['1,0', '1,1'])
-    saves.gates[id] = new Promise((resolve) => {
-      open[id] = resolve;
-    });
+  saves.gates['1,0'] = new Promise((resolve) => {
+    open = resolve;
+  });
   const result = ended(
     importer.importBans().finally(() => events.push('ended')),
     'the import'
   );
-  await until(() => events.includes('save 1,1'), 'the first saves');
+  await until(() => events.includes('save 1,1'), 'the first batch');
   control.requestStop('it received SIGTERM');
 
-  // One save finishes and no other starts, but the import waits for the second.
-  open['1,0']();
+  // The batch is still being saved, and the import waits for it.
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.deepStrictEqual(events.slice(4), [
-    'save 1,0',
-    'save 1,1',
-    'saved 1,0',
-    'reset Steam users'
-  ]);
-  open['1,1']();
+  assert.ok(!events.includes('ended'));
+  open();
 
   const error = await result;
   assert.strictEqual(error.name, 'RunStopped');
@@ -315,13 +343,15 @@ const summary = (lines) => lines.filter((line) => /^Got /.test(line.message));
     'read list 1',
     'fetch 1',
     'read stored bans of 1',
+    'read missing bans of 1',
+    'begin',
     'add Steam users',
     'save 1,0',
     'save 1,1',
     'saved 1,0',
-    'reset Steam users',
     'saved 1,1',
     'reset Steam users',
+    'commit',
     'ended'
   ]);
 }
@@ -341,25 +371,25 @@ const summary = (lines) => lines.filter((line) => /^Got /.test(line.message));
 }
 
 // Bans are removed only while the run holds the run lock: not once it has lost it, nor if it never
-// took it. The bans fetched are still saved, but without the lock the next list is not started.
+// took it. The new bans fetched are still saved, but without the lock the next list is not started.
 for (const [lock, sweeps] of [
   [heldLock, true],
   [lostLock, false],
   [null, false]
 ]) {
   const { importer, control, events } = await loadBanImporter({
-    1: { stored: [0, 9], fetched: [0] },
+    1: { stored: [0, 9], fetched: [0, 5] },
     2: { stored: [], fetched: [0] }
   });
   if (lock) control.setRunLock(lock);
   const outcome = await ended(importer.importBans(), 'the import');
-  assert.ok(events.includes('saved 1,0'));
+  assert.ok(events.includes('saved 1,5'));
   assert.strictEqual(events.includes('remove 1 bans'), sweeps);
   assert.strictEqual(events.includes('read list 2'), sweeps);
   if (sweeps) assert.ok(Array.isArray(outcome));
   else {
     assert.strictEqual(outcome.reason, control.LOCK_LOST);
-    assert.ok(!events.includes('begin'));
+    assert.ok(!events.some((event) => event.startsWith('remove')));
   }
 }
 
@@ -368,14 +398,14 @@ for (const [lock, sweeps] of [
 {
   const { importer, control, events } = await loadBanImporter({
     1: { stored: [0, 9], fetched: [0] },
-    2: { stored: [0, 8], fetched: [0] }
+    2: { stored: [0, 8], fetched: [0, 5] }
   });
   let checks = 0;
   control.setRunLock({ isHeld: async () => ++checks === 1 });
   const error = await ended(importer.importBans(), 'the import');
   assert.strictEqual(error.name, 'RunStopped');
   assert.strictEqual(error.reason, control.LOCK_LOST);
-  assert.ok(events.includes('saved 2,0'));
+  assert.ok(events.includes('saved 2,5'));
   assert.deepStrictEqual(
     events.filter((event) => event.startsWith('remove')),
     ['remove 1 bans']
@@ -409,7 +439,7 @@ for (const [lock, removes] of [
 // removed.
 {
   const { importer, control, events } = await loadBanImporter({
-    1: { stored: [0, 9], fetched: [0] },
+    1: { stored: [0, 9], fetched: [0, 5] },
     2: { stored: [], fetched: [0] }
   });
   control.setRunLock({
@@ -421,8 +451,8 @@ for (const [lock, removes] of [
   const error = await ended(importer.importBans(), 'the import');
   assert.strictEqual(error.name, 'RunStopped');
   assert.strictEqual(error.reason, 'it received SIGTERM');
-  assert.ok(events.includes('saved 1,0'));
-  assert.ok(!events.includes('begin'));
+  assert.ok(events.includes('saved 1,5'));
+  assert.ok(!events.some((event) => event.startsWith('remove')));
 }
 
 // A list that could not be fetched is tried again a minute after the others, but the wait ends as
@@ -539,7 +569,7 @@ for (const [lock, removes] of [
   assert.deepStrictEqual(
     summary(lines).map(({ message }) => message),
     [
-      'Got 1 deleted ban. Imported 3 ban lists before the run stopped: 2 bans fetched, 2 new, 0 updated, 1 removed, 0 held, 1 list failed.'
+      'Got 1 deleted ban. Imported 3 ban lists before the run stopped: 2 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 1 list failed.'
     ]
   );
   assert.deepStrictEqual(savedRows(syncSaves), [
@@ -551,8 +581,8 @@ for (const [lock, removes] of [
 
 // A stop requested while a list is imported at its second attempt, whether during its fetch or its
 // saves, leaves the list out of the import's summary, as a stop in the first pass does, and the
-// list's own line says what the attempt saved. The saves under way are finished first, and the
-// list is not swept. Its row is saved as its first attempt left it, as the run did fail it.
+// list's own line says what the attempt saved. The batch under way is finished first, and the list
+// is not swept. Its row is saved as its first attempt left it, as the run did fail it.
 for (const during of ['fetch', 'saves']) {
   let fetches = 0;
   const { importer, control, events, lines, saves, waits, syncSaves } = await loadBanImporter(
@@ -596,17 +626,17 @@ for (const during of ['fetch', 'saves']) {
   assert.deepStrictEqual(
     events.filter((event) => /^(save|remove) /.test(event)),
     during === 'saves'
-      ? ['save 1,0', 'remove 1 bans', 'save 2,0', 'save 2,1']
-      : ['save 1,0', 'remove 1 bans']
+      ? ['remove 1 bans', 'save 2,0', 'save 2,1', 'save 2,2', 'save 2,3']
+      : ['remove 1 bans']
   );
   if (during === 'saves')
-    assert.deepStrictEqual(events.slice(-3), ['saved 2,1', 'reset Steam users', 'ended']);
+    assert.deepStrictEqual(events.slice(-4), ['saved 2,3', 'reset Steam users', 'commit', 'ended']);
   assert.deepStrictEqual(
     lines.filter(({ important }) => important).map(({ message }) => message),
     [
       'Failed to import ban list (ID: 2) while fetching it, so none of its bans were removed. Error: Request failed with status code 502',
       during === 'saves'
-        ? 'Stopped importing ban list (ID: 2) at the second attempt while saving its bans, as the run is stopping, so none of its bans were removed (4 bans fetched, 2 new, 0 updated).'
+        ? 'Stopped importing ban list (ID: 2) at the second attempt while saving its bans, as the run is stopping, so none of its bans were removed (4 bans fetched, 4 new, 0 updated).'
         : 'Stopped importing ban list (ID: 2) at the second attempt while fetching it, as the run is stopping, so none of its bans were removed (4 bans fetched, 0 new, 0 updated).'
     ]
   );
@@ -615,7 +645,7 @@ for (const during of ['fetch', 'saves']) {
     summary(lines).map(({ message, important }) => [message, important]),
     [
       [
-        'Got 1 deleted ban. Imported 1 of 2 ban lists before the run stopped: 1 ban fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed.',
+        'Got 1 deleted ban. Imported 1 of 2 ban lists before the run stopped: 1 ban fetched, 0 new, 0 updated, 1 removed, 0 held, 0 lists failed.',
         undefined
       ]
     ]
@@ -637,6 +667,7 @@ async function loadBanFetcher({ battlemetrics, get }) {
     '../src/ban-fetcher.js',
     {
       axios: { default: { get: async (url) => get(url, imported.control) } },
+      crypto: { createHash },
       'scbl-lib/apis': {
         battlemetrics: async (method, endpoint, params) => battlemetrics(params, imported.control)
       },

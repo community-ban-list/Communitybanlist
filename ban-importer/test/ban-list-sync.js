@@ -53,11 +53,14 @@ const {
   nextSync,
   NOT_VISIBLE,
   readAccessCheck,
+  readBanListIDs,
+  readSwitch,
   readVisibleBanLists,
   sourceKey,
   stateOf,
   STATES,
-  UNCONFIRMED
+  UNCONFIRMED,
+  unquote
 } = module.namespace;
 
 // Copy a value made in the module's context into one of this test's own, to compare it.
@@ -72,6 +75,78 @@ assert.deepStrictEqual(plain(STATES), {
 });
 assert.strictEqual(FAILURE_ALERT_RUNS, 3);
 
+// A switch is on with 1, true, on or yes, and off with 0, false, off or no, in any case and with
+// spaces, or one pair of quotes, around them, as docker run --env-file keeps the quotes. Without a
+// value it is as its default, and an invalid value is as the safer of the two says, marked
+// invalid, with a warning that says what that means. A comment after the value is invalid.
+for (const [value, on] of [
+  ['1', true],
+  [' YES ', true],
+  ['on', true],
+  ['"1"', true],
+  ["'on'", true],
+  ['" yes "', true],
+  ['0', false],
+  ['False', false],
+  [' off', false],
+  ['"0"', false],
+  [" 'no' ", false],
+  [true, true],
+  [false, false]
+])
+  for (const defaultOn of [true, false])
+    assert.deepStrictEqual(
+      plain(readSwitch('IMPORTER_X', value, { defaultOn, meaning: 'it is as before' })),
+      { on },
+      `${value}, ${defaultOn}`
+    );
+for (const value of [undefined, null, '', '  ', '""', "' '"])
+  for (const defaultOn of [true, false])
+    assert.deepStrictEqual(
+      plain(readSwitch('IMPORTER_X', value, { defaultOn, meaning: 'it is as before' })),
+      { on: defaultOn },
+      `${value}, ${defaultOn}`
+    );
+assert.deepStrictEqual(
+  plain(readSwitch('IMPORTER_X', 'maybe', { defaultOn: false, meaning: 'nothing moves' })),
+  {
+    on: false,
+    invalid: true,
+    warning: 'Warning: IMPORTER_X must be 1 or 0, not "maybe", so nothing moves.'
+  }
+);
+for (const value of ['2', '0 # done', '"0', `"1'`, '1 1'])
+  assert.deepStrictEqual(
+    plain(
+      readSwitch('IMPORTER_DRY_RUN', value, {
+        defaultOn: false,
+        invalidOn: true,
+        meaning: 'the run is a dry run'
+      })
+    ),
+    {
+      on: true,
+      invalid: true,
+      warning: `Warning: IMPORTER_DRY_RUN must be 1 or 0, not "${value}", so the run is a dry run.`
+    },
+    value
+  );
+assert.deepStrictEqual(
+  [unquote(undefined), unquote(' "a b" '), unquote("'x'"), unquote('"x\''), unquote('x # y')],
+  ['', 'a b', 'x', '"x\'', 'x # y']
+);
+
+// A setting that names ban lists gives their IDs, as text, without spaces or quotes around them.
+for (const [value, ids] of [
+  [undefined, []],
+  ['', []],
+  ['5', ['5']],
+  [' 9, 5 ', ['9', '5']],
+  ['"9,5"', ['9', '5']],
+  ['3,,4,', ['3', '4']]
+])
+  assert.deepStrictEqual([...readBanListIDs(value)], ids, JSON.stringify(value));
+
 // IMPORTER_ACCESS_CHECK is on unless it is 0, false, off or no, in any case and with spaces around
 // it. An invalid value leaves it on, with a warning.
 for (const value of [undefined, null, '', '  ', '1', 'true', 'ON', ' yes ', true])
@@ -80,6 +155,7 @@ for (const value of ['0', 'false', 'Off', ' no ', false])
   assert.deepStrictEqual(plain(readAccessCheck(value)), { on: false }, String(value));
 assert.deepStrictEqual(plain(readAccessCheck('2')), {
   on: true,
+  invalid: true,
   warning: 'Warning: IMPORTER_ACCESS_CHECK must be 1 or 0, not "2", so the access check stays on.'
 });
 
@@ -217,25 +293,24 @@ const IMPORT_FIELDS = [
   'state',
   'lastAttemptAt',
   'lastSuccessAt',
+  'lastFullScanAt',
   'consecutiveFailures',
+  'incompleteScans',
   'lastError',
   'storedCount',
-  'headTotal'
+  'headTotal',
+  'replacePending'
 ];
+const REMOTE_FIELDS = ['remoteEtag', 'remoteLastModified', 'remoteBodyHash'];
 // Every column of BanListSyncs but updatedAt, which Sequelize sets on every save.
 const ALL_FIELDS = [
   ...IMPORT_FIELDS,
   'lastHeadPollAt',
-  'lastFullScanAt',
   'nextFullScanAt',
   'scanReason',
-  'incompleteScans',
   'headUids',
-  'replacePending',
   'allowFullRemovalUntil',
-  'remoteEtag',
-  'remoteLastModified',
-  'remoteBodyHash'
+  ...REMOTE_FIELDS
 ];
 
 for (const from of [null, 'ok', 'failing', 'access_lost', 'self_import', 'held']) {
@@ -301,6 +376,79 @@ for (const from of [null, 'ok', 'failing', 'access_lost', 'self_import', 'held']
       assert.strictEqual(sync.values.incompleteScans, 0, label);
     }
   }
+}
+
+// A read of all of the list, as the import made it, is counted: a complete one is when the list was
+// last read in full and resets the count of incomplete reads in a row, and an incomplete one adds
+// to it. An attempt that did not get as far as a read leaves both.
+{
+  const before = { ...rowIn('ok'), lastFullScanAt: EARLIER, incompleteScans: 2 };
+  for (const [complete, lastFullScanAt, incompleteScans] of [
+    [true, NOW, 0],
+    [false, EARLIER, 3],
+    [undefined, EARLIER, 2]
+  ]) {
+    const { values } = plain(nextSync(before, outcome('ok', { complete })));
+    assert.deepStrictEqual(
+      [values.lastFullScanAt, values.incompleteScans],
+      [lastFullScanAt, incompleteScans],
+      String(complete)
+    );
+  }
+  // A row from before these columns counts from 0.
+  const { values } = plain(
+    nextSync({ ...rowIn('ok'), incompleteScans: undefined }, outcome('ok', { complete: false }))
+  );
+  assert.strictEqual(values.incompleteScans, 1);
+}
+
+// Whether the list's old source's bans are still to be replaced is saved as the import says, and
+// kept when it says nothing, e.g. for a list that imports a CBL export ban list. A list whose
+// source was changed starts without it, unless the import says otherwise.
+{
+  for (const [replacePending, kept, saved] of [
+    [true, 0, true],
+    [false, 1, false],
+    [undefined, 1, true],
+    [undefined, 0, false]
+  ]) {
+    const { values } = plain(
+      nextSync({ ...rowIn('ok'), replacePending: kept }, outcome('ok', { replacePending }))
+    );
+    assert.strictEqual(values.replacePending, saved, `${replacePending}, ${kept}`);
+  }
+  const changed = { ...rowIn('ok'), sourceKey: 'b'.repeat(64), replacePending: 1 };
+  assert.strictEqual(plain(nextSync(changed, outcome('ok'))).values.replacePending, false);
+  assert.strictEqual(
+    plain(nextSync(changed, outcome('ok', { replacePending: true }))).values.replacePending,
+    true
+  );
+}
+
+// A remote list's file is saved, ETag, Last-Modified and SHA-256, when the import gives it, and
+// otherwise kept, as the list's columns are not saved. The import gives none to forget it.
+{
+  const before = { ...rowIn('ok'), remoteEtag: '"v0"', remoteBodyHash: 'c'.repeat(64) };
+  const file = {
+    etag: '"v1"',
+    lastModified: 'Wed, 21 Oct 2026 10:00:00 GMT',
+    bodyHash: 'd'.repeat(64)
+  };
+  let sync = plain(nextSync(before, outcome('ok', { remote: file })));
+  assert.deepStrictEqual(sync.fields, [...IMPORT_FIELDS, ...REMOTE_FIELDS]);
+  assert.deepStrictEqual(
+    REMOTE_FIELDS.map((field) => sync.values[field]),
+    [file.etag, file.lastModified, file.bodyHash]
+  );
+  sync = plain(
+    nextSync(before, outcome('ok', { remote: { etag: null, lastModified: null, bodyHash: null } }))
+  );
+  assert.deepStrictEqual(
+    REMOTE_FIELDS.map((field) => sync.values[field]),
+    [null, null, null]
+  );
+  sync = plain(nextSync(before, outcome('ok')));
+  assert.deepStrictEqual(sync.fields, IMPORT_FIELDS);
 }
 
 // Failed runs in a row are counted, and the 3rd is posted once: not the 1st, 2nd, 4th or 5th. A run
@@ -624,5 +772,5 @@ assert.strictEqual(
 );
 
 console.log(
-  'Ban list sync state checks passed: every change of state, failed runs and their alert, changed sources, the access check, lost access, runs that cannot tell, widespread losses and kept errors.'
+  'Ban list sync state checks passed: switches, with quotes and invalid values, ban list IDs, every change of state, failed runs and their alert, reads in full, replaced sources, remote files, changed sources, the access check, lost access, runs that cannot tell, widespread losses and kept errors.'
 );
