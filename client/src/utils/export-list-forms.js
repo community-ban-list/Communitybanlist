@@ -125,13 +125,13 @@ function limitsTest(findProblems) {
   };
 }
 
-// The rule for each of the list form's settings, which need only be numbers there. Their bounds,
-// and the points rules, come from the limits, as the web server checks them: on every value of a
-// new list, and on the values a change sets on a saved one, so a list saved with values outside
-// them can still be renamed. A setting left empty is null, which the limits refuse unless the list
-// was saved without it, and text that is not a number gets the web server's message for the
-// setting.
-const settingRule = (name) =>
+// The rule for each number the forms take, which need only be numbers there: the list form's
+// settings and the config form's points. Their bounds, and the points rules, come from the limits,
+// as the web server checks them: on every value of a new list or config, and on the values a
+// change sets on a saved list, so a list saved with values outside them can still be renamed. A
+// number left empty is null, which the limits refuse unless the list was saved without it, and
+// text that is not a number gets the web server's message for the value.
+const numberRule = (name) =>
   yup
     .number()
     .nullable()
@@ -146,7 +146,7 @@ const listSchema = yup
   .object()
   .shape({
     ...Validators.ExportBanList,
-    ...Object.fromEntries(SETTINGS.map((name) => [name, settingRule(name)]))
+    ...Object.fromEntries(SETTINGS.map((name) => [name, numberRule(name)]))
   })
   .test(
     limitsTest((values, { exportBanList, limits }) => listProblems(values, exportBanList, limits))
@@ -184,10 +184,16 @@ export const LIST_FIELDS = {
   maxBanAge: { deps: ['threshold'] }
 };
 
-// The config form's schema: the format rules every config meets, and then the limits.
+// The config form's schema: the format rules every config meets for its ban list
+// (scbl-lib/validators.js), its points as numbers, and then the limits. The points are always
+// checked against their bounds, so the form never sends points left empty.
 const configSchema = yup
   .object()
-  .shape(Validators.ExportBanListConfig)
+  .shape({
+    ...Validators.ExportBanListConfig,
+    activePoints: numberRule('activePoints'),
+    expiredPoints: numberRule('expiredPoints')
+  })
   .test(
     limitsTest((values, { exportBanList, banLists, limits }) =>
       configProblems(values, exportBanList, banLists, limits)

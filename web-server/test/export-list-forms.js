@@ -507,6 +507,23 @@ await form.type('activePoints', '101');
 assert.deepStrictEqual(form.errors(), { activePoints: MESSAGES.points });
 await form.type('activePoints', '-1');
 assert.deepStrictEqual(form.errors(), { activePoints: MESSAGES.points });
+// So do points left empty, as when an owner clears a field to type another number, and text that
+// is not a number. They get the web server's message for points, as in the list form, and the form
+// is not submitted.
+for (const [field, points] of [
+  ['activePoints', '6'],
+  ['expiredPoints', '3']
+])
+  for (const value of ['', ' ', 'x']) {
+    await form.type(field, value);
+    assert.deepStrictEqual(
+      form.errors(),
+      { [field]: MESSAGES.points },
+      `${field}: ${JSON.stringify(value)}`
+    );
+    assert.strictEqual(await form.submit(), undefined);
+    await form.type(field, points);
+  }
 await form.type('activePoints', '6');
 assert.deepStrictEqual(Object.keys(form.errors()), ['points']);
 // The web server refuses a second config for a ban list before it checks the points, so the form
@@ -525,7 +542,19 @@ form.render(
 );
 await form.type('expiredPoints', '4');
 assert.deepStrictEqual(form.errors(), {});
-// Until the list or the ban lists have loaded, only the bounds are checked.
+// A config needs a ban list. The ban list selector's first option, "Select a ban list...", is not
+// one, so choosing it asks for one, as saving without one does.
+const NO_BAN_LIST = 'A ban list must be specified.';
+form = configForm(adding);
+assert.strictEqual(await form.submit(), undefined);
+assert.deepStrictEqual(form.errors(), { banList: NO_BAN_LIST });
+await form.type('banList', '2');
+assert.deepStrictEqual(form.errors(), {});
+await form.type('banList', 'Select a ban list...');
+assert.deepStrictEqual(form.errors(), { banList: NO_BAN_LIST });
+assert.strictEqual(await form.submit(), undefined);
+// Until the list or the ban lists have loaded, only the bounds are checked. Points left empty are
+// refused then too, so the form never sends none for them.
 for (const [list, choices] of [
   [undefined, banLists],
   [adding, undefined]
@@ -536,6 +565,12 @@ for (const [list, choices] of [
   assert.deepStrictEqual(form.errors(), {});
   await form.type('expiredPoints', '101');
   assert.deepStrictEqual(form.errors(), { expiredPoints: MESSAGES.points });
+  await form.type('activePoints', '');
+  assert.deepStrictEqual(form.errors(), {
+    activePoints: MESSAGES.points,
+    expiredPoints: MESSAGES.points
+  });
+  assert.strictEqual(await form.submit(), undefined);
 }
 
 // A list outside the rules can be given a config with points of at most its defaults, but not one
