@@ -135,6 +135,14 @@ assert.strictEqual(cleanError(new Error('An error')), 'Error: An error');
 assert.strictEqual(cleanError('x'.repeat(500)), 'x'.repeat(500));
 assert.strictEqual(cleanError('x'.repeat(501)), `${'x'.repeat(497)}...`);
 assert.strictEqual(cleanError(`  ${'y '.repeat(400)}`).length, 500);
+// A word that holds an address is replaced as a whole, and cleaning stays quick for long text that
+// a server could send, such as a long run of letters with no address in it.
+assert.strictEqual(cleanError('Bad source url=https://bans.example/x.txt'), 'Bad source [address]');
+for (const long of ['a'.repeat(100000), 'a:'.repeat(50000), 'a:/'.repeat(30000)]) {
+  const started = performance.now();
+  assert.strictEqual(cleanError(long).length, 500);
+  assert.ok(performance.now() - started < 200, 'Cleaning a long error stays quick');
+}
 
 // Only BattleMetrics' 404 with its Unknown ban list title, and a list that gives no bans but counts
 // some, mean that CBL can no longer read a list. Any other error is a failure.

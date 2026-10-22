@@ -1627,7 +1627,7 @@ assert.strictEqual(
   logged(
     1,
     new RegExp(
-      `^Failed to import ban list \\(ID: 15\\) while fetching it, so none of its bans were removed\\. ${HIDDEN.replace(/[.()]/g, '\\$&')}$`
+      `^Failed to import ban list \\(ID: 15\\) while fetching it, so none of its bans were removed\\. ${RegExp.escape(HIDDEN)}$`
     )
   ).length,
   1

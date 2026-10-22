@@ -117,12 +117,15 @@ export function sourceKey({ type, source }) {
 
 // A problem with a list as its row keeps it: on one line, without any address, as a remote list's
 // address may hold a key, and in printable ASCII, which a column in any character set can hold, cut
-// to 500 characters.
+// to 500 characters. Each word that holds an address is replaced as a whole. Going word by word,
+// rather than searching for addresses with one pattern, keeps this quick for any text, as the text
+// can come from a server.
 export function cleanError(text) {
   const clean = String(text)
-    .replace(/[a-z][a-z0-9+.-]*:\/\/\S*/gi, '[address]')
-    .replace(/\s+/g, ' ')
-    .trim()
+    .split(/\s+/)
+    .filter((word) => word !== '')
+    .map((word) => (word.includes('://') ? '[address]' : word))
+    .join(' ')
     .replace(/[^\x20-\x7e]/gu, '?');
   return clean.length > MAX_ERROR_LENGTH ? `${clean.slice(0, MAX_ERROR_LENGTH - 3)}...` : clean;
 }
