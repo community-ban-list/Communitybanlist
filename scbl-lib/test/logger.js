@@ -1315,9 +1315,178 @@ assert.deepStrictEqual(warnings(revising.output), [
 ]);
 assert.strictEqual(revising.logger.discordWebhook, webhook);
 
+// A status message given an earlier message's ID, such as the importer service's after a restart,
+// edits that message from the start rather than posting another, and settles with its ID once the
+// first edit worked. With editInterval, its updates are sent at most that often, here once a
+// minute, however many there are, and its final payload at once.
+const reused = await loadLogger();
+reused.discord.reply = async ({ type, id }) => ({ id: type === 'send' ? '900' : id });
+title = 'Running again';
+const reusedStatus = reused.logger.statusMessage(draw, {
+  messageID: '444',
+  editInterval: 60000,
+  repostIfDeleted: true
+});
+assert.strictEqual(await reusedStatus.posted, '444');
+await reused.idle();
+title = 'Cycle 1';
+for (let i = 0; i < 50; i++) reusedStatus.update(draw);
+reused.advance(59999);
+await pause();
+assert.deepStrictEqual(shown(reused.discord.requests), [['edit', '444', null, ['Running again']]]);
+reused.advance(1);
+await reused.idle();
+title = 'Cycle 2';
+reusedStatus.update(draw);
+reused.advance(30000);
+await pause();
+assert.strictEqual(reused.discord.requests.length, 2);
+reusedStatus.finish({ embeds: [{ title: 'Stopped' }] });
+await reused.idle();
+assert.deepStrictEqual(shown(reused.discord.requests), [
+  ['edit', '444', null, ['Running again']],
+  ['edit', '444', null, ['Cycle 1']],
+  ['edit', '444', null, ['Stopped']]
+]);
+// An ID that is not one is not used: a new message is posted.
+const fresh = await loadLogger();
+fresh.discord.reply = async ({ type, id }) => ({ id: type === 'send' ? '901' : id });
+const freshStatus = fresh.logger.statusMessage(
+  { embeds: [{ title: 'Posted' }] },
+  { messageID: '../x' }
+);
+assert.strictEqual(await freshStatus.posted, '901');
+assert.deepStrictEqual(shown(fresh.discord.requests), [['send', undefined, null, ['Posted']]]);
+
+// With repostIfDeleted, a message that Discord says no longer exists, as someone deleted it, is
+// posted again, as a new message, with the payload that was to be shown, and onPosted is told its
+// ID, as it is for every message posted, so the service keeps it for the next process. Later edits
+// go to the new message. Without repostIfDeleted, such a message is no longer edited (see above),
+// and a webhook that is gone turns Discord logging off rather than posting again.
+const deleted = await loadLogger();
+const unknownMessage = discordError('Discord answered HTTP 404: Unknown Message (code 10008)', {
+  status: 404,
+  code: 10008
+});
+let deletedIDs = ['902', '903'];
+deleted.discord.reply = async ({ type, id }) => {
+  if (type === 'edit' && id === '444') throw unknownMessage;
+  return { id: type === 'send' ? deletedIDs.shift() : id };
+};
+const postedIDs = [];
+const deletedStatus = deleted.logger.statusMessage(
+  { embeds: [{ title: 'Running' }] },
+  {
+    messageID: '444',
+    editInterval: 60000,
+    repostIfDeleted: true,
+    onPosted: async (id) => postedIDs.push(id)
+  }
+);
+assert.strictEqual(await deletedStatus.posted, '902');
+await deleted.idle();
+assert.deepStrictEqual(postedIDs, ['902']);
+deletedStatus.update({ embeds: [{ title: 'Later' }] });
+deleted.advance(60000);
+await deleted.idle();
+assert.deepStrictEqual(shown(deleted.discord.requests), [
+  ['edit', '444', null, ['Running']],
+  ['send', undefined, null, ['Running']],
+  ['edit', '902', null, ['Later']]
+]);
+assert.deepStrictEqual(warnings(deleted.output), []);
+assert.deepStrictEqual(deleted.output, [
+  'Discord says a status message in the log channel was deleted, so it is posted again.'
+]);
+// Whatever onPosted does, it never fails the message: a failure is only warned about.
+deleted.discord.reply = async ({ type, id }) => {
+  if (type === 'edit') throw unknownMessage;
+  return { id: type === 'send' ? deletedIDs.shift() : id };
+};
+deletedIDs = ['904'];
+const failingStatus = deleted.logger.statusMessage(
+  { embeds: [{ title: 'Running' }] },
+  {
+    messageID: '445',
+    repostIfDeleted: true,
+    onPosted: async () => {
+      throw new Error('Database unavailable');
+    }
+  }
+);
+assert.strictEqual(await failingStatus.posted, '904');
+await deleted.idle();
+await pause();
+assert.ok(
+  deleted.output.includes(
+    'Could not keep the ID of a status message in the Discord log: Error: Database unavailable'
+  )
+);
+assert.strictEqual(deleted.logger.discordWebhook, webhook);
+// A message whose webhook is gone is not posted again: Discord logging turns off.
+const goneAgain = await loadLogger();
+goneAgain.discord.reply = async () => {
+  throw discordError('Discord answered HTTP 404: Unknown Webhook (code 10015)', {
+    status: 404,
+    code: 10015
+  });
+};
+const goneStatus2 = goneAgain.logger.statusMessage(
+  { embeds: [{ title: 'Running' }] },
+  { messageID: '446', repostIfDeleted: true }
+);
+assert.strictEqual(await goneStatus2.posted, null);
+await goneAgain.idle();
+assert.deepStrictEqual(shown(goneAgain.discord.requests), [['edit', '446', null, ['Running']]]);
+assert.strictEqual(goneAgain.logger.discordWebhook, null);
+
+// A message posted once, such as an embed of a cycle of the importer service or its hourly
+// summary, is posted ahead of other messages, as a run's lines are, and tried again after a
+// network error. A refusal is only warned about. Without Discord logging, nothing is posted.
+const once = await loadLogger();
+let onceFailures = 1;
+once.discord.reply = async ({ type }) => {
+  if (type === 'send' && onceFailures-- > 0)
+    throw networkError('Could not reach Discord (ECONNRESET)');
+  return { id: '950' };
+};
+once.logger.post({ embeds: [{ title: 'CBL update cycle 3 finished' }] });
+await until(() => once.discord.requests.length === 1 && once.timers.size === 1, 'a retry');
+once.advance(1000);
+await once.idle();
+assert.deepStrictEqual(shown(once.discord.requests), [
+  ['send', undefined, null, ['CBL update cycle 3 finished']],
+  ['send', undefined, null, ['CBL update cycle 3 finished']]
+]);
+once.discord.reply = async () => {
+  throw discordError('Discord answered HTTP 400: Invalid Form Body (code 50035)', { status: 400 });
+};
+once.logger.post({ content: 'Text', embeds: [] });
+await once.idle();
+assert.deepStrictEqual(warnings(once.output), [
+  'Could not post a message to the Discord log: DiscordWebhookError: Discord answered HTTP 400: Invalid Form Body (code 50035)'
+]);
+const silent = await loadLogger({});
+silent.logger.post({ embeds: [{ title: 'Nothing' }] });
+await silent.idle();
+assert.strictEqual(silent.discord.requests.length, 0);
+
+// The logger counts the lines logged for the log channel, level 1 and important ones, whether or
+// not Discord logging is on, so the importer service can tell whether a cycle had anything to say.
+for (const env of [{ DISCORD_LOG_WEBHOOK: webhook }, {}]) {
+  const counting = await loadLogger(env);
+  assert.strictEqual(counting.logger.channelLines, 0);
+  counting.logger.verbose('Test', 2, 'Console only');
+  counting.logger.verbose('Test', 1, 'A line');
+  counting.logger.important('Test', 'An important line');
+  counting.logger.post({ embeds: [{ title: 'An embed' }] });
+  assert.strictEqual(counting.logger.channelLines, 2);
+  await counting.idle();
+}
+
 await pause();
 assert.deepStrictEqual(unhandled, []);
 
 console.log(
-  'Logger checks passed: Discord off, failed sends, retries, long messages, errors, stack traces, progress bars and their first minute, status messages and their posts made again, changing earlier messages, the queue limit, run lines and gone webhooks.'
+  'Logger checks passed: Discord off, failed sends, retries, long messages, errors, stack traces, progress bars and their first minute, status messages and their posts made again, changing earlier messages, the queue limit, run lines and gone webhooks, status messages kept across processes and posted again once deleted, messages posted once, and the lines counted.'
 );

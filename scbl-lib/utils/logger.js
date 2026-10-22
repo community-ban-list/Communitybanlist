@@ -50,6 +50,9 @@ const EDIT_INTERVAL = 15 * 1000;
 // and the logger then never learns which message it is, so the longer this is, the rarer that is.
 const STATUS_POST_TIMEOUT = 30 * 1000;
 
+// Discord's error code for a message that does not exist, e.g. as someone deleted it.
+const UNKNOWN_MESSAGE = 10008;
+
 function convertToBarChart(minValue = 0, maxValue = 1, barValue) {
   const chartWidth = 50;
   if (minValue === maxValue) minValue = 0;
@@ -92,18 +95,31 @@ function messageBody(payload) {
 
 // A message in the log channel that is edited as what it shows changes, such as a progress bar or
 // a run's status, which the logger returns at once. It is posted in the background, at once or
-// after a delay, and then edited at most once every 15 seconds with its latest payload, so whatever
-// updates it thousands of times sends a few edits and never waits for Discord. A payload is
-// { content, embeds }, or a function that returns one, which is only called when the payload is
-// sent, so a message can show the latest of something that changes often without drawing it each
-// time. postTimeout, if given, is how long Discord has to answer its post, and with postAgain, a
-// post that failed is made again when the next payload is due, unless Discord refused it (see
-// failed).
+// after a delay, and then edited at most once every 15 seconds, or every editInterval
+// milliseconds, with its latest payload, so whatever updates it thousands of times sends a few
+// edits and never waits for Discord. A payload is { content, embeds }, or a function that returns
+// one, which is only called when the payload is sent, so a message can show the latest of
+// something that changes often without drawing it each time. postTimeout, if given, is how long
+// Discord has to answer its post, and with postAgain, a post that failed is made again when the
+// next payload is due, unless Discord refused it (see failed). A message given messageID edits that
+// message, posted earlier, rather than posting a new one, and with repostIfDeleted, a message that
+// turns out to have been deleted is posted again. onPosted is told the ID of each message it posts.
 class LogMessage {
   constructor(
     logger,
     payload,
-    { priority, name, delay = 0, finished = false, postTimeout, postAgain = false }
+    {
+      priority,
+      name,
+      delay = 0,
+      finished = false,
+      postTimeout,
+      postAgain = false,
+      messageID = null,
+      editInterval = EDIT_INTERVAL,
+      repostIfDeleted = false,
+      onPosted = null
+    }
   ) {
     this.logger = logger;
     this.priority = priority;
@@ -111,7 +127,10 @@ class LogMessage {
     this.name = name;
     this.postTimeout = postTimeout;
     this.postAgain = postAgain;
-    this.messageID = null;
+    this.editInterval = editInterval;
+    this.repostIfDeleted = repostIfDeleted;
+    this.onPosted = onPosted;
+    this.messageID = messageID;
     // The latest payload, while it waits to be sent.
     this.waiting = null;
     this.sending = false;
@@ -217,7 +236,7 @@ class LogMessage {
     if (!this.logger.discordWebhook) this.stop();
     if (this.stopped || this.sending || this.timer || this.waiting === null) return;
 
-    const due = this.flushing ? 0 : this.sentAt + EDIT_INTERVAL - Date.now();
+    const due = this.flushing ? 0 : this.sentAt + this.editInterval - Date.now();
     if (due > 0) {
       this.timer = setTimeout(() => {
         this.timer = null;
@@ -254,19 +273,10 @@ class LogMessage {
           // The webhook is read only now, as Discord logging is turned off if it turns out to be
           // gone, maybe while this waited.
           const webhook = this.logger.discordWebhook;
-          if (!webhook) {
-            this.stop();
-          } else if (this.messageID) {
-            await this.logger.withRetry(() =>
-              editDiscordWebhookMessage(webhook, this.messageID, messageBody(payload))
-            );
-          } else {
-            const message = await this.logger.withRetry(() =>
-              sendDiscordWebhook(webhook, messageBody(payload), { timeout: this.postTimeout })
-            );
-            if (!message?.id) throw new Error('Discord did not say which message it posted');
-            this.messageID = message.id;
-            this.resolvePosted(message.id);
+          if (!webhook) this.stop();
+          else {
+            if (this.messageID) await this.editMessage(webhook, payload);
+            if (!this.messageID) await this.postMessage(webhook, payload);
           }
         } catch (err) {
           if (!this.logger.webhookGone(err))
@@ -282,6 +292,44 @@ class LogMessage {
         this.done();
       }
     );
+  }
+
+  // Replace what the message shows with the payload. A message given when it was made, posted
+  // earlier, is known to be there once an edit works. One that turns out to have been deleted is
+  // forgotten, with repostIfDeleted, so it is posted again.
+  async editMessage(webhook, payload) {
+    try {
+      await this.logger.withRetry(() =>
+        editDiscordWebhookMessage(webhook, this.messageID, messageBody(payload))
+      );
+      this.resolvePosted(this.messageID);
+    } catch (err) {
+      if (!this.repostIfDeleted || err?.status !== 404 || err.code !== UNKNOWN_MESSAGE) throw err;
+      console.warn(
+        `Discord says ${this.name} in the log channel was deleted, so it is posted again.`
+      );
+      this.messageID = null;
+    }
+  }
+
+  // Post the message with the payload, and keep its ID, for its later edits and for onPosted.
+  async postMessage(webhook, payload) {
+    const message = await this.logger.withRetry(() =>
+      sendDiscordWebhook(webhook, messageBody(payload), { timeout: this.postTimeout })
+    );
+    if (!message?.id) throw new Error('Discord did not say which message it posted');
+    this.messageID = message.id;
+    this.resolvePosted(message.id);
+    if (this.onPosted) {
+      // Whatever onPosted does, e.g. saving the ID, it never holds up or fails the message.
+      Promise.resolve()
+        .then(() => this.onPosted(message.id))
+        .catch((err) =>
+          console.warn(
+            `Could not keep the ID of ${this.name} in the Discord log: ${describeError(err)}`
+          )
+        );
+    }
   }
 
   // After a send failed, or was dropped as the queue was full (err is then null), send the payload
@@ -339,6 +387,10 @@ class Logger {
     // and messages not posted yet, such as progress bars in their first minute, which may never be.
     this.waitingMessages = new Set();
     this.unpostedMessages = new Set();
+
+    // How many lines have been logged for the log channel, whether or not Discord logging is on,
+    // e.g. for the importer service to tell whether a cycle had anything to say.
+    this.channelLines = 0;
   }
 
   verbose(module, verboseness, message, ...extras) {
@@ -361,11 +413,13 @@ class Logger {
     if (errors.length > 0)
       text += `${/\s$/.test(text) ? '' : ' '}${errors.map(describeError).join(', ')}`;
 
-    if (verboseness === 1)
+    if (verboseness === 1) {
+      this.channelLines++;
       this.sendMessage(
         `[${module}][${verboseness}] ${text}`,
         priority ?? (errors.length > 0 ? ERROR_PRIORITY : MESSAGE_PRIORITY)
       );
+    }
 
     let colorFunc = chalk[this.colors[module] || 'white'];
     if (typeof colorFunc !== 'function') colorFunc = chalk.white;
@@ -407,13 +461,44 @@ class Logger {
   // payload, given to finish(), is sent at once. Nothing waits for Discord. A payload is
   // { content, embeds }, or a function that returns one when it is sent. Unlike a progress bar, a
   // status message whose post failed is posted again, with its latest payload, 15 seconds later,
-  // unless Discord refused it, and Discord has 30 seconds to answer its post.
-  statusMessage(payload) {
+  // unless Discord refused it, and Discord has 30 seconds to answer its post. Options:
+  // - messageID: a status message posted earlier, e.g. by the process before this one, which is
+  //   edited from the start rather than posted again; once it is, it settles with that ID;
+  // - editInterval: the time between edits, in milliseconds, rather than 15 seconds;
+  // - repostIfDeleted: a message Discord says no longer exists, as someone deleted it, is posted
+  //   again, rather than no longer edited;
+  // - onPosted(id): told the ID of each message posted, e.g. to keep it for the next process.
+  statusMessage(payload, { messageID = null, editInterval, repostIfDeleted, onPosted } = {}) {
     return new LogMessage(this, payload, {
       priority: STATUS_PRIORITY,
       name: 'a status message',
       postTimeout: STATUS_POST_TIMEOUT,
-      postAgain: true
+      postAgain: true,
+      messageID: typeof messageID === 'string' && /^\d+$/.test(messageID) ? messageID : null,
+      editInterval,
+      repostIfDeleted,
+      onPosted
+    });
+  }
+
+  // Post a message to the log channel once, such as an embed of the importer service's cycle or
+  // its hourly summary, ahead of other messages, as a run's own lines go. Like a line, it is tried
+  // again after a network error, as a rare second copy is better than a lost one. Nothing waits for
+  // it, and a failure is only reported in the console. A payload is { content, embeds }.
+  post(payload) {
+    if (!this.discordWebhook) return;
+    this.queue(RUN_PRIORITY, async () => {
+      // Discord logging may have been turned off while this waited, as its webhook is gone.
+      const webhook = this.discordWebhook;
+      if (!webhook) return;
+      try {
+        await this.withRetry(() => sendDiscordWebhook(webhook, messageBody(payload)), {
+          retryNetwork: true
+        });
+      } catch (err) {
+        if (!this.webhookGone(err))
+          console.warn(`Could not post a message to the Discord log: ${describeError(err)}`);
+      }
     });
   }
 

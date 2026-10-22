@@ -804,6 +804,30 @@ for (const state of [
     assert.strictEqual(markEnded(other, ended('finished')), null);
 }
 
+// A cycle of the importer service, which posts its embed once it has ended, is named as one in its
+// title, with its number, and is otherwise drawn as a run is. A cycle number that is not one is
+// left out.
+for (const [outcome, title] of [
+  ['finished', 'CBL update cycle 12 finished'],
+  ['failed', 'CBL update cycle 12 failed'],
+  ['stopped', 'CBL update cycle 12 stopped'],
+  ['lockLost', 'CBL update cycle 12 lost its run lock']
+]) {
+  const embed = render({ ...ended(outcome), cycle: 12 });
+  assert.strictEqual(embed.title, title);
+  assert.deepStrictEqual(
+    { ...embed, title: TITLES[outcome] },
+    render(ended(outcome)),
+    `${outcome} is drawn as a run's`
+  );
+}
+for (const cycle of [0, -1, 1.5, '12', null, Number.MAX_SAFE_INTEGER + 2])
+  assert.strictEqual(render({ ...ended('finished'), cycle }).title, TITLES.finished, `${cycle}`);
+assert.strictEqual(
+  render({ ...ended('finished'), cycle: Number.MAX_SAFE_INTEGER }).title,
+  `CBL update cycle ${Number.MAX_SAFE_INTEGER} finished`
+);
+
 console.log(
-  'Run status checks passed: every step and outcome, progress bars, counts, times, commits, migrations, reasons, Discord limits, and runs that ended without finishing or whose last edit was lost.'
+  'Run status checks passed: every step and outcome, progress bars, counts, times, commits, migrations, reasons, Discord limits, runs that ended without finishing or whose last edit was lost, and cycles of the importer service.'
 );

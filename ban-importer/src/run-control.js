@@ -1,7 +1,9 @@
 // A run can be asked to stop part-way: by SIGTERM or SIGINT, by its time limit, or because it lost
 // its run lock. It then stops at the next safe point, e.g. between ban lists or between export
 // bans, and never between a BattleMetrics request and the database save that records it. The
-// steps also say here how far they have got, which the run's status in the log channel shows.
+// steps also say here how far they have got, which the run's status in the log channel shows. In
+// loop mode, each cycle is a run of its own here: a cycle stopped by its time limit is followed by
+// the next one, which starts afresh (see clearStop).
 //
 // This file has no imports, so it can be loaded on its own.
 
@@ -12,11 +14,9 @@ export const LOCK_LOST = 'it lost its run lock';
 // Why the run was asked to stop, e.g. 'it received SIGTERM', or null while it should carry on.
 let stopReason = null;
 
-let resolveStopRequest;
-// Settles, with the reason, when the run is asked to stop.
-export const stopRequest = new Promise((resolve) => {
-  resolveStopRequest = resolve;
-});
+// Called once when the run is asked to stop, while they wait (see pause). Each is removed once its
+// wait is over, so waits leave nothing behind, however many cycles a service runs.
+const stopListeners = new Set();
 
 // The run lock the run holds.
 let runLock = null;
@@ -37,7 +37,7 @@ export class RunStopped extends Error {
 export function requestStop(reason) {
   if (stopReason !== null) return;
   stopReason = reason;
-  resolveStopRequest(reason);
+  for (const listener of [...stopListeners]) listener(reason);
 }
 
 export function isStopping() {
@@ -47,6 +47,31 @@ export function isStopping() {
 // Called at each safe point, to end the run there if it was asked to stop.
 export function stopIfRequested() {
   if (stopReason !== null) throw new RunStopped(stopReason);
+}
+
+// Start the next cycle of the importer service afresh: a stop the last cycle was asked for, e.g. by
+// its time limit, does not stop the next one. The service asks again at once when it is stopping
+// itself, e.g. after SIGTERM.
+export function clearStop() {
+  stopReason = null;
+}
+
+// Wait ms milliseconds, but no longer than until the run is asked to stop, and not at all once it
+// has been.
+export function pause(ms) {
+  return new Promise((resolve) => {
+    if (stopReason !== null) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      stopListeners.delete(done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    stopListeners.add(done);
+  });
 }
 
 export function setRunLock(lock) {
@@ -77,4 +102,9 @@ export function reportProgress(done, total, unit) {
   } catch (err) {
     console.warn(`Warning: could not show a step's progress: ${err?.message}`);
   }
+}
+
+// How many waits are listening for a stop, which is none between them.
+export function waitingForStop() {
+  return stopListeners.size;
 }

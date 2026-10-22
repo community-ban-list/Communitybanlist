@@ -99,6 +99,9 @@ const MARK_CHECKED = 'UPDATE SteamUsers SET lastRefreshedInfo = ? WHERE id IN (?
 // IDs are written to the database at most this many in one statement.
 const IDS_PER_STATEMENT = 500;
 
+// The invalid IMPORTER_STEAM_REFRESH_PER_RUN that was last posted about.
+let warnedRefreshPerRun;
+
 // A count written with thousands separators, e.g. 4,376.
 function formatCount(count) {
   return count.toLocaleString('en-US');
@@ -275,7 +278,14 @@ export async function updateSteamUserInfo(
     refreshPerRun,
     refreshPerRunFor(Number(backlog?.players ?? 0), cadenceSeconds)
   );
-  if (setting.warning) Logger.important('Steam', setting.warning);
+  // An invalid setting is posted the first time, and then only printed in the console, as the
+  // importer service runs this step every cycle with the same settings.
+  if (setting.warning && refreshPerRun === warnedRefreshPerRun)
+    Logger.verbose('Steam', 2, setting.warning);
+  else if (setting.warning) {
+    warnedRefreshPerRun = refreshPerRun;
+    Logger.important('Steam', setting.warning);
+  }
 
   // The players this run takes: first the new ones, at most NEW_PER_RUN plus the setting, as new
   // ones beyond NEW_PER_RUN take the slots of the players due a refresh, and then the players due a

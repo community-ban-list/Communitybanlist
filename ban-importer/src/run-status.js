@@ -1,7 +1,9 @@
 // How a run looks in the log channel: one Discord embed, which the run posts once it holds the run
 // lock, keeps up to date while it goes, and edits a last time to show how it ended. This draws that
 // embed from what the run has done so far, and corrects the embed of a run whose last edit did not
-// reach Discord. It only draws, so anything that shows a run's status can use it.
+// reach Discord. It only draws, so anything that shows a run's status can use it: in loop mode,
+// the importer service posts the embed of a cycle once it has ended (see loop.js), and its own
+// status message is drawn with the helpers exported here (see service-status.js).
 //
 // This file has no imports, so it can be loaded on its own.
 
@@ -72,17 +74,17 @@ const MAX_MIGRATIONS = 300;
 // A progress bar has 20 cells.
 const BAR_WIDTH = 20;
 
-const isCount = (value) => Number.isFinite(value) && value >= 0;
+export const isCount = (value) => Number.isFinite(value) && value >= 0;
 
 // A count written with thousands separators, e.g. 86,919.
-const formatCount = (count) => count.toLocaleString('en-US');
+export const formatCount = (count) => count.toLocaleString('en-US');
 
-function plural(count, noun) {
+export function plural(count, noun) {
   return `${formatCount(count)} ${noun}${count === 1 ? '' : 's'}`;
 }
 
 // A length of time, e.g. 0.4s, 14s, 8m 05s or 1h 05m.
-function formatDuration(seconds) {
+export function formatDuration(seconds) {
   const time = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
   if (time < 9.95) return `${time.toFixed(1)}s`;
   const whole = Math.round(time);
@@ -92,20 +94,20 @@ function formatDuration(seconds) {
   return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`;
 }
 
-// A time as Discord shows it, in each viewer's own time zone: f is the date and time, R how long
-// ago.
-const discordTime = (ms, style) => `<t:${Math.floor(ms / 1000)}:${style}>`;
+// A time as Discord shows it, in each viewer's own time zone: f is the date and time, t the time
+// alone, and R how long ago, or how long until.
+export const discordTime = (ms, style) => `<t:${Math.floor(ms / 1000)}:${style}>`;
 
 // Cut text to at most max characters, on a character boundary so no emoji is cut in half, ending
 // it with … when it is cut.
-function cut(text, max) {
+export function cut(text, max) {
   const whole = String(text).toWellFormed();
   if (whole.length <= max) return whole;
   return max < 1 ? '' : `${whole.slice(0, max - 1).replace(/[\uD800-\uDBFF]$/, '')}…`;
 }
 
 // Cut text of several lines to at most max characters, at the end of a line where it can be.
-function cutLines(text, max) {
+export function cutLines(text, max) {
   if (text.length <= max) return text;
   if (max < 2) return cut(text, max);
   const kept = cut(text, max - 1).slice(0, -1);
@@ -114,11 +116,11 @@ function cutLines(text, max) {
 }
 
 // Show text as it is, rather than as Discord's formatting, such as bold, links or mentions.
-const plain = (text) => text.replace(/[\\`*_~|<>[\]]/g, '\\$&');
+export const plain = (text) => text.replace(/[\\`*_~|<>[\]]/g, '\\$&');
 
 // Why a run ended, on one line, cut to fit and without any address, which could hold a key or a
 // token. The run gives a reason described by describeError, so it never holds an error's request.
-function describeReason(reason) {
+export function describeReason(reason) {
   const text = String(reason)
     .replace(/\s+/g, ' ')
     .trim()
@@ -127,16 +129,17 @@ function describeReason(reason) {
 }
 
 // The commit, as the first 7 characters of its SHA.
-function shortSha(gitSha) {
+export function shortSha(gitSha) {
   const sha = String(gitSha ?? '');
   if (/^[0-9a-f]{7,40}$/i.test(sha)) return sha.slice(0, 7);
   return cut(sha.replace(/[^\w.-]/g, ''), 40) || 'unknown';
 }
 
-const label = (name) => plain(cut(LABELS[name] ?? String(name), MAX_LABEL));
+// A phase's name, as the embed shows it.
+export const label = (name) => plain(cut(LABELS[name] ?? String(name), MAX_LABEL));
 
 // How far a step has got, e.g. 7 / 20 ban lists, with a bar for the step under way.
-function describeProgress(progress, { bar = false } = {}) {
+export function describeProgress(progress, { bar = false } = {}) {
   if (!progress || !isCount(progress.done) || !isCount(progress.total)) return null;
   const { done, total, unit } = progress;
   const numbers = `${formatCount(done)} / ${formatCount(total)}${
@@ -343,7 +346,8 @@ function headerLines(state) {
 // - progress: each step's latest progress, as { done, total, unit }, by name;
 // - counts: the counts each step gave, by name, as the run record keeps them;
 // - migrations: the importer migrations it applied;
-// - reason: why a run that did not finish ended.
+// - reason: why a run that did not finish ended;
+// - cycle: in loop mode, the number of the importer service's cycle, which its title names.
 // Whatever the state holds, every part is kept within Discord's limits.
 export default function renderRunStatus(state) {
   const array = (value) => (Array.isArray(value) ? value.map(String) : []);
@@ -371,8 +375,10 @@ export default function renderRunStatus(state) {
     running: outcome === 'running',
     phases: normal.phases
   });
+  // A cycle of the importer service is named as one, e.g. CBL update cycle 12 finished.
+  const cycle = Number.isSafeInteger(state.cycle) && state.cycle > 0 ? state.cycle : null;
   return {
-    title: TITLES[outcome],
+    title: cycle ? TITLES[outcome].replace('run', `cycle ${cycle}`) : TITLES[outcome],
     color: COLORS[outcome],
     description: [header, '', ...lines].join('\n'),
     footer: { text: outcome === 'running' ? 'Last updated' : 'Ended' },

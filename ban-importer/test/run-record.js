@@ -50,11 +50,11 @@ function fakeDatabase({ rows = {}, tablesMadeAt = null, error = null } = {}) {
       }
       return state.has(name) ? { name, value: read(name) } : null;
     },
-    // The record's rows are written in a transaction. The run's status message is the one row
-    // written on its own.
+    // The record's rows are written in a transaction. The run's status message, and the importer
+    // service's row, are the rows written on their own.
     async upsert({ name, value }, { transaction } = {}) {
       fail();
-      if (name === 'lastRunMessage' && !transaction) {
+      if ((name === 'lastRunMessage' || name === 'importerService') && !transaction) {
         state.set(name, JSON.stringify(value));
         writes.push(name);
         return;
@@ -688,6 +688,96 @@ for (const skipped of [false, true]) {
   assert.strictEqual(database.transactions(), 2);
 }
 
+// The record of a cycle of the importer service also gives the cycle's number, after the commit,
+// and the process's memory as the cycle ended, last. Its summary in recentRuns keeps both.
+{
+  const database = fakeDatabase();
+  const { default: RunRecord, saveRecord } = await loadRunRecord(database);
+  const record = new RunRecord();
+  record.cycle = 12;
+  record.memory = { rssMB: 150, heapUsedMB: 52.5, heapTotalMB: 80, externalMB: 3 };
+  record.count('importBans', () => ({ lists: 2, banLists: [{ id: 1 }] }));
+  const ended = plain(record.end('finished', 0));
+  assert.deepStrictEqual(Object.keys(ended), [
+    'event',
+    'outcome',
+    'exitCode',
+    'startedAt',
+    'endedAt',
+    'seconds',
+    'gitSha',
+    'cycle',
+    'phases',
+    'counts',
+    'memory'
+  ]);
+  assert.deepStrictEqual([ended.cycle, ended.memory.rssMB], [12, 150]);
+  await saveRecord(record.ended);
+  const [summary] = database.read('recentRuns');
+  assert.deepStrictEqual(
+    [summary.cycle, summary.memory, summary.counts],
+    [12, ended.memory, { importBans: { lists: 2 } }]
+  );
+}
+
+// The importer service keeps a row of its own, on its own: its status message, when the process
+// that keeps it up to date started, and, once that process ended as it should, when and how. A
+// row whose message is not a Discord message's ID keeps the rest.
+{
+  const database = fakeDatabase();
+  const { readService, saveService, SERVICE_STATE } = await loadRunRecord(database);
+  assert.strictEqual(SERVICE_STATE.SERVICE, 'importerService');
+  assert.strictEqual(await readService(), null);
+  await saveService({ messageId: '1430000000000000020', startedAt: START });
+  assert.deepStrictEqual(database.read('importerService'), {
+    messageId: '1430000000000000020',
+    startedAt: '2026-10-15T12:00:00.000Z'
+  });
+  assert.deepStrictEqual(plain(await readService()), database.read('importerService'));
+  await saveService({
+    messageId: '1430000000000000020',
+    startedAt: START,
+    endedAt: START + HOUR,
+    outcome: 'stopped'
+  });
+  assert.deepStrictEqual(plain(await readService()), {
+    messageId: '1430000000000000020',
+    startedAt: '2026-10-15T12:00:00.000Z',
+    endedAt: '2026-10-15T13:00:00.000Z',
+    outcome: 'stopped'
+  });
+  // A process that has not posted a status message, e.g. in changes mode, saves none.
+  await saveService({ startedAt: START });
+  assert.deepStrictEqual(database.read('importerService'), {
+    messageId: null,
+    startedAt: '2026-10-15T12:00:00.000Z'
+  });
+  assert.deepStrictEqual(plain(await readService()), { startedAt: '2026-10-15T12:00:00.000Z' });
+  database.state.set('importerService', JSON.stringify({ messageId: '../x', startedAt: 'then' }));
+  assert.deepStrictEqual(plain(await readService()), { startedAt: 'then' });
+  for (const value of ['text', null, [1]]) {
+    database.state.set('importerService', JSON.stringify(value));
+    assert.strictEqual(await readService(), null, JSON.stringify(value));
+  }
+  assert.strictEqual(database.transactions(), 0);
+}
+
+// The importer service checks whether the importer is stale as runs do, and its alert says that it
+// starts a cycle every cadence, and, while it stands by for the run lock, that it does.
+{
+  const database = fakeDatabase({
+    rows: { lastSuccessAt: JSON.stringify(new Date(START - 2 * HOUR).toISOString()) }
+  });
+  const { alertIfStale, discord } = await loadRunRecord(database);
+  assert.strictEqual(
+    await alertIfStale({ cadenceSeconds: 600, skipped: true, startedAt: START, service: true }),
+    true
+  );
+  assert.deepStrictEqual(discord, [
+    'The CBL update is stale: no run has succeeded for 2.0 hours, since the one that started at 2026-10-15T10:00:00.000Z. The importer service starts a cycle every 10 minutes (IMPORTER_CADENCE_SECONDS, or else IMPORTER_CYCLE_SECONDS), so 3 or more in a row have not succeeded. The importer service is standing by, as another run holds the run lock.'
+  ]);
+}
+
 console.log(
-  'Run record checks passed: what a record holds, reasons cut on a character boundary, saving it with the latest 100 summaries, what counts as a success, the staleness alert on the schedule, with its limit of one a cadence, and the run status message to check, with the record of its run.'
+  'Run record checks passed: what a record holds, reasons cut on a character boundary, saving it with the latest 100 summaries, what counts as a success, the staleness alert on the schedule, with its limit of one a cadence, the run status message to check, with the record of its run, and the importer service: its cycles, its row and its alert.'
 );

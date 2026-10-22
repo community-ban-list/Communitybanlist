@@ -3957,6 +3957,23 @@ for (const [name, value, warning, reads] of [
   );
   delete env[name];
 }
+// The importer service imports with the same importer every cycle, which posts the warnings on its
+// first import only, and prints them in the console on the later ones, rather than posting them
+// every few minutes.
+{
+  env.IMPORTER_DRIFT = 'sometimes';
+  const service = new BanImporter();
+  delete env.IMPORTER_DRIFT;
+  const warning =
+    'Warning: IMPORTER_DRIFT must be 1 or 0, not "sometimes", so head polls still compare BattleMetrics\' counts.';
+  const levels = [];
+  for (let cycle = 0; cycle < 3; cycle++) {
+    logs.length = 0;
+    await service.importBans();
+    levels.push(...logs.filter((log) => log.message === warning).map(({ level }) => level));
+  }
+  assert.deepStrictEqual(levels, [1, 2, 2]);
+}
 
 // A held list stays held while it is only polled, as a poll does not check for removed bans, and
 // its line, posted when a read of all of it keeps its bans, is not posted for a poll. Here the list

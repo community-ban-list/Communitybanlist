@@ -29,6 +29,9 @@ const deletedWebhooks = new Set();
 // is only reported once.
 const invalidWebhookLists = new Set();
 
+// Both are emptied when the export push starts, so they last one run, or in loop mode one cycle,
+// rather than growing for as long as the importer service runs.
+
 export default class Core {
   static async clearOrphanedUsers() {
     Logger.verbose('Core', 2, 'Clearing reputation points of orphaned Steam users...');
@@ -186,6 +189,8 @@ export default class Core {
   static async exportExportBans(counts = {}) {
     Logger.verbose('Core', 2, 'Exporting Bans...');
     const profileStartTime = Date.now();
+    deletedWebhooks.clear();
+    invalidWebhookLists.clear();
     // Get bans that need exporting, the longest waiting first. An export ban BattleMetrics refused
     // was changed when its claim was released, so it goes to the back of the queue, and cannot
     // hold up the rest of its list run after run.

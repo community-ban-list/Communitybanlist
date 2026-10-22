@@ -120,3 +120,9 @@ export default async function (method, url, params, data, priority = 5, options)
   reportBudget();
   return request(method, url, params, data, priority, options);
 }
+
+// How many requests have been sent to BattleMetrics since the service started, each attempt
+// counted, retries included, as each uses the budget.
+export function requestCount() {
+  return request.attempts();
+}

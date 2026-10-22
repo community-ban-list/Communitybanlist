@@ -169,8 +169,11 @@ async function load() {
   requests = [];
   logs.length = 0;
   reply = () => ({ status: 200, headers: {}, data: { data: [] } });
+  client = module.namespace;
   return module.namespace.default;
 }
+// The client last loaded, with its other exports.
+let client;
 
 // An error as axios gives one, holding the request with its headers, and so the token.
 function axiosError(request, { status, code, message, data, headers = {} } = {}) {
@@ -324,6 +327,14 @@ assert.strictEqual(
   logs.filter(([line]) => /Trying again in [\d.]+s \(attempt \d of 3\)/.test(line)).length,
   2
 );
+// The client counts every attempt it made, each retry too, as each uses the budget, for the
+// importer service's hourly summary.
+assert.strictEqual(client.requestCount(), 3);
+await battlemetrics('delete', 'bans/42').catch(() => {});
+assert.strictEqual(client.requestCount(), 6);
+reply = () => ({ status: 204, headers: {} });
+await battlemetrics('delete', 'bans/43');
+assert.strictEqual(client.requestCount(), 7);
 
 // A request that works when tried again returns its answer, and a Retry-After is honoured.
 battlemetrics = await load();
