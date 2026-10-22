@@ -184,40 +184,63 @@ export const FULL_REMOVAL_BANS = 10;
 
 // Decide what to do with the bans missing from a complete read of a list: missing is their IDs,
 // stored and fetched the numbers of bans the list had before the read and the read found, pending
-// the bans recorded as missing before, as readPendingRemovals gives them, now the time of the read
-// in milliseconds, replace whether the bans are being replaced by those of the list's new source,
-// and confirmed whether the list may lose any number of bans at once. Returns:
+// when each ban recorded as missing before was first missing, in milliseconds, by its ID, held the
+// IDs of the bans the list still has that an earlier run held for an admin, now the time of the
+// read in milliseconds, replace whether the bans are being replaced by those of the list's new
+// source, and confirmed whether the list may lose any number of bans at once. Returns:
 // - remove: the IDs of the bans to remove now;
 // - wait: the IDs of the bans to keep until a later complete read confirms they are gone;
-// - hold: why all the missing bans wait for an admin to confirm their removal, or null: 'empty'
-//   for a read that found no bans, and 'full' for one that found none of the bans of a list of at
-//   least FULL_REMOVAL_BANS bans.
+// - hold: why bans wait for an admin to confirm their removal, or null: 'empty' for a read that
+//   found no bans, and 'full' for one that found none of the bans of a list of at least
+//   FULL_REMOVAL_BANS bans, or none of those an earlier run held for that reason;
+// - held: the IDs of the bans that wait for an admin;
+// - released: the IDs of the bans an earlier run held that no longer wait for an admin, but for a
+//   later complete read, as if first missing now.
 // So with confirmed, every missing ban is removed at once. Otherwise a list that seems to have
 // lost all its bans keeps them, as its source more likely broke, unless its bans are being
-// replaced. Any other missing ban is removed once complete reads have not had it for
-// CONFIRM_AFTER, and waits until then, but when fewer than REMOVE_AT_ONCE_BANS and
-// REMOVE_AT_ONCE_SHARE of the list would wait, all of them are removed at once.
+// replaced. A 'full' hold lasts until one of its bans comes back, or the bans are replaced: the
+// bans the list saved since are not its bans from before. Any other missing ban is removed once
+// complete reads have not had it for CONFIRM_AFTER, and waits until then, but when fewer than
+// REMOVE_AT_ONCE_BANS and REMOVE_AT_ONCE_SHARE of the list would wait, all of them are removed at
+// once.
 export function planRemovals({
   missing,
   stored,
   fetched,
   pending = new Map(),
+  held = new Set(),
   now = Date.now(),
   replace = false,
   confirmed = false
 }) {
-  const none = { remove: [], wait: [], hold: null };
+  const none = { remove: [], wait: [], hold: null, held: [], released: [] };
   if (missing.length === 0) return none;
   if (confirmed) return { ...none, remove: [...missing] };
-  if (!replace && fetched === 0) return { ...none, hold: 'empty' };
+  if (!replace && fetched === 0) return { ...none, hold: 'empty', held: [...missing] };
   if (!replace && missing.length >= stored && stored >= FULL_REMOVAL_BANS)
-    return { ...none, hold: 'full' };
+    return { ...none, hold: 'full', held: [...missing] };
 
-  const due = (id) => pending.has(id) && now - pending.get(id) >= CONFIRM_AFTER;
-  const wait = missing.filter((id) => !due(id));
-  if (wait.length < Math.max(REMOVE_AT_ONCE_BANS, stored * REMOVE_AT_ONCE_SHARE))
-    return { ...none, remove: [...missing] };
-  return { ...none, remove: missing.filter(due), wait };
+  // A list an earlier run held stays held while none of the bans held has come back. The other
+  // missing bans, which it saved since, are removed as usual.
+  const isMissing = new Set(missing);
+  const stillHeld = [...held].filter((id) => isMissing.has(id));
+  const holding = !replace && held.size > 0 && stillHeld.length === held.size;
+  const released = new Set(holding ? [] : stillHeld);
+  const others = holding ? missing.filter((id) => !held.has(id)) : missing;
+
+  const due = (id) =>
+    !released.has(id) && pending.has(id) && now - pending.get(id) >= CONFIRM_AFTER;
+  const wait = others.filter((id) => !due(id));
+  const plan =
+    wait.length < Math.max(REMOVE_AT_ONCE_BANS, stored * REMOVE_AT_ONCE_SHARE)
+      ? { remove: [...others], wait: [] }
+      : { remove: others.filter(due), wait };
+  return {
+    ...plan,
+    hold: holding ? 'full' : null,
+    held: holding ? stillHeld : [],
+    released: [...released]
+  };
 }
 
 // The bans written, and the bans removed, at most this many in one transaction.
@@ -266,13 +289,19 @@ export function readStoredBans(banList) {
 }
 
 // The list's bans that earlier complete reads did not have, by ID, each with when the first of them
-// did not, in milliseconds.
+// did not (firstMissingAt), and when a run began holding it for an admin (heldAt), or null, in
+// milliseconds.
 export async function readPendingRemovals(banList) {
   const rows = await sequelize.query(
-    'SELECT banId, firstMissingAt FROM BanListPendingRemovals WHERE banList = ?',
+    'SELECT banId, firstMissingAt, heldAt FROM BanListPendingRemovals WHERE banList = ?',
     { replacements: [banList], type: QueryTypes.SELECT }
   );
-  return new Map(rows.map(({ banId, firstMissingAt }) => [banId, timeOf(firstMissingAt)]));
+  return new Map(
+    rows.map(({ banId, firstMissingAt, heldAt }) => [
+      banId,
+      { firstMissingAt: timeOf(firstMissingAt), heldAt: timeOf(heldAt) }
+    ])
+  );
 }
 
 // Write a batch of bans in one transaction: add their players that are new, write the bans, and
@@ -385,17 +414,41 @@ export async function removeBans(banList, bans, { batchSize = BATCH_SIZE } = {})
 }
 
 // Record that the bans, by ID, were missing from the complete read of the list at now: as first
-// missing then, if they are not recorded yet, and as last missing then.
-export async function savePendingRemovals(banList, ids, { now, batchSize = BATCH_SIZE }) {
+// missing then, if they are not recorded yet, and as last missing then. With held, they are held for
+// an admin, from now if they were not already.
+export async function savePendingRemovals(
+  banList,
+  ids,
+  { now, held = false, batchSize = BATCH_SIZE }
+) {
   for (let i = 0; i < ids.length; i += batchSize) {
     const batch = ids.slice(i, i + batchSize);
     await retryOperation(() =>
       sequelize.query(
-        `INSERT INTO BanListPendingRemovals (banList, banId, firstMissingAt, lastMissingAt) VALUES ${placeholders(batch.length, 4)} AS new ON DUPLICATE KEY UPDATE lastMissingAt = new.lastMissingAt`,
-        { replacements: batch.flatMap((id) => [banList, id, sqlTime(now), sqlTime(now)]) }
+        `INSERT INTO BanListPendingRemovals (banList, banId, firstMissingAt, lastMissingAt, heldAt) VALUES ${placeholders(batch.length, 5)} AS new ON DUPLICATE KEY UPDATE lastMissingAt = new.lastMissingAt, heldAt = COALESCE(BanListPendingRemovals.heldAt, new.heldAt)`,
+        {
+          replacements: batch.flatMap((id) => [
+            banList,
+            id,
+            sqlTime(now),
+            sqlTime(now),
+            held ? sqlTime(now) : null
+          ])
+        }
       )
     );
   }
+}
+
+// Stop holding the list's held bans for an admin: they wait for a later complete read instead, as
+// if first missing at now.
+export async function releaseHeldRemovals(banList, { now }) {
+  await retryOperation(() =>
+    sequelize.query(
+      'UPDATE BanListPendingRemovals SET firstMissingAt = ?, lastMissingAt = ?, heldAt = NULL WHERE banList = ? AND heldAt IS NOT NULL',
+      { replacements: [sqlTime(now), sqlTime(now), banList] }
+    )
+  );
 }
 
 // Drop the records of bans, by ID, that a read found again, or that the list no longer has.

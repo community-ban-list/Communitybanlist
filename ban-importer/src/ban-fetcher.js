@@ -23,9 +23,9 @@ const BATTLEMETRICS_BANS = new URL('https://api.battlemetrics.com/bans');
 const BATTLEMETRICS_PAGE_SIZE = 100;
 
 // A BattleMetrics list is read for at most this many pages, in case its links never end. The
-// largest lists need about 120. With the count check on, a list is read for at most as many pages
-// as BattleMetrics' count of its bans needs, and BATTLEMETRICS_EXTRA_PAGES more, as bans may be
-// added while it is read.
+// largest lists need about 120. With the count check on for the list, it is read for at most as
+// many pages as BattleMetrics' count of its bans needs, and BATTLEMETRICS_EXTRA_PAGES more, as bans
+// may be added while it is read.
 const BATTLEMETRICS_MAX_PAGES = 2000;
 const BATTLEMETRICS_EXTRA_PAGES = 50;
 
@@ -33,6 +33,13 @@ const BATTLEMETRICS_EXTRA_PAGES = 50;
 // with or without a SteamID, is within this many of BattleMetrics' count of the list's bans on its
 // first page, plus however much that count changed by its last page.
 const COUNT_TOLERANCE = 2;
+
+// Bans added or removed while a list is read change BattleMetrics' count of them on later pages,
+// but by little: counts on the pages of one read that differ by more than this many, or this share
+// of the first page's count if that is more, are taken to be wrong, so the read cannot be checked.
+// A wrong count on the last page would otherwise widen the tolerance above to most of the list.
+const COUNT_DRIFT_BANS = 10;
+const COUNT_DRIFT_SHARE = 0.01;
 
 async function doSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -129,9 +136,10 @@ function keptHeader(response, name, maxLength) {
 
 export default class BanFetcher {
   // countCheck turns on the check that a read of all of a BattleMetrics list read every ban
-  // BattleMetrics counts on it.
-  constructor({ countCheck = true } = {}) {
+  // BattleMetrics counts on it, for every list but those whose IDs, as text, countCheckSkip has.
+  constructor({ countCheck = true, countCheckSkip = new Set() } = {}) {
     this.countCheck = countCheck;
+    this.countCheckSkip = countCheckSkip;
   }
 
   // Fetch all of a ban list, or throw if any part of it cannot be fetched, so the bans that could
@@ -142,8 +150,8 @@ export default class BanFetcher {
   // - firstMetaTotal: BattleMetrics' count of the list's bans, or null;
   // - complete: whether the read is complete, so that the bans it did not find may be removed, and
   //   if it is not, why not (incomplete). A BattleMetrics list is read in full by following its
-  //   links to the end, and with the count check on, the bans read must also match BattleMetrics'
-  //   count of them (see checkCount);
+  //   links to the end, and with the count check on for the list, the bans read must also match
+  //   BattleMetrics' count of them (see checkCount);
   // - for a remote list, remote: its ETag and Last-Modified, if it has them, and the SHA-256 of
   //   the file, and unchanged: whether the file is the one the list was last imported from, by
   //   those of previous, the ones the list was last imported with, if given. A list whose file is
@@ -302,23 +310,33 @@ export default class BanFetcher {
   }
 
   // Whether a read of all of a BattleMetrics list is complete, by the number of different bans it
-  // read (scanned) and BattleMetrics' count of the list's bans on its first and last pages. With the
-  // count check off, a read that reached the list's last page is complete. With it on, the number
-  // read must also be within COUNT_TOLERANCE of the first count, plus however much the count
-  // changed while the list was read, and a list without a count cannot be checked.
-  checkCount(scanned, firstMetaTotal, lastMetaTotal) {
-    if (!this.countCheck) return { complete: true };
-    if (firstMetaTotal === null)
+  // read (scanned) and BattleMetrics' counts of the list's bans: on its first page (first), its
+  // last (last), and the lowest and highest on any page. With the count check off (countCheck), a
+  // read that reached the list's last page is complete. With it on, the counts must differ by no
+  // more than COUNT_DRIFT_BANS, or COUNT_DRIFT_SHARE of the first, and the number read must be
+  // within COUNT_TOLERANCE of the first count, plus however much the count changed by the last
+  // page. A list without a count cannot be checked.
+  checkCount(scanned, { first, last, lowest, highest }, countCheck = this.countCheck) {
+    if (!countCheck) return { complete: true };
+    if (first === null)
       return {
         complete: false,
         incomplete:
           "BattleMetrics gave no count of the list's bans, so it could not be checked that every ban was read"
       };
-    const tolerance = Math.abs(lastMetaTotal - firstMetaTotal) + COUNT_TOLERANCE;
-    if (Math.abs(scanned - firstMetaTotal) <= tolerance) return { complete: true };
+    const format = (count) => count.toLocaleString('en-US');
+    if (highest - lowest > Math.max(COUNT_DRIFT_BANS, Math.ceil(first * COUNT_DRIFT_SHARE))) {
+      const other = highest - first >= first - lowest ? highest : lowest;
+      return {
+        complete: false,
+        incomplete: `BattleMetrics counts ${format(first)} bans on the list's first page, but ${format(other)} on a later one, which bans added or removed while it was read cannot explain, so it could not be checked that every ban was read`
+      };
+    }
+    const tolerance = Math.abs(last - first) + COUNT_TOLERANCE;
+    if (Math.abs(scanned - first) <= tolerance) return { complete: true };
     return {
       complete: false,
-      incomplete: `BattleMetrics counts ${firstMetaTotal.toLocaleString('en-US')} bans on the list, but ${scanned.toLocaleString('en-US')} were read`
+      incomplete: `BattleMetrics counts ${format(first)} bans on the list, but ${format(scanned)} were read`
     };
   }
 
@@ -326,8 +344,11 @@ export default class BanFetcher {
     // Setup the initial parameters for the first fetch.
     let params = { 'filter[banList]': banList.source, 'page[size]': BATTLEMETRICS_PAGE_SIZE };
     const visited = new Set([pageAddress(params)]);
-    let firstMetaTotal = null;
-    let lastMetaTotal = null;
+    // The count check is on for the list unless it is off, or off for the list.
+    const countCheck = this.countCheck && !this.countCheckSkip.has(String(banList.id));
+    // BattleMetrics' counts of the list's bans: on its first page, its last, and the lowest and
+    // highest on any page.
+    const counts = { first: null, last: null, lowest: null, highest: null };
     let maxPages = BATTLEMETRICS_MAX_PAGES;
     let rawCount = 0;
     // The IDs of the bans read, with or without a SteamID, which the count check counts.
@@ -356,23 +377,28 @@ export default class BanFetcher {
       const total = data.meta && data.meta.total;
       const count = Number.isInteger(total) && total >= 0 ? total : null;
       if (page === 1 && count !== null) {
-        firstMetaTotal = count;
-        if (this.countCheck)
+        counts.first = count;
+        if (countCheck)
           maxPages = Math.min(
             BATTLEMETRICS_MAX_PAGES,
             Math.ceil(count / BATTLEMETRICS_PAGE_SIZE) + BATTLEMETRICS_EXTRA_PAGES
           );
       }
-      if (count !== null) lastMetaTotal = count;
+      if (count !== null)
+        Object.assign(counts, {
+          last: count,
+          lowest: Math.min(counts.lowest ?? count, count),
+          highest: Math.max(counts.highest ?? count, count)
+        });
 
       // BattleMetrics answers a list that CBL may see, but not its bans, with no bans that it still
       // counts. Such a list has not emptied, so it fails as hidden bans rather than look empty.
-      if (page === 1 && data.data.length === 0 && firstMetaTotal > 0) {
+      if (page === 1 && data.data.length === 0 && counts.first > 0) {
         const error = new Error(
-          `BattleMetrics counts ${firstMetaTotal.toLocaleString('en-US')} bans on the list but gave none of them, so CBL may no longer be allowed to see its bans.`
+          `BattleMetrics counts ${counts.first.toLocaleString('en-US')} bans on the list but gave none of them, so CBL may no longer be allowed to see its bans.`
         );
         error.bansHidden = true;
-        error.metaTotal = firstMetaTotal;
+        error.metaTotal = counts.first;
         throw error;
       }
 
@@ -436,8 +462,8 @@ export default class BanFetcher {
     return {
       bans,
       rawCount,
-      firstMetaTotal,
-      ...this.checkCount(uids.size, firstMetaTotal, lastMetaTotal)
+      firstMetaTotal: counts.first,
+      ...this.checkCount(uids.size, counts, countCheck)
     };
   }
 }

@@ -142,6 +142,7 @@ const {
   planRemovals,
   readPendingRemovals,
   readStoredBans,
+  releaseHeldRemovals,
   removeBans,
   REMOVE_AT_ONCE_BANS,
   REMOVE_AT_ONCE_SHARE,
@@ -378,7 +379,9 @@ const plan = (rules) => plain(planRemovals({ now: NOW, ...rules }));
 assert.deepStrictEqual(plan({ missing: [], stored: 50, fetched: 50 }), {
   remove: [],
   wait: [],
-  hold: null
+  hold: null,
+  held: [],
+  released: []
 });
 // Fewer than 10 missing bans, and 5% of the list, are removed at once.
 assert.deepStrictEqual(
@@ -393,7 +396,9 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(plan({ missing: range(0, 10), stored: 100, fetched: 90 }), {
   remove: [],
   wait: range(0, 10),
-  hold: null
+  hold: null,
+  held: [],
+  released: []
 });
 assert.deepStrictEqual(
   plan({ missing: range(0, 50), stored: 1000, fetched: 950 }).wait,
@@ -405,13 +410,17 @@ let pending = new Map([...pendingSince(range(0, 30), 10), ...pendingSince(range(
 assert.deepStrictEqual(plan({ missing: range(0, 60), stored: 200, fetched: 140, pending }), {
   remove: range(0, 30),
   wait: range(30, 60),
-  hold: null
+  hold: null,
+  held: [],
+  released: []
 });
 // Once fewer would wait, they are all removed at once.
 assert.deepStrictEqual(plan({ missing: range(0, 39), stored: 200, fetched: 161, pending }), {
   remove: range(0, 39),
   wait: [],
-  hold: null
+  hold: null,
+  held: [],
+  released: []
 });
 // A read that found no bans at all, or none of a list's 10 or more bans, holds them all for an
 // admin, however long they have been missing. A smaller list that lost all its bans to other bans
@@ -420,13 +429,87 @@ pending = pendingSince(range(0, 12), 60);
 assert.deepStrictEqual(plan({ missing: range(0, 3), stored: 3, fetched: 0 }), {
   remove: [],
   wait: [],
-  hold: 'empty'
+  hold: 'empty',
+  held: range(0, 3),
+  released: []
 });
+assert.deepStrictEqual(plan({ missing: range(0, 12), stored: 12, fetched: 40, pending }), {
+  remove: [],
+  wait: [],
+  hold: 'full',
+  held: range(0, 12),
+  released: []
+});
+assert.deepStrictEqual(plan({ missing: range(0, 9), stored: 9, fetched: 40 }).remove, range(0, 9));
+// A list held as it lost all its bans has saved the bans its read found since, so its bans from
+// before are no longer all of it, but it stays held while none of them has come back, however long
+// they have been missing, here 30 of 430. The bans it saved since, and no longer has, are removed
+// as usual: at once when few, and after a later read when many.
+const held = new Set(range(0, 30));
+pending = pendingSince(range(0, 30), 600);
+assert.deepStrictEqual(plan({ missing: range(0, 30), stored: 430, fetched: 400, pending, held }), {
+  remove: [],
+  wait: [],
+  hold: 'full',
+  held: range(0, 30),
+  released: []
+});
+assert.deepStrictEqual(plan({ missing: range(0, 35), stored: 430, fetched: 395, pending, held }), {
+  remove: range(30, 35),
+  wait: [],
+  hold: 'full',
+  held: range(0, 30),
+  released: []
+});
+assert.deepStrictEqual(plan({ missing: range(0, 60), stored: 430, fetched: 370, pending, held }), {
+  remove: [],
+  wait: range(30, 60),
+  hold: 'full',
+  held: range(0, 30),
+  released: []
+});
+// So do 20 of 420, which the rule for few missing bans would otherwise remove at once, and a list
+// whose read found a single other ban.
 assert.deepStrictEqual(
-  plan({ missing: range(0, 12), stored: 12, fetched: 40, pending }).hold,
+  plan({
+    missing: range(0, 20),
+    stored: 420,
+    fetched: 400,
+    pending,
+    held: new Set(range(0, 20))
+  }).hold,
   'full'
 );
-assert.deepStrictEqual(plan({ missing: range(0, 9), stored: 9, fetched: 40 }).remove, range(0, 9));
+assert.deepStrictEqual(
+  plan({ missing: range(0, 30), stored: 31, fetched: 1, pending, held }).held,
+  range(0, 30)
+);
+// Once one of them comes back, the hold ends: the rest wait for a later complete read, as if first
+// missing now, however long they were held, or are removed at once when they are few.
+assert.deepStrictEqual(plan({ missing: range(1, 30), stored: 430, fetched: 401, pending, held }), {
+  remove: [],
+  wait: range(1, 30),
+  hold: null,
+  held: [],
+  released: range(1, 30)
+});
+assert.deepStrictEqual(plan({ missing: range(25, 30), stored: 430, fetched: 425, pending, held }), {
+  remove: range(25, 30),
+  wait: [],
+  hold: null,
+  held: [],
+  released: range(25, 30)
+});
+// As it does for a list whose bans are being replaced.
+assert.deepStrictEqual(
+  plan({ missing: range(0, 30), stored: 430, fetched: 400, pending, held, replace: true }),
+  { remove: [], wait: range(0, 30), hold: null, held: [], released: range(0, 30) }
+);
+// An admin's confirmation removes them.
+assert.deepStrictEqual(
+  plan({ missing: range(0, 30), stored: 430, fetched: 400, pending, held, confirmed: true }).remove,
+  range(0, 30)
+);
 // An admin's confirmation removes them all at once.
 assert.deepStrictEqual(
   plan({ missing: range(0, 12), stored: 12, fetched: 0, confirmed: true }).remove,
@@ -440,31 +523,40 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(plan({ missing: range(0, 12), stored: 12, fetched: 40, replace: true }), {
   remove: [],
   wait: range(0, 12),
-  hold: null
+  hold: null,
+  held: [],
+  released: []
 });
 assert.deepStrictEqual(
   plan({ missing: range(0, 12), stored: 12, fetched: 0, replace: true, pending }).remove,
   range(0, 12)
 );
 
-// Reading a list's stored bans and its recorded missing bans takes one query each, by the list.
+// Reading a list's stored bans and its recorded missing bans takes one query each, by the list. A
+// recorded ban says when it was first missing, and when a run began holding it for an admin, if
+// one did.
 reset();
 const STORED_BANS =
   'SELECT id, steamUser, expires, expired, reason, rawReason, rawNote FROM Bans WHERE banList = ?';
-const PENDING_BANS = 'SELECT banId, firstMissingAt FROM BanListPendingRemovals WHERE banList = ?';
+const PENDING_BANS =
+  'SELECT banId, firstMissingAt, heldAt FROM BanListPendingRemovals WHERE banList = ?';
 selects = {
   [STORED_BANS]: [storedBan('a')],
   [PENDING_BANS]: [
-    { banId: '1,x', firstMissingAt: new Date(ago(5)) },
-    { banId: '1,y', firstMissingAt: '2026-10-21 11:00:00.000' }
+    { banId: '1,x', firstMissingAt: new Date(ago(5)), heldAt: null },
+    { banId: '1,y', firstMissingAt: '2026-10-21 11:00:00.000', heldAt: new Date(ago(30)) }
   ]
 };
 assert.deepStrictEqual(plain(await readStoredBans(1)), plain([storedBan('a')]));
 assert.deepStrictEqual(
-  Array.from(await readPendingRemovals(1), ([banId, firstMissingAt]) => [banId, firstMissingAt]),
+  Array.from(await readPendingRemovals(1), ([banId, { firstMissingAt, heldAt }]) => [
+    banId,
+    firstMissingAt,
+    heldAt
+  ]),
   [
-    ['1,x', ago(5)],
-    ['1,y', ago(60)]
+    ['1,x', ago(5), null],
+    ['1,y', ago(60), ago(30)]
   ]
 );
 assert.deepStrictEqual(
@@ -630,6 +722,28 @@ await writeBans(7, diff.added.slice(0, 1), {
   onFailed: (ban) => failed.push(ban.id)
 });
 assert.deepStrictEqual([failed, transactions], [['1,n1'], 1]);
+// While the batch is written a ban at a time, a ban that cannot be written as the database stays
+// unavailable, or as the list is not in the database, stops the writes, as it would for the batch.
+// It is not passed on as a ban that cannot be saved, and no other ban is written.
+for (const [errors, rejection] of [
+  [Array.from({ length: 5 }, () => new ConnectionError()), ConnectionError],
+  [[new ForeignKeyConstraintError('banList')], (err) => isMissingBanList(err)]
+]) {
+  reset();
+  fail(WRITE_BANS, new ValidationError('Validation error'), ...errors);
+  failed.length = 0;
+  batches.length = 0;
+  await assert.rejects(
+    writeBans(7, diff.added, {
+      now: WRITTEN_AT,
+      onWritten: (batch) => batches.push(batch.length),
+      onFailed: (ban) => failed.push(ban.id)
+    }),
+    rejection
+  );
+  assert.deepStrictEqual([failed, batches], [[], []], describeError(errors[0]));
+  assert.strictEqual(transactions, 1 + errors.length, describeError(errors[0]));
+}
 
 // A list that is not in the database fails the bans' foreign key, which stops the writes at once,
 // without retries or writing the bans one at a time.
@@ -710,35 +824,42 @@ assert.deepStrictEqual(
 );
 
 // Missing bans are recorded with one statement per batch, which keeps when a ban was first missing
-// and updates when it was last, and their records are dropped the same way.
+// and updates when it was last, and their records are dropped the same way. Bans held for an admin
+// are recorded as held from now, unless they already were, which keeps when that began. Releasing
+// a list's held bans makes them wait for a later complete read, as if first missing now.
 reset();
+const SAVE_PENDING = (rows) =>
+  `INSERT INTO BanListPendingRemovals (banList, banId, firstMissingAt, lastMissingAt, heldAt) VALUES ${Array(
+    rows
+  )
+    .fill('(?, ?, ?, ?, ?)')
+    .join(
+      ', '
+    )} AS new ON DUPLICATE KEY UPDATE lastMissingAt = new.lastMissingAt, heldAt = COALESCE(BanListPendingRemovals.heldAt, new.heldAt)`;
+const AT = '2026-10-21 12:00:00.000';
 await savePendingRemovals(7, ['7,a', '7,b', '7,c'], { now: new Date(NOW), batchSize: 2 });
+await savePendingRemovals(7, ['7,e'], { now: new Date(NOW), held: true });
 await clearPendingRemovals(7, ['7,d'], { batchSize: 2 });
+await releaseHeldRemovals(7, { now: new Date(NOW) });
 assert.deepStrictEqual(
   events.map(([, sql, replacements, transaction]) => [sql, replacements, transaction]),
   [
+    [SAVE_PENDING(2), [7, '7,a', AT, AT, null, 7, '7,b', AT, AT, null], null],
+    [SAVE_PENDING(1), [7, '7,c', AT, AT, null], null],
+    [SAVE_PENDING(1), [7, '7,e', AT, AT, AT], null],
+    ['DELETE FROM BanListPendingRemovals WHERE banList = ? AND banId IN (?)', [7, ['7,d']], null],
     [
-      'INSERT INTO BanListPendingRemovals (banList, banId, firstMissingAt, lastMissingAt) VALUES (?, ?, ?, ?), (?, ?, ?, ?) AS new ON DUPLICATE KEY UPDATE lastMissingAt = new.lastMissingAt',
-      [
-        7,
-        '7,a',
-        '2026-10-21 12:00:00.000',
-        '2026-10-21 12:00:00.000',
-        7,
-        '7,b',
-        '2026-10-21 12:00:00.000',
-        '2026-10-21 12:00:00.000'
-      ],
+      'UPDATE BanListPendingRemovals SET firstMissingAt = ?, lastMissingAt = ?, heldAt = NULL WHERE banList = ? AND heldAt IS NOT NULL',
+      [AT, AT, 7],
       null
-    ],
-    [
-      'INSERT INTO BanListPendingRemovals (banList, banId, firstMissingAt, lastMissingAt) VALUES (?, ?, ?, ?) AS new ON DUPLICATE KEY UPDATE lastMissingAt = new.lastMissingAt',
-      [7, '7,c', '2026-10-21 12:00:00.000', '2026-10-21 12:00:00.000'],
-      null
-    ],
-    ['DELETE FROM BanListPendingRemovals WHERE banList = ? AND banId IN (?)', [7, ['7,d']], null]
+    ]
   ]
 );
+// A deadlock runs a statement again.
+reset();
+fail(/^UPDATE BanListPendingRemovals /, deadlock());
+await releaseHeldRemovals(7, { now: new Date(NOW) });
+assert.deepStrictEqual([statements().length, delays], [2, [5000]]);
 
 // Once the run is asked to stop, the batch under way is finished, and no other is started.
 reset();
@@ -758,5 +879,5 @@ assert.deepStrictEqual(batches, [2, 2]);
 assert.strictEqual(events.filter(([type]) => type === 'commit').length, 2);
 
 console.log(
-  'Apply checks passed: values compared, players kept and moved, removals planned, batched writes, retries, failed bans, removals and stops.'
+  'Apply checks passed: values compared, players kept and moved, removals planned, holds that last until confirmed or a held ban comes back, batched writes, retries, failed bans, bans written alone, removals, records of missing and held bans, and stops.'
 );

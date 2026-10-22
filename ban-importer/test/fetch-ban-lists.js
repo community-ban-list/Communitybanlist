@@ -622,6 +622,79 @@ for (const [first, last] of [
   assert.strictEqual((await uncounted.fetchBanList(banList)).complete, true, `${first}`);
 }
 
+// Bans added or removed while a list is read change its count by little, so counts on its pages
+// that differ by more than 10, or 1% of the first page's count if that is more, cannot be trusted,
+// and the read is not complete. So a last page that counts no bans, or the bans left after it,
+// cannot widen the tolerance to most of the list. Each case is [the count on each page, the bans
+// on each page, whether the read is complete].
+const countedPages = (counts, perPage) =>
+  Object.fromEntries(
+    counts.map((count, page) => [
+      page === 0 ? 'first' : `c${page}`,
+      {
+        meta: count === null ? undefined : { total: count },
+        data: Array.from({ length: perPage }, (_, i) =>
+          ban(`c${page}-${i}`, steam(page * perPage + i))
+        ),
+        links: { next: page < counts.length - 1 ? link(`c${page + 1}`) : null }
+      }
+    ])
+  );
+const DRIFT =
+  /^BattleMetrics counts ([\d,]+) bans on the list's first page, but ([\d,]+) on a later one, which bans added or removed while it was read cannot explain, so it could not be checked that every ban was read$/;
+for (const [counts, perPage, complete] of [
+  [[300, 0], 50, false],
+  [[300, 100], 150, false],
+  [[300, 0, 300], 100, false],
+  [[300, 300, 300, 300, 300, 300, 301], 43, true],
+  [[...Array(9).fill(1000), 1012], 100, false],
+  [[...Array(9).fill(1000), 1010], 100, true],
+  [[1000, 990, ...Array(8).fill(1000)], 100, true],
+  [[1000, 989, ...Array(8).fill(1000)], 100, false],
+  [[20, 31], 10, false],
+  [[20, 30], 10, true],
+  [[300, null], 150, true]
+]) {
+  reset();
+  book(countedPages(counts, perPage));
+  list = await fetcher.fetchBanList(banList);
+  const label = JSON.stringify(counts);
+  assert.strictEqual(list.complete, complete, label);
+  if (complete) continue;
+  const [, first, other] = list.incomplete.match(DRIFT) ?? [];
+  assert.deepStrictEqual(
+    [first, other],
+    [counts[0], counts.find((count) => count !== counts[0])].map((count) =>
+      count.toLocaleString('en-US')
+    ),
+    label
+  );
+}
+
+// A list that IMPORTER_SCAN_COUNT_CHECK_SKIP names is left out of the check, as with the check off,
+// so a read of it to its last page is complete, whatever its count, and it is read for up to 2,000
+// pages. A list it does not name is checked. A list that gives no bans but counts some still has
+// hidden bans.
+const skipping = new BanFetcher({ countCheckSkip: new Set(['3']) });
+reset();
+book(countedPages([300, 0], 50));
+list = await skipping.fetchBanList(banList);
+assert.deepStrictEqual([list.complete, list.bans.length, list.firstMetaTotal], [true, 100, 300]);
+reset();
+book(countedPages([300, 0], 50));
+assert.strictEqual(
+  (await skipping.fetchBanList({ ...banList, id: 4 })).complete,
+  false,
+  'Another list is checked'
+);
+reset();
+pageNumber = 0;
+book(new Proxy({}, { get: endless({ total: 150 }) }));
+await assert.rejects(skipping.fetchBanList(banList), /more than 2000 pages/);
+reset();
+book({ first: { meta: { total: 40 }, data: [], links: {} } });
+await assert.rejects(skipping.fetchBanList(banList), (err) => err.bansHidden === true);
+
 // A remote list's file is kept by its ETag and Last-Modified, when they are plain text that fits
 // their columns, and its SHA-256, and a file read in full is complete.
 const FILE = '76561198000000001:0 //Cheating\n76561198000000002:0 //Toxic';
@@ -712,5 +785,5 @@ answers({ status: 304, data: '', headers: {} });
 await assert.rejects(fetcher.fetchBanList(remoteList), /the server answered HTTP 304\.$/);
 
 console.log(
-  'Ban list fetch checks passed: remote bodies, limits and retries, remote files kept and asked about, BattleMetrics paging, the count check, SteamIDs and hidden bans.'
+  'Ban list fetch checks passed: remote bodies, limits and retries, remote files kept and asked about, BattleMetrics paging, the count check, counts that change too much, lists left out of the check, SteamIDs and hidden bans.'
 );

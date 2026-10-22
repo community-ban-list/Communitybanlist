@@ -189,7 +189,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 const ALL = ['001-importer-state', '002-ban-list-syncs', '003-ban-list-pending-removals'];
 
 // The columns of BanListPendingRemovals, which migration 003 makes.
-const PENDING_REMOVAL_COLUMNS = ['banList', 'banId', 'firstMissingAt', 'lastMissingAt'];
+const PENDING_REMOVAL_COLUMNS = ['banList', 'banId', 'firstMissingAt', 'lastMissingAt', 'heldAt'];
 
 // The columns of BanListSyncs, which migration 002 makes.
 const BAN_LIST_SYNC_COLUMNS = [
@@ -277,7 +277,8 @@ const BAN_LIST_SYNC_COLUMNS = [
     assert.ok(banListSyncs.includes(definition), definition);
   // A missing ban is keyed by its list and its ban. Its list's foreign key deletes it with the list.
   // Its ban is a plain column, with the type, character set and collation of Bans.id, as Bans.id
-  // is not an INT, so the two compare as equal.
+  // is not an INT, so the two compare as equal. A ban that only waits for a later read is held for
+  // no admin.
   const pendingRemovals = database.statements.find((sql) =>
     sql.startsWith('CREATE TABLE IF NOT EXISTS BanListPendingRemovals ')
   );
@@ -286,6 +287,7 @@ const BAN_LIST_SYNC_COLUMNS = [
     'banId varchar(255) CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci NOT NULL,',
     'firstMissingAt DATETIME(3) NOT NULL,',
     'lastMissingAt DATETIME(3) NOT NULL,',
+    'heldAt DATETIME(3) NULL,',
     'PRIMARY KEY (banList, banId),',
     'CONSTRAINT BanListPendingRemovals_banList FOREIGN KEY (banList) REFERENCES BanLists (id) ON DELETE CASCADE )'
   ])
@@ -592,5 +594,5 @@ assert.deepStrictEqual(
 );
 
 console.log(
-  'Importer migration checks passed: a new database, ones with migrations 001 and 002, a second run, BanListSyncs, BanListPendingRemovals and their keys, failures, the column check and newer migrations.'
+  'Importer migration checks passed: a new database, ones with migrations 001 and 002, a second run, BanListSyncs, BanListPendingRemovals with its held bans, and their keys, failures, the column check and newer migrations.'
 );

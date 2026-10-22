@@ -53,12 +53,14 @@ const {
   nextSync,
   NOT_VISIBLE,
   readAccessCheck,
+  readBanListIDs,
   readSwitch,
   readVisibleBanLists,
   sourceKey,
   stateOf,
   STATES,
-  UNCONFIRMED
+  UNCONFIRMED,
+  unquote
 } = module.namespace;
 
 // Copy a value made in the module's context into one of this test's own, to compare it.
@@ -74,15 +76,21 @@ assert.deepStrictEqual(plain(STATES), {
 assert.strictEqual(FAILURE_ALERT_RUNS, 3);
 
 // A switch is on with 1, true, on or yes, and off with 0, false, off or no, in any case and with
-// spaces around them. Without a value it is as its default, and an invalid value is as the safer
-// of the two says, with a warning that says what that means.
+// spaces, or one pair of quotes, around them, as docker run --env-file keeps the quotes. Without a
+// value it is as its default, and an invalid value is as the safer of the two says, marked
+// invalid, with a warning that says what that means. A comment after the value is invalid.
 for (const [value, on] of [
   ['1', true],
   [' YES ', true],
   ['on', true],
+  ['"1"', true],
+  ["'on'", true],
+  ['" yes "', true],
   ['0', false],
   ['False', false],
   [' off', false],
+  ['"0"', false],
+  [" 'no' ", false],
   [true, true],
   [false, false]
 ])
@@ -92,7 +100,7 @@ for (const [value, on] of [
       { on },
       `${value}, ${defaultOn}`
     );
-for (const value of [undefined, null, '', '  '])
+for (const value of [undefined, null, '', '  ', '""', "' '"])
   for (const defaultOn of [true, false])
     assert.deepStrictEqual(
       plain(readSwitch('IMPORTER_X', value, { defaultOn, meaning: 'it is as before' })),
@@ -101,21 +109,43 @@ for (const value of [undefined, null, '', '  '])
     );
 assert.deepStrictEqual(
   plain(readSwitch('IMPORTER_X', 'maybe', { defaultOn: false, meaning: 'nothing moves' })),
-  { on: false, warning: 'Warning: IMPORTER_X must be 1 or 0, not "maybe", so nothing moves.' }
-);
-assert.deepStrictEqual(
-  plain(
-    readSwitch('IMPORTER_DRY_RUN', '2', {
-      defaultOn: false,
-      invalidOn: true,
-      meaning: 'the run is a dry run'
-    })
-  ),
   {
-    on: true,
-    warning: 'Warning: IMPORTER_DRY_RUN must be 1 or 0, not "2", so the run is a dry run.'
+    on: false,
+    invalid: true,
+    warning: 'Warning: IMPORTER_X must be 1 or 0, not "maybe", so nothing moves.'
   }
 );
+for (const value of ['2', '0 # done', '"0', `"1'`, '1 1'])
+  assert.deepStrictEqual(
+    plain(
+      readSwitch('IMPORTER_DRY_RUN', value, {
+        defaultOn: false,
+        invalidOn: true,
+        meaning: 'the run is a dry run'
+      })
+    ),
+    {
+      on: true,
+      invalid: true,
+      warning: `Warning: IMPORTER_DRY_RUN must be 1 or 0, not "${value}", so the run is a dry run.`
+    },
+    value
+  );
+assert.deepStrictEqual(
+  [unquote(undefined), unquote(' "a b" '), unquote("'x'"), unquote('"x\''), unquote('x # y')],
+  ['', 'a b', 'x', '"x\'', 'x # y']
+);
+
+// A setting that names ban lists gives their IDs, as text, without spaces or quotes around them.
+for (const [value, ids] of [
+  [undefined, []],
+  ['', []],
+  ['5', ['5']],
+  [' 9, 5 ', ['9', '5']],
+  ['"9,5"', ['9', '5']],
+  ['3,,4,', ['3', '4']]
+])
+  assert.deepStrictEqual([...readBanListIDs(value)], ids, JSON.stringify(value));
 
 // IMPORTER_ACCESS_CHECK is on unless it is 0, false, off or no, in any case and with spaces around
 // it. An invalid value leaves it on, with a warning.
@@ -125,6 +155,7 @@ for (const value of ['0', 'false', 'Off', ' no ', false])
   assert.deepStrictEqual(plain(readAccessCheck(value)), { on: false }, String(value));
 assert.deepStrictEqual(plain(readAccessCheck('2')), {
   on: true,
+  invalid: true,
   warning: 'Warning: IMPORTER_ACCESS_CHECK must be 1 or 0, not "2", so the access check stays on.'
 });
 
@@ -741,5 +772,5 @@ assert.strictEqual(
 );
 
 console.log(
-  'Ban list sync state checks passed: switches, every change of state, failed runs and their alert, reads in full, replaced sources, remote files, changed sources, the access check, lost access, runs that cannot tell, widespread losses and kept errors.'
+  'Ban list sync state checks passed: switches, with quotes and invalid values, ban list IDs, every change of state, failed runs and their alert, reads in full, replaced sources, remote files, changed sources, the access check, lost access, runs that cannot tell, widespread losses and kept errors.'
 );

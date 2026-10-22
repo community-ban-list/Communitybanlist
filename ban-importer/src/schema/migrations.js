@@ -152,10 +152,11 @@ export default [
   },
   {
     // BanListPendingRemovals, which keeps the bans that a complete read of their ban list no longer
-    // had, until a later complete read shows they are gone. A list's rows are deleted with the
-    // list, so banList has the type of BanLists.id, which its foreign key needs. banId refers to
-    // Bans.id, which is a VARCHAR, so it is a plain column with the type, character set and
-    // collation of Bans.id.
+    // had, until a later complete read shows they are gone, and the bans held for an admin, as their
+    // list seemed to have lost all of them, with when that began (heldAt). A list's rows are
+    // deleted with the list, so banList has the type of BanLists.id, which its foreign key needs.
+    // banId refers to Bans.id, which is a VARCHAR, so it is a plain column with the type, character
+    // set and collation of Bans.id.
     id: '003-ban-list-pending-removals',
     async up(query) {
       const options = await tableOptions(query);
@@ -167,6 +168,7 @@ export default [
           banId ${banIdType} NOT NULL,
           firstMissingAt DATETIME(3) NOT NULL,
           lastMissingAt DATETIME(3) NOT NULL,
+          heldAt DATETIME(3) NULL,
           PRIMARY KEY (banList, banId),
           CONSTRAINT BanListPendingRemovals_banList FOREIGN KEY (banList) REFERENCES BanLists (id)
             ON DELETE CASCADE

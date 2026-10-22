@@ -17,6 +17,7 @@ import {
   planRemovals,
   readPendingRemovals,
   readStoredBans,
+  releaseHeldRemovals,
   removeBans,
   retryOperation,
   savePendingRemovals,
@@ -32,6 +33,7 @@ import {
   nextSync,
   NOT_VISIBLE,
   readAccessCheck,
+  readBanListIDs,
   readSwitch,
   readVisibleBanLists,
   sourceKey,
@@ -161,6 +163,8 @@ export default class BanImporter {
       // Whether a read of all of a BattleMetrics list must have read as many bans as BattleMetrics
       // counts on it before any of its bans may be removed.
       countCheck: process.env.IMPORTER_SCAN_COUNT_CHECK,
+      // The IDs of the ban lists, separated by commas, that the count check leaves out.
+      countCheckSkip: process.env.IMPORTER_SCAN_COUNT_CHECK_SKIP,
       // Whether the run only says what the import would change, and writes nothing.
       dryRun: process.env.IMPORTER_DRY_RUN,
       // Whether a ban whose player is no longer one of its SteamIDs is moved to another of them.
@@ -171,12 +175,8 @@ export default class BanImporter {
     };
 
     this.batchSize = options.batchSize;
-    this.allowMassRemoval = new Set(
-      String(options.allowMassRemoval ?? '')
-        .split(',')
-        .map((id) => id.trim())
-        .filter(Boolean)
-    );
+    this.allowMassRemoval = readBanListIDs(options.allowMassRemoval);
+    this.countCheckSkip = readBanListIDs(options.countCheckSkip);
     const accessCheck = readAccessCheck(options.accessCheck);
     const countCheck = readSwitch('IMPORTER_SCAN_COUNT_CHECK', options.countCheck, {
       defaultOn: true,
@@ -192,13 +192,23 @@ export default class BanImporter {
       options.applySteamIDMoves,
       { defaultOn: false, meaning: 'no ban is moved to another of its SteamIDs' }
     );
-    for (const { warning } of [accessCheck, countCheck, dryRun, applySteamIDMoves])
-      if (warning) Logger.verbose('BanImporter', 2, warning);
+    // The warnings about invalid settings are posted once the run imports. An invalid
+    // IMPORTER_DRY_RUN stops the import instead, as the run cannot tell whether it may write, and
+    // until then the run is taken to be a dry run, so it runs no other step.
+    this.warnings = [accessCheck, countCheck, applySteamIDMoves]
+      .map(({ warning }) => warning)
+      .filter(Boolean);
+    this.dryRunError = dryRun.invalid
+      ? `IMPORTER_DRY_RUN must be 1 or 0, not "${options.dryRun}", so the run imported nothing, as it cannot tell whether it may write. Set it to 1 for a dry run, or to 0 or nothing for a run that writes.`
+      : null;
     this.accessCheck = accessCheck.on;
     this.countCheck = countCheck.on;
     this.dryRun = dryRun.on;
     this.applySteamIDMoves = applySteamIDMoves.on;
-    this.fetcher = new BanFetcher({ countCheck: this.countCheck });
+    this.fetcher = new BanFetcher({
+      countCheck: this.countCheck,
+      countCheckSkip: this.countCheckSkip
+    });
 
     // The number of ban lists the import started with, and a result for each list it imported.
     this.listCount = 0;
@@ -219,20 +229,33 @@ export default class BanImporter {
   }
 
   async importBans() {
+    // An invalid IMPORTER_DRY_RUN stops the import before it reads anything. Invalid values of the
+    // other settings are posted, as the run goes on with the safer choice, which may not be what
+    // was meant, and so is a dry run, which may have been left on by mistake.
+    if (this.dryRunError) throw new Error(this.dryRunError);
+    for (const warning of this.warnings) Logger.important('BanImporter', warning);
+    if (this.dryRun)
+      Logger.important(
+        'BanImporter',
+        'IMPORTER_DRY_RUN is on, so this run writes nothing: it only says what the import would change.'
+      );
+
     Logger.verbose('BanImporter', 2, 'Fetching ban lists to import...');
     const banLists = await retryOperation(() => BanList.findAll({ attributes: ['id'] }));
     Logger.verbose('BanImporter', 2, `Fetched ${banLists.length} ban lists to import.`);
-    if (this.dryRun)
-      Logger.verbose(
-        'BanImporter',
-        2,
-        'IMPORTER_DRY_RUN is on, so this run writes nothing: it only says what the import would change.'
-      );
     if (!this.countCheck)
       Logger.verbose(
         'BanImporter',
         2,
         "IMPORTER_SCAN_COUNT_CHECK is off, so a BattleMetrics list read to its last page counts as read in full, whatever BattleMetrics' count of its bans."
+      );
+    else if (this.countCheckSkip.size > 0)
+      Logger.verbose(
+        'BanImporter',
+        2,
+        `IMPORTER_SCAN_COUNT_CHECK_SKIP turns the count check off for ban lists ${[
+          ...this.countCheckSkip
+        ].join(', ')}, so each of them read to its last page counts as read in full.`
       );
     if (this.allowMassRemoval.size > 0)
       Logger.verbose(
@@ -381,6 +404,7 @@ export default class BanImporter {
       // could not be made, it is not swept either, nor said to be back to normal.
       if (banList.type === 'battlemetrics') this.triedBattlemetrics.add(id);
       result.lostBefore = this.hadLostAccess(banList);
+      result.incompleteBefore = this.wasIncomplete(banList);
       const visible = await this.checkAccess(banList);
       if (visible === false) result.accessLost = NOT_VISIBLE;
       else if (visible === null && result.lostBefore) result.accessLost = UNCONFIRMED;
@@ -471,13 +495,16 @@ export default class BanImporter {
         await this.removeOldSourceBans(banList, bans, stored, result);
       } else if (!result.accessLost) {
         if (!scan.complete) {
-          // The bans the read found are not missing, whatever else it missed.
+          // The bans the read found are not missing, whatever else it missed. Those held for an
+          // admin keep their records, for the next complete read to find that they came back.
           stage = 'checking that it was read in full';
           const found = new Set(bans.map((ban) => ban.id));
           if (!this.dryRun)
             await clearPendingRemovals(
               banList.id,
-              [...pending.keys()].filter((banId) => found.has(banId)),
+              [...pending]
+                .filter(([banId, { heldAt }]) => found.has(banId) && heldAt === null)
+                .map(([banId]) => banId),
               { batchSize: this.batchSize }
             );
           throw Object.assign(new Error(`${scan.incomplete}.`), { incomplete: true });
@@ -504,9 +531,12 @@ export default class BanImporter {
       result.lostAgain = Boolean(lost && result.lostBefore);
       if (lost && Number.isInteger(err.metaTotal)) result.firstMetaTotal = err.metaTotal;
       // A list whose source failed in a way that can pass, or that was not read in full, is tried
-      // again after the other lists.
+      // again after the other lists. Not a list whose last run did not read it in full either, as
+      // its count more likely stays off: its failure was posted when it started, so this one only
+      // goes to the console, and the alert for failing runs in a row says if it lasts.
+      result.incompleteAgain = err.incomplete === true && result.incompleteBefore;
       result.retry =
-        (stage === 'fetching it' || err.incomplete === true) &&
+        (stage === 'fetching it' || (err.incomplete === true && !result.incompleteAgain)) &&
         attempt === 1 &&
         !isRefused(err) &&
         !lost;
@@ -530,6 +560,13 @@ export default class BanImporter {
   hadLostAccess(banList) {
     const before = this.syncs.get(banList.id);
     return before?.state === STATES.ACCESS_LOST && before.sourceKey === sourceKey(banList);
+  }
+
+  // Whether the list's last read of all of it was not complete, by its row from before the run, for
+  // its current type and source.
+  wasIncomplete(banList) {
+    const before = this.syncs.get(banList.id);
+    return before?.sourceKey === sourceKey(banList) && Number(before.incompleteScans) > 0;
   }
 
   // The file a remote list was last imported from in full, by its row (before): its ETag,
@@ -753,14 +790,19 @@ export default class BanImporter {
   // of planRemovals. A list named in IMPORTER_ALLOW_MASS_REMOVAL, or one whose row an admin has
   // allowed to lose all its bans (allowFullRemovalUntil, set for its current source), loses them
   // all at once. The bans kept are counted as held, and those that wait for a later complete read
-  // as pending too, which are recorded in BanListPendingRemovals. A recorded ban that came back,
-  // or that the list no longer has, loses its record.
+  // as pending too, which are recorded in BanListPendingRemovals, as are those held for an admin
+  // as the list seemed to have lost all its bans, so that the hold lasts until it is confirmed or
+  // one of them comes back. A recorded ban that came back, or that the list no longer has, loses
+  // its record. A list removed during the run, so that its records cannot be saved, is skipped as
+  // gone.
   async removeMissingBans(banList, bans, stored, pending, result) {
     const now = Date.now();
     const found = new Set(bans.map((ban) => ban.id));
     const had = new Set(stored.map((ban) => ban.id));
     const missing = stored.filter((ban) => !found.has(ban.id));
     const cleared = [...pending.keys()].filter((banId) => found.has(banId) || !had.has(banId));
+    // The bans the list still has that an earlier run held for an admin, and since when.
+    const held = [...pending].filter(([banId, { heldAt }]) => heldAt !== null && had.has(banId));
 
     const bySetting = this.allowMassRemoval.has(String(banList.id));
     const confirmed = bySetting || this.fullRemovalAllowed(banList, now);
@@ -768,7 +810,8 @@ export default class BanImporter {
       missing: missing.map((ban) => ban.id),
       stored: stored.length,
       fetched: bans.length,
-      pending,
+      pending: new Map([...pending].map(([banId, { firstMissingAt }]) => [banId, firstMissingAt])),
+      held: new Set(held.map(([banId]) => banId)),
       now,
       replace: result.replace
     };
@@ -780,8 +823,11 @@ export default class BanImporter {
       result.confirmedBy = bySetting ? 'IMPORTER_ALLOW_MASS_REMOVAL' : 'allowFullRemovalUntil';
     }
     result.hold = plan.hold;
-    result.held = plan.hold ? missing.length : plan.wait.length;
+    result.held = plan.held.length + plan.wait.length;
     result.pending = plan.wait.length;
+    // A 'full' hold that an earlier run began says since when.
+    if (plan.hold === 'full' && held.length > 0)
+      result.heldSince = held.reduce((since, [, { heldAt }]) => Math.min(since, heldAt), Infinity);
     const remove = new Set(plan.remove);
     const removed = missing.filter((ban) => remove.has(ban.id));
 
@@ -792,15 +838,29 @@ export default class BanImporter {
         (ban) => `Would remove ban (ID: ${ban.id}) from ban list (ID: ${banList.id}).`
       );
     } else {
-      if (cleared.length > 0)
-        await clearPendingRemovals(banList.id, cleared, { batchSize: this.batchSize });
-      if (plan.wait.length > 0)
-        await savePendingRemovals(banList.id, plan.wait, {
-          now: new Date(now),
-          batchSize: this.batchSize
-        });
-      if (removed.length > 0)
-        result.removed += await removeBans(banList.id, removed, { batchSize: this.batchSize });
+      try {
+        if (cleared.length > 0)
+          await clearPendingRemovals(banList.id, cleared, { batchSize: this.batchSize });
+        if (plan.released.length > 0) await releaseHeldRemovals(banList.id, { now: new Date(now) });
+        if (plan.wait.length > 0)
+          await savePendingRemovals(banList.id, plan.wait, {
+            now: new Date(now),
+            batchSize: this.batchSize
+          });
+        if (plan.hold === 'full')
+          await savePendingRemovals(banList.id, plan.held, {
+            now: new Date(now),
+            held: true,
+            batchSize: this.batchSize
+          });
+        if (removed.length > 0)
+          result.removed += await removeBans(banList.id, removed, { batchSize: this.batchSize });
+      } catch (err) {
+        if ((await this.stopReason(err, banList)) !== LIST_REMOVED) throw err;
+        // Its bans went with it, so none of them is kept.
+        Object.assign(result, { gone: true, hold: null, held: 0, pending: 0 });
+        return;
+      }
     }
     if (result.replace && !plan.hold && plan.wait.length === 0) result.replaced = true;
   }
@@ -840,8 +900,10 @@ export default class BanImporter {
   // when that starts (see saveSync), so its line otherwise only goes to the console, unless its
   // import failed. And once a list has been posted about as one CBL cannot read, before this run, a
   // failure that shows it again only goes to the console; any other failure of it, e.g. while
-  // BattleMetrics is down, is posted as for any list. In a dry run, every line goes to the console
-  // only, as nothing in it needs doing.
+  // BattleMetrics is down, is posted as for any list. A read that is not complete, after one in the
+  // list's last run that was not either, only goes to the console too, as the first was posted. A
+  // list whose bans are held for an admin is posted about on every run while they are. In a dry
+  // run, every line goes to the console only, as nothing in it needs doing.
   logResult(result) {
     const log = (important, line) => {
       if (important && !this.dryRun) Logger.important('BanImporter', line);
@@ -890,12 +952,13 @@ export default class BanImporter {
           ? `after removing ${result.removed} of its bans`
           : 'so none of its bans were removed';
       const line = `Failed to import ${list}${again ? ' again' : ''} while ${result.stage}, ${removed}${progress}. ${result.error}`;
-      log(!result.lostAgain, line);
+      log(!result.lostAgain && !result.incompleteAgain, line);
     } else if (result.sourceChanged) {
-      log(
-        true,
-        `Removed the bans fetched for ${list}${again ? ' at the second attempt' : ''}, as its type or source was changed while it was imported${progress}. Its new source is imported on the next run.${dryRun}`
-      );
+      // A dry run saved none of the bans fetched, so it has none to remove.
+      const what = this.dryRun
+        ? `Checked ${list}${again ? ' at the second attempt' : ''}, but its type or source was changed while it was read`
+        : `Removed the bans fetched for ${list}${again ? ' at the second attempt' : ''}, as its type or source was changed while it was imported`;
+      log(true, `${what}${progress}. Its new source is imported on the next run.${dryRun}`);
     } else if (result.accessLost) {
       log(
         again,
@@ -908,10 +971,23 @@ export default class BanImporter {
         `${imported}: it returned ${none}, so its ${result.stored} stored bans were kept in case the list is broken. If the list really is empty, set IMPORTER_ALLOW_MASS_REMOVAL=${result.id} for one run.${dryRun}`
       );
     } else if (result.hold === 'full') {
-      log(
-        true,
-        `${imported}: ${counts.join(', ')}. Kept all ${result.stored} of its stored bans, as it no longer has any of them, which more likely means that its source broke. If the list really replaced all of its bans, set IMPORTER_ALLOW_MASS_REMOVAL=${result.id} for one run.${dryRun}`
-      );
+      const confirm = `If the list really replaced all of its bans, set IMPORTER_ALLOW_MASS_REMOVAL=${result.id} for one run.`;
+      if (result.heldSince === undefined)
+        log(
+          true,
+          `${imported}: ${counts.join(', ')}. Kept all ${result.stored} of its stored bans, as it no longer has any of them, which more likely means that its source broke. They are kept until one of them comes back. ${confirm}${dryRun}`
+        );
+      else {
+        // The bans it saved since, which it no longer has, are removed as usual.
+        const waiting =
+          result.pending > 0
+            ? ` Of the bans it saved since, ${result.pending} that it no longer has are kept until a later complete read of it confirms they are gone.`
+            : '';
+        log(
+          true,
+          `${imported}: ${counts.join(', ')}. Still kept the ${plural(result.held - result.pending, 'ban')} it had when it lost all of its bans at once, held since ${new Date(result.heldSince).toISOString()}, as none of them has come back, which more likely means that its source broke. ${confirm}${waiting}${dryRun}`
+        );
+      }
     } else if (result.replace && (result.removed > 0 || result.pending > 0)) {
       const waiting =
         result.pending > 0

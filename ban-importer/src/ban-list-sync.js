@@ -82,21 +82,43 @@ function plural(count, noun) {
   return `${formatCount(count)} ${noun}${count === 1 ? '' : 's'}`;
 }
 
+// A setting's value without the spaces around it, or one pair of matching quotes around it, as
+// docker run --env-file keeps quotes as part of the value. Anything else, such as a comment after
+// the value, is left in it.
+export function unquote(value) {
+  if (value === undefined || value === null) return '';
+  return String(value)
+    .trim()
+    .replace(/^(['"])(.*)\1$/s, '$2')
+    .trim();
+}
+
 // Read a setting that is turned on with 1, true, on or yes, and off with 0, false, off or no, in any
-// case and with spaces around it. A setting that is not given is as defaultOn says, and an invalid
-// value is as invalidOn says, the safer of the two, with a warning to log that says what that
-// means.
+// case, with spaces or quotes around it. A setting that is not given is as defaultOn says, and an
+// invalid value is as invalidOn says, the safer of the two, marked invalid, with a warning to log
+// that says what that means.
 export function readSwitch(name, value, { defaultOn, invalidOn = defaultOn, meaning }) {
   if (typeof value === 'boolean') return { on: value };
-  if (value === undefined || value === null || String(value).trim() === '')
-    return { on: defaultOn };
-  const setting = String(value).trim().toLowerCase();
+  const setting = unquote(value).toLowerCase();
+  if (setting === '') return { on: defaultOn };
   if (['1', 'true', 'on', 'yes'].includes(setting)) return { on: true };
   if (['0', 'false', 'off', 'no'].includes(setting)) return { on: false };
   return {
     on: invalidOn,
+    invalid: true,
     warning: `Warning: ${name} must be 1 or 0, not "${value}", so ${meaning}.`
   };
+}
+
+// Read a setting that names ban lists by their IDs, separated by commas, with spaces or quotes
+// around it, and give the IDs, as text.
+export function readBanListIDs(value) {
+  return new Set(
+    unquote(value)
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean)
+  );
 }
 
 // Read IMPORTER_ACCESS_CHECK, which turns the access check off when it is 0, false, off or no. It is
