@@ -23,6 +23,7 @@ import {
   describeOrganisation,
   formatBanListName,
   formatBanListType,
+  listEmbed,
   organisationEmbed,
   plural,
   truncate
@@ -37,6 +38,7 @@ import {
   suggestOrganisations
 } from './lookup.js';
 import paginate from './paginate.js';
+import ReplyUpdater from './reply-updater.js';
 import UserError from './user-error.js';
 
 export {
@@ -61,11 +63,13 @@ export {
   findOrganisation,
   formatBanListName,
   formatBanListType,
+  listEmbed,
   organisationEmbed,
   organisationOption,
   paginate,
   parseBanListSource,
   plural,
+  ReplyUpdater,
   skipCheckOption,
   suggestBanLists,
   suggestOrganisations,

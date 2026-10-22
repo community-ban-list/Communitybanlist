@@ -1,5 +1,6 @@
 import { Client, Events, GatewayIntentBits, MessageFlags } from 'discord.js';
 
+import { EXPORT_LIST_LIMIT_PROBLEMS } from 'scbl-lib/config';
 import { connect, disconnect } from 'scbl-lib/db';
 import { describeError, Logger, stackTrace } from 'scbl-lib/utils';
 
@@ -9,6 +10,10 @@ import { DISCORD_ADMIN_ROLE_IDS, DISCORD_BOT_TOKEN, DISCORD_GUILD_ID } from './s
 import { UserError } from './src/utils/index.js';
 
 const SHUTDOWN_LOG_TIMEOUT = 5000;
+
+// Limits on export ban lists set to values that cannot be used, which have their defaults instead.
+// /exportbanlist removes the lists outside the limits, so they must be the web server's.
+for (const problem of EXPORT_LIST_LIMIT_PROBLEMS) console.warn(`Warning: ${problem}`);
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 

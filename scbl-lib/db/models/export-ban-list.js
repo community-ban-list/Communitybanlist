@@ -5,13 +5,47 @@ import sequelize from '../sequelize.js';
 import { battlemetrics } from '../../apis/index.js';
 import {
   checkOwnership,
+  findVisibleBanLists,
   removeInvitesAndSubscribers,
   removeOwner
 } from '../../apis/delete-battlemetrics-ban-list.js';
+import { checkRules, DEFAULT_SETTINGS } from '../../export-list-limits.js';
 import { Logger } from '../../utils/index.js';
-import { BATTLEMETRICS_ORGANIZATION } from '../../config.js';
+import { BATTLEMETRICS_ORGANIZATION, EXPORT_LIST_LIMITS } from '../../config.js';
 
 const { DataTypes } = Sequelize;
+
+// The settings that decide who is on a list, with its configs.
+const SETTINGS = Object.keys(DEFAULT_SETTINGS);
+
+// The export bans of the players on a list: those waiting to be added and those already added.
+// /export/:id serves these, and a BattleMetrics list holds them once the importer has added them.
+const PLAYER_STATUSES = ['TO_BE_CREATED', 'CREATED'];
+
+// How the messages name each type of list, as export-list-limits.js names them.
+const TYPE_NAMES = { battlemetrics: 'BattleMetrics', remote: 'remote' };
+
+// A whole number as the messages write it, with commas: 20,000.
+const formatNumber = (value) => value.toLocaleString('en-US');
+
+// The problems of a stored list under today's limits, or null when its type has none to check it
+// against: those of its settings and configs under its type's points rules, for the whole list, as
+// checkRules gives them, and one when it has more players than its type's cap (0 for none).
+function limitProblems(exportBanList, configs, players, limits) {
+  const { type } = exportBanList;
+  if (!Object.hasOwn(TYPE_NAMES, type) || !limits?.[type]) return null;
+
+  const settings = Object.fromEntries(SETTINGS.map((name) => [name, exportBanList[name]]));
+  const problems = [...checkRules(type, { settings, configs }, limits)];
+  const { maxPlayers } = limits[type];
+  if (maxPlayers > 0 && players > maxPlayers)
+    problems.push({
+      rule: 'max-players',
+      field: 'players',
+      message: `It has ${formatNumber(players)} players, more than the ${formatNumber(maxPlayers)} a ${TYPE_NAMES[type]} export ban list can have.`
+    });
+  return problems;
+}
 
 // Record an export ban list's BattleMetrics ban list and invite, or null for none, and save them.
 // A list that fails to save is left as it was, as the database still has it.
@@ -32,6 +66,80 @@ async function saveBattlemetricsBanList(exportBanList, battlemetricsID, battleme
 }
 
 class ExportBanList extends Sequelize.Model {
+  // Check stored export ban lists against today's limits on export ban lists, those the website
+  // checks changes to lists against (export-list-limits.js, with the EXPORT_* settings in
+  // EXPORT_LIST_LIMITS), e.g. for the Discord bot to remove the lists outside them. Checks every
+  // list, or those with the given IDs, and gives the limits and the lists, in ID order, each as
+  // { exportBanList, configs, players, problems, checked }, with the list's owner as
+  // exportBanList.SteamUser.
+  //
+  // A list is outside the limits when it has problems: those of its stored settings and configs
+  // under its type's points rules, as checkRules gives them for the whole list, and one when it has
+  // more players than its type's cap. Its configs are loaded as the website loads them to check a
+  // change, with their ban lists' and organisations' names for the messages. players counts its
+  // export bans waiting to be added or already added (TO_BE_CREATED or CREATED), which
+  // /export/:id serves. A list of a type the limits do not cover is not checked, and has no
+  // problems.
+  static async checkLimits({ ids, limits = EXPORT_LIST_LIMITS } = {}) {
+    if (ids !== undefined && ids.length === 0) return { limits, lists: [] };
+    const { BanList, ExportBan, ExportBanListConfig, Organisation, SteamUser } = sequelize.models;
+
+    const exportBanLists = await ExportBanList.findAll({
+      ...(ids === undefined ? {} : { where: { id: ids } }),
+      include: [{ model: SteamUser, attributes: ['id', 'name'] }],
+      order: [['id', 'ASC']]
+    });
+    if (exportBanLists.length === 0) return { limits, lists: [] };
+    const listIDs = exportBanLists.map((exportBanList) => exportBanList.id);
+
+    const configs = new Map(listIDs.map((id) => [id, []]));
+    const configRows = await ExportBanListConfig.findAll({
+      where: { exportBanList: listIDs },
+      include: [{ model: BanList, include: [Organisation] }],
+      order: [['id', 'ASC']]
+    });
+    for (const config of configRows)
+      configs.get(config.exportBanList)?.push({
+        id: config.id,
+        banList: config.banList,
+        activePoints: config.activePoints,
+        expiredPoints: config.expiredPoints,
+        banListName: config.BanList?.name,
+        organisationName: config.BanList?.Organisation?.name
+      });
+
+    const counts = await ExportBan.count({
+      where: { exportBanList: listIDs, status: PLAYER_STATUSES },
+      group: ['exportBanList']
+    });
+    const players = new Map(
+      counts.map(({ exportBanList, count }) => [exportBanList, Number(count)])
+    );
+
+    return {
+      limits,
+      lists: exportBanLists.map((exportBanList) => {
+        const listConfigs = configs.get(exportBanList.id);
+        const listPlayers = players.get(exportBanList.id) ?? 0;
+        const problems = limitProblems(exportBanList, listConfigs, listPlayers, limits);
+        return {
+          exportBanList,
+          configs: listConfigs,
+          players: listPlayers,
+          problems: problems ?? [],
+          checked: problems !== null
+        };
+      })
+    };
+  }
+
+  // The IDs of every BattleMetrics ban list CBL's API key can see. Deleting a list treats a ban
+  // list BattleMetrics does not know as already gone, so anything that deletes many lists at once
+  // can check first that the key sees CBL's ban lists. See findVisibleBanLists.
+  static findVisibleBattlemetricsBanLists() {
+    return findVisibleBanLists();
+  }
+
   // Create the BattleMetrics ban list and its invite.
   async createBattlemetricsBanList() {
     // A list whose ban list was created but not its invite only needs the invite.

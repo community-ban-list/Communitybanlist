@@ -113,7 +113,7 @@ const stubs = {
   '../sequelize.js': { default: {} },
   '../../apis/index.js': { battlemetrics },
   '../../utils/index.js': { Logger: { verbose: (...args) => logs.push(args) } },
-  '../../config.js': { BATTLEMETRICS_ORGANIZATION: OWNER },
+  '../../config.js': { BATTLEMETRICS_ORGANIZATION: OWNER, EXPORT_LIST_LIMITS: {} },
   // The deletion steps' own imports.
   './battlemetrics.js': { default: battlemetrics },
   '../config.js': { BATTLEMETRICS_ORGANIZATION: OWNER }
