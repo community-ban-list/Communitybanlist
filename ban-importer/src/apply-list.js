@@ -300,19 +300,24 @@ export async function readStoredBansByID(banList, ids) {
 
 // For each list with bans that complete reads of it did not have, by list: when the first of those
 // that wait for a confirming read is due to be confirmed as gone (confirmAt), CONFIRM_AFTER after it
-// was first missing, in milliseconds, or null when none wait, and how many are held for an admin
-// (held). A run reads it once, to decide which lists to read in full.
+// was first missing, in milliseconds, or null when none wait, how many are held for an admin (held)
+// and how many wait for a confirming read (waiting). A run reads it once, to decide which lists to
+// read in full, and to count the bans kept by the lists it only polls.
 export async function readPendingSummary() {
   const rows = await sequelize.query(
-    'SELECT banList, MIN(CASE WHEN heldAt IS NULL THEN firstMissingAt END) AS firstMissingAt, SUM(heldAt IS NOT NULL) AS held FROM BanListPendingRemovals GROUP BY banList',
+    'SELECT banList, MIN(CASE WHEN heldAt IS NULL THEN firstMissingAt END) AS firstMissingAt, SUM(heldAt IS NOT NULL) AS held, SUM(heldAt IS NULL) AS waiting FROM BanListPendingRemovals GROUP BY banList',
     { type: QueryTypes.SELECT }
   );
   return new Map(
-    rows.map(({ banList, firstMissingAt, held }) => {
+    rows.map(({ banList, firstMissingAt, held, waiting }) => {
       const first = timeOf(firstMissingAt);
       return [
         Number(banList),
-        { confirmAt: first === null ? null : first + CONFIRM_AFTER, held: Number(held) || 0 }
+        {
+          confirmAt: first === null ? null : first + CONFIRM_AFTER,
+          held: Number(held) || 0,
+          waiting: Number(waiting) || 0
+        }
       ];
     })
   );

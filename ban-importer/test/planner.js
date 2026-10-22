@@ -315,6 +315,20 @@ for (const trigger of ['drift', 'overflow'])
   assert.deepStrictEqual(schedule({ trigger }), { nextFullScanAt: NOW, scanReason: trigger });
 assert.strictEqual(schedule({}), null);
 assert.strictEqual(schedule({ confirmAt: NOW + MINUTE }), null);
+// The next periodic read is counted from when the run planned its reads, its now, so a list read in
+// full 8 minutes into a run is due by the run that starts 30 minutes after that one, however the
+// fifth at random falls, and the run 15 minutes after it only polls the list.
+for (const random of [() => 0, () => 0.5, () => 0.9999]) {
+  const { nextFullScanAt, scanReason } = scheduleAfter({
+    now: NOW,
+    fullScanMinutes: 30,
+    completed: true,
+    random
+  });
+  const readLate = rowOf({ lastFullScanAt: NOW + 8 * MINUTE, nextFullScanAt, scanReason });
+  assert.deepStrictEqual(plan(readLate, { now: NOW + 15 * MINUTE }), { read: 'head' });
+  assert.deepStrictEqual(plan(readLate, { now: NOW + 30 * MINUTE }), full('periodic'));
+}
 
 // What a head poll's pages say. Each page has its ban IDs, with or without a SteamID, its count of
 // the list's bans and whether another page follows. Here the list's last read saw a, b and c on its
@@ -402,5 +416,5 @@ assert.strictEqual(shouldFollow(newPages(10), seen('a')), false);
 assert.strictEqual(shouldFollow(newPages(2), seen('a'), 2), false);
 
 console.log(
-  'Planner checks passed: IMPORTER_FULL_SCAN_MINUTES, the newest bans a row keeps, which lists are read in full and why, the order of reads, when the next full read is due, and what a head poll finds about drift and overflow.'
+  'Planner checks passed: IMPORTER_FULL_SCAN_MINUTES, the newest bans a row keeps, which lists are read in full and why, the order of reads, when the next full read is due, counted from the start of the run, and what a head poll finds about drift and overflow.'
 );

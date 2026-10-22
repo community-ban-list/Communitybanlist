@@ -230,17 +230,20 @@ export function shouldFollow(pages, known, maxPages = MAX_HEAD_PAGES) {
   return Boolean(last.next) && pages.length < maxPages && !last.uids.some((uid) => known.has(uid));
 }
 
-// When a list read in full at now is next due to be: fullScanMinutes later, less up to a fifth of
-// that at random, in milliseconds.
+// When a list read in full in a run that planned its reads at now is next due to be:
+// fullScanMinutes later, less up to a fifth of that at random, in milliseconds.
 export function nextFullScan(now, fullScanMinutes, random = Math.random) {
   return now + Math.round(fullScanMinutes * 60 * 1000 * (1 - FULL_SCAN_JITTER * random()));
 }
 
-// The schedule to save in a BattleMetrics list's row after an attempt at it at now, as
-// { nextFullScanAt, scanReason }, or undefined to keep the one it has:
+// The schedule to save in a BattleMetrics list's row after an attempt at it, in a run that planned
+// its reads at now (planRead's now), as { nextFullScanAt, scanReason }, or undefined to keep the one
+// it has:
 // - after a full read that completed without an error, the next periodic one, or, when bans it no
 //   longer had wait for a confirming read, the time the first of them is due (confirmAt), if that
-//   is sooner;
+//   is sooner. The periodic one is counted from now, not from when the list was read, so a run
+//   that starts fullScanMinutes after this one finds the list due, however late in this run it was
+//   read;
 // - after a head poll that found a reason to read the list in full (trigger), when the read in full
 //   did not complete without an error, at once, with that reason, so the next run reads it in full;
 // - after anything else, as it was. A list whose full read failed is still due one.

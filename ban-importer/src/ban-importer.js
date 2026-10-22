@@ -126,9 +126,11 @@ function isRefused(err) {
 
 // The import's totals, as its summary line and the run record give them. Bans kept that a list no
 // longer has are counted as held, and of those, the ones that wait for a later complete read of
-// their list as pending too. The run record also counts the bans whose player is no longer one of
-// their SteamIDs, the lists that import one of CBL's own export ban lists, those CBL can no longer
-// read on BattleMetrics, and the lists that were only polled and those that were read in full.
+// their list as pending too, for a list only polled as the run found them at its start, so the
+// totals do not drop to 0 on runs that only poll a list whose bans are kept. The run record also
+// counts the bans whose player is no longer one of their SteamIDs, the lists that import one of
+// CBL's own export ban lists, those CBL can no longer read on BattleMetrics, and the lists that
+// were only polled and those that were read in full.
 function totals(results) {
   const sum = (field) => results.reduce((total, result) => total + result[field], 0);
   return {
@@ -278,8 +280,7 @@ export default class BanImporter {
     this.syncs = new Map();
     this.pending = new Map();
     this.plannedAt = Date.now();
-    // The reasons polls found in the run to read lists in full, with the newest page each poll saved,
-    // by list (see pollHead).
+    // The reasons polls found in the run to read lists in full, by list (see pollHead).
     this.found = new Map();
     this.exportBanLists = [];
     this.visibleBanLists = null;
@@ -517,14 +518,9 @@ export default class BanImporter {
       result.read = plan.read;
       if (plan.reason) result.reason = plan.reason;
       // A second attempt at a list whose poll found a reason to read it in full keeps that reason,
-      // and the newest page the poll saved, should its own read not complete either.
-      const polledBefore = this.found.get(banList.id);
-      if (polledBefore)
-        Object.assign(result, {
-          trigger: polledBefore.trigger,
-          head: polledBefore.head,
-          firstMetaTotal: polledBefore.head.total
-        });
+      // should its own read not complete either.
+      const trigger = this.found.get(banList.id);
+      if (trigger) result.trigger = trigger;
       let read = null;
       if (plan.read === 'head') {
         read = await this.pollHead(banList, before, result, at);
@@ -677,11 +673,11 @@ export default class BanImporter {
   // How the list is read this run, by planRead (see planner.js): from its row from before the run,
   // the bans it has that wait for a confirming read or are held for an admin, whether
   // IMPORTER_ALLOW_MASS_REMOVAL names it, the settings, and when the run planned its reads. A list
-  // whose poll found a reason to read it in full earlier in the run is read in full for it, as the
-  // bans the poll saved since its row was read would hide it from another poll.
+  // whose poll found a reason to read it in full earlier in the run is read in full for it, from its
+  // first page, without polling it again.
   planFor(banList) {
-    const found = this.found.get(banList.id);
-    if (found) return { read: 'full', reason: found.trigger };
+    const trigger = this.found.get(banList.id);
+    if (trigger) return { read: 'full', reason: trigger };
     return planRead({
       type: banList.type,
       row: this.syncs.get(banList.id) ?? null,
@@ -700,15 +696,17 @@ export default class BanImporter {
   // been seen when it was on the list's newest page at its last read (its row's headUids), or is
   // stored. Only the stored bans on the pages read are read from the database. Returns null when
   // that is all the list needs, or else the read, to be read on to the list's last page as a read of
-  // all of the list (see checkHead):
-  // - when the pages read are all of the list already, which is then imported as a read of all of
-  //   it, with nothing saved here;
+  // all of the list (see checkHead), with nothing saved here:
+  // - when the pages read are all of the list already;
   // - when they hold only new bans, and as many pages as a poll follows (overflow);
   // - when BattleMetrics' count of the list's bans is not its count at the list's last read plus
   //   the new bans (drift), which only a read of all of it can explain.
-  // The bans on the pages are saved before the list is read in full, unless the run is a dry run,
-  // so the read cannot hold them up, or lose them if it fails. A list that was held stays so, as a
-  // poll does not check for removed bans.
+  // The read of all of the list saves the bans on the pages with the rest, so what the list lost is
+  // measured against the bans it had before the run, as for any read in full: had the poll saved its
+  // new bans first, a list whose source now gives none of its old bans, only more new ones than a
+  // poll follows, would not seem to have lost all of its bans, and would not be held for an admin.
+  // A read in full that fails saves none of them, as for any read in full, until the list is read in
+  // full again. A list that was held stays so, as a poll does not check for removed bans.
   async pollHead(banList, before, result, at) {
     at.stage = 'fetching it';
     const read = await this.fetcher.fetchBattlemetricsHead(banList);
@@ -737,52 +735,59 @@ export default class BanImporter {
     if (head.complete) return read;
 
     const trigger = head.overflow ? REASONS.OVERFLOW : head.drift ? REASONS.DRIFT : null;
+    if (trigger) {
+      // The list is read in full after all, for the reason the poll found, which a second attempt
+      // at it keeps.
+      Object.assign(result, { read: 'full', reason: trigger, trigger });
+      this.found.set(banList.id, trigger);
+      const pages =
+        read.pages.length === 1 ? 'newest page' : `newest ${formatCount(read.pages.length)} pages`;
+      if (head.drift) {
+        result.drift = head.drift;
+        Logger.verbose(
+          'BanImporter',
+          2,
+          `Reading ban list (ID: ${banList.id}) in full, as BattleMetrics counts ${plural(head.drift.total, 'ban')} on it, but its count at its last read and the ${plural(head.newBans, 'new ban')} on its ${pages} make ${formatCount(head.drift.expected)}, so a ban was removed, or added below its ${pages}.`
+        );
+      } else
+        Logger.verbose(
+          'BanImporter',
+          2,
+          `Reading ban list (ID: ${banList.id}) in full, as its ${pages} hold only new bans.`
+        );
+      return read;
+    }
+
     const bans = uniqueBans(read.pages.flatMap((page) => page.bans));
     result.fetched = bans.length;
-    // A dry run's read of all of the list counts all of its bans, so they are not counted twice.
-    if (!trigger || !this.dryRun) {
-      at.stage = 'saving its bans';
-      const diff = diffBans(bans, [...stored.values()], { applyMoves: this.applySteamIDMoves });
-      result.moves = diff.moves.length;
-      this.logChanges(banList, diff);
-      if (this.dryRun) {
-        result.created = diff.added.length;
-        result.updated = diff.changed.length;
-      } else if (!(await this.saveBans(banList, diff, result))) {
-        result.gone = true;
-        return null;
-      }
+    at.stage = 'saving its bans';
+    const diff = diffBans(bans, [...stored.values()], { applyMoves: this.applySteamIDMoves });
+    result.moves = diff.moves.length;
+    this.logChanges(banList, diff);
+    if (this.dryRun) {
+      result.created = diff.added.length;
+      result.updated = diff.changed.length;
+    } else if (!(await this.saveBans(banList, diff, result))) {
+      result.gone = true;
+      return null;
     }
+    // A run that was asked to stop while the bans were saved ends here, once the batch under way
+    // has been saved, and the list keeps its row: its newest page and count are only saved with all
+    // the bans on the pages, so the next poll still finds the bans not saved, on its newest page as
+    // new ones, or below it by drift.
+    stopIfRequested();
+
     // Once its bans are saved, the list's newest page, with its count, is the one its next poll
-    // compares its own with.
+    // compares its own with. The bans the list kept for now, as the run found them at its start,
+    // are still kept, as a poll removes none: those held for an admin, and those that wait for a
+    // confirming read, which are pending too. So a list that was held stays so.
     const [newest] = read.pages;
     result.head = { uids: newest.uids, total: newest.total };
     result.firstMetaTotal = newest.total;
-    if (!trigger) {
-      result.stillHeld = before?.state === STATES.HELD;
-      return null;
-    }
-
-    // The list is read in full after all, for the reason the poll found, which a second attempt at
-    // it keeps.
-    Object.assign(result, { read: 'full', reason: trigger, trigger });
-    this.found.set(banList.id, { trigger, head: result.head });
-    const pages =
-      read.pages.length === 1 ? 'newest page' : `newest ${formatCount(read.pages.length)} pages`;
-    if (head.drift) {
-      result.drift = head.drift;
-      Logger.verbose(
-        'BanImporter',
-        2,
-        `Reading ban list (ID: ${banList.id}) in full, as BattleMetrics counts ${plural(head.drift.total, 'ban')} on it, but its count at its last read and the ${plural(head.newBans, 'new ban')} on its ${pages} make ${formatCount(head.drift.expected)}, so a ban was removed, or added below its ${pages}.`
-      );
-    } else
-      Logger.verbose(
-        'BanImporter',
-        2,
-        `Reading ban list (ID: ${banList.id}) in full, as its ${pages} hold only new bans.`
-      );
-    return read;
+    result.stillHeld = before?.state === STATES.HELD;
+    const kept = this.pending.get(banList.id);
+    if (kept) Object.assign(result, { held: kept.held + kept.waiting, pending: kept.waiting });
+    return null;
   }
 
   // Whether CBL had lost access to the list, by its row from before the run, for its current type
@@ -894,7 +899,7 @@ export default class BanImporter {
         // off, the list forgets its newest page, whatever the attempt did, so once they are on
         // again it is read in full before it is polled.
         head: battlemetrics ? (this.headPoll ? result.head : null) : undefined,
-        schedule: battlemetrics ? this.scheduleOf(result, now) : undefined,
+        schedule: battlemetrics ? this.scheduleOf(result) : undefined,
         storedCount: await retryOperation(() => Ban.count({ where: { banList: banList.id } })),
         // BattleMetrics' count of the list's bans, if the attempt got as far as asking for it.
         headTotal: 'firstMetaTotal' in result ? result.firstMetaTotal : undefined,
@@ -936,15 +941,18 @@ export default class BanImporter {
     }
   }
 
-  // When a BattleMetrics list is next due to be read in full after the attempt at it, at the time
-  // now, and why, by scheduleAfter (see planner.js), as { nextFullScanAt, scanReason }, or undefined
-  // to keep its row's. A read of all of the list that completed without an error schedules the next
-  // one, or the read that confirms the removal of bans it left waiting, if that is sooner. A poll
-  // that found a reason to read the list in full, which was not then read in full without an
-  // error, leaves it due at once, for that reason.
-  scheduleOf(result, now) {
+  // When a BattleMetrics list is next due to be read in full after the attempt at it, and why, by
+  // scheduleAfter (see planner.js), as { nextFullScanAt, scanReason }, or undefined to keep its
+  // row's. A read of all of the list that completed without an error schedules the next one, or the
+  // read that confirms the removal of bans it left waiting, if that is sooner. A poll that found a
+  // reason to read the list in full, which was not then read in full without an error, leaves it
+  // due at once, for that reason. The next periodic read is counted from when the run planned its
+  // reads, as the next runs plan theirs, not from when the list was read: a list read in full late
+  // in a run is then due by the run that starts IMPORTER_FULL_SCAN_MINUTES after this one, as one
+  // read early is, rather than by the run after that.
+  scheduleOf(result) {
     const schedule = scheduleAfter({
-      now: now.getTime(),
+      now: this.plannedAt,
       fullScanMinutes: this.fullScanMinutes,
       completed: result.complete === true && !result.error,
       confirmAt: result.confirmAt ?? null,
@@ -1177,7 +1185,8 @@ export default class BanImporter {
   // failure that shows it again only goes to the console; any other failure of it, e.g. while
   // BattleMetrics is down, is posted as for any list. A read that is not complete, after one in the
   // list's last run that was not either, only goes to the console too, as the first was posted. A
-  // list whose bans are held for an admin is posted about on every run while they are. In a dry
+  // list whose bans are held for an admin is posted about on every read of all of it while they
+  // are, and a list that is only polled says in the console how many bans it still keeps. In a dry
   // run, every line goes to the console only, as nothing in it needs doing.
   logResult(result) {
     const log = (important, line) => {
@@ -1241,6 +1250,11 @@ export default class BanImporter {
         again,
         `${imported}: ${counts.join(', ')}. None of its bans were checked for removal, as ${result.accessLost}.${dryRun}`
       );
+    } else if (polled) {
+      // A poll removes none of the list's bans, so those it kept for now are still kept, and are
+      // posted about when a read of all of it keeps them.
+      const held = result.held > 0 ? `, ${formatCount(result.held)} held` : '';
+      log(result.failed > 0 || again, `${imported}: ${counts.join(', ')}${held}.${dryRun}`);
     } else if (result.hold === 'empty') {
       const none = result.rawCount > 0 ? 'no bans with a SteamID' : 'no bans';
       log(
