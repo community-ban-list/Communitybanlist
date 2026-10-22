@@ -77,7 +77,8 @@ let answer;
 let whileConfirming;
 // How long each confirmation waited for an answer, in milliseconds.
 let timeouts;
-// CBL's Steam users, as { id, name } by Steam ID: those a sign-in or the importer has added.
+// CBL's Steam users, as { id, name, isSCBLUser } by Steam ID: those a sign-in or the importer has
+// added. isSCBLUser is whether they have signed in to the website.
 let steamUsers;
 // Runs as an update starts, with the update's values and options, before it writes anything, e.g.
 // to change a list in the moment after it was read again, or to make the update wait or fail.
@@ -214,14 +215,13 @@ const ExportBanList = {
   }
 };
 
-// A user is looked up by their Steam ID, with their Steam name, which the command reaches through
-// sequelize.models.
+// A user is looked up by their Steam ID, which the command reaches through sequelize.models. Only
+// the columns asked for are loaded, as with Sequelize.
 const SteamUser = {
   async findByPk(id, { attributes }) {
     calls.push(['user', id]);
-    assert.ok(attributes.includes('name'));
     const user = steamUsers.get(id);
-    return user ? { ...user } : null;
+    return user ? Object.fromEntries(attributes.map((column) => [column, user[column]])) : null;
   }
 };
 
@@ -356,6 +356,11 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(
   [ownerOption.type, ownerOption.name, ownerOption.required],
   [discord.ApplicationCommandOptionType.String, 'owner', true]
+);
+// The new owner must be a Steam user CBL knows, as signing in to the website makes them.
+assert.strictEqual(
+  ownerOption.description,
+  "The new owner's SteamID64, 17 digits. CBL must know it: signing in to the website adds it."
 );
 assert.deepStrictEqual(otherTransferOptions, []);
 
@@ -1156,6 +1161,12 @@ const NEW_OWNER = '76561198100000001';
 const OTHER_USER = '76561198100000002';
 const OWNER_12 = '76561198000000012';
 
+// Add a Steam user who has signed in to the website, or with signedIn false, one CBL knows only
+// from a ban list.
+function addSteamUser(id, name, { signedIn = true } = {}) {
+  steamUsers.set(id, { id, name, isSCBLUser: signedIn });
+}
+
 // Give a user remote export ban lists of their own, with these IDs.
 function giveLists(owner, ids) {
   for (const id of ids)
@@ -1170,7 +1181,7 @@ const ownerOf = (id) => rows.get(id)?.exportBanList.owner;
 // The transfer is logged, and no owner is told. Neither the run lock nor BattleMetrics is asked.
 reset();
 addList(12, 'battlemetrics', { battlemetricsID: 'bm-12', players: 1234 });
-steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+addSteamUser(NEW_OWNER, 'New Owner');
 giveLists(NEW_OWNER, [30]);
 await run('transfer', { id: 12, owner: NEW_OWNER });
 shown = prompt();
@@ -1211,7 +1222,7 @@ assert.deepStrictEqual(notifications, []);
 // name is shown by their Steam ID. Spaces around the Steam ID given are left out.
 reset();
 addList(13, 'remote', { SteamUser: null, players: 5, problems: [] });
-steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: null });
+addSteamUser(NEW_OWNER, null);
 await run('transfer', { id: 13, owner: ` ${NEW_OWNER} ` });
 shown = prompt();
 assert.strictEqual(
@@ -1238,7 +1249,7 @@ assert.strictEqual(ownerOf(13), NEW_OWNER);
 // A user with 3 lists can be given a fourth, the most the website lets them have.
 reset();
 addList(12, 'remote');
-steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+addSteamUser(NEW_OWNER, 'New Owner');
 giveLists(NEW_OWNER, [30, 31, 32]);
 await run('transfer', { id: 12, owner: NEW_OWNER });
 assert.deepStrictEqual(fieldsOf(prompt().embed).at(-1), [
@@ -1248,10 +1259,25 @@ assert.deepStrictEqual(fieldsOf(prompt().embed).at(-1), [
 assert.strictEqual(ownerOf(12), NEW_OWNER);
 assert.match(contentOf(replies.at(-1)), /^Transferred export ban list \*\*List 12\*\* \(#12\) /);
 
+// CBL also knows the Steam IDs of players who have been on its ban lists, so a list can be given to
+// someone who has never signed in to the website, who sees it once they do. The confirmation warns
+// that they have not signed in yet, so that the Steam ID can be checked first.
+reset();
+addList(12, 'remote');
+addSteamUser(NEW_OWNER, 'Player 7', { signedIn: false });
+await run('transfer', { id: 12, owner: NEW_OWNER });
+assert.deepStrictEqual(fieldsOf(prompt().embed)[4], [
+  'New owner',
+  `**Player 7** (\`${NEW_OWNER}\`)\n**Has not signed in to the website yet**, so check the Steam ID is theirs. They see the list once they sign in.`
+]);
+assert.strictEqual(ownerOf(12), NEW_OWNER);
+assert.match(contentOf(replies.at(-1)), /^Transferred export ban list \*\*List 12\*\* \(#12\) /);
+
 // A transfer is refused, with nothing shown, asked or changed: when the owner given is not a
 // SteamID64, which is checked before anything is read; when the list does not exist or already
-// belongs to that user; when CBL has no Steam user with that ID, as they have never signed in; and
-// when the user already has as many export ban lists as the website lets a user have.
+// belongs to that user; when CBL has no Steam user with that ID, as they have never signed in or
+// been on a ban list; and when the user already has as many export ban lists as the website lets a
+// user have.
 async function refusedTransfer(options, message, reads) {
   const owners = new Map([...rows].map(([id, row]) => [id, row.exportBanList.owner]));
   await assert.rejects(run('transfer', options), (err) => {
@@ -1281,7 +1307,7 @@ for (const given of [
 ]) {
   reset();
   addList(12, 'remote');
-  steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+  addSteamUser(NEW_OWNER, 'New Owner');
   await refusedTransfer({ id: 12, owner: given }, notSteamID(given), []);
 }
 // A long one is cut short in the message.
@@ -1289,14 +1315,14 @@ reset();
 await refusedTransfer({ id: 12, owner: '7'.repeat(300) }, notSteamID(`${'7'.repeat(99)}…`), []);
 
 reset();
-steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+addSteamUser(NEW_OWNER, 'New Owner');
 await refusedTransfer({ id: 404, owner: NEW_OWNER }, 'There is no export ban list with ID 404.', [
   ['check', [404]]
 ]);
 
 reset();
 addList(12, 'remote');
-steamUsers.set(OWNER_12, { id: OWNER_12, name: 'Owner 12' });
+addSteamUser(OWNER_12, 'Owner 12');
 await refusedTransfer(
   { id: 12, owner: OWNER_12 },
   `Export ban list **List 12** (#12) already belongs to **Owner 12** (\`${OWNER_12}\`).`,
@@ -1321,7 +1347,7 @@ for (const ids of [
 ]) {
   reset();
   addList(12, 'battlemetrics', { battlemetricsID: 'bm-12' });
-  steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+  addSteamUser(NEW_OWNER, 'New Owner');
   giveLists(NEW_OWNER, ids);
   await refusedTransfer(
     { id: 12, owner: NEW_OWNER },
@@ -1341,7 +1367,7 @@ for (const [choice, reply] of [
 ]) {
   reset();
   addList(12, 'battlemetrics', { battlemetricsID: 'bm-12' });
-  steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+  addSteamUser(NEW_OWNER, 'New Owner');
   answer = choice;
   await run('transfer', { id: 12, owner: NEW_OWNER });
   assert.strictEqual(contentOf(replies.at(-1)), reply);
@@ -1396,7 +1422,7 @@ for (const { case: name, change, reply, reads, owner } of [
 ]) {
   reset();
   addList(12, 'battlemetrics', { battlemetricsID: 'bm-12' });
-  steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+  addSteamUser(NEW_OWNER, 'New Owner');
   giveLists(NEW_OWNER, [30]);
   whileConfirming = change;
   await run('transfer', { id: 12, owner: NEW_OWNER });
@@ -1425,7 +1451,7 @@ for (const [name, change, owner] of [
 ]) {
   reset();
   addList(12, 'battlemetrics', { battlemetricsID: 'bm-12' });
-  steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+  addSteamUser(NEW_OWNER, 'New Owner');
   beforeUpdate = change;
   await run('transfer', { id: 12, owner: NEW_OWNER });
   assert.deepStrictEqual(
@@ -1458,7 +1484,7 @@ const OWNER_13 = '76561198000000013';
 reset();
 addList(12, 'remote');
 addList(13, 'remote');
-steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+addSteamUser(NEW_OWNER, 'New Owner');
 giveLists(NEW_OWNER, [30, 31, 32]);
 let releaseUpdate;
 const updateReleased = new Promise((resolve) => (releaseUpdate = resolve));
@@ -1493,7 +1519,7 @@ assert.deepStrictEqual(audits, [
 reset();
 addList(12, 'remote');
 addList(13, 'remote');
-steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+addSteamUser(NEW_OWNER, 'New Owner');
 const lockWaitTimeout = new Error('Lock wait timeout exceeded; try restarting transaction');
 const failureReleased = new Promise((resolve) => (releaseUpdate = resolve));
 beforeUpdate = async (values, { where }) => {
@@ -1530,7 +1556,7 @@ assert.deepStrictEqual(audits, [
 // a run does reads or writes a list's owner.
 reset();
 addList(12, 'battlemetrics', { battlemetricsID: 'bm-12' });
-steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+addSteamUser(NEW_OWNER, 'New Owner');
 lockAnswers = [true, true];
 await run('transfer', { id: 12, owner: NEW_OWNER });
 assert.ok(!calls.some(([call]) => call === 'lock'));

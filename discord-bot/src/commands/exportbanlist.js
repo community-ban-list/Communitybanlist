@@ -58,7 +58,7 @@ const data = new SlashCommandBuilder()
         option
           .setName('owner')
           .setDescription(
-            "The new owner's SteamID64, 17 digits. They must have signed in to the website once."
+            "The new owner's SteamID64, 17 digits. CBL must know it: signing in to the website adds it."
           )
           .setRequired(true)
       )
@@ -718,11 +718,20 @@ function transferTerms(exportBanList) {
     : { kept: 'settings, configs, players and Discord webhook', shown: 'its Discord webhook' };
 }
 
+// The new owner, pointing out one who has not signed in to the website yet. CBL also knows the
+// Steam IDs of players who have been on its ban lists, so a Steam ID given wrongly can still be one
+// CBL knows, and someone who has not signed in only sees the list once they do.
+function formatNewOwner(newOwner) {
+  const user = formatSteamUser(newOwner.id, newOwner.name);
+  if (newOwner.isSCBLUser) return user;
+  return `${user}\n**Has not signed in to the website yet**, so check the Steam ID is theirs. They see the list once they sign in.`;
+}
+
 // The list, its owner, the new owner and how many export ban lists the new owner has.
 function transferEmbed(check, newOwner, listCount) {
   return listDetailsEmbed(check).addFields(
     { name: 'Current owner', value: truncate(formatOwner(check.exportBanList), 1024) },
-    { name: 'New owner', value: truncate(formatSteamUser(newOwner.id, newOwner.name), 1024) },
+    { name: 'New owner', value: truncate(formatNewOwner(newOwner), 1024) },
     {
       name: "New owner's export ban lists",
       value: `${listCount.toLocaleString('en-US')} now, and ${(listCount + 1).toLocaleString('en-US')} with this one. A user can have ${MAX_LISTS_PER_USER}.`
@@ -794,11 +803,12 @@ async function transfer(interaction) {
   if (exportBanList.owner === owner)
     throw new UserError(`Export ban list ${name} already belongs to ${from}.`);
 
-  // A list's owner must be one of CBL's Steam users, whom a player's first sign-in adds. The model
-  // is taken from sequelize.models, as checkLimits takes it, so the bot imports no more models by
-  // name than its tests stand in for.
+  // A list's owner must be one of CBL's Steam users. A player's first sign-in to the website adds
+  // them, and so does the ban importer for each player on a ban list, so whether the new owner has
+  // signed in is shown too. The model is taken from sequelize.models, as checkLimits takes it, so
+  // the bot imports no more models by name than its tests stand in for.
   const newOwner = await sequelize.models.SteamUser.findByPk(owner, {
-    attributes: ['id', 'name']
+    attributes: ['id', 'name', 'isSCBLUser']
   });
   if (!newOwner)
     throw new UserError(
