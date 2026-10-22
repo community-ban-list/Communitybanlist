@@ -5,6 +5,7 @@ import { battlemetrics } from 'scbl-lib/apis';
 import { classifyBanReason, Logger } from 'scbl-lib/utils';
 
 import { stopIfRequested } from './run-control.js';
+import { findSteamIDIn } from './steam-id.js';
 
 // Remote ban lists are downloaded with a limit on each wait, a limit on the whole download and a
 // size limit, so a host that stalls, trickles or sends something huge cannot hold up the run.
@@ -74,23 +75,6 @@ function pageAddress(params) {
   for (const [name, value] of Object.entries(params)) url.searchParams.append(name, value);
   url.searchParams.sort();
   return url.href;
-}
-
-// The SteamID64s of players' Steam accounts: account numbers 1 to 4,294,967,295 in Steam's public
-// universe.
-const MIN_STEAM_ID = 76561197960265729n;
-const MAX_STEAM_ID = 76561202255233023n;
-
-// The SteamID64 in a value, such as a SteamID on its own or in a profile's address, or null. It is a
-// run of exactly 17 digits, not part of a longer number, that is a player's account. Anything else,
-// e.g. a longer number or one outside that range, is not a SteamID Steam can know, and would only
-// make a player that is never found. Spaces around the value, and the case of an address, make no
-// difference.
-export function findSteamIDIn(value) {
-  const match = /(?<![0-9])[0-9]{17}(?![0-9])/.exec(String(value ?? ''));
-  if (!match) return null;
-  const steamID = BigInt(match[0]);
-  return steamID >= MIN_STEAM_ID && steamID <= MAX_STEAM_ID ? match[0] : null;
 }
 
 // The SteamIDs of the player banned, from a BattleMetrics ban's steamID identifiers: each valid one

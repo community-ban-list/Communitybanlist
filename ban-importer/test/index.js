@@ -29,6 +29,8 @@ const settle = () => new Promise(setImmediate);
 // them. The import is a dry run when dryRun is set, as IMPORTER_DRY_RUN makes it.
 async function loadIndex({ dryRun = false } = {}) {
   const calls = [];
+  // The options a step was given besides its counts, as [name, options].
+  const options = [];
   const output = [];
   const result = deferred();
   const leftWaiting = deferred();
@@ -42,21 +44,23 @@ async function loadIndex({ dryRun = false } = {}) {
 
   // A step that counts what it does is given an object to count in, which it fills in here with
   // its name.
-  const step = (name) => async (counts) => {
+  const step = (name) => async (counts, given) => {
     calls.push(name);
     if (counts) counts.step = name;
+    if (given) options.push([name, { ...given }]);
   };
   const dependencies = {
     'scbl-lib/utils': { describeError, stackTrace },
     './src/core.js': {
       default: {
-        updateSteamUserInfo: step('updateSteamUserInfo'),
         clearOrphanedUsers: step('clearOrphanedUsers'),
         updateReputationPoints: step('updateReputationPoints'),
         updateReputationRank: step('updateReputationRank'),
         exportExportBans: step('exportExportBans')
       }
     },
+    './src/expiry.js': { expireBans: step('expireBans') },
+    './src/steam-profiles.js': { updateSteamUserInfo: step('updateSteamUserInfo') },
     './src/ban-importer.js': {
       default: class {
         constructor() {
@@ -114,17 +118,20 @@ async function loadIndex({ dryRun = false } = {}) {
   });
   await module.evaluate();
 
-  return { calls, output, result, leftWaiting, process: fakeProcess, steps: () => steps };
+  return { calls, options, output, result, leftWaiting, process: fakeProcess, steps: () => steps };
 }
 
 // The run is given every step, in order, each named after what it runs, as the run record names
-// them. The import reports its counts for the record, and the Steam step, the export
-// recalculation and the export push count what they do in an object they are given, which the
-// record keeps, also when the step fails part-way. Each run of a step counts afresh.
+// them. Bans whose expiry has passed are marked expired after the import and before the steps that
+// recalculate players. The import reports its counts for the record, and the expiry step, the Steam
+// step, the export recalculation and the export push count what they do in an object they are
+// given, which the record keeps, also when the step fails part-way. Each run of a step counts
+// afresh. The Steam step is given how often runs start, which the run gives the steps.
 {
   const index = await loadIndex();
   const names = [
     'importBans',
+    'expireBans',
     'updateSteamUserInfo',
     'clearOrphanedUsers',
     'updateReputationPoints',
@@ -146,22 +153,27 @@ async function loadIndex({ dryRun = false } = {}) {
       .filter((step) => step.counts && step.name !== 'importBans')
       .map((step) => [step.name, step.counts()]),
     [
+      ['expireBans', undefined],
       ['updateSteamUserInfo', undefined],
       ['updateExportBans', undefined],
       ['exportExportBans', undefined]
     ]
   );
-  for (const step of steps) await step.run();
+  for (const step of steps) await step.run({ cadenceSeconds: 3600 });
   assert.deepStrictEqual(index.calls, names);
+  assert.deepStrictEqual(index.options, [['updateSteamUserInfo', { cadenceSeconds: 3600 }]]);
   assert.deepStrictEqual(counted(), [
     ['importBans', { lists: 2 }],
+    ['expireBans', { step: 'expireBans' }],
     ['updateSteamUserInfo', { step: 'updateSteamUserInfo' }],
     ['updateExportBans', { step: 'updateExportBans' }],
     ['exportExportBans', { step: 'exportExportBans' }]
   ]);
-  const first = steps[1].counts();
-  await steps[1].run();
-  assert.notStrictEqual(steps[1].counts(), first);
+  for (const step of [steps[1], steps[2]]) {
+    const first = step.counts();
+    await step.run();
+    assert.notStrictEqual(step.counts(), first);
+  }
 }
 
 // A dry run only imports, as every other step writes.

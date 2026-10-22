@@ -1,6 +1,6 @@
 # CBL Ban Importer
 
-Copies the bans of the partner ban lists into the CBL database, then updates the Steam profiles, reputation points and ranks of the players, recalculates the export ban lists and sends their changes to BattleMetrics. One run does all of this and exits. The script that starts the importer runs it every 6 hours. Of each list's bans, only those that are new or changed are written (see [Importing a ban list](#importing-a-ban-list)).
+Copies the bans of the partner ban lists into the CBL database and marks the bans whose expiry has passed as expired, then updates the Steam profiles, reputation points and ranks of the players, recalculates the export ban lists and sends their changes to BattleMetrics. One run does all of this and exits. The script that starts the importer runs it every 6 hours. Of each list's bans, only those that are new or changed are written (see [Importing a ban list](#importing-a-ban-list)).
 
 ## Running it
 
@@ -44,8 +44,8 @@ For example, spread over several lines here and shortened:
   "outcome": "finished",
   "exitCode": 0,
   "startedAt": "2026-10-15T19:00:21.975Z",
-  "endedAt": "2026-10-15T19:29:58.958Z",
-  "seconds": 1776.98,
+  "endedAt": "2026-10-15T19:31:15.645Z",
+  "seconds": 1853.67,
   "gitSha": "0e921bf",
   "phases": {
     "waitForDatabase": 0.02,
@@ -53,7 +53,8 @@ For example, spread over several lines here and shortened:
     "connect": 0.84,
     "migrate": 0.05,
     "importBans": 521.3,
-    "updateSteamUserInfo": 17.22,
+    "expireBans": 0.05,
+    "updateSteamUserInfo": 81.4,
     "clearOrphanedUsers": 0.13,
     "updateReputationPoints": 0.81,
     "updateReputationRank": 5.63,
@@ -86,6 +87,17 @@ For example, spread over several lines here and shortened:
           "stored": 11760
         }
       ]
+    },
+    "expireBans": { "due": 4, "expired": 4, "players": 4 },
+    "updateSteamUserInfo": {
+      "due": 5243,
+      "new": 31,
+      "updated": 5238,
+      "missing": 3,
+      "skipped": 2,
+      "unsaved": 0,
+      "left": 0,
+      "calls": 53
     }
   }
 }
@@ -102,14 +114,15 @@ For example, spread over several lines here and shortened:
 | `phases`               | How long each phase took, in seconds: waiting for the database, taking the run lock, connecting, migrations and each step. |
 | `counts`               | What the steps counted (see below).                                                                                        |
 
-The steps that count what they do keep their counts also when they fail or stop part-way:
+The steps that count what they do keep their counts also when they fail or stop part-way. The expiry and Steam steps start counting once their first read has worked, so one that fails before, e.g. as the database is unavailable, has no counts, rather than counts that say nothing was due:
 
-| Step                  | Counts                                                                                                                       |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `importBans`          | The totals of its summary line, how many of its `lists` it `imported` and, in `banLists`, each list's own counts and errors. |
-| `updateSteamUserInfo` | How many Steam users were `due` to be refreshed, and how many it `updated`.                                                  |
-| `updateExportBans`    | How many `players` it recalculated.                                                                                          |
-| `exportExportBans`    | How many export bans were `queued`, and of those, how many it `created` and `deleted`, and how many `failed`.                |
+| Step                  | Counts                                                                                                                                                                                                                                                                                                                                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `importBans`          | The totals of its summary line, how many of its `lists` it `imported` and, in `banLists`, each list's own counts and errors.                                                                                                                                                                                                                                              |
+| `expireBans`          | How many bans whose expiry has passed it found (`due`) and marked `expired`, and how many different `players` it queued for a recalculation.                                                                                                                                                                                                                              |
+| `updateSteamUserInfo` | How many Steam users were `due` a refresh and, of those, how many were `new` (never refreshed, or queued for a refresh), how many it `updated`, how many Steam did not have (`missing`), how many it `skipped` as their IDs are not SteamIDs, how many profiles it could not save (`unsaved`), how many are `left` for later runs, and how many `calls` it made to Steam. |
+| `updateExportBans`    | How many `players` it recalculated.                                                                                                                                                                                                                                                                                                                                       |
+| `exportExportBans`    | How many export bans were `queued`, and of those, how many it `created` and `deleted`, and how many `failed`.                                                                                                                                                                                                                                                             |
 
 `importBans` also counts the lists that import one of CBL's own export ban lists (`selfImports`) and those CBL can no longer read on BattleMetrics (`accessLost`), and says how the access check went (`accessCheck`: `ok`, `failed`, `off`, or `unused` when no BattleMetrics list was imported). Its `held` counts the bans the lists no longer have that were kept for now, of which `pending` wait for a later complete read of their list, and `moves` counts the bans whose player is no longer one of their SteamIDs (see [Importing a ban list](#importing-a-ban-list)). A dry run's counts say what the import would have done, and it has `"dryRun": true`.
 
@@ -117,13 +130,14 @@ Each list in `banLists` has its `state` when it is not `ok` (see [Ban list state
 
 A run that held the run lock also saves its record in the database, in the importer's `ImporterState` table:
 
-| Row                | What it holds                                                                                         |
-| ------------------ | ----------------------------------------------------------------------------------------------------- |
-| `lastRun`          | The latest run's record, as its JSON line shows it.                                                   |
-| `lastSuccessAt`    | When the latest successful run started: one that exited 0 and imported at least one ban list, if any. |
-| `recentRuns`       | The latest 100 runs' records, oldest first, without per-list counts.                                  |
-| `lastStaleAlertAt` | When the run, or the skipped start, that last posted that the importer is stale started.              |
-| `lastRunMessage`   | The ID of the latest run's status message in the log channel, and when that run started (see below).  |
+| Row                  | What it holds                                                                                                                                       |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lastRun`            | The latest run's record, as its JSON line shows it.                                                                                                 |
+| `lastSuccessAt`      | When the latest successful run started: one that exited 0 and imported at least one ban list, if any.                                               |
+| `recentRuns`         | The latest 100 runs' records, oldest first, without per-list counts.                                                                                |
+| `lastStaleAlertAt`   | When the run, or the skipped start, that last posted that the importer is stale started.                                                            |
+| `lastRunMessage`     | The ID of the latest run's status message in the log channel, and when that run started (see below).                                                |
+| `steamRefreshCursor` | The ID of the last player due a Steam profile refresh that a run took, after which the next run carries on (see [Steam profiles](#steam-profiles)). |
 
 ```sql
 SELECT name, updatedAt, value FROM ImporterState;
@@ -133,7 +147,7 @@ A run that never held the lock, e.g. one that was skipped or could not reach the
 
 ### Staleness
 
-The importer is stale when no run has succeeded for 3 times `IMPORTER_CADENCE_SECONDS`, which is 18 hours by default. A run succeeds when it exits 0 and imports at least one ban list, so runs during a BattleMetrics outage, when every list fails, do not count. The importer then posts that it is stale to the log channel, and again every `IMPORTER_CADENCE_SECONDS` while it stays stale. It compares when runs started, so with a run every `IMPORTER_CADENCE_SECONDS`, the alert comes with the 3rd run in a row that does not succeed, however quickly the runs fail, and it allows 5 minutes, or a tenth of the cadence if that is less, for runs that start a little early or late. Set `IMPORTER_CADENCE_SECONDS` to how often the script starts a run.
+The importer is stale when no run has succeeded for 3 times `IMPORTER_CADENCE_SECONDS`, which is 18 hours by default. A run succeeds when it exits 0 and imports at least one ban list, so runs during a BattleMetrics outage, when every list fails, do not count. The importer then posts that it is stale to the log channel, and again every `IMPORTER_CADENCE_SECONDS` while it stays stale. It compares when runs started, so with a run every `IMPORTER_CADENCE_SECONDS`, the alert comes with the 3rd run in a row that does not succeed, however quickly the runs fail, and it allows 5 minutes, or a tenth of the cadence if that is less, for runs that start a little early or late. Set `IMPORTER_CADENCE_SECONDS` to how often the script starts a run, as it also sets how many Steam profiles a run refreshes (see [Steam profiles](#steam-profiles)).
 
 Only the importer checks: at the end of every run that did not succeed, and whenever a start is skipped, as another run holds the lock. So while no run starts at all, nothing is posted. Whichever run or skipped start posts saves when it started, so no other posts again within the cadence.
 
@@ -143,7 +157,7 @@ The importer posts to `DISCORD_LOG_WEBHOOK` one status message for each run, and
 
 As soon as a run holds the run lock, it posts its status, an embed, and keeps it up to date while it goes, editing it at most every 15 seconds. The embed shows that the run is in progress, in blurple, when it started, in each viewer's own time, how long it has taken, the commit it runs and any importer migrations it applied. Below them are the run's steps: each finished one with a tick, its time and what it counted, the one under way with how long it has taken and a bar of how far it has got, e.g. `18,250 / 145,155 players` or `7 / 20 ban lists`, and those still to run.
 
-When the run ends, it edits the embed a last time, before it releases the lock, to show how it ended: finished in green, failed in red, lost its run lock in red, or stopped in orange, as it received `SIGTERM` or `SIGINT` or took longer than `IMPORTER_MAX_RUN_SECONDS`. The embed then shows how long the run took, each step's time and counts (the import's totals as in its summary line, the Steam profiles updated, the players recalculated, and the export bans created and deleted), and for a run that did not finish, the phase it ended in and why. A run that is skipped, or fails before it holds the lock, posts no status, only its failure line, if it failed.
+When the run ends, it edits the embed a last time, before it releases the lock, to show how it ended: finished in green, failed in red, lost its run lock in red, or stopped in orange, as it received `SIGTERM` or `SIGINT` or took longer than `IMPORTER_MAX_RUN_SECONDS`. The embed then shows how long the run took, each step's time and counts (the import's totals as in its summary line, the bans marked expired, the Steam profiles updated and those left for later runs, the players recalculated, and the export bans created and deleted), and for a run that did not finish, the phase it ended in and why. A run that is skipped, or fails before it holds the lock, posts no status, only its failure line, if it failed.
 
 Of the import's lines about each list, only those that need looking at are posted: a list that failed, or was not read in full, one whose bans are held for an admin, on every run while they are, one whose old source's bans are being replaced, one that lost bans as an admin allowed it, and one whose bans could not all be saved. A list whose missing bans wait for a later read, which needs nothing doing, only goes to the console, as do each new, changed or moved ban, and a list that is not read in full again, after it was not in its last run either, as its first one was posted. In a dry run, every line about a list goes to the console.
 
@@ -218,6 +232,26 @@ Each batch of at most 500 bans is removed in one transaction, which also queues 
 
 **Dry runs.** With `IMPORTER_DRY_RUN=1`, a run reads everything and writes nothing: no ban, player, record of a missing ban or `BanListSyncs` row, and it runs none of the other steps, as they all write. Its counts, in its summary line, status and record, say what the import would have done, and the console has a line for each ban it would add, change, move or remove, up to 100 of each for each list. It posts that it is a dry run, so one left on by mistake is seen, but nothing about the lists. It still takes the run lock, applies the importer's migrations and saves its run record, but never counts as a success for the stale alert. An invalid value, e.g. `0 # done` (`docker run --env-file` keeps a comment after the value), fails the run, with exit code 1, before it imports anything, as it cannot tell whether it may write.
 
+## Expired bans
+
+Whether a ban has expired is stored with it, in `Bans.expired`, which the export ban lists and the website's active and expired bans read. The import sets it for the bans it fetches, but the bans of a list it does not fetch, e.g. as its source is failing or it imports a CBL export ban list, would otherwise stay active for as long as that lasts, and a ban that expires after its list was fetched stays active until the next run fetches it. So after the import, the run marks as expired every ban whose expiry has passed but that is not marked expired (`0` or `NULL`), whatever its list. One read, which locks nothing, finds them, and each batch of 500 is marked in one transaction, which also queues the bans' players for a recalculation of their reputation points and rank and their export bans, by setting their `lastRefreshedReputationPoints`, `lastRefreshedReputationRank` and `lastRefreshedExport` to `NULL`, but not for a refresh of their Steam profile, as their bans did not change. A ban changed since the read is left as it is. A batch that ends in a deadlock or a lock wait timeout, or finds the database unavailable, is run again as a whole, after 5 seconds, as the import's batches are. A dry run does not mark any, as it writes nothing.
+
+The expiries are compared with the time the step starts, given in UTC, as the importer writes every time in UTC, so the comparison is right whatever the time zone of the database or of the connection. In a session in the server's own zone, e.g. `SYSTEM` on a host in Chicago, `NOW()` would be 5 or 6 hours behind, and the bans that expired in that time would not count as expired yet; Sequelize sets the importer's own connections to UTC. To count the bans the next run will mark:
+
+```sql
+SELECT COUNT(*) FROM Bans WHERE (expired = 0 OR expired IS NULL) AND expires <= UTC_TIMESTAMP();
+```
+
+## Steam profiles
+
+Each run refreshes the Steam profiles, the names, profile addresses and avatars, of the players who were never refreshed, or were queued for a refresh as their bans changed, the newest first, as the export ban lists' alerts name the players they add. After them, it refreshes players whose profile is due a refresh, in the order of their IDs, carrying on after the last one the run before took, which `ImporterState` keeps as `steamRefreshCursor`, and from the first again once it has reached the last. A profile is due a refresh 7 days after its last one, give or take a day: each player has their own interval, from 6 days up to 8, which comes from their ID (`6 days + CRC32(id) % 172800 seconds`), so the players refreshed in the same run fall due over two days, rather than all in one run week after week.
+
+A run refreshes at most `IMPORTER_STEAM_REFRESH_PER_RUN` players due a refresh, and 300 new players besides. When there are more new players, e.g. after a ban list was added, they also take the slots of the players due a refresh, so a run refreshes up to 300 plus `IMPORTER_STEAM_REFRESH_PER_RUN` new players; the slots new players leave unused are not given to players due a refresh. Unless it is set, `IMPORTER_STEAM_REFRESH_PER_RUN` is worked out each run from the number of players and `IMPORTER_CADENCE_SECONDS`: enough to refresh every player within the shortest interval, 6 days, with a run every `IMPORTER_CADENCE_SECONDS`. That is about 15% more than intervals of 6 to 8 days need, so the players Steam leaves out, and those a run could not take, e.g. as Steam was down, are caught up on. For about 145,000 players it is about 6,050 a run every 6 hours (61 calls, about a minute and a half), 1,010 every hour and 250 every 15 minutes. It is at least 200, so that runs a minute or two apart still catch up quickly, and at most 10,000. So keep `IMPORTER_CADENCE_SECONDS` at how often runs really start. The console says how many a run takes (`taking at most 6046 due a refresh a run`), and once runs have caught up, the Steam profiles in the run's status show few or none `left for later runs`.
+
+Steam is asked for 100 players a call, and each call's profiles are saved with one statement, which updates the players' rows and marks them refreshed, and never adds a row for a player removed in the meantime. A player Steam leaves out of its answer, e.g. as the account no longer exists, is tried again a day later rather than on every run: it is marked refreshed a day less than its interval ago, e.g. 6 days ago for a player refreshed every 7 days, and keeps its name. A player whose ID is not a SteamID64 of a player's account, e.g. one saved before SteamIDs were checked, is never sent to Steam: it is skipped and marked as looked at, so it comes up again only once its interval has passed. A profile that cannot be saved, e.g. as its name holds a character the table's character set cannot store, is left out, as the call's other profiles are saved again one at a time; it is tried again a day later, and the run posts how many profiles could not be saved, with the first error.
+
+A call that fails, or is answered without a list of players, is posted with its error, and its players stay as they were, so they are taken again: the new ones as new, and the next run carries on from before the first of those due a refresh. Once 2 calls in a row have failed, the step stops, as Steam is then most likely down, and it stops at once when Steam refuses the API key, or still answers HTTP 429 after the Steam client's own retries and pauses. Nothing waits between calls but the Steam client's limit of one request every 1.5 seconds, and each request has 15 seconds to be answered.
+
 ## Database tables
 
 Besides the CBL's own tables, the importer owns `ImporterSchemaMigrations`, `ImporterState`, `BanListSyncs` and `BanListPendingRemovals`. It makes them itself with its migrations (`src/schema/migrations.js`), which it applies once it holds the run lock, before its first step, and records in `ImporterSchemaMigrations`. The web server and the bot never make or change these tables, and the importer never changes the CBL's own tables' columns or indexes. A migration that fails makes the run fail with exit code 1, naming the migration. Going back to an older importer image leaves the tables in place, and the older importer ignores them.
@@ -264,17 +298,18 @@ SELECT banList, state, lastSuccessAt, consecutiveFailures, storedCount, headTota
 
 The importer reads the same `DATABASE_URI`, `BATTLEMETRICS_API_KEY`, `BATTLEMETRICS_ORGANIZATION`, `BATTLEMETRICS_API_RESERVOIR`, `STEAM_API_KEY`, `DISCORD_LOG_WEBHOOK` and `HOST` as the other services, and these of its own:
 
-| Variable                         | Default | Description                                                                                                                                                                                                    |
-| -------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `IMPORTER_MAX_RUN_SECONDS`       | `18000` | A run that takes longer stops at its next safe point, and exits at once 60 seconds later if it has not. Keep it shorter than the time between starts.                                                          |
-| `IMPORTER_CADENCE_SECONDS`       | `21600` | How often the script starts a run, which sets when the importer is stale.                                                                                                                                      |
-| `IMPORTER_ALLOW_MASS_REMOVAL`    |         | Ban list IDs, separated by commas, that may lose any number of bans at once in the next run, once they are read in full (see [Removing bans](#removing-bans)). Remove a list from it once its removal is done. |
-| `IMPORTER_ACCESS_CHECK`          | `1`     | `0` turns off the check, once a run, of which BattleMetrics ban lists the CBL organisation can see (see [Ban list states](#ban-list-states)).                                                                  |
-| `IMPORTER_SCAN_COUNT_CHECK`      | `1`     | `0` turns off the check that a read of a BattleMetrics list found as many bans as BattleMetrics counts on it (see [Importing a ban list](#importing-a-ban-list)).                                              |
-| `IMPORTER_SCAN_COUNT_CHECK_SKIP` |         | Ban list IDs, separated by commas, that the count check leaves out, for a list whose count BattleMetrics keeps getting wrong. Remove a list from it once its count is right again.                             |
-| `IMPORTER_APPLY_STEAMID_MOVES`   | `0`     | `1` moves a ban whose player is no longer one of its SteamIDs to another of them. Until then such moves are only counted and logged.                                                                           |
-| `IMPORTER_DRY_RUN`               | `0`     | `1` makes the run read everything, write nothing and say what the import would change. It runs no other step.                                                                                                  |
-| `GIT_SHA`                        |         | The commit the image was built from, shown when a run starts and in its JSON line.                                                                                                                             |
+| Variable                         | Default | Description                                                                                                                                                                                                                                                  |
+| -------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `IMPORTER_MAX_RUN_SECONDS`       | `18000` | A run that takes longer stops at its next safe point, and exits at once 60 seconds later if it has not. Keep it shorter than the time between starts.                                                                                                        |
+| `IMPORTER_CADENCE_SECONDS`       | `21600` | How often the script starts a run, which sets when the importer is stale and how many Steam profiles a run refreshes (see [Steam profiles](#steam-profiles)).                                                                                                |
+| `IMPORTER_ALLOW_MASS_REMOVAL`    |         | Ban list IDs, separated by commas, that may lose any number of bans at once in the next run, once they are read in full (see [Removing bans](#removing-bans)). Remove a list from it once its removal is done.                                               |
+| `IMPORTER_ACCESS_CHECK`          | `1`     | `0` turns off the check, once a run, of which BattleMetrics ban lists the CBL organisation can see (see [Ban list states](#ban-list-states)).                                                                                                                |
+| `IMPORTER_SCAN_COUNT_CHECK`      | `1`     | `0` turns off the check that a read of a BattleMetrics list found as many bans as BattleMetrics counts on it (see [Importing a ban list](#importing-a-ban-list)).                                                                                            |
+| `IMPORTER_SCAN_COUNT_CHECK_SKIP` |         | Ban list IDs, separated by commas, that the count check leaves out, for a list whose count BattleMetrics keeps getting wrong. Remove a list from it once its count is right again.                                                                           |
+| `IMPORTER_APPLY_STEAMID_MOVES`   | `0`     | `1` moves a ban whose player is no longer one of its SteamIDs to another of them. Until then such moves are only counted and logged.                                                                                                                         |
+| `IMPORTER_STEAM_REFRESH_PER_RUN` |         | How many players due a Steam profile refresh a run refreshes, at most: `0` to `10000`. Not set, or invalid, with a warning, it is enough to refresh all within 6 days at `IMPORTER_CADENCE_SECONDS`, at least `200` (see [Steam profiles](#steam-profiles)). |
+| `IMPORTER_DRY_RUN`               | `0`     | `1` makes the run read everything, write nothing and say what the import would change. It runs no other step.                                                                                                                                                |
+| `GIT_SHA`                        |         | The commit the image was built from, shown when a run starts and in its JSON line.                                                                                                                                                                           |
 
 The switches are on with `1`, `true`, `on` or `yes`, and off with `0`, `false`, `off` or `no`, in any case, with spaces or one pair of quotes around them, which `docker run --env-file` keeps. An invalid value of `IMPORTER_ACCESS_CHECK`, `IMPORTER_SCAN_COUNT_CHECK` or `IMPORTER_APPLY_STEAMID_MOVES` is taken as the safer choice, with a warning posted to the log channel: the checks stay on, and no ban is moved. An invalid `IMPORTER_DRY_RUN` fails the run before it imports anything (see the dry runs in [Removing bans](#removing-bans)), as either choice could be the wrong one.
 
@@ -289,3 +324,9 @@ Its first run applies migration `003`. Then:
 A list that the previous version held, as it would have lost at least 25 bans and 10% of them at once, is no longer waiting for `IMPORTER_ALLOW_MASS_REMOVAL`: its missing bans are recorded on the first run, and removed by the next one that still does not find them, unless it seems to have lost all of its bans. The dry run counts them as held.
 
 Going back to the previous image returns to its rules: a list's missing bans are removed at once, unless they reach 25 bans and 10% of the list, which wait for `IMPORTER_ALLOW_MASS_REMOVAL`. The new table stays, and the older importer ignores it.
+
+### Deploying the version that marks expired bans and budgets Steam profiles
+
+Nothing needs to be set: each run works out how many Steam profiles to refresh from `IMPORTER_CADENCE_SECONDS`, so keep that at how often runs start, e.g. `3600` once they start every hour. The first run may mark many bans expired, those of lists that were not fetched for a while, and queue their players. Within a day, the Steam profiles in the run's status should show few or none `left for later runs`. If `IMPORTER_STEAM_REFRESH_PER_RUN` is set instead, e.g. to keep the Steam step short, about `6100` keeps about 145,000 players refreshed weekly with a run every 6 hours, and about `1000` with a run every hour.
+
+Going back to the previous image brings back its Steam step, which refreshes in one run every player not refreshed for 7 days: a few thousand after runs of this version, which adds a few minutes to that run, and more, for longer, if `IMPORTER_STEAM_REFRESH_PER_RUN` was set lower than the schedule needs. The bans this version marked expired stay marked.

@@ -259,7 +259,7 @@ const ON_DUPLICATE_BAN =
   'AS new ON DUPLICATE KEY UPDATE steamUser = new.steamUser, expires = new.expires, expired = new.expired, reason = new.reason, rawReason = new.rawReason, rawNote = new.rawNote, updatedAt = new.updatedAt';
 
 // Placeholders for rows of values, e.g. (?, ?), (?, ?) for 2 rows of 2 values.
-function placeholders(rows, columns) {
+export function placeholders(rows, columns) {
   const row = `(${Array(columns).fill('?').join(', ')})`;
   return Array(rows).fill(row).join(', ');
 }
@@ -274,7 +274,7 @@ export function sqlTime(value) {
 
 // The number of rows a statement changed, from what Sequelize resolves with: [result, metadata],
 // or [insertId, affectedRows] for an INSERT.
-function affectedRows(result) {
+export function affectedRows(result) {
   if (!Array.isArray(result)) return 0;
   if (typeof result[1] === 'number') return result[1];
   return result[0]?.affectedRows ?? 0;

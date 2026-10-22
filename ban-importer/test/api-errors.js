@@ -3,25 +3,13 @@ import { readFile } from 'fs/promises';
 import { inspect } from 'util';
 import vm from 'vm';
 
-// Exercise how Core handles failed Steam and BattleMetrics requests, without a database or
-// network requests.
+// Exercise how Core handles failed BattleMetrics requests, without a database or network requests.
+// steam-profiles.js checks how the Steam step handles failed Steam requests.
 const logs = [];
 // How far the steps said they had got, for the run's status, as [done, total, unit].
 const progress = [];
-// How long each wait Core asked for was, in milliseconds.
-const waits = [];
-let steamCalls = 0;
-let steamReply;
-let users = [];
-const updatedUsers = [];
 let exportBans = [];
 const dependencies = {
-  'scbl-lib/apis': {
-    async steam(method, path, params) {
-      steamCalls++;
-      return steamReply(steamCalls, params);
-    }
-  },
   'scbl-lib/db': { sequelize: {} },
   'scbl-lib/db/models': {
     ExportBan: {
@@ -30,11 +18,7 @@ const dependencies = {
       findOne: async ({ where }) => exportBans.find((exportBan) => exportBan.id === where.id)
     },
     ExportBanList: {},
-    SteamUser: {
-      // The step takes users off the list it gets as it goes, so it gets a copy.
-      findAll: async () => [...users],
-      update: async (values, { where }) => updatedUsers.push(where.id)
-    }
+    SteamUser: {}
   },
   'scbl-lib/db/sequelize': { Op: {} },
   'scbl-lib/utils': {
@@ -55,10 +39,9 @@ const dependencies = {
   }
 };
 
-// Waits are recorded and skipped, such as the 5 seconds after a failed batch of Steam users.
+// Waits are skipped.
 const context = vm.createContext({
-  setTimeout: (callback, ms) => {
-    waits.push(ms);
+  setTimeout: (callback) => {
     setImmediate(callback);
   }
 });
@@ -100,97 +83,6 @@ function errorLines() {
 
 // The arguments of the first line logged with the given start.
 const logged = (start) => logs.find(([, , message]) => message.startsWith(start));
-
-const fiveSecondWaits = () => waits.filter((ms) => ms === 5000).length;
-
-// Update the given number of Steam users, 50 to a batch, with steam() answering with reply().
-// Resolves with what the step counted.
-async function updateSteamUsers(count, reply) {
-  logs.length = 0;
-  waits.length = 0;
-  progress.length = 0;
-  updatedUsers.length = 0;
-  steamCalls = 0;
-  steamReply = reply;
-  users = Array.from({ length: count }, (_, i) => ({
-    id: `7656119800000${String(i).padStart(4, '0')}`
-  }));
-  const counts = {};
-  await Core.updateSteamUserInfo(counts);
-  return { ...counts };
-}
-
-const unavailable = 'Steam GET ISteamUser/GetPlayerSummaries/v2 failed after 3 attempts: HTTP 503';
-const fail = () => {
-  throw apiError(unavailable, { status: 503, auth: false });
-};
-const answer = (params) => ({
-  data: {
-    response: { players: params.steamids.split(',').map((steamid) => ({ steamid })) }
-  }
-});
-const failedBatch = (size) => `Failed to update batch of ${size} Steam users due to Error: `;
-
-// A failed batch of Steam users is logged with its error, and the next batch is still tried.
-const someFailed = await updateSteamUsers(120, (call, params) =>
-  call === 1 ? fail() : answer(params)
-);
-assert.strictEqual(steamCalls, 3);
-assert.deepStrictEqual(errorLines(), [failedBatch(50) + unavailable]);
-assert.strictEqual(logged('Failed')[3].name, 'ApiError');
-assert.strictEqual(fiveSecondWaits(), 1);
-assert.strictEqual(updatedUsers.length, 70);
-// The step says how far it has got before each batch and once it is done, for the run's status,
-// and counts how many users were due and how many it updated, for the run record.
-assert.deepStrictEqual(progress, [
-  [0, 120, 'Steam users'],
-  [50, 120, 'Steam users'],
-  [100, 120, 'Steam users'],
-  [120, 120, 'Steam users']
-]);
-assert.deepStrictEqual(someFailed, { due: 120, updated: 70 });
-
-// Once 3 batches in a row have failed, the step stops, as Steam is most likely down and the rest
-// would fail too. Its progress and counts say how far it got.
-const allFailed = await updateSteamUsers(250, fail);
-assert.strictEqual(steamCalls, 3);
-assert.deepStrictEqual(errorLines(), [
-  failedBatch(50) + unavailable,
-  failedBatch(50) + unavailable,
-  `Stopped updating Steam users, as 3 batches in a row failed: ${unavailable}`
-]);
-assert.strictEqual(fiveSecondWaits(), 2);
-assert.deepStrictEqual(progress.at(-1), [150, 250, 'Steam users']);
-assert.deepStrictEqual(allFailed, { due: 250, updated: 0 });
-
-// Batches that fail between batches that work do not stop the step.
-await updateSteamUsers(300, (call, params) => ([3, 6].includes(call) ? answer(params) : fail()));
-assert.strictEqual(steamCalls, 6);
-assert.deepStrictEqual(errorLines(), Array(4).fill(failedBatch(50) + unavailable));
-assert.strictEqual(updatedUsers.length, 100);
-
-// When Steam still answers 429 after the client's own retries and minute-long pauses, the step
-// stops at once, as every other batch would wait out the same pauses.
-const limited = 'Steam GET ISteamUser/GetPlayerSummaries/v2 failed after 3 attempts: HTTP 429';
-await updateSteamUsers(120, () => {
-  throw apiError(limited, { status: 429, auth: false });
-});
-assert.strictEqual(steamCalls, 1);
-assert.deepStrictEqual(errorLines(), [
-  `Stopped updating Steam users, as Steam is still limiting requests: ${limited}`
-]);
-assert.strictEqual(fiveSecondWaits(), 0);
-
-// When Steam refuses the key, the step stops, as every other batch would be refused too.
-const refused = 'Steam GET ISteamUser/GetPlayerSummaries/v2 failed: HTTP 403';
-await updateSteamUsers(120, () => {
-  throw apiError(refused, { status: 403, auth: true });
-});
-assert.strictEqual(steamCalls, 1);
-assert.deepStrictEqual(errorLines(), [
-  `Stopped updating Steam users, as Steam refused the API key: ${refused}`
-]);
-assert.strictEqual(fiveSecondWaits(), 0);
 
 // An export ban, on a BattleMetrics list unless another is given, whose BattleMetrics requests
 // call request(). They resolve with what the model would: 'created' or 'deleted' unless request()
@@ -528,5 +420,5 @@ assert.deepStrictEqual(
 );
 
 console.log(
-  'API error checks passed: failures are logged with their errors, and the Steam step and BattleMetrics exports stop when retrying cannot help, or BattleMetrics is down.'
+  'API error checks passed: failures are logged with their errors, and BattleMetrics exports stop when retrying cannot help, or BattleMetrics is down.'
 );

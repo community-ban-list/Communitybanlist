@@ -475,6 +475,7 @@ const module = await load('../src/ban-importer.js');
 const runControl = load('../src/run-control.js');
 const link = async (specifier) => {
   if (specifier === './ban-fetcher.js') return load('../src/ban-fetcher.js');
+  if (specifier === './steam-id.js') return load('../src/steam-id.js');
   if (specifier === './ban-list-sync.js') return load('../src/ban-list-sync.js');
   if (specifier === './apply-list.js') return load('../src/apply-list.js');
   if (specifier === './run-control.js') return runControl;
