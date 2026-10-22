@@ -80,7 +80,10 @@ const REASON_LENGTH = 300;
 const REVIEW_TIMEOUT = 5 * 60 * 1000;
 
 // The most export ban lists a user can have, as the website allows (hasRoomForList in
-// web-server/src/graphql-api/mutation/resolver.js). A transfer never takes a user past it.
+// web-server/src/graphql-api/mutation/resolver.js). A transfer checks it again just before it is
+// made, and the bot makes one transfer at a time, so transfers cannot take a user past it. Only a
+// list the new owner creates on the website at that same moment still can, as the website and the
+// bot do not wait for each other.
 const MAX_LISTS_PER_USER = 4;
 
 // A SteamID64, as the website takes one from a Steam sign-in.
@@ -752,6 +755,20 @@ async function transferIfUnchanged(exportBanList, newOwner) {
   return updated === 0 ? `Export ban list ${name} changed as it was being transferred` : null;
 }
 
+// The last transfer, which the next waits for. The bot makes one transfer at a time, from reading
+// the list and the new owner's lists again to writing the owner, so two confirmed at the same time
+// cannot both find that the new owner has room for another list. The bot runs as a single process,
+// so this is kept in memory, as the website keeps each user's changes in order (guard-changes.js
+// in web-server/src/graphql-api/mutation).
+let lastTransfer = Promise.resolve();
+
+// Make a transfer once the last one has finished, whether or not that succeeded.
+function afterLastTransfer(makeTransfer) {
+  const result = lastTransfer.then(makeTransfer);
+  lastTransfer = result.catch(() => {});
+  return result;
+}
+
 // Give an export ban list to another Steam user. Only its owner changes, and the website reads a
 // list's owner from the database on every request, so from then on the new owner sees the list,
 // with its Discord webhook and BattleMetrics invite, and can change or delete it, and the old
@@ -761,7 +778,8 @@ async function transferIfUnchanged(exportBanList, newOwner) {
 // the exports do reads or writes a list's owner, so a run goes on the same whoever owns the list.
 // Like the website's own changes, the update can wait for rows a run has locked, such as the new
 // owner's Steam user while the run recalculates every player's reputation, which can take most of
-// a minute after a big import. If MySQL gives up waiting, nothing is changed.
+// a minute after a big import, and transfers confirmed meanwhile wait for it in turn. If MySQL
+// gives up waiting, nothing is changed.
 async function transfer(interaction) {
   const id = interaction.options.getInteger('id', true);
   const owner = parseSteamID(interaction.options.getString('owner', true));
@@ -805,7 +823,7 @@ async function transfer(interaction) {
   );
   if (!confirmed) return;
 
-  const left = await transferIfUnchanged(exportBanList, newOwner);
+  const left = await afterLastTransfer(() => transferIfUnchanged(exportBanList, newOwner));
   if (left) {
     await interaction.editReply({
       content: truncate(`${left}, so nothing was changed.`, MESSAGE_LENGTH),

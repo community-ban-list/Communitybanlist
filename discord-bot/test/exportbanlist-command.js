@@ -79,8 +79,8 @@ let whileConfirming;
 let timeouts;
 // CBL's Steam users, as { id, name } by Steam ID: those a sign-in or the importer has added.
 let steamUsers;
-// Runs as an update starts, before it writes anything, e.g. to change a list in the moment after it
-// was read again.
+// Runs as an update starts, with the update's values and options, before it writes anything, e.g.
+// to change a list in the moment after it was read again, or to make the update wait or fail.
 let beforeUpdate;
 
 function reset() {
@@ -200,7 +200,7 @@ const ExportBanList = {
   // Sequelize's update does.
   async update(values, options) {
     calls.push(['update', values, options]);
-    if (beforeUpdate) await beforeUpdate();
+    if (beforeUpdate) await beforeUpdate(values, options);
     const updated = [...rows.values()].filter((row) =>
       hasColumns(row.exportBanList, options.where)
     );
@@ -1440,6 +1440,91 @@ for (const [name, change, owner] of [
   assert.strictEqual(ownerOf(12), owner, name);
   assert.deepStrictEqual(audits, [], name);
 }
+
+// Let every step that waits for nothing else run: the stand-ins answer at once, so only an update
+// held back by the test is still waiting afterwards.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+const listsOf = (owner) =>
+  [...rows.values()]
+    .filter((row) => row.exportBanList.owner === owner)
+    .map((row) => row.exportBanList.id);
+const OWNER_13 = '76561198000000013';
+
+// The bot makes one transfer at a time, from reading the list and the new owner's lists again to
+// writing the owner, so two transfers to a user with 3 lists, confirmed at the same time, cannot
+// both give them their fourth. Here the first one's update waits until both have been confirmed,
+// as when MySQL makes it wait for a row a ban importer run has locked. The second is only checked
+// once the first has been made, and is refused.
+reset();
+addList(12, 'remote');
+addList(13, 'remote');
+steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+giveLists(NEW_OWNER, [30, 31, 32]);
+let releaseUpdate;
+const updateReleased = new Promise((resolve) => (releaseUpdate = resolve));
+beforeUpdate = () => updateReleased;
+const together = [
+  run('transfer', { id: 12, owner: NEW_OWNER }),
+  run('transfer', { id: 13, owner: NEW_OWNER })
+];
+await settle();
+releaseUpdate();
+await Promise.all(together);
+assert.deepStrictEqual(listsOf(NEW_OWNER), [12, 30, 31, 32]);
+assert.strictEqual(ownerOf(13), OWNER_13);
+assert.deepStrictEqual(calls.slice(calls.findIndex(([call]) => call === 'update')), [
+  ['update', { owner: NEW_OWNER }, { where: { id: 12, owner: OWNER_12 } }],
+  ['find', 13],
+  ['count', { owner: NEW_OWNER }]
+]);
+assert.ok(
+  replies.some(
+    (reply) =>
+      contentOf(reply) ===
+      `**New Owner** (\`${NEW_OWNER}\`) now has 4 export ban lists, and the website lets a user have at most 4, so nothing was changed.`
+  )
+);
+assert.deepStrictEqual(audits, [
+  `admin (1) transferred export ban list "List 12" (ID: 12, Remote) of Steam user "Owner 12" (ID: ${OWNER_12}) to Steam user "New Owner" (ID: ${NEW_OWNER}).`
+]);
+
+// A transfer whose update fails, as when MySQL gives up waiting for a lock, changes nothing, and a
+// transfer confirmed meanwhile waits for it to end and then is made as usual.
+reset();
+addList(12, 'remote');
+addList(13, 'remote');
+steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+const lockWaitTimeout = new Error('Lock wait timeout exceeded; try restarting transaction');
+const failureReleased = new Promise((resolve) => (releaseUpdate = resolve));
+beforeUpdate = async (values, { where }) => {
+  if (where.id !== 12) return;
+  await failureReleased;
+  calls.push(['failed', 12]);
+  throw lockWaitTimeout;
+};
+const [failing, waiting] = [
+  run('transfer', { id: 12, owner: NEW_OWNER }),
+  run('transfer', { id: 13, owner: NEW_OWNER })
+];
+await settle();
+releaseUpdate();
+await assert.rejects(failing, (error) => error === lockWaitTimeout);
+await waiting;
+assert.deepStrictEqual(calls.slice(calls.findIndex(([call]) => call === 'failed')), [
+  ['failed', 12],
+  ['find', 13],
+  ['count', { owner: NEW_OWNER }],
+  ['update', { owner: NEW_OWNER }, { where: { id: 13, owner: OWNER_13 } }]
+]);
+assert.strictEqual(ownerOf(12), OWNER_12);
+assert.strictEqual(ownerOf(13), NEW_OWNER);
+assert.deepStrictEqual(replies.at(-1), {
+  content: `Transferred export ban list **List 13** (#13) from **Owner 13** (\`${OWNER_13}\`) to **New Owner** (\`${NEW_OWNER}\`). From now on the new owner sees it on the website, with its Discord webhook, and the old owner no longer does. Neither was told.`,
+  embeds: []
+});
+assert.deepStrictEqual(audits, [
+  `admin (1) transferred export ban list "List 13" (ID: 13, Remote) of Steam user "Owner 13" (ID: ${OWNER_13}) to Steam user "New Owner" (ID: ${NEW_OWNER}).`
+]);
 
 // A transfer goes ahead while a ban importer run holds its lock, which it does not check: nothing
 // a run does reads or writes a list's owner.
