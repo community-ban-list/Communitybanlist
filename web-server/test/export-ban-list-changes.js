@@ -591,7 +591,8 @@ function database(pause = async () => {}) {
   return { rows, queries, writes, models };
 }
 
-// The limits on export ban lists, with no limit on their players, and the rules for each value.
+// The limits on export ban lists, with no limit on their players, so no list's players are
+// counted, and the rules for each value.
 const limits = {
   'scbl-lib/config': {
     EXPORT_LIST_LIMITS: exportListLimits.readLimits({
@@ -600,7 +601,15 @@ const limits = {
     }).limits
   },
   'scbl-lib/export-list-limits': exportListLimits,
-  'scbl-lib/validators': { default: Validators }
+  'scbl-lib/validators': { default: Validators },
+  'scbl-lib/db/export-membership': {
+    countMembers() {
+      throw new Error('A list was counted with no limit on its players.');
+    },
+    countPlayersWithBans() {
+      throw new Error('Players were counted with no limit on lists.');
+    }
+  }
 };
 
 // The Discord webhook checks from scbl-lib, with Discord refusing every test message.

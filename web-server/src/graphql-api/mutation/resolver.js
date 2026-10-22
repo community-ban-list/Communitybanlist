@@ -8,6 +8,7 @@ import {
 } from 'scbl-lib/export-list-limits';
 import Validators from 'scbl-lib/validators';
 
+import checkSize from './check-size.js';
 import refusal from './refusal.js';
 import testWebhook from './test-webhook.js';
 
@@ -44,19 +45,33 @@ function checkFormats(args, exportBanList = {}) {
   }
 }
 
+// Whether a user has room for another export ban list, as each user can have 4.
+async function hasRoomForList(user) {
+  return (await ExportBanList.count({ where: { owner: user } })) < 4;
+}
+
 // Check a change that can change who is on a list against the limits on export ban lists
 // (scbl-lib/export-list-limits.js): its creation, a change to its settings, or a config added or
 // deleted. before is the list as stored, or null for a new list, and after is the whole list after
 // the change, each as { settings, configs }. A change that can only make the list smaller, or keep
 // it the same, is allowed, so lists saved before the limits keep working. One that could make the
-// list bigger must leave the whole list within the points rules.
+// list bigger must leave the whole list within the points rules, and within its type's limit on
+// players (check-size.js). list is the list's type, its ID (undefined for a new list) and the kind
+// of change, which check-size.js describes.
 //
 // Every such change comes here before anything is saved, a webhook is tested or BattleMetrics is
 // asked for anything, so any other check of a change that could make a list bigger
-// (change.mayGrow), such as of the players it would list, belongs here too.
-async function checkListChange(type, before, after) {
-  const change = checkChange(type, before, after, EXPORT_LIST_LIMITS);
+// (change.mayGrow) belongs here too.
+async function checkListChange(context, list, before, after) {
+  const change = checkChange(list.type, before, after, EXPORT_LIST_LIMITS);
   refuseProblems(change.problems);
+  await checkSize(context, {
+    ...list,
+    before,
+    after,
+    change,
+    hasRoomForList: () => hasRoomForList(context.user.id)
+  });
   return change;
 }
 
@@ -101,8 +116,8 @@ export default {
   Mutation: {
     createExportBanList: async (parent, args, context) => {
       // Ensure user does not exceed max export ban list amount.
-      const count = await ExportBanList.count({ where: { owner: context.user.id } });
-      if (count >= 4) throw new Error('You are limited to 4 export ban lists.');
+      if (!(await hasRoomForList(context.user.id)))
+        throw new Error('You are limited to 4 export ban lists.');
 
       // Validate arguments.
       if (!['remote', 'battlemetrics'].includes(args.type))
@@ -116,7 +131,10 @@ export default {
         threshold: defaultThreshold(EXPORT_LIST_LIMITS),
         ...givenSettings(args)
       };
-      await checkListChange(args.type, null, { settings, configs: [] });
+      await checkListChange(context, { type: args.type, kind: 'create' }, null, {
+        settings,
+        configs: []
+      });
 
       if (args.discordWebhook) await testWebhook(context, args.discordWebhook);
 
@@ -197,7 +215,8 @@ export default {
       if (changed.length > 0) {
         const configs = await loadConfigs(exportBanList.id);
         await checkListChange(
-          exportBanList.type,
+          context,
+          { type: exportBanList.type, exportBanList: exportBanList.id, kind: 'update' },
           { settings: stored, configs },
           { settings, configs }
         );
@@ -307,7 +326,8 @@ export default {
         organisationName: banList.Organisation?.name
       };
       await checkListChange(
-        exportBanList.type,
+        context,
+        { type: exportBanList.type, exportBanList: exportBanList.id, kind: 'add config' },
         { settings, configs },
         { settings, configs: [...configs, added] }
       );
@@ -333,7 +353,8 @@ export default {
       const settings = storedSettings(exportBanList);
       const configs = await loadConfigs(exportBanList.id);
       await checkListChange(
-        exportBanList.type,
+        context,
+        { type: exportBanList.type, exportBanList: exportBanList.id, kind: 'delete config' },
         { settings, configs },
         { settings, configs: configs.filter((config) => config.id !== exportBanListConfig.id) }
       );

@@ -152,16 +152,28 @@ function database() {
 }
 
 // Load the mutations, as mutation/index.js guards them, with these limits on export ban lists.
-// Webhook tests are recorded, and all of them pass.
+// There is no limit on the players a list can have, so no list's players are counted
+// (export-ban-list-size.js checks that limit). Webhook tests are recorded, and all of them pass.
 async function mutations(env) {
   const db = database();
   const tested = [];
   const logged = [];
+  const noPlayerLimits = { EXPORT_BM_MAX_PLAYERS: '0', EXPORT_REMOTE_MAX_PLAYERS: '0' };
   const { resolver } = await load(
     '../src/graphql-api/mutation/index.js',
     {
       './typedef.js': { default: { kind: 'Document' } },
-      'scbl-lib/config': { EXPORT_LIST_LIMITS: exportListLimits.readLimits(env).limits },
+      'scbl-lib/config': {
+        EXPORT_LIST_LIMITS: exportListLimits.readLimits({ ...noPlayerLimits, ...env }).limits
+      },
+      'scbl-lib/db/export-membership': {
+        countMembers() {
+          throw new Error('A list was counted with no limit on its players.');
+        },
+        countPlayersWithBans() {
+          throw new Error('Players were counted with no limit on lists.');
+        }
+      },
       'scbl-lib/db/models': db.models,
       'scbl-lib/export-list-limits': exportListLimits,
       'scbl-lib/utils': {
