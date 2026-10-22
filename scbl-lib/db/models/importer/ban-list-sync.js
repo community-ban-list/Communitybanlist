@@ -23,7 +23,8 @@ export default sequelize.define(
     },
     // ok, failing, access_lost (CBL cannot read the list on BattleMetrics, or BattleMetrics does not
     // list it among those CBL can see), self_import (the list's source is one of CBL's own export
-    // ban lists) or held (removing the bans the list no longer has waits for confirmation).
+    // ban lists) or held (some of the bans the list no longer has were kept until their removal is
+    // confirmed).
     state: {
       type: DataTypes.STRING(16),
       allowNull: false,

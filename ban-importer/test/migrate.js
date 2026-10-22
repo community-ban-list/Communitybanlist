@@ -18,12 +18,18 @@ const { default: MIGRATIONS } = await import('../src/schema/migrations.js');
 // A stand-in for a MySQL database, as the migration connection sees it. It knows the statements the
 // migrations run, makes the tables their CREATE TABLE statements describe, and answers
 // information_schema queries from those tables. The CBL's BanLists table has an id of the type
-// given, as Sequelize made it, or is missing if that is null. fail(sql), if given, returns an error
-// for a statement to fail with.
+// given, as Sequelize made it, or is missing if that is null, and its Bans table has an id with the
+// type, character set and collation given. fail(sql), if given, returns an error for a statement
+// to fail with.
 function fakeDatabase({
   bans = { characterSet: 'utf8mb3', collationName: 'utf8mb3_general_ci' },
   defaults = { characterSet: 'utf8mb4', collationName: 'utf8mb4_0900_ai_ci' },
   banListsID = 'int',
+  bansID = {
+    columnType: 'varchar(255)',
+    characterSet: 'utf8mb3',
+    collationName: 'utf8mb3_general_ci'
+  },
   fail = () => null
 } = {}) {
   const database = {
@@ -34,7 +40,7 @@ function fakeDatabase({
     connections: [],
     fail
   };
-  if (bans) database.tables.set('Bans', { columns: ['id'], ...bans });
+  if (bans) database.tables.set('Bans', { columns: ['id'], ...bans, id: bansID });
   if (banListsID) database.tables.set('BanLists', { columns: ['id'], idType: banListsID });
 
   const answer = (sql, values) => {
@@ -66,11 +72,20 @@ function fakeDatabase({
       const table = database.tables.get(values[0]);
       return table?.idType ? [{ columnType: table.idType }] : [];
     }
+    if (
+      /^SELECT COLUMN_TYPE AS columnType, CHARACTER_SET_NAME AS characterSet, COLLATION_NAME AS collationName FROM information_schema\.COLUMNS WHERE TABLE_SCHEMA = DATABASE\(\) AND TABLE_NAME = \? AND COLUMN_NAME = \?$/.test(
+        sql
+      )
+    ) {
+      const column = database.tables.get(values[0])?.[values[1]];
+      return column ? [column] : [];
+    }
     if ((match = sql.match(/^CREATE TABLE IF NOT EXISTS (\w+) \((.*)\) (.*)$/))) {
       const [, name, body, options] = match;
       if (!database.tables.has(name)) {
+        // The definitions are separated by the commas outside parentheses.
         const columns = body
-          .split(',')
+          .split(/,(?![^(]*\))/)
           .map((part) => part.trim().split(' ')[0])
           .filter((word) => !/^(PRIMARY|KEY|INDEX|UNIQUE|CONSTRAINT|FOREIGN)$/.test(word));
         database.tables.set(name, { columns, options });
@@ -171,7 +186,10 @@ async function loadMigrate(database, { models = IMPORTER_MODELS, connectError = 
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 // Every migration, in order.
-const ALL = ['001-importer-state', '002-ban-list-syncs'];
+const ALL = ['001-importer-state', '002-ban-list-syncs', '003-ban-list-pending-removals'];
+
+// The columns of BanListPendingRemovals, which migration 003 makes.
+const PENDING_REMOVAL_COLUMNS = ['banList', 'banId', 'firstMissingAt', 'lastMissingAt'];
 
 // The columns of BanListSyncs, which migration 002 makes.
 const BAN_LIST_SYNC_COLUMNS = [
@@ -199,8 +217,8 @@ const BAN_LIST_SYNC_COLUMNS = [
 ];
 
 // On a database without the importer's tables, migration 001 makes ImporterSchemaMigrations and
-// ImporterState, and migration 002 BanListSyncs. Each is recorded, and the run is told, as it is
-// applied. The connection first makes schema changes wait at most 3 seconds for a table, as other
+// ImporterState, migration 002 BanListSyncs, and migration 003 BanListPendingRemovals. Each is
+// recorded, and the run is told, as it is applied. The connection first makes schema changes wait at most 3 seconds for a table, as other
 // queries on the table wait behind them, and is closed at the end.
 {
   const database = fakeDatabase();
@@ -211,7 +229,8 @@ const BAN_LIST_SYNC_COLUMNS = [
   assert.deepStrictEqual(database.migrations, ALL);
   assert.deepStrictEqual(told, [
     ['001-importer-state', ['001-importer-state']],
-    ['002-ban-list-syncs', ALL]
+    ['002-ban-list-syncs', ALL.slice(0, 2)],
+    ['003-ban-list-pending-removals', ALL]
   ]);
   assert.strictEqual(database.statements[0], 'SET SESSION lock_wait_timeout = 3');
   assert.deepStrictEqual(database.tables.get('ImporterSchemaMigrations').columns, [
@@ -224,8 +243,17 @@ const BAN_LIST_SYNC_COLUMNS = [
     'updatedAt'
   ]);
   assert.deepStrictEqual(database.tables.get('BanListSyncs').columns, BAN_LIST_SYNC_COLUMNS);
+  assert.deepStrictEqual(
+    database.tables.get('BanListPendingRemovals').columns,
+    PENDING_REMOVAL_COLUMNS
+  );
   // The new tables use the existing tables' character set and collation, read from Bans.
-  for (const table of ['ImporterSchemaMigrations', 'ImporterState', 'BanListSyncs'])
+  for (const table of [
+    'ImporterSchemaMigrations',
+    'ImporterState',
+    'BanListSyncs',
+    'BanListPendingRemovals'
+  ])
     assert.strictEqual(
       database.tables.get(table).options,
       'ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci'
@@ -247,6 +275,21 @@ const BAN_LIST_SYNC_COLUMNS = [
     'CONSTRAINT BanListSyncs_banList FOREIGN KEY (banList) REFERENCES BanLists (id) ON DELETE CASCADE )'
   ])
     assert.ok(banListSyncs.includes(definition), definition);
+  // A missing ban is keyed by its list and its ban. Its list's foreign key deletes it with the list.
+  // Its ban is a plain column, with the type, character set and collation of Bans.id, as Bans.id
+  // is not an INT, so the two compare as equal.
+  const pendingRemovals = database.statements.find((sql) =>
+    sql.startsWith('CREATE TABLE IF NOT EXISTS BanListPendingRemovals ')
+  );
+  for (const definition of [
+    'banList int NOT NULL,',
+    'banId varchar(255) CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci NOT NULL,',
+    'firstMissingAt DATETIME(3) NOT NULL,',
+    'lastMissingAt DATETIME(3) NOT NULL,',
+    'PRIMARY KEY (banList, banId),',
+    'CONSTRAINT BanListPendingRemovals_banList FOREIGN KEY (banList) REFERENCES BanLists (id) ON DELETE CASCADE )'
+  ])
+    assert.ok(pendingRemovals.includes(definition), definition);
   // Every statement has a time limit, and the connection is closed.
   const [connection] = database.connections;
   assert.ok(connection.queries.every(({ timeout }) => timeout === 5 * 60 * 1000));
@@ -254,13 +297,13 @@ const BAN_LIST_SYNC_COLUMNS = [
   // The column check reads the models' tables after the migrations.
   assert.match(database.statements.at(-1), /information_schema\.COLUMNS/);
   assert.deepStrictEqual(plain(connection.queries.at(-1).values), [
-    ['ImporterSchemaMigrations', 'ImporterState', 'BanListSyncs']
+    ['ImporterSchemaMigrations', 'ImporterState', 'BanListSyncs', 'BanListPendingRemovals']
   ]);
 
   // A second run applies nothing, and changes nothing, but still checks the columns.
   const before = database.statements.length;
   assert.deepStrictEqual(plain(await migrate({ onApplied })), { applied: [], unknown: [] });
-  assert.strictEqual(told.length, 2);
+  assert.strictEqual(told.length, 3);
   const again = database.statements.slice(before);
   assert.ok(!again.some((sql) => /^(CREATE|INSERT|ALTER|DROP)/.test(sql)));
   assert.strictEqual(again[0], 'SET SESSION lock_wait_timeout = 3');
@@ -268,20 +311,26 @@ const BAN_LIST_SYNC_COLUMNS = [
   assert.deepStrictEqual(database.migrations, ALL);
 }
 
-// A database that has migration 001, from the importer before this one, is given only migration
-// 002.
-{
+// A database that has migration 001, or 001 and 002, from the importers before this one, is given
+// only the migrations it does not have.
+for (const [had, given] of [
+  [1, ['BanListSyncs', 'BanListPendingRemovals']],
+  [2, ['BanListPendingRemovals']]
+]) {
   const database = fakeDatabase();
   const { migrate } = await loadMigrate(database);
-  await migrate({ migrations: MIGRATIONS.slice(0, 1), models: IMPORTER_MODELS.slice(0, 2) });
-  assert.deepStrictEqual(database.migrations, ['001-importer-state']);
-  assert.ok(!database.tables.has('BanListSyncs'));
+  await migrate({
+    migrations: MIGRATIONS.slice(0, had),
+    models: IMPORTER_MODELS.slice(0, had + 1)
+  });
+  assert.deepStrictEqual(database.migrations, ALL.slice(0, had));
+  assert.ok(!database.tables.has('BanListPendingRemovals'));
   const before = database.statements.length;
-  assert.deepStrictEqual(plain(await migrate()), { applied: ['002-ban-list-syncs'], unknown: [] });
+  assert.deepStrictEqual(plain(await migrate()), { applied: ALL.slice(had), unknown: [] });
   const creates = database.statements.slice(before).filter((sql) => sql.startsWith('CREATE'));
   assert.deepStrictEqual(
     creates.map((sql) => sql.split(' ')[5]),
-    ['BanListSyncs']
+    given
   );
   assert.deepStrictEqual(database.migrations, ALL);
 }
@@ -292,12 +341,13 @@ for (const type of ['int unsigned', 'bigint', 'INT(11)']) {
   const database = fakeDatabase({ banListsID: type });
   const { migrate } = await loadMigrate(database);
   await migrate();
-  assert.ok(
-    database.statements.some((sql) =>
-      sql.startsWith(`CREATE TABLE IF NOT EXISTS BanListSyncs ( banList ${type} NOT NULL,`)
-    ),
-    type
-  );
+  for (const table of ['BanListSyncs', 'BanListPendingRemovals'])
+    assert.ok(
+      database.statements.some((sql) =>
+        sql.startsWith(`CREATE TABLE IF NOT EXISTS ${table} ( banList ${type} NOT NULL,`)
+      ),
+      `${table}: ${type}`
+    );
 }
 for (const type of [null, 'varchar(255)', 'int; DROP TABLE Bans']) {
   const database = fakeDatabase({ banListsID: type });
@@ -311,11 +361,47 @@ for (const type of [null, 'varchar(255)', 'int; DROP TABLE Bans']) {
   assert.ok(!database.tables.has('BanListSyncs'));
 }
 
-// Without a Bans table, the database's default character set and collation are used.
+// The column for a missing ban has whatever VARCHAR type, character set and collation Bans.id has.
+// A Bans.id that is missing, not a VARCHAR, or has names that could not be put safely into DDL,
+// fails migration 003 before it makes anything.
+{
+  const database = fakeDatabase({
+    bansID: { columnType: 'varchar(191)', characterSet: 'utf8mb4', collationName: 'utf8mb4_bin' }
+  });
+  const { migrate } = await loadMigrate(database);
+  await migrate();
+  assert.ok(
+    database.statements.some((sql) =>
+      sql.includes(' banId varchar(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,')
+    )
+  );
+}
+for (const bansID of [
+  null,
+  { columnType: 'int', characterSet: null, collationName: null },
+  { columnType: 'varchar(255)', characterSet: 'utf8mb4', collationName: null },
+  { columnType: 'varchar(255)', characterSet: 'utf8mb4; DROP TABLE Bans', collationName: 'x' }
+]) {
+  const database = fakeDatabase({ bansID });
+  const { migrate } = await loadMigrate(database);
+  await assert.rejects(migrate(), {
+    name: 'MigrationError',
+    message:
+      'Importer migration 003-ban-list-pending-removals failed: Error: Could not read the type of Bans.id, which a column refers to.'
+  });
+  assert.deepStrictEqual(database.migrations, ALL.slice(0, 2), JSON.stringify(bansID));
+  assert.ok(!database.tables.has('BanListPendingRemovals'));
+}
+
+// Without a Bans table, the database's default character set and collation are used, but a missing
+// ban's column has no Bans.id to take its type from, so migration 003 fails.
 {
   const database = fakeDatabase({ bans: null });
   const { migrate } = await loadMigrate(database);
-  await migrate();
+  await assert.rejects(
+    migrate(),
+    /^MigrationError: Importer migration 003-ban-list-pending-removals failed: Error: Could not read the type of Bans\.id/
+  );
   for (const table of ['ImporterState', 'BanListSyncs'])
     assert.strictEqual(
       database.tables.get(table).options,
@@ -407,7 +493,7 @@ for (const type of [null, 'varchar(255)', 'int; DROP TABLE Bans']) {
 
   failing = false;
   assert.deepStrictEqual(plain(await migrate({ onApplied: (id) => told.push(id) })), {
-    applied: ['002-ban-list-syncs'],
+    applied: ALL.slice(1),
     unknown: []
   });
   assert.deepStrictEqual(told, ALL);
@@ -456,7 +542,7 @@ for (const type of [null, 'varchar(255)', 'int; DROP TABLE Bans']) {
   await assert.rejects(migrate(), {
     name: 'MigrationError',
     message:
-      "The importer's tables are missing columns after migration 002-ban-list-syncs: ImporterState.value, BanListSyncs.headTotal."
+      "The importer's tables are missing columns after migration 003-ban-list-pending-removals: ImporterState.value, BanListSyncs.headTotal."
   });
 }
 {
@@ -470,10 +556,10 @@ for (const type of [null, 'varchar(255)', 'int; DROP TABLE Bans']) {
   const told = [];
   const error = await migrate({ onApplied: (id) => told.push(id) }).catch((err) => err);
   assert.strictEqual(error.name, 'MigrationError');
-  assert.strictEqual(error.migration, '002-ban-list-syncs');
+  assert.strictEqual(error.migration, '003-ban-list-pending-removals');
   assert.match(
     error.message,
-    /missing columns after migration 002-ban-list-syncs: ImporterState\.cursor\.$/
+    /missing columns after migration 003-ban-list-pending-removals: ImporterState\.cursor\.$/
   );
   // The migrations themselves were applied and recorded, and the run was told, so its record names
   // them, although the next run will not apply them again.
@@ -487,23 +573,24 @@ for (const type of [null, 'varchar(255)', 'int; DROP TABLE Bans']) {
   const database = fakeDatabase();
   const { migrate } = await loadMigrate(database);
   await migrate();
-  database.migrations.push('003-ban-list-pending-removals');
+  database.migrations.push('004-export-ban-list-syncs');
   assert.deepStrictEqual(plain(await migrate()), {
     applied: [],
-    unknown: ['003-ban-list-pending-removals']
+    unknown: ['004-export-ban-list-syncs']
   });
 }
 
-// The models' tables and columns, which migrations 001 and 002 make, as the checks above show.
+// The models' tables and columns, which migrations 001 to 003 make, as the checks above show.
 assert.deepStrictEqual(
   IMPORTER_MODELS.map((model) => [model.getTableName(), Object.keys(model.getAttributes())]),
   [
     ['ImporterSchemaMigrations', ['id', 'appliedAt']],
     ['ImporterState', ['name', 'value', 'updatedAt']],
-    ['BanListSyncs', BAN_LIST_SYNC_COLUMNS]
+    ['BanListSyncs', BAN_LIST_SYNC_COLUMNS],
+    ['BanListPendingRemovals', PENDING_REMOVAL_COLUMNS]
   ]
 );
 
 console.log(
-  'Importer migration checks passed: a new database, one with migration 001, a second run, BanListSyncs and its foreign key, failures, the column check and newer migrations.'
+  'Importer migration checks passed: a new database, ones with migrations 001 and 002, a second run, BanListSyncs, BanListPendingRemovals and their keys, failures, the column check and newer migrations.'
 );

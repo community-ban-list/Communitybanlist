@@ -424,6 +424,12 @@ for (const [name, counts, expected, progress] of [
     { ...COUNTS.importBans, imported: 7, fetched: 1, removed: 0, failedLists: 1 },
     '7 of 20 ban lists: 1 ban fetched, 1 new, 0 updated, 0 removed, 0 held, 1 list failed'
   ],
+  // A dry run's totals say it was one.
+  [
+    'importBans',
+    { ...COUNTS.importBans, dryRun: true },
+    '20 ban lists: 87,026 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed, in a dry run that wrote nothing'
+  ],
   ['updateSteamUserInfo', { due: 0, updated: 0 }, 'none were due'],
   ['updateSteamUserInfo', { due: 1, updated: 1 }, '1 of 1 updated'],
   ['updateExportBans', { players: 1 }, '1 player'],

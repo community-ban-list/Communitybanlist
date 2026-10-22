@@ -1,4 +1,5 @@
 import assert from 'assert';
+import { createHash } from 'crypto';
 import { readFile } from 'fs/promises';
 import vm from 'vm';
 
@@ -13,15 +14,23 @@ const battlemetricsRequests = [];
 let remote;
 let battlemetrics;
 
+// A remote list's host answers with what remote() returns, as axios would: an answer whose status
+// the request does not take fails, with the answer.
 const dependencies = {
   axios: {
     default: {
       async get(url, options) {
         remoteRequests.push({ url, options });
-        return remote();
+        const response = await remote();
+        if (!options.validateStatus(response.status))
+          throw Object.assign(new Error(`Request failed with status code ${response.status}`), {
+            response
+          });
+        return response;
       }
     }
   },
+  crypto: { createHash },
   'scbl-lib/apis': {
     async battlemetrics(method, endpoint, params) {
       battlemetricsRequests.push({ method, endpoint, params });
@@ -55,7 +64,11 @@ await module.link((specifier) => {
 });
 await module.evaluate();
 const BanFetcher = module.namespace.default;
+const { findSteamIDs } = module.namespace;
+// The count check is on unless it is turned off.
 const fetcher = new BanFetcher();
+const uncounted = new BanFetcher({ countCheck: false });
+assert.deepStrictEqual([fetcher.countCheck, uncounted.countCheck], [true, false]);
 
 const reset = () => {
   delays.length = 0;
@@ -73,7 +86,8 @@ const answers = (...replies) => {
   remote = () => {
     const reply = replies.shift();
     if (reply instanceof Error) throw reply;
-    return { status: 200, data: reply };
+    if (reply && typeof reply === 'object') return reply;
+    return { status: 200, data: reply, headers: {} };
   };
 };
 
@@ -329,27 +343,36 @@ book({
 });
 assert.deepStrictEqual(ids((await fetcher.fetchBanList(banList)).bans), ['3,a', '3,b']);
 
-// BattleMetrics' count of the list's bans is returned, but does not limit the pages read: a list
-// with many more bans than its count, e.g. as the count leaves out its expired bans, is still read
-// in full.
-reset();
-book(
+// BattleMetrics' count of the list's bans is returned. With the count check off, it does not limit
+// the pages read: a list with many more bans than its count is still read in full, and is complete
+// once its last page is read. With the check on, a list is read for at most as many pages as its
+// count needs, and 50 more.
+const pagesOf = (count, meta) =>
   Object.fromEntries(
-    Array.from({ length: 120 }, (_, page) => [
+    Array.from({ length: count }, (_, page) => [
       page === 0 ? 'first' : `page${page}`,
       {
-        meta: page === 0 ? { active: 1, total: 1 } : undefined,
+        meta: page === 0 ? meta : undefined,
         data: [ban(`v${page}`, steam(page))],
-        links: { next: page < 119 ? link(`page${page + 1}`) : null }
+        links: { next: page < count - 1 ? link(`page${page + 1}`) : null }
       }
     ])
-  )
-);
-list = await fetcher.fetchBanList(banList);
+  );
+reset();
+book(pagesOf(120, { active: 1, total: 1 }));
+list = await uncounted.fetchBanList(banList);
 assert.strictEqual(list.bans.length, 120);
 assert.deepStrictEqual(ids(list.bans).slice(-2), ['3,v118', '3,v119']);
-assert.strictEqual(list.firstMetaTotal, 1);
+assert.deepStrictEqual([list.firstMetaTotal, list.complete], [1, true]);
 assert.strictEqual(battlemetricsRequests.length, 120);
+reset();
+book(pagesOf(120, { active: 1, total: 1 }));
+await assert.rejects(fetcher.fetchBanList(banList), /more than 51 pages of bans/);
+assert.strictEqual(battlemetricsRequests.length, 51);
+reset();
+book(pagesOf(120, { total: 7000 }));
+list = await fetcher.fetchBanList(banList);
+assert.deepStrictEqual([list.bans.length, list.complete], [120, false]);
 
 // A list whose first page has no bans, but whose count says it has some, is not an empty list:
 // BattleMetrics answers so for a list CBL may see but not its bans. Its fetch fails as hidden bans,
@@ -385,18 +408,25 @@ book({
 });
 assert.deepStrictEqual(ids((await fetcher.fetchBanList(banList)).bans), ['3,a', '3,b']);
 
-// Links that never end stop at 2,000 pages, whatever the list's ban count.
+// Links that never end stop at 2,000 pages, whatever the list's ban count when the count check is
+// off, or when the list has no count, and at the pages its count needs and 50 more with it on.
 let pageNumber = 0;
 const endless = (meta) => () => ({
   meta,
   data: [ban(`u${++pageNumber}`, steam(1))],
   links: { next: link(`page${pageNumber}`) }
 });
-for (const meta of [{ total: 150 }, undefined]) {
+for (const [reader, meta, pages] of [
+  [uncounted, { total: 150 }, 2000],
+  [uncounted, undefined, 2000],
+  [fetcher, undefined, 2000],
+  [fetcher, { total: 150 }, 52],
+  [fetcher, { total: 1000000 }, 2000]
+]) {
   reset();
   book(new Proxy({}, { get: endless(meta) }));
-  await assert.rejects(fetcher.fetchBanList(banList), /more than 2000 pages/);
-  assert.strictEqual(battlemetricsRequests.length, 2000);
+  await assert.rejects(reader.fetchBanList(banList), new RegExp(`more than ${pages} pages`));
+  assert.strictEqual(battlemetricsRequests.length, pages);
 }
 
 await assert.rejects(
@@ -456,6 +486,231 @@ answers(
 list = await fetcher.fetchBanList(remoteList);
 assert.deepStrictEqual(ids(list.bans), ['7,76561198000000001,null', '7,76561198000000003,null']);
 
+// Every valid SteamID of a ban is kept, in the order the ban gives them, each once, with whether an
+// admin added it by hand: on its own, with spaces around it, in a profile's address in any case,
+// or else in the profile's details. Identifiers of other kinds are left out.
+const plain = (value) => JSON.parse(JSON.stringify(value));
+assert.deepStrictEqual(
+  plain(
+    findSteamIDs([
+      { type: 'steamID', identifier: ` ${steamID(1)} `, manual: true },
+      { type: 'eosID', identifier: steamID(9), manual: true },
+      { type: 'steamID', identifier: `HTTPS://STEAMCOMMUNITY.COM/PROFILES/${steamID(2)}/` },
+      {
+        type: 'steamID',
+        identifier: `https://steamcommunity.com/id/someone`,
+        metadata: { profile: { steamid: steamID(3) } }
+      },
+      { type: 'steamID', identifier: steamID(1) },
+      { type: 'steamID', identifier: steamID(2), manual: true },
+      { type: 'steamID', identifier: '1234' },
+      null,
+      { type: 'steamID', metadata: {} }
+    ])
+  ),
+  [
+    { steamID: steamID(1), manual: true },
+    { steamID: steamID(2), manual: true },
+    { steamID: steamID(3), manual: false }
+  ]
+);
+assert.deepStrictEqual(plain(findSteamIDs(undefined)), []);
+assert.deepStrictEqual(plain(findSteamIDs('76561198000000001')), []);
+
+// A ban gives all its SteamIDs, and is for the first that an admin added by hand, or else the
+// first.
+reset();
+book({
+  first: {
+    meta: { total: 3 },
+    data: [
+      ban('q', [
+        { type: 'steamID', identifier: steamID(1) },
+        { type: 'steamID', identifier: steamID(2), manual: true },
+        { type: 'steamID', identifier: steamID(3), manual: true }
+      ]),
+      ban('r', [
+        { type: 'steamID', identifier: steamID(4), manual: false },
+        { type: 'steamID', identifier: steamID(5) }
+      ]),
+      ban('s', [{ type: 'steamID', identifier: steamID(6), manual: true }])
+    ],
+    links: {}
+  }
+});
+list = await fetcher.fetchBanList(banList);
+assert.deepStrictEqual(
+  Array.from(list.bans, (ban) => [
+    ban.id,
+    ban.steamUser,
+    plain(ban.steamIDs).map(({ steamID }) => steamID)
+  ]),
+  [
+    ['3,q', steamID(2), [steamID(1), steamID(2), steamID(3)]],
+    ['3,r', steamID(4), [steamID(4), steamID(5)]],
+    ['3,s', steamID(6), [steamID(6)]]
+  ]
+);
+assert.strictEqual(list.complete, true);
+
+// A list read to its last page is complete, with the count check, only if the number of different
+// bans it read, with or without a SteamID, is within 2 of BattleMetrics' count on its first page,
+// plus however much the count changed by its last page. A ban listed twice counts once.
+const counted = (first, last, data) => ({
+  first: {
+    meta: first === null ? undefined : { total: first },
+    data: data.slice(0, 2),
+    links: { next: link('two') }
+  },
+  two: { meta: last === null ? undefined : { total: last }, data: data.slice(2), links: {} }
+});
+const fiveBans = [
+  ban('a', steam(1)),
+  ban('b', [{ type: 'eosID', identifier: 'b' }]),
+  ban('c', steam(3)),
+  ban('a', steam(1)),
+  ban('d', steam(4)),
+  ban('e', steam(5))
+];
+for (const [first, last, complete] of [
+  [5, 5, true],
+  [3, 3, true],
+  [7, 7, true],
+  [2, 2, false],
+  [8, 8, false],
+  [2, 5, true],
+  [9, 6, true],
+  [12, 9, false],
+  [5, null, true],
+  [8, null, false]
+]) {
+  reset();
+  book(counted(first, last, fiveBans));
+  list = await fetcher.fetchBanList(banList);
+  const label = `${first} then ${last}`;
+  assert.strictEqual(list.complete, complete, label);
+  assert.strictEqual(
+    list.incomplete,
+    complete ? undefined : `BattleMetrics counts ${first} bans on the list, but 5 were read`,
+    label
+  );
+  assert.deepStrictEqual(
+    [list.bans.length, list.rawCount, list.firstMetaTotal],
+    [4, 6, first],
+    label
+  );
+}
+// Without a count on its first page, a list cannot be checked, so it is not complete.
+reset();
+book(counted(null, 5, fiveBans));
+list = await fetcher.fetchBanList(banList);
+assert.deepStrictEqual(
+  [list.complete, list.incomplete],
+  [
+    false,
+    "BattleMetrics gave no count of the list's bans, so it could not be checked that every ban was read"
+  ]
+);
+// With the check off, a list read to its last page is complete, whatever its count.
+for (const [first, last] of [
+  [null, null],
+  [100, 100],
+  [0, 0]
+]) {
+  reset();
+  book(counted(first, last, fiveBans));
+  assert.strictEqual((await uncounted.fetchBanList(banList)).complete, true, `${first}`);
+}
+
+// A remote list's file is kept by its ETag and Last-Modified, when they are plain text that fits
+// their columns, and its SHA-256, and a file read in full is complete.
+const FILE = '76561198000000001:0 //Cheating\n76561198000000002:0 //Toxic';
+const FILE_HASH = createHash('sha256').update(FILE).digest('hex');
+reset();
+answers({
+  status: 200,
+  data: FILE,
+  headers: { etag: 'W/"v1"', 'last-modified': 'Wed, 21 Oct 2026 10:00:00 GMT' }
+});
+list = await fetcher.fetchBanList(remoteList);
+assert.deepStrictEqual(
+  [list.bans.length, list.complete, list.unchanged, plain(list.remote)],
+  [
+    2,
+    true,
+    undefined,
+    { etag: 'W/"v1"', lastModified: 'Wed, 21 Oct 2026 10:00:00 GMT', bodyHash: FILE_HASH }
+  ]
+);
+assert.deepStrictEqual(plain(remoteRequests[0].options.headers), {});
+for (const headers of [
+  { etag: `"${'x'.repeat(254)}"` },
+  { etag: '"ünïcode"' },
+  { 'last-modified': 'x'.repeat(65) }
+]) {
+  reset();
+  answers({ status: 200, data: FILE, headers });
+  list = await fetcher.fetchBanList(remoteList);
+  assert.deepStrictEqual(
+    [list.remote.etag, list.remote.lastModified],
+    [null, null],
+    JSON.stringify(headers)
+  );
+}
+// An empty file is complete too.
+reset();
+answers({ status: 200, data: '', headers: {} });
+list = await fetcher.fetchBanList(remoteList);
+assert.deepStrictEqual(
+  [list.bans.length, list.complete, list.remote.bodyHash],
+  [0, true, createHash('sha256').update('').digest('hex')]
+);
+
+// Given the file the list was last imported from, its host is asked whether the file has changed,
+// and an answer of 304 Not Modified means it has not: nothing is read, and the old ETag and
+// Last-Modified are kept unless the host gives new ones.
+const previous = {
+  etag: '"v1"',
+  lastModified: 'Wed, 21 Oct 2026 10:00:00 GMT',
+  bodyHash: FILE_HASH
+};
+for (const [headers, kept] of [
+  [{}, previous],
+  [{ etag: '"v2"' }, { ...previous, etag: '"v2"' }]
+]) {
+  reset();
+  answers({ status: 304, data: '', headers });
+  list = await fetcher.fetchBanList(remoteList, { previous });
+  assert.deepStrictEqual(plain(remoteRequests[0].options.headers), {
+    'If-None-Match': '"v1"',
+    'If-Modified-Since': 'Wed, 21 Oct 2026 10:00:00 GMT'
+  });
+  assert.deepStrictEqual(
+    [list.bans.length, list.complete, list.unchanged, plain(list.remote)],
+    [0, true, true, kept]
+  );
+}
+// A host that gives the file again, here without an ETag, gives the same SHA-256, so the file has
+// not changed either. One whose file differs gives it to read.
+reset();
+answers(FILE);
+list = await fetcher.fetchBanList(remoteList, {
+  previous: { etag: null, lastModified: null, bodyHash: FILE_HASH }
+});
+assert.deepStrictEqual(plain(remoteRequests[0].options.headers), {});
+assert.deepStrictEqual(
+  [list.unchanged, list.bans.length, plain(list.remote)],
+  [true, 0, { etag: null, lastModified: null, bodyHash: FILE_HASH }]
+);
+reset();
+answers(`${FILE}\n76561198000000003:0 //Cheating`);
+list = await fetcher.fetchBanList(remoteList, { previous });
+assert.deepStrictEqual([list.unchanged, list.bans.length], [undefined, 3]);
+// A 304 the host was not asked for is a failed fetch.
+reset();
+answers({ status: 304, data: '', headers: {} });
+await assert.rejects(fetcher.fetchBanList(remoteList), /the server answered HTTP 304\.$/);
+
 console.log(
-  'Ban list fetch checks passed: remote bodies, limits and retries, BattleMetrics paging, SteamIDs and hidden bans.'
+  'Ban list fetch checks passed: remote bodies, limits and retries, remote files kept and asked about, BattleMetrics paging, the count check, SteamIDs and hidden bans.'
 );

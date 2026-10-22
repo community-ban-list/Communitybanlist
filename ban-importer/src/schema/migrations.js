@@ -63,6 +63,28 @@ async function keyType(query, table) {
   return columnType;
 }
 
+// A VARCHAR column type as information_schema writes it, e.g. varchar(255).
+const VARCHAR_TYPE = /^varchar\(\d+\)$/i;
+
+// The type, character set and collation of an existing table's VARCHAR column, as a column that
+// refers to it must have them, so that the two compare as equal.
+async function textColumnType(query, table, column) {
+  const [[{ columnType, characterSet, collationName } = {}]] = await query(
+    `SELECT COLUMN_TYPE AS columnType, CHARACTER_SET_NAME AS characterSet,
+       COLLATION_NAME AS collationName
+     FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+    [table, column]
+  );
+  if (
+    !VARCHAR_TYPE.test(columnType ?? '') ||
+    !NAME.test(characterSet ?? '') ||
+    !NAME.test(collationName ?? '')
+  )
+    throw new Error(`Could not read the type of ${table}.${column}, which a column refers to.`);
+  return `${columnType} CHARACTER SET ${characterSet} COLLATE ${collationName}`;
+}
+
 export default [
   {
     // The table of applied migrations, and ImporterState, which holds the importer's own state,
@@ -123,6 +145,30 @@ export default [
           updatedAt DATETIME(3) NOT NULL,
           PRIMARY KEY (banList),
           CONSTRAINT BanListSyncs_banList FOREIGN KEY (banList) REFERENCES BanLists (id)
+            ON DELETE CASCADE
+        ) ${options}`
+      );
+    }
+  },
+  {
+    // BanListPendingRemovals, which keeps the bans that a complete read of their ban list no longer
+    // had, until a later complete read shows they are gone. A list's rows are deleted with the
+    // list, so banList has the type of BanLists.id, which its foreign key needs. banId refers to
+    // Bans.id, which is a VARCHAR, so it is a plain column with the type, character set and
+    // collation of Bans.id.
+    id: '003-ban-list-pending-removals',
+    async up(query) {
+      const options = await tableOptions(query);
+      const banListType = await keyType(query, 'BanLists');
+      const banIdType = await textColumnType(query, 'Bans', 'id');
+      await query(
+        `CREATE TABLE IF NOT EXISTS BanListPendingRemovals (
+          banList ${banListType} NOT NULL,
+          banId ${banIdType} NOT NULL,
+          firstMissingAt DATETIME(3) NOT NULL,
+          lastMissingAt DATETIME(3) NOT NULL,
+          PRIMARY KEY (banList, banId),
+          CONSTRAINT BanListPendingRemovals_banList FOREIGN KEY (banList) REFERENCES BanLists (id)
             ON DELETE CASCADE
         ) ${options}`
       );
