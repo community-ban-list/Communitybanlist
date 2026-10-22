@@ -1,6 +1,6 @@
 import { AttachmentBuilder, escapeMarkdown, SlashCommandBuilder } from 'discord.js';
 
-import { isRunLockHeld } from 'scbl-lib/db';
+import { isRunLockHeld, sequelize } from 'scbl-lib/db';
 import { ExportBanList } from 'scbl-lib/db/models';
 
 import {
@@ -18,11 +18,12 @@ import {
 // Export ban lists are removed the way the website's Delete button removes them, with
 // ExportBanList's deleteExportBanList, and their owners are not told. The lists outside today's
 // limits are found with the website's own rules and the EXPORT_* settings, through ExportBanList's
-// checkLimits, so the bot needs the same settings as the web server.
+// checkLimits, so the bot needs the same settings as the web server. A list given to another user
+// changes only its owner, and neither owner is told either.
 
 const data = new SlashCommandBuilder()
   .setName('exportbanlist')
-  .setDescription("Remove users' export ban lists.")
+  .setDescription("Remove users' export ban lists, or give one to another user.")
   // Only administrators see the command unless other roles are allowed in the server's settings.
   .setDefaultMemberPermissions(0)
   .addSubcommand((subcommand) =>
@@ -41,6 +42,26 @@ const data = new SlashCommandBuilder()
     subcommand
       .setName('remove_outside_limits')
       .setDescription("Remove every export ban list outside today's limits, after a preview.")
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName('transfer')
+      .setDescription('Give an export ban list to another Steam user, after a confirmation.')
+      .addIntegerOption((option) =>
+        option
+          .setName('id')
+          .setDescription('ID of the export ban list, as in its address: /export/ID.')
+          .setRequired(true)
+          .setMinValue(1)
+      )
+      .addStringOption((option) =>
+        option
+          .setName('owner')
+          .setDescription(
+            "The new owner's SteamID64, 17 digits. They must have signed in to the website once."
+          )
+          .setRequired(true)
+      )
   );
 
 const IMPORTER_RUNNING =
@@ -57,6 +78,13 @@ const REASON_LENGTH = 300;
 // and partly in an attached file, before confirming. Each list is read and checked again just
 // before it is removed, so a list changed meanwhile is not removed as the preview showed it.
 const REVIEW_TIMEOUT = 5 * 60 * 1000;
+
+// The most export ban lists a user can have, as the website allows (hasRoomForList in
+// web-server/src/graphql-api/mutation/resolver.js). A transfer never takes a user past it.
+const MAX_LISTS_PER_USER = 4;
+
+// A SteamID64, as the website takes one from a Steam sign-in.
+const STEAM_ID = /^[0-9]{17}$/;
 
 // What happened on BattleMetrics, as deleteExportBanList gives it, for the log.
 const OUTCOMES = {
@@ -93,20 +121,23 @@ function formatName(exportBanList) {
   return `${bold(exportBanList.name || 'Unnamed')} (#${exportBanList.id})`;
 }
 
-// The list's owner: their Steam name, when they have one, and their Steam ID.
-function formatOwner(exportBanList) {
-  const name = exportBanList.SteamUser?.name;
-  const id = `\`${exportBanList.owner}\``;
-  return name ? `${bold(name)} (${id})` : id;
+// A Steam user: their Steam name, when they have one, and their Steam ID.
+function formatSteamUser(id, name) {
+  return name ? `${bold(name)} (\`${id}\`)` : `\`${id}\``;
 }
+
+// The list's owner, as formatSteamUser shows them.
+const formatOwner = (exportBanList) =>
+  formatSteamUser(exportBanList.owner, exportBanList.SteamUser?.name);
+
+// Describe a Steam user for the audit log.
+const describeSteamUser = (id, name) =>
+  name ? `Steam user "${name}" (ID: ${id})` : `Steam user ${id}`;
 
 // Describe the list for the audit log, with the BattleMetrics ban list it records, or the one given.
 function describeExportBanList(exportBanList, battlemetricsID = exportBanList.battlemetricsID) {
   const battlemetrics = battlemetricsID ? `, BattleMetrics ID: ${battlemetricsID}` : '';
-  const name = exportBanList.SteamUser?.name;
-  const owner = name
-    ? `Steam user "${name}" (ID: ${exportBanList.owner})`
-    : `Steam user ${exportBanList.owner}`;
+  const owner = describeSteamUser(exportBanList.owner, exportBanList.SteamUser?.name);
   const type = formatBanListType(exportBanList.type);
   return `export ban list "${exportBanList.name}" (ID: ${exportBanList.id}, ${type}${battlemetrics}) of ${owner}`;
 }
@@ -229,14 +260,21 @@ function describeBattlemetricsBanList(exportBanList, access) {
   return `${id}, which CBL's BattleMetrics key ${keySees(exportBanList.battlemetricsID, access) ? 'can' : 'cannot'} see.`;
 }
 
-function exportBanListEmbed(check, access = null) {
-  const { exportBanList, players } = check;
-  const embed = listEmbed(truncate(exportBanList.name || 'Unnamed', 256), null).addFields(
+// An embed for the list, with its ID, type and players.
+function listDetailsEmbed({ exportBanList, players }) {
+  return listEmbed(truncate(exportBanList.name || 'Unnamed', 256), null).addFields(
     { name: 'ID', value: String(exportBanList.id), inline: true },
     { name: 'Type', value: formatBanListType(exportBanList.type), inline: true },
-    { name: 'Players', value: players.toLocaleString('en-US'), inline: true },
-    { name: 'Owner', value: truncate(formatOwner(exportBanList), 1024) }
+    { name: 'Players', value: players.toLocaleString('en-US'), inline: true }
   );
+}
+
+function exportBanListEmbed(check, access = null) {
+  const { exportBanList } = check;
+  const embed = listDetailsEmbed(check).addFields({
+    name: 'Owner',
+    value: truncate(formatOwner(exportBanList), 1024)
+  });
   if (exportBanList.type === 'battlemetrics')
     embed.addFields({
       name: 'BattleMetrics ID',
@@ -656,7 +694,138 @@ async function removeAllOutsideLimits(interaction) {
   });
 }
 
-const subcommands = { remove, remove_outside_limits: removeOutsideLimits };
+// The new owner's Steam ID as given, or a UserError when it is not a SteamID64.
+function parseSteamID(value) {
+  const id = value.trim();
+  if (!STEAM_ID.test(id))
+    throw new UserError(
+      `${bold(truncate(id, 100))} is not a Steam ID. Give the new owner's SteamID64, which is 17 digits.`
+    );
+  return id;
+}
+
+// What a transfer leaves as it is, and what the new owner then sees with the list on the website.
+// Only a BattleMetrics list has a BattleMetrics ban list and invite.
+function transferTerms(exportBanList) {
+  return exportBanList.type === 'battlemetrics'
+    ? {
+        kept: 'settings, configs, players, Discord webhook and BattleMetrics ban list',
+        shown: 'its Discord webhook and BattleMetrics invite'
+      }
+    : { kept: 'settings, configs, players and Discord webhook', shown: 'its Discord webhook' };
+}
+
+// The list, its owner, the new owner and how many export ban lists the new owner has.
+function transferEmbed(check, newOwner, listCount) {
+  return listDetailsEmbed(check).addFields(
+    { name: 'Current owner', value: truncate(formatOwner(check.exportBanList), 1024) },
+    { name: 'New owner', value: truncate(formatSteamUser(newOwner.id, newOwner.name), 1024) },
+    {
+      name: "New owner's export ban lists",
+      value: `${listCount.toLocaleString('en-US')} now, and ${(listCount + 1).toLocaleString('en-US')} with this one. A user can have ${MAX_LISTS_PER_USER}.`
+    }
+  );
+}
+
+// Give the list to the new owner, as the admin confirmed it, if that can still be done: the list
+// and the new owner's lists are read again first, as the list may have been deleted or given to
+// someone else meanwhile, and the new owner may have made lists of their own. Gives null once the
+// list is theirs, or why it was left as it is.
+async function transferIfUnchanged(exportBanList, newOwner) {
+  const name = formatName(exportBanList);
+  const to = formatSteamUser(newOwner.id, newOwner.name);
+  const current = await ExportBanList.findByPk(exportBanList.id);
+  if (!current) return `Export ban list ${name} no longer exists`;
+  if (current.owner === newOwner.id) return `Export ban list ${name} already belongs to ${to}`;
+  if (current.owner !== exportBanList.owner)
+    return `Export ban list ${name} now belongs to \`${current.owner}\`, not ${formatOwner(exportBanList)} as shown`;
+  const listCount = await ExportBanList.count({ where: { owner: newOwner.id } });
+  if (listCount >= MAX_LISTS_PER_USER)
+    return `${to} now has ${plural(listCount, 'export ban list')}, and the website lets a user have at most ${MAX_LISTS_PER_USER}`;
+
+  // Only the owner is written, and only while the list still has the owner shown, so a list
+  // changed in the moment since it was read again is left as it is.
+  const [updated] = await ExportBanList.update(
+    { owner: newOwner.id },
+    { where: { id: exportBanList.id, owner: exportBanList.owner } }
+  );
+  return updated === 0 ? `Export ban list ${name} changed as it was being transferred` : null;
+}
+
+// Give an export ban list to another Steam user. Only its owner changes, and the website reads a
+// list's owner from the database on every request, so from then on the new owner sees the list,
+// with its Discord webhook and BattleMetrics invite, and can change or delete it, and the old
+// owner no longer can.
+//
+// Unlike a removal, a transfer is not refused while the ban importer runs: nothing the importer or
+// the exports do reads or writes a list's owner, so a run goes on the same whoever owns the list.
+// Like the website's own changes, the update may wait a few seconds for rows a run has locked.
+async function transfer(interaction) {
+  const id = interaction.options.getInteger('id', true);
+  const owner = parseSteamID(interaction.options.getString('owner', true));
+
+  const {
+    lists: [check]
+  } = await ExportBanList.checkLimits({ ids: [id] });
+  if (!check) throw new UserError(`There is no export ban list with ID ${id}.`);
+  const { exportBanList } = check;
+  const name = formatName(exportBanList);
+  const from = formatOwner(exportBanList);
+  if (exportBanList.owner === owner)
+    throw new UserError(`Export ban list ${name} already belongs to ${from}.`);
+
+  // A list's owner must be one of CBL's Steam users, whom a player's first sign-in adds. The model
+  // is taken from sequelize.models, as checkLimits takes it, so the bot imports no more models by
+  // name than its tests stand in for.
+  const newOwner = await sequelize.models.SteamUser.findByPk(owner, {
+    attributes: ['id', 'name']
+  });
+  if (!newOwner)
+    throw new UserError(
+      `CBL has no Steam user with ID \`${owner}\`. The new owner must sign in to the website once first, which adds them.`
+    );
+  const to = formatSteamUser(newOwner.id, newOwner.name);
+  const listCount = await ExportBanList.count({ where: { owner } });
+  if (listCount >= MAX_LISTS_PER_USER)
+    throw new UserError(
+      `${to} already has ${plural(listCount, 'export ban list')}, and the website lets a user have at most ${MAX_LISTS_PER_USER}. One of them must be removed before they can be given another.`
+    );
+
+  const { kept, shown } = transferTerms(exportBanList);
+  const confirmed = await confirm(
+    interaction,
+    truncate(
+      `Transfer export ban list ${name} from ${from} to ${to}? Only its owner changes: its ${kept} stay as they are. From then on the new owner sees it on the website, with ${shown}, and can change or delete it, and the current owner no longer can. Neither is told.`,
+      MESSAGE_LENGTH
+    ),
+    'Transfer export ban list',
+    { embeds: [transferEmbed(check, newOwner, listCount)] }
+  );
+  if (!confirmed) return;
+
+  const left = await transferIfUnchanged(exportBanList, newOwner);
+  if (left) {
+    await interaction.editReply({
+      content: truncate(`${left}, so nothing was changed.`, MESSAGE_LENGTH),
+      embeds: []
+    });
+    return;
+  }
+
+  audit(
+    interaction,
+    `transferred ${describeExportBanList(exportBanList)} to ${describeSteamUser(newOwner.id, newOwner.name)}.`
+  );
+  await interaction.editReply({
+    content: truncate(
+      `Transferred export ban list ${name} from ${from} to ${to}. From now on the new owner sees it on the website, with ${shown}, and the old owner no longer does. Neither was told.`,
+      MESSAGE_LENGTH
+    ),
+    embeds: []
+  });
+}
+
+const subcommands = { remove, remove_outside_limits: removeOutsideLimits, transfer };
 
 export default {
   data,

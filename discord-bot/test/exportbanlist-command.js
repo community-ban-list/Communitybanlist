@@ -77,6 +77,11 @@ let answer;
 let whileConfirming;
 // How long each confirmation waited for an answer, in milliseconds.
 let timeouts;
+// CBL's Steam users, as { id, name } by Steam ID: those a sign-in or the importer has added.
+let steamUsers;
+// Runs as an update starts, before it writes anything, e.g. to change a list in the moment after it
+// was read again.
+let beforeUpdate;
 
 function reset() {
   calls = [];
@@ -91,6 +96,8 @@ function reset() {
   answer = 'confirm';
   whileConfirming = null;
   timeouts = [];
+  steamUsers = new Map();
+  beforeUpdate = null;
 }
 
 // Add a list to the database. Reading its Discord webhook, the only way to tell its owner anything,
@@ -149,6 +156,10 @@ const instance = (exportBanList, query) =>
     }
   );
 
+// Whether a list's columns equal a query's.
+const hasColumns = (exportBanList, where) =>
+  Object.entries(where).every(([column, value]) => exportBanList[column] === value);
+
 const ExportBanList = {
   async checkLimits({ ids } = {}) {
     calls.push(['check', ids === undefined ? 'all' : [...ids]]);
@@ -176,11 +187,25 @@ const ExportBanList = {
     assert.ok(attributes.includes('type') && attributes.includes('battlemetricsID'));
     return [...rows.values()]
       .map((row) => row.exportBanList)
-      .filter((exportBanList) =>
-        Object.entries(where).every(([column, value]) => exportBanList[column] === value)
-      )
+      .filter((exportBanList) => hasColumns(exportBanList, where))
       .sort((a, b) => a.id - b.id)
       .map((exportBanList) => instance(exportBanList, 'find all'));
+  },
+  // How many lists have the columns of the query, e.g. how many a user owns.
+  async count({ where }) {
+    calls.push(['count', where]);
+    return [...rows.values()].filter((row) => hasColumns(row.exportBanList, where)).length;
+  },
+  // Write the values to the lists with the columns of the query, and give how many there were, as
+  // Sequelize's update does.
+  async update(values, options) {
+    calls.push(['update', values, options]);
+    if (beforeUpdate) await beforeUpdate();
+    const updated = [...rows.values()].filter((row) =>
+      hasColumns(row.exportBanList, options.where)
+    );
+    for (const { exportBanList } of updated) Object.assign(exportBanList, values);
+    return [updated.length];
   },
   async findVisibleBattlemetricsBanLists() {
     calls.push(['visible']);
@@ -189,12 +214,23 @@ const ExportBanList = {
   }
 };
 
+// A user is looked up by their Steam ID, with their Steam name, which the command reaches through
+// sequelize.models.
+const SteamUser = {
+  async findByPk(id, { attributes }) {
+    calls.push(['user', id]);
+    assert.ok(attributes.includes('name'));
+    const user = steamUsers.get(id);
+    return user ? { ...user } : null;
+  }
+};
+
 const stubs = {
   'discord.js': discord,
   axios: { default: { create: () => ({}) } },
   'scbl-lib/config': { BATTLEMETRICS_API_KEY: 'test-key' },
   'scbl-lib/db': {
-    sequelize: {},
+    sequelize: { models: { SteamUser } },
     async isRunLockHeld() {
       calls.push(['lock']);
       const held = lockAnswers.shift() ?? false;
@@ -237,6 +273,10 @@ function interaction(subcommand, options = {}, { createdTimestamp = Date.now() }
     options: {
       getSubcommand: () => subcommand,
       getInteger: (name, required) => {
+        assert.strictEqual(required, true);
+        return options[name] ?? null;
+      },
+      getString: (name, required) => {
         assert.strictEqual(required, true);
         return options[name] ?? null;
       },
@@ -285,14 +325,14 @@ function prompt() {
 const deleted = () => calls.filter(([call]) => call === 'delete').map(([, id]) => id);
 
 // Only administrators see the command unless the server allows other roles, and the bot itself
-// lets only its admin roles use it. It has a subcommand for one list and one for every list outside
-// the limits.
+// lets only its admin roles use it. It has a subcommand to remove one list, one for every list
+// outside the limits, and one to give a list to another user.
 const json = command.data.toJSON();
 assert.strictEqual(json.name, 'exportbanlist');
 assert.strictEqual(json.default_member_permissions, '0');
 assert.deepStrictEqual(
   json.options.map((option) => option.name),
-  ['remove', 'remove_outside_limits']
+  ['remove', 'remove_outside_limits', 'transfer']
 );
 const [idOption] = json.options[0].options;
 assert.deepStrictEqual(
@@ -301,6 +341,23 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(json.options[0].options.length, 1);
 assert.deepStrictEqual(json.options[1].options, []);
+// A transfer takes the list's ID, as a removal does, and the new owner's Steam ID as text, as a
+// SteamID64 is too large a number for Discord's whole-number options.
+const [transferIDOption, ownerOption, ...otherTransferOptions] = json.options[2].options;
+assert.deepStrictEqual(
+  [
+    transferIDOption.type,
+    transferIDOption.name,
+    transferIDOption.required,
+    transferIDOption.min_value
+  ],
+  [discord.ApplicationCommandOptionType.Integer, 'id', true, 1]
+);
+assert.deepStrictEqual(
+  [ownerOption.type, ownerOption.name, ownerOption.required],
+  [discord.ApplicationCommandOptionType.String, 'owner', true]
+);
+assert.deepStrictEqual(otherTransferOptions, []);
 
 // The query that reads the BattleMetrics ban lists CBL's lists record.
 const FIND_RECORDED = ['find all', { type: 'battlemetrics' }];
@@ -1094,6 +1151,310 @@ await run('remove_outside_limits');
 assert.deepStrictEqual(deleted(), [95, 96]);
 assert.deepStrictEqual(notifications, []);
 
+// Steam users to give lists to, and the owner addList gives list 12.
+const NEW_OWNER = '76561198100000001';
+const OTHER_USER = '76561198100000002';
+const OWNER_12 = '76561198000000012';
+
+// Give a user remote export ban lists of their own, with these IDs.
+function giveLists(owner, ids) {
+  for (const id of ids)
+    addList(id, 'remote', { owner, SteamUser: steamUsers.get(owner) ?? null, problems: [] });
+}
+const ownerOf = (id) => rows.get(id)?.exportBanList.owner;
+
+// Giving a list to another Steam user shows the list's name, ID, type and players, its owner and
+// the new owner, each with their Steam name and Steam ID, and how many export ban lists the new
+// owner has, and asks first, giving a minute to answer. Then the list and the new owner's lists are
+// read again, and only the list's owner is written, and only while it is still the owner shown.
+// The transfer is logged, and no owner is told. Neither the run lock nor BattleMetrics is asked.
+reset();
+addList(12, 'battlemetrics', { battlemetricsID: 'bm-12', players: 1234 });
+steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+giveLists(NEW_OWNER, [30]);
+await run('transfer', { id: 12, owner: NEW_OWNER });
+shown = prompt();
+assert.strictEqual(
+  contentOf(shown.reply),
+  `Transfer export ban list **List 12** (#12) from **Owner 12** (\`${OWNER_12}\`) to **New Owner** (\`${NEW_OWNER}\`)? Only its owner changes: its settings, configs, players, Discord webhook and BattleMetrics ban list stay as they are. From then on the new owner sees it on the website, with its Discord webhook and BattleMetrics invite, and can change or delete it, and the current owner no longer can. Neither is told.`
+);
+assert.strictEqual(shown.label, 'Transfer export ban list');
+assert.strictEqual(shown.embed.title, 'List 12');
+assert.deepStrictEqual(fieldsOf(shown.embed), [
+  ['ID', '12'],
+  ['Type', 'BattleMetrics'],
+  ['Players', '1,234'],
+  ['Current owner', `**Owner 12** (\`${OWNER_12}\`)`],
+  ['New owner', `**New Owner** (\`${NEW_OWNER}\`)`],
+  ["New owner's export ban lists", '1 now, and 2 with this one. A user can have 4.']
+]);
+assert.deepStrictEqual(timeouts, [60 * 1000]);
+assert.deepStrictEqual(calls, [
+  ['check', [12]],
+  ['user', NEW_OWNER],
+  ['count', { owner: NEW_OWNER }],
+  ['find', 12],
+  ['count', { owner: NEW_OWNER }],
+  ['update', { owner: NEW_OWNER }, { where: { id: 12, owner: OWNER_12 } }]
+]);
+assert.strictEqual(ownerOf(12), NEW_OWNER);
+assert.deepStrictEqual(replies.at(-1), {
+  content: `Transferred export ban list **List 12** (#12) from **Owner 12** (\`${OWNER_12}\`) to **New Owner** (\`${NEW_OWNER}\`). From now on the new owner sees it on the website, with its Discord webhook and BattleMetrics invite, and the old owner no longer does. Neither was told.`,
+  embeds: []
+});
+assert.deepStrictEqual(audits, [
+  `admin (1) transferred export ban list "List 12" (ID: 12, BattleMetrics, BattleMetrics ID: bm-12) of Steam user "Owner 12" (ID: ${OWNER_12}) to Steam user "New Owner" (ID: ${NEW_OWNER}).`
+]);
+assert.deepStrictEqual(notifications, []);
+
+// A remote list has no BattleMetrics ban list or invite to hand over, and a user without a Steam
+// name is shown by their Steam ID. Spaces around the Steam ID given are left out.
+reset();
+addList(13, 'remote', { SteamUser: null, players: 5, problems: [] });
+steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: null });
+await run('transfer', { id: 13, owner: ` ${NEW_OWNER} ` });
+shown = prompt();
+assert.strictEqual(
+  contentOf(shown.reply),
+  `Transfer export ban list **List 13** (#13) from \`76561198000000013\` to \`${NEW_OWNER}\`? Only its owner changes: its settings, configs, players and Discord webhook stay as they are. From then on the new owner sees it on the website, with its Discord webhook, and can change or delete it, and the current owner no longer can. Neither is told.`
+);
+assert.deepStrictEqual(fieldsOf(shown.embed), [
+  ['ID', '13'],
+  ['Type', 'Remote'],
+  ['Players', '5'],
+  ['Current owner', '`76561198000000013`'],
+  ['New owner', `\`${NEW_OWNER}\``],
+  ["New owner's export ban lists", '0 now, and 1 with this one. A user can have 4.']
+]);
+assert.strictEqual(
+  contentOf(replies.at(-1)),
+  `Transferred export ban list **List 13** (#13) from \`76561198000000013\` to \`${NEW_OWNER}\`. From now on the new owner sees it on the website, with its Discord webhook, and the old owner no longer does. Neither was told.`
+);
+assert.deepStrictEqual(audits, [
+  `admin (1) transferred export ban list "List 13" (ID: 13, Remote) of Steam user 76561198000000013 to Steam user ${NEW_OWNER}.`
+]);
+assert.strictEqual(ownerOf(13), NEW_OWNER);
+
+// A user with 3 lists can be given a fourth, the most the website lets them have.
+reset();
+addList(12, 'remote');
+steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+giveLists(NEW_OWNER, [30, 31, 32]);
+await run('transfer', { id: 12, owner: NEW_OWNER });
+assert.deepStrictEqual(fieldsOf(prompt().embed).at(-1), [
+  "New owner's export ban lists",
+  '3 now, and 4 with this one. A user can have 4.'
+]);
+assert.strictEqual(ownerOf(12), NEW_OWNER);
+assert.match(contentOf(replies.at(-1)), /^Transferred export ban list \*\*List 12\*\* \(#12\) /);
+
+// A transfer is refused, with nothing shown, asked or changed: when the owner given is not a
+// SteamID64, which is checked before anything is read; when the list does not exist or already
+// belongs to that user; when CBL has no Steam user with that ID, as they have never signed in; and
+// when the user already has as many export ban lists as the website lets a user have.
+async function refusedTransfer(options, message, reads) {
+  const owners = new Map([...rows].map(([id, row]) => [id, row.exportBanList.owner]));
+  await assert.rejects(run('transfer', options), (err) => {
+    assert.ok(err instanceof UserError, message);
+    assert.strictEqual(err.message, message);
+    return true;
+  });
+  assert.deepStrictEqual(calls, reads, message);
+  assert.strictEqual(prompt(), null, message);
+  assert.deepStrictEqual(audits, [], message);
+  assert.deepStrictEqual(
+    new Map([...rows].map(([id, row]) => [id, row.exportBanList.owner])),
+    owners,
+    message
+  );
+}
+const notSteamID = (given) =>
+  `**${discord.escapeMarkdown(given)}** is not a Steam ID. Give the new owner's SteamID64, which is 17 digits.`;
+
+for (const given of [
+  NEW_OWNER.slice(0, -1),
+  `${NEW_OWNER}1`,
+  `${NEW_OWNER.slice(0, -1)}x`,
+  `https://steamcommunity.com/profiles/${NEW_OWNER}`,
+  'STEAM_0:1:20011',
+  '-7656119810000000'
+]) {
+  reset();
+  addList(12, 'remote');
+  steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+  await refusedTransfer({ id: 12, owner: given }, notSteamID(given), []);
+}
+// A long one is cut short in the message.
+reset();
+await refusedTransfer({ id: 12, owner: '7'.repeat(300) }, notSteamID(`${'7'.repeat(99)}…`), []);
+
+reset();
+steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+await refusedTransfer({ id: 404, owner: NEW_OWNER }, 'There is no export ban list with ID 404.', [
+  ['check', [404]]
+]);
+
+reset();
+addList(12, 'remote');
+steamUsers.set(OWNER_12, { id: OWNER_12, name: 'Owner 12' });
+await refusedTransfer(
+  { id: 12, owner: OWNER_12 },
+  `Export ban list **List 12** (#12) already belongs to **Owner 12** (\`${OWNER_12}\`).`,
+  [['check', [12]]]
+);
+
+reset();
+addList(12, 'remote');
+await refusedTransfer(
+  { id: 12, owner: NEW_OWNER },
+  `CBL has no Steam user with ID \`${NEW_OWNER}\`. The new owner must sign in to the website once first, which adds them.`,
+  [
+    ['check', [12]],
+    ['user', NEW_OWNER]
+  ]
+);
+
+// Lists from before the limit can leave a user with more than 4.
+for (const ids of [
+  [30, 31, 32, 33],
+  [30, 31, 32, 33, 34]
+]) {
+  reset();
+  addList(12, 'battlemetrics', { battlemetricsID: 'bm-12' });
+  steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+  giveLists(NEW_OWNER, ids);
+  await refusedTransfer(
+    { id: 12, owner: NEW_OWNER },
+    `**New Owner** (\`${NEW_OWNER}\`) already has ${ids.length} export ban lists, and the website lets a user have at most 4. One of them must be removed before they can be given another.`,
+    [
+      ['check', [12]],
+      ['user', NEW_OWNER],
+      ['count', { owner: NEW_OWNER }]
+    ]
+  );
+}
+
+// Cancelling, or not answering in time, changes nothing.
+for (const [choice, reply] of [
+  ['cancel', 'Cancelled. Nothing was changed.'],
+  ['timeout', 'Timed out. Nothing was changed.']
+]) {
+  reset();
+  addList(12, 'battlemetrics', { battlemetricsID: 'bm-12' });
+  steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+  answer = choice;
+  await run('transfer', { id: 12, owner: NEW_OWNER });
+  assert.strictEqual(contentOf(replies.at(-1)), reply);
+  assert.deepStrictEqual(calls, [
+    ['check', [12]],
+    ['user', NEW_OWNER],
+    ['count', { owner: NEW_OWNER }]
+  ]);
+  assert.deepStrictEqual(audits, []);
+  assert.strictEqual(ownerOf(12), OWNER_12);
+}
+
+// Once the transfer is confirmed, the list and the new owner's lists are read again, and nothing is
+// changed if the list has been deleted, or given to the new owner or to someone else, or the new
+// owner has as many lists as a user can have.
+for (const { case: name, change, reply, reads, owner } of [
+  {
+    case: 'the list was deleted',
+    change: () => rows.delete(12),
+    reply: 'Export ban list **List 12** (#12) no longer exists, so nothing was changed.',
+    reads: [['find', 12]],
+    owner: undefined
+  },
+  {
+    case: 'the list was given to the new owner',
+    change: () => {
+      rows.get(12).exportBanList.owner = NEW_OWNER;
+    },
+    reply: `Export ban list **List 12** (#12) already belongs to **New Owner** (\`${NEW_OWNER}\`), so nothing was changed.`,
+    reads: [['find', 12]],
+    owner: NEW_OWNER
+  },
+  {
+    case: 'the list was given to someone else',
+    change: () => {
+      rows.get(12).exportBanList.owner = OTHER_USER;
+    },
+    reply: `Export ban list **List 12** (#12) now belongs to \`${OTHER_USER}\`, not **Owner 12** (\`${OWNER_12}\`) as shown, so nothing was changed.`,
+    reads: [['find', 12]],
+    owner: OTHER_USER
+  },
+  {
+    case: 'the new owner has made lists',
+    change: () => giveLists(NEW_OWNER, [31, 32, 33]),
+    reply: `**New Owner** (\`${NEW_OWNER}\`) now has 4 export ban lists, and the website lets a user have at most 4, so nothing was changed.`,
+    reads: [
+      ['find', 12],
+      ['count', { owner: NEW_OWNER }]
+    ],
+    owner: OWNER_12
+  }
+]) {
+  reset();
+  addList(12, 'battlemetrics', { battlemetricsID: 'bm-12' });
+  steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+  giveLists(NEW_OWNER, [30]);
+  whileConfirming = change;
+  await run('transfer', { id: 12, owner: NEW_OWNER });
+  assert.ok(prompt(), name);
+  assert.deepStrictEqual(replies.at(-1), { content: reply, embeds: [] }, name);
+  assert.deepStrictEqual(
+    calls,
+    [['check', [12]], ['user', NEW_OWNER], ['count', { owner: NEW_OWNER }], ...reads],
+    name
+  );
+  assert.deepStrictEqual(audits, [], name);
+  assert.strictEqual(ownerOf(12), owner, name);
+}
+
+// A list changed or deleted in the moment between being read again and the update is left as it
+// is, as the update only writes the owner while the list still has the owner shown.
+for (const [name, change, owner] of [
+  [
+    'given to someone else',
+    () => {
+      rows.get(12).exportBanList.owner = OTHER_USER;
+    },
+    OTHER_USER
+  ],
+  ['deleted', () => rows.delete(12), undefined]
+]) {
+  reset();
+  addList(12, 'battlemetrics', { battlemetricsID: 'bm-12' });
+  steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+  beforeUpdate = change;
+  await run('transfer', { id: 12, owner: NEW_OWNER });
+  assert.deepStrictEqual(
+    replies.at(-1),
+    {
+      content:
+        'Export ban list **List 12** (#12) changed as it was being transferred, so nothing was changed.',
+      embeds: []
+    },
+    name
+  );
+  assert.strictEqual(ownerOf(12), owner, name);
+  assert.deepStrictEqual(audits, [], name);
+}
+
+// A transfer goes ahead while a ban importer run holds its lock, which it does not check: nothing
+// a run does reads or writes a list's owner.
+reset();
+addList(12, 'battlemetrics', { battlemetricsID: 'bm-12' });
+steamUsers.set(NEW_OWNER, { id: NEW_OWNER, name: 'New Owner' });
+lockAnswers = [true, true];
+await run('transfer', { id: 12, owner: NEW_OWNER });
+assert.ok(!calls.some(([call]) => call === 'lock'));
+assert.strictEqual(ownerOf(12), NEW_OWNER);
+assert.match(audits[0], /^admin \(1\) transferred export ban list "List 12" /);
+assert.deepStrictEqual(notifications, []);
+
+console.log('Transferring an export ban list: checks passed.');
+
 console.log(
-  'Export ban list command checks passed: admin only, previews, confirmations, the run lock, BattleMetrics access, failures and long removals.'
+  'Export ban list command checks passed: admin only, previews, confirmations, the run lock, BattleMetrics access, failures, long removals and transfers.'
 );
