@@ -19,7 +19,9 @@ import refusal from './refusal.js';
 //   players the list would hold are counted. A change that would put the list over the limit and
 //   make it bigger is refused.
 // Counts run one at a time, server-wide, so they use at most one of the web server's database
-// connections, and each user can only start a few.
+// connections, and each user can only start a few. A count the database does not answer in time
+// is given up on, so no change waits for it for good, though its connection stays in use until the
+// database answers (ANSWER_LIMIT).
 
 // How long a count of the players with two or more bans is used for, in milliseconds. In that time,
 // a list within the rules can only pass its limit by the players who get a second ban.
@@ -36,6 +38,13 @@ export const COUNTS_WAITING = 5;
 
 // How long MySQL may take over each count, in milliseconds.
 export const TIME_LIMIT = 3000;
+
+// How long the web server waits for the answer to each count, in milliseconds, before it gives up
+// on the count as one that failed. MySQL stops a count at TIME_LIMIT, so a count with no answer
+// well after that is on a connection that has stopped answering. Without this, the changes waiting
+// for it, those whose turn comes after it, and the same users' later changes would wait for good.
+// The connection stays in use until the database answers, but the next count can run.
+export const ANSWER_LIMIT = TIME_LIMIT + 2000;
 
 const TYPE_NAMES = { battlemetrics: 'BattleMetrics', remote: 'remote' };
 
@@ -126,10 +135,11 @@ async function countPlayers(user, { type, exportBanList, before, after }, now) {
   try {
     return await oneAtATime(async () => {
       startCount(user, now());
-      const options = { timeLimit: TIME_LIMIT };
-      const players = await countMembers(after.settings, after.configs, options);
+      const count = (list) =>
+        answerInTime(countMembers(list.settings, list.configs, { timeLimit: TIME_LIMIT }));
+      const players = await count(after);
       if (!before || players <= EXPORT_LIST_LIMITS[type].maxPlayers) return { players };
-      return { players, current: await countMembers(before.settings, before.configs, options) };
+      return { players, current: await count(before) };
     });
   } catch (error) {
     if (error?.refusal === true) throw error;
@@ -165,8 +175,8 @@ function waitForCount(user, time) {
     : times[times.length - COUNTS_PER_USER] + COUNTS_PERIOD - time;
 }
 
-// Run a count once those before it have finished, whether or not they worked, so only one runs at
-// a time, server-wide.
+// Run a count once those before it have finished, whether or not they worked, or been given up on,
+// so only one runs at a time, server-wide.
 function oneAtATime(count) {
   unfinished += 1;
   const result = lastCount.then(count);
@@ -175,6 +185,22 @@ function oneAtATime(count) {
   };
   lastCount = result.then(finished, finished);
   return result;
+}
+
+// A count's answer, or an error when the database has not answered it within ANSWER_LIMIT. A late
+// answer is not used.
+function answerInTime(counting) {
+  let timer;
+  const givenUp = new Promise((resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(`The database did not answer the count within ${ANSWER_LIMIT / 1000} seconds.`)
+        ),
+      ANSWER_LIMIT
+    );
+  });
+  return Promise.race([counting, givenUp]).finally(() => clearTimeout(timer));
 }
 
 // How many players have two or more bans, counted at most once every POPULATION_KEPT. Changes at
@@ -186,7 +212,9 @@ function playersWithTwoBans(now) {
   if (time - populationCountedAt < POPULATION_KEPT) return population;
 
   populationCountedAt = time;
-  populationCount = oneAtATime(() => countPlayersWithBans(2, { timeLimit: TIME_LIMIT }))
+  populationCount = oneAtATime(() =>
+    answerInTime(countPlayersWithBans(2, { timeLimit: TIME_LIMIT }))
+  )
     .then(
       (players) => {
         population = players;

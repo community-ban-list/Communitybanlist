@@ -67,6 +67,31 @@ function countStandIns() {
   return counts;
 }
 
+// Timers for a module's context that only go off when the checks set them off, so a count can go
+// unanswered for as long as the checks need. Each is recorded with its wait, in milliseconds.
+function fakeTimers() {
+  const pending = new Set();
+  return {
+    // The waits of the timers that are set and have not been cleared or set off.
+    waits: () => [...pending].map(({ ms }) => ms),
+    // Set off every timer that is waiting now.
+    fire() {
+      for (const timer of [...pending]) {
+        pending.delete(timer);
+        timer.callback();
+      }
+    },
+    globals: {
+      setTimeout: (callback, ms) => {
+        const timer = { callback, ms };
+        pending.add(timer);
+        return timer;
+      },
+      clearTimeout: (timer) => pending.delete(timer)
+    }
+  };
+}
+
 // Answers for the counts, given in turn.
 const inTurn =
   (...numbers) =>
@@ -135,9 +160,11 @@ const now = () => time;
 // Load check-size.js with the limits these environment variables set. `check` makes a change by a
 // user as resolver.js gives it to checkSize, from the list before (null for a new list) and after
 // it, with what checkChange gives for it. The list's ID is 7, and the user has room for another.
+// The module's timers only go off when the checks set them off.
 async function sizeChecks(env) {
   const limits = exportListLimits.readLimits(env).limits;
   const counts = countStandIns();
+  const timers = fakeTimers();
   const logged = [];
   const { default: checkSize, ...constants } = await load(
     '../src/graphql-api/mutation/check-size.js',
@@ -147,7 +174,8 @@ async function sizeChecks(env) {
       'scbl-lib/export-list-limits': exportListLimits
     },
     vm.createContext({
-      console: { log: (line) => logged.push(line), error: (line) => logged.push(line) }
+      console: { log: (line) => logged.push(line), error: (line) => logged.push(line) },
+      ...timers.globals
     })
   );
   const check = (user, type, before, after, more) =>
@@ -167,11 +195,18 @@ async function sizeChecks(env) {
         now
       )
     );
-  return { check, constants, counts, logged };
+  return { check, constants, counts, logged, timers };
 }
 
 const { constants } = await sizeChecks({});
-const { POPULATION_KEPT, COUNTS_PER_USER, COUNTS_PERIOD, COUNTS_WAITING, TIME_LIMIT } = constants;
+const {
+  POPULATION_KEPT,
+  COUNTS_PER_USER,
+  COUNTS_PERIOD,
+  COUNTS_WAITING,
+  TIME_LIMIT,
+  ANSWER_LIMIT
+} = constants;
 // The checks below work out their times and counts from these, so they can be tuned within these
 // bounds without changing the checks.
 assert.ok(POPULATION_KEPT >= 60 * SECOND, 'The checks need the population kept for a minute.');
@@ -179,17 +214,20 @@ assert.ok(COUNTS_PER_USER >= 2, 'Creating a list and adding a config takes 2 cou
 assert.ok(COUNTS_PERIOD > (COUNTS_PER_USER + 1) * SECOND, 'The checks need a longer period.');
 assert.ok(COUNTS_WAITING > COUNTS_PER_USER, 'The checks need room for more counts to wait.');
 assert.strictEqual(TIME_LIMIT, 3000, 'Each count stops after 3 seconds.');
+assert.ok(ANSWER_LIMIT > TIME_LIMIT, 'MySQL stops a count before the web server gives up on it.');
 const counting = { timeLimit: TIME_LIMIT };
 const twoBans = { bans: 2, options: counting };
 const rateLimit = (wait) =>
   `Saving this change needs a count of the players it would list, and each user can run ${COUNTS_PER_USER} counts every ${COUNTS_PERIOD / SECOND} seconds. Please try again in ${wait}.`;
+// What is logged of a count the database did not answer in time.
+const NO_ANSWER = `Error: The database did not answer the count within ${ANSWER_LIMIT / SECOND} seconds.`;
 
 // With the default limits, one active ban plus one expired ban is never enough to put a player on
 // a list, so a list within the rules holds only players with two or more bans. Those players are
 // counted once for POPULATION_KEPT, and changes at the same time share the count. While they are
 // within a type's limit, no list of that type is counted.
 {
-  const { check, counts, logged } = await sizeChecks({});
+  const { check, counts, logged, timers } = await sizeChecks({});
   time = 0;
   const finished = [];
   const together = [
@@ -268,6 +306,8 @@ const rateLimit = (wait) =>
   for (const after of [listOf({ threshold: 10 }), listOf({ maxBanAge: 365 }), before])
     assert.strictEqual(await check('a', 'battlemetrics', before, after), 'allowed');
   assert.strictEqual(counts.calls.length, 12);
+  // Each count's timer was cleared once the count was answered or failed.
+  assert.deepStrictEqual(timers.waits(), []);
 }
 
 // With no count of them yet, as it failed, a change within the rules is allowed and the failure
@@ -525,6 +565,62 @@ const rateLimit = (wait) =>
   assert.deepStrictEqual(mixed.logged, []);
 }
 
+// A count the database does not answer within ANSWER_LIMIT, as on a connection that has stopped
+// answering, is given up on as a count that failed. The changes waiting for it go on, and the next
+// count takes its turn.
+{
+  // Remote lists keep their rules, so their changes use the count of the players with two or more
+  // bans. BattleMetrics lists have theirs turned off, so their changes are counted one by one.
+  const { check, counts, logged, timers } = await sizeChecks({ EXPORT_BM_NEVER_ENOUGH: 'none' });
+  time = 0;
+  const growing = [listOf(), listOf({ threshold: 6 })];
+  const remote = [check('a', 'remote', null, listOf()), check('b', 'remote', ...growing)];
+  const battlemetrics = check('c', 'battlemetrics', null, listOf(ANY_BAN));
+  await settle();
+  assert.deepStrictEqual(counts.calls, [twoBans]);
+  assert.deepStrictEqual(timers.waits(), [ANSWER_LIMIT]);
+
+  // With no count of the players with two or more bans, the remote changes are allowed, as when
+  // the count fails, and the BattleMetrics list's count runs.
+  timers.fire();
+  assert.deepStrictEqual(await Promise.all(remote), ['allowed', 'allowed']);
+  await settle();
+  assert.deepStrictEqual(counts.calls.slice(1), [
+    { settings: settingsOf(ANY_BAN), configs: [], options: counting }
+  ]);
+  assert.deepStrictEqual(timers.waits(), [ANSWER_LIMIT]);
+  // A list's count with no answer refuses its change with the plain message.
+  timers.fire();
+  assert.strictEqual(await battlemetrics, COULD_NOT_COUNT);
+  assert.deepStrictEqual(logged, [
+    `Export ban list sizes: could not count the players who have two or more bans, so changes within the points rules are allowed without counting their players until they are counted again in ${POPULATION_KEPT / 60000} minutes: ${NO_ANSWER}`,
+    `Export ban list sizes: could not count the players for a new BattleMetrics export ban list, so the change was refused: ${NO_ANSWER}`
+  ]);
+
+  // Answers that come late are not used. These would put the players with two or more bans over
+  // the limit on remote lists, which would then be counted one by one.
+  counts.finish(45120);
+  counts.finish(25692);
+  await settle();
+  assert.strictEqual(await check('a', 'remote', null, listOf()), 'allowed');
+  assert.strictEqual(counts.calls.length, 2);
+  assert.strictEqual(logged.length, 2);
+
+  // When a list would be over its limit, its count as it is now is given up on in the same way.
+  // An answered count's timer is cleared.
+  const overLimit = check('d', 'battlemetrics', ...growing);
+  await settle();
+  counts.finish(25692);
+  await settle();
+  assert.strictEqual(counts.calls.length, 4);
+  assert.deepStrictEqual(timers.waits(), [ANSWER_LIMIT]);
+  timers.fire();
+  assert.strictEqual(await overLimit, COULD_NOT_COUNT);
+  counts.finish(7943);
+  await settle();
+  assert.deepStrictEqual([timers.waits(), counts.waiting.length], [[], 0]);
+}
+
 // Lists of a type with no limit, or changes that can only make a list smaller, are not counted.
 {
   const { check, counts } = await sizeChecks({ ...NONE, EXPORT_BM_MAX_PLAYERS: '0' });
@@ -648,11 +744,12 @@ function database() {
 
 // Load the mutations, as mutation/index.js guards them, with the limits these environment
 // variables set. Webhook tests are recorded, and all of them pass. No list is counted unless the
-// checks give the counts an answer.
+// checks give the counts an answer, and the timers only go off when the checks set them off.
 async function mutations(env) {
   const db = database();
   const counts = countStandIns();
   counts.answer = () => assert.fail('A list was counted.');
+  const timers = fakeTimers();
   const tested = [];
   const logged = [];
   const { resolver } = await load(
@@ -672,7 +769,8 @@ async function mutations(env) {
       'scbl-lib/validators': { default: Validators }
     },
     vm.createContext({
-      console: { log: (line) => logged.push(line), error: (line) => logged.push(line) }
+      console: { log: (line) => logged.push(line), error: (line) => logged.push(line) },
+      ...timers.globals
     })
   );
   const { Mutation } = resolver;
@@ -685,7 +783,7 @@ async function mutations(env) {
     assert.strictEqual(await change(name, args, user), message);
     assert.deepStrictEqual([db.writes.length, tested.length, db.battlemetrics.length], before);
   }
-  return { db, counts, tested, logged, Mutation, change, refused };
+  return { db, counts, timers, tested, logged, Mutation, change, refused };
 }
 
 const webhook = (id) => `https://discord.com/api/webhooks/${id}/token-${id}`;
@@ -781,7 +879,7 @@ const scoringOf = ({ threshold, defaultActivePoints, defaultExpiredPoints, maxBa
 // configs with the change applied, duplicates included, and then as the list is. A change is
 // refused when it would put the list over the limit and make it bigger.
 {
-  const { db, counts, logged, change, refused } = await mutations(NONE);
+  const { db, counts, timers, logged, change, refused } = await mutations(NONE);
   const { rows } = db;
   let configID = 1000;
   const configOf = (exportBanList, banList, activePoints, expiredPoints) => {
@@ -904,6 +1002,8 @@ const scoringOf = ({ threshold, defaultActivePoints, defaultExpiredPoints, maxBa
   );
   assert.strictEqual(counts.calls.length, callsBefore);
   assert.strictEqual(logged.length, 4);
+  // Each count's timer was cleared once the count was answered.
+  assert.deepStrictEqual(timers.waits(), []);
 }
 
 // A count that MySQL stops at its time limit, or that fails, refuses the change with a plain
