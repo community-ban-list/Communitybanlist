@@ -288,6 +288,41 @@ export function readStoredBans(banList) {
   );
 }
 
+// The list's stored bans with the IDs given, with the values the import compares, which a head poll
+// reads for the bans on the pages it read, rather than all of the list's.
+export async function readStoredBansByID(banList, ids) {
+  if (ids.length === 0) return [];
+  return sequelize.query(
+    'SELECT id, steamUser, expires, expired, reason, rawReason, rawNote FROM Bans WHERE banList = ? AND id IN (?)',
+    { replacements: [banList, ids], type: QueryTypes.SELECT }
+  );
+}
+
+// For each list with bans that complete reads of it did not have, by list: when the first of those
+// that wait for a confirming read is due to be confirmed as gone (confirmAt), CONFIRM_AFTER after it
+// was first missing, in milliseconds, or null when none wait, how many are held for an admin (held)
+// and how many wait for a confirming read (waiting). A run reads it once, to decide which lists to
+// read in full, and to count the bans kept by the lists it only polls.
+export async function readPendingSummary() {
+  const rows = await sequelize.query(
+    'SELECT banList, MIN(CASE WHEN heldAt IS NULL THEN firstMissingAt END) AS firstMissingAt, SUM(heldAt IS NOT NULL) AS held, SUM(heldAt IS NULL) AS waiting FROM BanListPendingRemovals GROUP BY banList',
+    { type: QueryTypes.SELECT }
+  );
+  return new Map(
+    rows.map(({ banList, firstMissingAt, held, waiting }) => {
+      const first = timeOf(firstMissingAt);
+      return [
+        Number(banList),
+        {
+          confirmAt: first === null ? null : first + CONFIRM_AFTER,
+          held: Number(held) || 0,
+          waiting: Number(waiting) || 0
+        }
+      ];
+    })
+  );
+}
+
 // The list's bans that earlier complete reads did not have, by ID, each with when the first of them
 // did not (firstMissingAt), and when a run began holding it for an admin (heldAt), or null, in
 // milliseconds.

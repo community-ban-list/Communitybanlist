@@ -31,7 +31,13 @@ const module = new vm.SourceTextModule(await readFile(url, 'utf8'), {
   context,
   identifier: url.href
 });
+// The real planner.js, which says how a row keeps the IDs of a list's newest bans.
+const planner = new vm.SourceTextModule(
+  await readFile(new URL('../src/planner.js', import.meta.url), 'utf8'),
+  { context }
+);
 await module.link((specifier) => {
+  if (specifier === './planner.js') return planner;
   const exports = dependencies[specifier];
   assert.ok(exports, `Unexpected dependency: ${specifier}`);
   return new vm.SyntheticModule(
@@ -249,6 +255,10 @@ for (const err of [
 // A list's state is what its attempt found, the most important first.
 assert.strictEqual(stateOf({ held: 0 }), 'ok');
 assert.strictEqual(stateOf({ held: 3 }), 'held');
+// A head poll, which never checks for removed bans, leaves a held list held, unless it failed.
+assert.strictEqual(stateOf({ held: 0, stillHeld: true }), 'held');
+assert.strictEqual(stateOf({ held: 0, stillHeld: false }), 'ok');
+assert.strictEqual(stateOf({ error: 'Error: x', held: 0, stillHeld: true }), 'failing');
 assert.strictEqual(stateOf({ error: 'Error: x', held: 3 }), 'failing');
 assert.strictEqual(stateOf({ accessLost: NOT_VISIBLE, error: 'Error: x' }), 'access_lost');
 assert.strictEqual(stateOf({ selfImport: 12, accessLost: NOT_VISIBLE, error: 'x' }), 'self_import');
@@ -449,6 +459,70 @@ for (const from of [null, 'ok', 'failing', 'access_lost', 'self_import', 'held']
   );
   sync = plain(nextSync(before, outcome('ok')));
   assert.deepStrictEqual(sync.fields, IMPORT_FIELDS);
+}
+
+// A BattleMetrics list's newest page, once the bans on it are saved, is saved with when it was read,
+// as the IDs of its bans, as JSON, each once and at most 100, and none when its pages were not read
+// newest first. When its next full read is due, and why, is saved when the import gives it.
+// Otherwise the row keeps them, as the list's columns are not saved.
+{
+  const before = {
+    ...rowIn('ok'),
+    lastHeadPollAt: EARLIER,
+    headUids: '["old"]',
+    scanReason: 'periodic'
+  };
+  const due = NOW + 27 * 60 * 1000;
+  let sync = plain(
+    nextSync(
+      before,
+      outcome('ok', {
+        head: { uids: ['n1', 'n2', 'n1', ...Array.from({ length: 120 }, (_, n) => `u${n}`)] },
+        schedule: { nextFullScanAt: due, scanReason: 'periodic' }
+      })
+    )
+  );
+  assert.deepStrictEqual(sync.fields, [
+    ...IMPORT_FIELDS,
+    'lastHeadPollAt',
+    'headUids',
+    'nextFullScanAt',
+    'scanReason'
+  ]);
+  assert.deepStrictEqual(
+    [sync.values.lastHeadPollAt, sync.values.nextFullScanAt, sync.values.scanReason],
+    [NOW, due, 'periodic']
+  );
+  const uids = JSON.parse(sync.values.headUids);
+  assert.deepStrictEqual([uids.length, uids.slice(0, 3)], [100, ['n1', 'n2', 'u0']]);
+  // A poll that found drift leaves the list due at once.
+  sync = plain(
+    nextSync(before, outcome('ok', { schedule: { nextFullScanAt: NOW, scanReason: 'drift' } }))
+  );
+  assert.deepStrictEqual(sync.fields, [...IMPORT_FIELDS, 'nextFullScanAt', 'scanReason']);
+  assert.deepStrictEqual([sync.values.nextFullScanAt, sync.values.scanReason], [NOW, 'drift']);
+  // A read with head polls off forgets the newest page, which head polls would compare theirs with.
+  sync = plain(nextSync(before, outcome('ok', { head: null })));
+  assert.deepStrictEqual(sync.fields, [...IMPORT_FIELDS, 'headUids']);
+  assert.strictEqual(sync.values.headUids, null);
+  sync = plain(nextSync(before, outcome('ok')));
+  assert.deepStrictEqual(sync.fields, IMPORT_FIELDS);
+  // A held list that a poll left held stays so.
+  sync = plain(nextSync(rowIn('held'), outcome('ok', { stillHeld: true })));
+  assert.strictEqual(sync.values.state, 'held');
+  // A list whose source was changed starts with none of them, but those the import gives.
+  sync = plain(
+    nextSync({ ...before, sourceKey: 'b'.repeat(64) }, outcome('ok', { head: { uids: ['n1'] } }))
+  );
+  assert.deepStrictEqual(
+    [
+      sync.values.lastHeadPollAt,
+      sync.values.headUids,
+      sync.values.nextFullScanAt,
+      sync.values.scanReason
+    ],
+    [NOW, '["n1"]', null, null]
+  );
 }
 
 // Failed runs in a row are counted, and the 3rd is posted once: not the 1st, 2nd, 4th or 5th. A run

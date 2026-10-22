@@ -3,6 +3,8 @@ import { createHash } from 'crypto';
 import { readBattlemetricsPages } from 'scbl-lib/apis';
 import { normaliseBattlemetricsID } from 'scbl-lib/utils';
 
+import { writeHeadUids } from './planner.js';
+
 // The state of each ban list's import, which the importer keeps between runs in the list's
 // BanListSyncs row, and the checks that set it: whether CBL can still read a list on BattleMetrics,
 // and whether a list imports one of CBL's own export ban lists. This works out each list's new row
@@ -180,12 +182,13 @@ export function accessProblem(err) {
   return null;
 }
 
-// A list's state after an attempt at it, by what the attempt found, the most important first.
-export function stateOf({ selfImport, accessLost, error, held }) {
+// A list's state after an attempt at it, by what the attempt found, the most important first. A
+// head poll, which never checks for removed bans, leaves a list that was held so (stillHeld).
+export function stateOf({ selfImport, accessLost, error, held, stillHeld }) {
   if (selfImport) return STATES.SELF_IMPORT;
   if (accessLost) return STATES.ACCESS_LOST;
   if (error) return STATES.FAILING;
-  if (held > 0) return STATES.HELD;
+  if (held > 0 || stillHeld) return STATES.HELD;
   return STATES.OK;
 }
 
@@ -195,8 +198,12 @@ export function stateOf({ selfImport, accessLost, error, held }) {
 // attempt's error, the bans it held, the bans the list has here, BattleMetrics' count of its bans,
 // or undefined when the attempt got none, whether the attempt read all of the list (complete: true
 // or false, or undefined when it did not get that far), whether the bans of the list's old source
-// are still to be replaced (replacePending, or undefined to keep it), and for a remote list, the
-// ETag, Last-Modified and SHA-256 of the file to keep (remote, or undefined to keep them). Returns:
+// are still to be replaced (replacePending, or undefined to keep it), for a remote list, the ETag,
+// Last-Modified and SHA-256 of the file to keep (remote, or undefined to keep them), and for a
+// BattleMetrics list, the IDs of the bans on its newest page (head: { uids }, or null when its
+// pages were not read newest first, or undefined to keep them), which head polls compare later
+// pages with, and when its next full read is due, and why (schedule: { nextFullScanAt, scanReason },
+// or undefined to keep them). Returns:
 // - values: the row's new values;
 // - fields: the columns to write. A list whose type or source was changed starts afresh, so all
 //   of its columns are written, and otherwise only those the import sets;
@@ -254,6 +261,18 @@ export function nextSync(before, outcome) {
       remoteEtag: outcome.remote?.etag ?? null,
       remoteLastModified: outcome.remote?.lastModified ?? null,
       remoteBodyHash: outcome.remote?.bodyHash ?? null
+    });
+  // The newest page read now is the one later head polls compare theirs with, from now on.
+  if (outcome.head === null) values.headUids = null;
+  else if (outcome.head !== undefined)
+    Object.assign(values, {
+      lastHeadPollAt: outcome.now,
+      headUids: writeHeadUids(outcome.head.uids)
+    });
+  if (outcome.schedule !== undefined)
+    Object.assign(values, {
+      nextFullScanAt: outcome.schedule.nextFullScanAt,
+      scanReason: outcome.schedule.scanReason
     });
 
   const alerts = [];

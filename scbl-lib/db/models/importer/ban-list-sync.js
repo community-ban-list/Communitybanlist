@@ -5,10 +5,9 @@ import sequelize from '../../sequelize.js';
 const { DataTypes } = Sequelize;
 
 // What the ban importer keeps about each ban list between runs: the state of its import, how its
-// latest attempts went, and how many bans it has here and on BattleMetrics. The columns for reading
-// only what changed on a list come with it, for later versions of the importer. A list's row is
-// deleted with the list. The importer makes this table with its migrations, so the model is never
-// synced.
+// latest attempts went, how many bans it has here and on BattleMetrics, the newest page its head
+// polls compare theirs with, and when it is next due to be read in full. A list's row is deleted
+// with the list. The importer makes this table with its migrations, so the model is never synced.
 export default sequelize.define(
   'BanListSync',
   {
@@ -76,7 +75,7 @@ export default sequelize.define(
     headTotal: {
       type: DataTypes.INTEGER.UNSIGNED
     },
-    // The IDs of the bans on the newest page of the list, at most 100.
+    // The IDs of the bans on the newest page of the list, at most 100, as JSON.
     headUids: {
       type: DataTypes.TEXT
     },

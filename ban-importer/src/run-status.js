@@ -153,7 +153,9 @@ function describeProgress(progress, { bar = false } = {}) {
 // What the counts of the steps that count what they do say, in a line, or null without them. Each
 // is also given the step's latest progress.
 const DETAILS = {
-  // The import's totals, as in its summary line. Those of a dry run say what it would have done.
+  // The import's totals, as in its summary line, and how many lists it only polled and read in
+  // full, with the BattleMetrics requests that took, when it says. Those of a dry run say what it
+  // would have done.
   importBans: (counts) => {
     const { lists, imported, fetched, updated, removed, held, failedLists } = counts;
     if (![imported, fetched, counts.new, updated, removed, held, failedLists].every(isCount))
@@ -162,8 +164,21 @@ const DETAILS = {
       isCount(lists) && imported < lists
         ? `${formatCount(imported)} of ${plural(lists, 'ban list')}`
         : plural(imported, 'ban list');
+    let reads = '';
+    if (isCount(counts.headPolls) && isCount(counts.fullReads)) {
+      reads = `; ${formatCount(counts.headPolls)} polled, ${formatCount(counts.fullReads)} read in full`;
+      const requests =
+        counts.requests && typeof counts.requests === 'object'
+          ? Object.values(counts.requests)
+          : [];
+      if (requests.length > 0 && requests.every(isCount))
+        reads += `, ${plural(
+          requests.reduce((total, count) => total + count, 0),
+          'BattleMetrics request'
+        )}`;
+    }
     const dryRun = counts.dryRun === true ? ', in a dry run that wrote nothing' : '';
-    return `${banLists}: ${plural(fetched, 'ban')} fetched, ${formatCount(counts.new)} new, ${formatCount(updated)} updated, ${formatCount(removed)} removed, ${formatCount(held)} held, ${plural(failedLists, 'list')} failed${dryRun}`;
+    return `${banLists}: ${plural(fetched, 'ban')} fetched, ${formatCount(counts.new)} new, ${formatCount(updated)} updated, ${formatCount(removed)} removed, ${formatCount(held)} held, ${plural(failedLists, 'list')} failed${reads}${dryRun}`;
   },
   // The bans marked expired, of those found, and the players queued for a recalculation.
   expireBans: ({ due, expired, players }) => {

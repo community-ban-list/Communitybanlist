@@ -473,6 +473,35 @@ for (const [name, counts, expected, progress] of [
     '500 of 1,200 bans marked expired, 480 players queued'
   ],
   ['expireBans', { due: 3 }, null],
+  // An import that says how it read its lists gives how many it only polled and read in full, and
+  // the BattleMetrics requests that took, when it gives them all.
+  [
+    'importBans',
+    {
+      ...COUNTS.importBans,
+      fetched: 2003,
+      headPolls: 18,
+      fullReads: 2,
+      requests: { head: 20, follow: 1, full: 85 }
+    },
+    '20 ban lists: 2,003 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed; 18 polled, 2 read in full, 106 BattleMetrics requests'
+  ],
+  [
+    'importBans',
+    {
+      ...COUNTS.importBans,
+      headPolls: 0,
+      fullReads: 20,
+      requests: { head: 0, follow: 0, full: 1 },
+      dryRun: true
+    },
+    '20 ban lists: 87,026 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed; 0 polled, 20 read in full, 1 BattleMetrics request, in a dry run that wrote nothing'
+  ],
+  [
+    'importBans',
+    { ...COUNTS.importBans, headPolls: 19, fullReads: 1, requests: { head: 'x' } },
+    '20 ban lists: 87,026 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed; 19 polled, 1 read in full'
+  ],
   ['updateSteamUserInfo', { due: 0, updated: 0 }, 'none were due'],
   ['updateSteamUserInfo', { due: 1, updated: 1 }, '1 of 1 updated'],
   [

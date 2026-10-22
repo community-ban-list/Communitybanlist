@@ -157,6 +157,8 @@ async function loadBanImporter(lists, { onFetch = () => {}, options, syncs = [] 
       events.push(`read missing bans of ${replacements[0]}`);
       return [];
     }
+    // No list has bans waiting for a confirming read.
+    if (sql.startsWith('SELECT banList, MIN(')) return [];
     if (sql.startsWith('INSERT IGNORE INTO SteamUsers')) {
       events.push('add Steam users');
       return [{}, {}];
@@ -219,7 +221,12 @@ async function loadBanImporter(lists, { onFetch = () => {}, options, syncs = [] 
       'scbl-lib/db/models': {
         ExportBanList: { findAll: async () => [] },
         BanList: {
-          findAll: async () => Object.keys(lists).map((id) => ({ id: Number(id) })),
+          findAll: async () =>
+            Object.keys(lists).map((id) => ({
+              id: Number(id),
+              type: 'battlemetrics',
+              source: lists[id].source ?? `bm-${id}`
+            })),
           findByPk: async (id) => {
             events.push(`read list ${id}`);
             return { id, type: 'battlemetrics', source: lists[id].source ?? `bm-${id}` };

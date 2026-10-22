@@ -80,6 +80,8 @@ const reset = () => {
   battlemetricsRequests.length = 0;
 };
 const ids = (bans) => Array.from(bans, (ban) => ban.id);
+// Copy a value made in the module's context into one of this test's own, to compare it.
+const plainCopy = (value) => JSON.parse(JSON.stringify(value));
 const httpError = (status) =>
   Object.assign(new Error(`Request failed with status code ${status}`), { response: { status } });
 const networkError = (code, message = code) => Object.assign(new Error(message), { code });
@@ -235,7 +237,8 @@ const book = (pages) => {
   };
 };
 
-// Every page is read by following BattleMetrics' links, from the same first request as before.
+// Every page is read by following BattleMetrics' links, from a first request for the list's newest
+// bans first, so a read's first page is the list's newest page, which head polls read on its own.
 // Bans without a SteamID are skipped but counted, as is a ban listed twice.
 reset();
 book({
@@ -281,11 +284,28 @@ assert.strictEqual(list.firstMetaTotal, 6);
 assert.deepStrictEqual(
   battlemetricsRequests.map(({ method, endpoint, params }) => [method, endpoint, { ...params }]),
   [
-    ['get', 'bans', { 'filter[banList]': 'bm-list', 'page[size]': 100 }],
+    ['get', 'bans', { 'filter[banList]': 'bm-list', sort: '-timestamp', 'page[size]': 100 }],
     ['get', 'bans', { 'filter[banList]': 'bm-list', 'page[key]': 'two', 'page[size]': '100' }],
     ['get', 'bans', { 'filter[banList]': 'bm-list', 'page[key]': 'three', 'page[size]': '100' }]
   ]
 );
+// The read gives its first page's ban IDs, with or without a SteamID, and count, which head polls
+// compare their pages with. Each request is counted as one of a read of all of a list.
+assert.deepStrictEqual(plainCopy(list.head), { uids: ['a', 'b'], total: 6 });
+assert.deepStrictEqual(plainCopy(fetcher.requests), { head: 0, follow: 0, full: 3 });
+// Without newest first, as with head polls off, the first request is as before head polls, and
+// a read gives no newest page.
+const unsorted = new BanFetcher({ newestFirst: false });
+reset();
+list = await unsorted.fetchBanList(banList);
+assert.deepStrictEqual(
+  { ...battlemetricsRequests[0].params },
+  {
+    'filter[banList]': 'bm-list',
+    'page[size]': 100
+  }
+);
+assert.deepStrictEqual([list.bans.length, list.head], [4, null]);
 
 // A page that cannot be fetched, after the BattleMetrics client's own retries, fails the whole
 // list instead of returning the pages before it. So does a page that is not a list of bans.
@@ -310,7 +330,9 @@ reset();
 book({
   first: {
     data: [ban('a', steam(1))],
-    links: { next: 'https://api.battlemetrics.com/bans?page[size]=100&filter[banList]=bm-list' }
+    links: {
+      next: 'https://api.battlemetrics.com/bans?page[size]=100&sort=-timestamp&filter[banList]=bm-list'
+    }
   }
 });
 await assert.rejects(fetcher.fetchBanList(banList), /Invalid BattleMetrics pagination link/);
@@ -558,8 +580,10 @@ assert.deepStrictEqual(
 assert.strictEqual(list.complete, true);
 
 // A list read to its last page is complete, with the count check, only if the number of different
-// bans it read, with or without a SteamID, is within 2 of BattleMetrics' count on its first page,
-// plus however much the count changed by its last page. A ban listed twice counts once.
+// bans it read, with or without a SteamID, is no more than 2 short of BattleMetrics' count on its
+// first page, plus however much the count changed by its last page. A read may be over the count by
+// 5 more, or 0.5% of the count if that is more, as bans read cannot be missing. A ban listed twice
+// counts once.
 const counted = (first, last, data) => ({
   first: {
     meta: first === null ? undefined : { total: first },
@@ -580,7 +604,9 @@ for (const [first, last, complete] of [
   [5, 5, true],
   [3, 3, true],
   [7, 7, true],
-  [2, 2, false],
+  // 3 over the count, which 2 and 5 more allow.
+  [2, 2, true],
+  [0, 0, true],
   [8, 8, false],
   [2, 5, true],
   [9, 6, true],
@@ -671,6 +697,54 @@ for (const [counts, perPage, complete] of [
     [counts[0], counts.find((count) => count !== counts[0])].map((count) =>
       count.toLocaleString('en-US')
     ),
+    label
+  );
+}
+
+// A read that finds more bans than BattleMetrics counts is complete while it is over by no more than
+// 2, plus however much the count changed, plus 5 or 0.5% of the count if that is more, as one list
+// in production gives 3 more bans than its count of 3,798 on every read. A read that finds fewer is
+// held to the 2 alone, as missing bans would look removed.
+const readOf = (count, read, last = count) => {
+  const pages = Math.ceil(read / 100);
+  return Object.fromEntries(
+    Array.from({ length: pages }, (_, page) => [
+      page === 0 ? 'first' : `r${page}`,
+      {
+        meta: { total: page === pages - 1 ? last : count },
+        data: Array.from({ length: Math.min(100, read - page * 100) }, (_, i) =>
+          ban(`r${page * 100 + i}`, steam(i))
+        ),
+        links: { next: page < pages - 1 ? link(`r${page + 1}`) : null }
+      }
+    ])
+  );
+};
+for (const [count, read, last, complete] of [
+  [3798, 3801, 3798, true],
+  [3798, 3819, 3798, true],
+  [3798, 3820, 3798, false],
+  [3798, 3823, 3802, true],
+  [3798, 3824, 3802, false],
+  [3798, 3796, 3798, true],
+  [3798, 3795, 3798, false],
+  [3798, 3793, 3801, true],
+  [3798, 3792, 3801, false],
+  [100, 107, 100, true],
+  [100, 108, 100, false],
+  [100, 98, 100, true],
+  [100, 97, 100, false]
+]) {
+  reset();
+  book(readOf(count, read, last));
+  list = await fetcher.fetchBanList(banList);
+  const label = `${read} read of ${count}, then ${last}`;
+  assert.strictEqual(list.complete, complete, label);
+  assert.strictEqual(
+    list.incomplete,
+    complete
+      ? undefined
+      : `BattleMetrics counts ${count.toLocaleString('en-US')} bans on the list, but ${read.toLocaleString('en-US')} were read`,
     label
   );
 }
@@ -788,6 +862,105 @@ reset();
 answers({ status: 304, data: '', headers: {} });
 await assert.rejects(fetcher.fetchBanList(remoteList), /the server answered HTTP 304\.$/);
 
+// A head poll reads a list's newest page with one request: its bans, the IDs of all its bans, with
+// or without a SteamID, BattleMetrics' counts of the list's bans, of those running and of those
+// expired, and the parameters of the next page. Following reads the next page, and a read of all of
+// the list then reads on from there, never reading a page twice, and is checked against the count
+// on the first page. Each request is counted by what it was for.
+{
+  const reader = new BanFetcher();
+  reset();
+  book({
+    first: {
+      meta: { total: 5, active: 2, expired: 3 },
+      data: [ban('a', steam(1)), ban('b', [{ type: 'eosID', identifier: 'b' }])],
+      links: { next: link('two') }
+    },
+    two: {
+      meta: { total: 5 },
+      data: [ban('c', steam(3)), ban('d', steam(4))],
+      links: { next: link('three') }
+    },
+    three: { meta: { total: 5 }, data: [ban('e', steam(5))], links: {} }
+  });
+  const read = await reader.fetchBattlemetricsHead(banList);
+  assert.deepStrictEqual(
+    battlemetricsRequests.map(({ params }) => ({ ...params })),
+    [{ 'filter[banList]': 'bm-list', sort: '-timestamp', 'page[size]': 100 }]
+  );
+  const [head] = read.pages;
+  assert.deepStrictEqual(plainCopy({ ...head, bans: ids(head.bans) }), {
+    bans: ['3,a'],
+    uids: ['a', 'b'],
+    rawCount: 2,
+    total: 5,
+    active: 2,
+    expired: 3,
+    next: { 'filter[banList]': 'bm-list', 'page[key]': 'two', 'page[size]': '100' }
+  });
+  assert.deepStrictEqual(plainCopy(reader.requests), { head: 1, follow: 0, full: 0 });
+  const followed = await reader.followBattlemetrics(read);
+  assert.deepStrictEqual(plainCopy([followed.uids, followed.total, followed.active]), [
+    ['c', 'd'],
+    5,
+    null
+  ]);
+  list = await reader.fetchBanList(banList, { read });
+  assert.deepStrictEqual(ids(list.bans), ['3,a', '3,c', '3,d', '3,e']);
+  assert.deepStrictEqual([list.complete, list.rawCount, list.firstMetaTotal], [true, 5, 5]);
+  assert.deepStrictEqual(plainCopy(list.head), { uids: ['a', 'b'], total: 5 });
+  assert.deepStrictEqual(
+    battlemetricsRequests.map(({ params }) => params['page[key]'] ?? 'first'),
+    ['first', 'two', 'three']
+  );
+  assert.deepStrictEqual(plainCopy(reader.requests), { head: 1, follow: 1, full: 1 });
+
+  // A list whose newest page is all of it has no next page, so a read of all of it needs no more
+  // requests.
+  reset();
+  book({
+    first: { meta: { total: 2 }, data: [ban('a', steam(1)), ban('c', steam(3))], links: {} }
+  });
+  const whole = await reader.fetchBattlemetricsHead(banList);
+  assert.strictEqual(whole.next, null);
+  list = await reader.fetchBanList(banList, { read: whole });
+  assert.deepStrictEqual([ids(list.bans), list.complete], [['3,a', '3,c'], true]);
+  assert.strictEqual(battlemetricsRequests.length, 1);
+
+  // A later page that links back to the newest page is refused, as are hidden bans on the newest
+  // page, which a head poll finds as a read of all of the list would.
+  reset();
+  book({
+    first: { meta: { total: 3 }, data: [ban('a', steam(1))], links: { next: link('two') } },
+    two: {
+      data: [ban('b', steam(2))],
+      links: {
+        next: 'https://api.battlemetrics.com/bans?filter[banList]=bm-list&sort=-timestamp&page[size]=100'
+      }
+    }
+  });
+  const looping = await reader.fetchBattlemetricsHead(banList);
+  await assert.rejects(
+    reader.followBattlemetrics(looping),
+    /Invalid BattleMetrics pagination link/
+  );
+  reset();
+  book({ first: { meta: { total: 11768 }, data: [], links: {} } });
+  await assert.rejects(reader.fetchBattlemetricsHead(banList), (err) => {
+    assert.deepStrictEqual([err.bansHidden, err.metaTotal], [true, 11768]);
+    return true;
+  });
+
+  // The pages a read may read, by the count on its first page, count the pages a head poll read.
+  reset();
+  pageNumber = 0;
+  book(new Proxy({}, { get: endless({ total: 150 }) }));
+  const endlessRead = await reader.fetchBattlemetricsHead(banList);
+  for (let page = 2; page <= 10; page++) await reader.followBattlemetrics(endlessRead);
+  await assert.rejects(reader.fetchBanList(banList, { read: endlessRead }), /more than 52 pages/);
+  assert.strictEqual(battlemetricsRequests.length, 52);
+}
+
 console.log(
-  'Ban list fetch checks passed: remote bodies, limits and retries, remote files kept and asked about, BattleMetrics paging, the count check, counts that change too much, lists left out of the check, SteamIDs and hidden bans.'
+  'Ban list fetch checks passed: remote bodies, limits and retries, remote files kept and asked about, BattleMetrics paging, the count check, reads longer than the count, counts that change too much, lists left out of the check, SteamIDs, hidden bans, and head polls read on in full.'
 );
