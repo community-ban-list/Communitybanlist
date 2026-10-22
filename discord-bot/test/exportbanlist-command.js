@@ -846,14 +846,16 @@ assert.match(
   /\*\*List 61\*\* \(#61\): left: its BattleMetrics ban list is not among those CBL's BattleMetrics key can see$/
 );
 
-for (const [access, note] of [
+for (const [access, note, why] of [
   [
     new Set(['partner-list']),
-    "CBL's BattleMetrics key can see 0 of the 2 BattleMetrics ban lists CBL's export ban lists record. It may belong to an account outside CBL's organisation, so the lists with BattleMetrics ban lists are left. Check BATTLEMETRICS_API_KEY."
+    "CBL's BattleMetrics key can see 0 of the 2 BattleMetrics ban lists CBL's export ban lists record. It may belong to an account outside CBL's organisation, so the lists with BattleMetrics ban lists are left. Check BATTLEMETRICS_API_KEY.",
+    "CBL's BattleMetrics key can see none of CBL's ban lists"
   ],
   [
     new Error('BattleMetrics GET ban-lists failed: HTTP 401'),
-    "BattleMetrics could not be asked which ban lists CBL's BattleMetrics key can see (BattleMetrics GET ban-lists failed: HTTP 401), so the lists with BattleMetrics ban lists are left. Try again later."
+    "BattleMetrics could not be asked which ban lists CBL's BattleMetrics key can see (BattleMetrics GET ban-lists failed: HTTP 401), so the lists with BattleMetrics ban lists are left. Try again later.",
+    'BattleMetrics could not be asked about its ban list'
   ]
 ]) {
   reset();
@@ -862,9 +864,42 @@ for (const [access, note] of [
   addList(66, 'battlemetrics');
   visible = access;
   await run('remove_outside_limits');
-  assert.ok(contentOf(prompt().reply).includes(`\n${note}\n`));
+  shown = prompt();
+  assert.ok(contentOf(shown.reply).includes(`\n${note}\n`));
+  // The preview says why each list with a ban list is left.
+  assert.deepStrictEqual(
+    shown.embed.description.split('\n').filter((line) => line.startsWith('↳')),
+    [`↳ ${escapedRule} **Left:** ${why}.`, `↳ ${escapedRule} **Left:** ${why}.`, `↳ ${escapedRule}`]
+  );
   assert.deepStrictEqual(deleted(), [66]);
 }
+
+// A list given a ban list after the preview, as one still being made is, when no list in the
+// preview had one and so BattleMetrics was not asked which ban lists CBL's key can see, is left, and
+// the removal goes on to the next list and its summary.
+reset();
+addList(68, 'battlemetrics');
+addList(69, 'remote');
+whileConfirming = async () => {
+  rows.get(68).exportBanList.battlemetricsID = 'bm-68';
+};
+await run('remove_outside_limits');
+assert.ok(!calls.some(([call]) => call === 'visible'));
+assert.deepStrictEqual(deleted(), [69]);
+assert.deepStrictEqual([...rows.keys()], [68]);
+summary = replies.at(-1);
+assert.strictEqual(
+  summary.content,
+  "Removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it had changed."
+);
+assert.deepStrictEqual(embedOf(summary).description.split('\n'), [
+  '**List 68** (#68): not removed, as its BattleMetrics ban list was not checked',
+  '**List 69** (#69): removed; there was nothing to delete on BattleMetrics'
+]);
+assert.strictEqual(
+  audits.at(-1),
+  "[important] admin (1) removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it had changed."
+);
 
 // When nothing can be removed, the preview is shown without asking.
 reset();
