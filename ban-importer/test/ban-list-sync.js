@@ -7,8 +7,9 @@ import { normaliseBattlemetricsID } from '../../scbl-lib/utils/battlemetrics-id.
 
 // Check how a ban list's sync state is worked out, without a database or network requests: every
 // change of state and the alerts it calls for, the count of failed runs, lists whose source was
-// changed, the access check's read of BattleMetrics' ban lists, which errors mean lost access, and
-// how errors are kept. import-bans.js checks the importer saving it.
+// changed, the access check's read of BattleMetrics' ban lists, which errors mean lost access, lists
+// still taken to have lost access when a run cannot tell, and how errors are kept. import-bans.js
+// checks the importer saving it.
 
 // BattleMetrics' list of ban lists, as readBattlemetricsPages gives it, or an error.
 let banListPages = [];
@@ -46,14 +47,17 @@ const {
   accessProblem,
   cleanError,
   describeAlert,
+  describeWidespreadLoss,
   FAILURE_ALERT_RUNS,
+  isWidespread,
   nextSync,
   NOT_VISIBLE,
   readAccessCheck,
   readVisibleBanLists,
   sourceKey,
   stateOf,
-  STATES
+  STATES,
+  UNCONFIRMED
 } = module.namespace;
 
 // Copy a value made in the module's context into one of this test's own, to compare it.
@@ -334,7 +338,159 @@ for (const from of [null, 'ok', 'failing', 'access_lost', 'self_import', 'held']
     nextSync(rowIn('failing', 2), outcome('self_import')).values.consecutiveFailures,
     2
   );
+  // A list that starts failing with its count already past 3, as it was not failing before, e.g.
+  // as it imported a CBL export ban list meanwhile, is posted about at once, but only once.
+  for (const from of ['self_import', 'access_lost']) {
+    const entered = plain(nextSync(rowIn(from, 4), outcome('failing')));
+    assert.deepStrictEqual(
+      [entered.values.state, entered.values.consecutiveFailures, entered.alerts],
+      ['failing', 5, ['failing']],
+      from
+    );
+    assert.deepStrictEqual(plain(nextSync(entered.values, outcome('failing')).alerts), [], from);
+  }
 }
+
+// A list CBL had lost access to stays so while a run cannot tell whether CBL can read it again: its
+// access check could not be made, or its fetch failed for another reason, such as a 401 or a 500.
+// The importer then gives it UNCONFIRMED. It is not posted about again, its row keeps why it lost
+// access, and it is not said to be back to normal. A failed fetch still counts as a failed run. Only
+// a run whose fetch works, while the check finds the list or is off, brings it back.
+{
+  const lostRow = {
+    ...rowIn('access_lost', 1),
+    lastError: 'ApiError: BattleMetrics GET bans failed: HTTP 404 (Unknown ban list)'
+  };
+  const unchecked = plain(nextSync(lostRow, outcome('ok', { accessLost: UNCONFIRMED })));
+  assert.deepStrictEqual(
+    [
+      unchecked.values.state,
+      unchecked.values.consecutiveFailures,
+      unchecked.values.lastError,
+      unchecked.values.lastSuccessAt,
+      unchecked.alerts,
+      unchecked.recovered
+    ],
+    ['access_lost', 0, lostRow.lastError, NOW, [], null]
+  );
+  assert.deepStrictEqual(unchecked.fields, IMPORT_FIELDS);
+  for (const error of [
+    'ApiError: BattleMetrics GET bans failed after 3 attempts: HTTP 401 (Unauthorized)',
+    'Error: Request failed with status code 500'
+  ]) {
+    const failed = plain(nextSync(lostRow, outcome('failing', { error, accessLost: UNCONFIRMED })));
+    assert.deepStrictEqual(
+      [
+        failed.values.state,
+        failed.values.consecutiveFailures,
+        failed.values.lastError,
+        failed.values.lastSuccessAt,
+        failed.alerts,
+        failed.recovered
+      ],
+      ['access_lost', 2, lostRow.lastError, EARLIER, [], null],
+      error
+    );
+  }
+  const back = plain(nextSync(lostRow, outcome('ok')));
+  assert.deepStrictEqual(
+    [back.values.state, back.values.lastError, back.alerts, back.recovered],
+    ['ok', null, [], 'CBL can read it on BattleMetrics again']
+  );
+}
+
+// Runs in a row, each worked out from the row the one before saved. Each step gives the run's error,
+// or null, and what it found about access: why CBL cannot read the list, undefined when the access
+// check found the list or is off, or null when the check could not be made. As the importer does, a
+// list whose row is access_lost, and whose run cannot tell, as its check could not be made or its
+// fetch failed for another reason, is given UNCONFIRMED.
+function runs(steps) {
+  let row = null;
+  return steps.map(([error, found]) => {
+    const cannotTell = found === null || (error && found === undefined);
+    const accessLost = found || (row?.state === 'access_lost' && cannotTell ? UNCONFIRMED : null);
+    const sync = plain(
+      nextSync(row, outcome(error ? 'failing' : 'ok', { error, accessLost, headTotal: undefined }))
+    );
+    row = sync.values;
+    return [row.state, row.consecutiveFailures, sync.alerts, sync.recovered];
+  });
+}
+const UNKNOWN_LIST =
+  'BattleMetrics answers that it does not know the list (HTTP 404, Unknown ban list)';
+const HTTP_404 = 'ApiError: BattleMetrics GET bans failed: HTTP 404 (Unknown ban list)';
+const HTTP_503 = 'ApiError: BattleMetrics GET bans failed after 3 attempts: HTTP 503';
+// A 404 Unknown ban list, a 503, then the 404 again: the list is access_lost throughout, posted
+// about once, and its failures count 1, 2, 3.
+assert.deepStrictEqual(
+  runs([
+    [HTTP_404, UNKNOWN_LIST],
+    [HTTP_503, undefined],
+    [HTTP_404, UNKNOWN_LIST]
+  ]),
+  [
+    ['access_lost', 1, ['access_lost'], null],
+    ['access_lost', 2, [], null],
+    ['access_lost', 3, [], null]
+  ]
+);
+// Not among the ban lists CBL can see, then a run whose check could not be made (null), then not
+// among them again: posted about once, never said to be back to normal.
+assert.deepStrictEqual(
+  runs([
+    [null, NOT_VISIBLE],
+    [null, null],
+    [null, NOT_VISIBLE]
+  ]),
+  [
+    ['access_lost', 0, ['access_lost'], null],
+    ['access_lost', 0, [], null],
+    ['access_lost', 0, [], null]
+  ]
+);
+// Three 404s, then three 503s: still access_lost, so it is not posted about as failing, as its loss
+// of access was, until a run that can read it brings it back.
+assert.deepStrictEqual(
+  runs([
+    [HTTP_404, UNKNOWN_LIST],
+    [HTTP_404, UNKNOWN_LIST],
+    [HTTP_404, UNKNOWN_LIST],
+    [HTTP_503, undefined],
+    [HTTP_503, undefined],
+    [HTTP_503, undefined],
+    [null, undefined]
+  ]),
+  [
+    ['access_lost', 1, ['access_lost'], null],
+    ['access_lost', 2, [], null],
+    ['access_lost', 3, [], null],
+    ['access_lost', 4, [], null],
+    ['access_lost', 5, [], null],
+    ['access_lost', 6, [], null],
+    ['ok', 0, [], 'CBL can read it on BattleMetrics again']
+  ]
+);
+// Two 503s, a 404 Unknown ban list at the 3rd failed run, then a 503: posted about as lost access
+// only, and still access_lost.
+assert.deepStrictEqual(
+  runs([
+    [HTTP_503, undefined],
+    [HTTP_503, undefined],
+    [HTTP_404, UNKNOWN_LIST],
+    [HTTP_503, undefined]
+  ]),
+  [
+    ['failing', 1, [], null],
+    ['failing', 2, [], null],
+    ['access_lost', 3, ['access_lost'], null],
+    ['access_lost', 4, [], null]
+  ]
+);
+// Five failed runs: posted about at the 3rd only.
+assert.deepStrictEqual(
+  runs(Array.from({ length: 5 }, () => [HTTP_503, undefined])).map(([, , alerts]) => alerts),
+  [[], [], ['failing'], [], []]
+);
 
 // A list whose type or source was changed starts afresh: its failures and BattleMetrics' count are
 // forgotten, every column is saved, other columns are reset, and its state is posted about as for
@@ -364,54 +520,101 @@ for (const from of [null, 'ok', 'failing', 'access_lost', 'self_import', 'held']
   );
 }
 
-// The alerts, as they are posted to the log channel.
+// The alerts, as they are posted to the log channel. Each is described from what nextSync gave.
 {
-  const failing = nextSync(rowIn('failing', 2), outcome('failing'));
+  const alert = (kind, before, result) => describeAlert(kind, nextSync(before, result), result);
   assert.strictEqual(
-    describeAlert('failing', failing.values, outcome('failing')),
+    alert('failing', rowIn('failing', 2), outcome('failing')),
     'Ban list (ID: 7) has failed to import 3 runs in a row, so its bans may be out of date: it was last imported at 2026-10-16T05:59:59.000Z. Its latest error: Error: Request failed with status code 503'
   );
-  const never = nextSync({ ...rowIn('failing', 2), lastSuccessAt: null }, outcome('failing'));
+  // It gives the list's count of failed runs, which can be past 3.
   assert.match(
-    describeAlert('failing', never.values, outcome('failing')),
-    /so its bans may be out of date: it has not been imported from its current source yet\. Its latest error: /
+    alert('failing', rowIn('self_import', 4), outcome('failing')),
+    /^Ban list \(ID: 7\) has failed to import 5 runs in a row, so /
   );
-  const lost = outcome('access_lost');
+  // A list with no time it was imported, as its row is new, e.g. the first after this version is
+  // deployed, or as its source was changed, is not said never to have been imported.
+  assert.match(
+    alert('failing', { ...rowIn('failing', 2), lastSuccessAt: null }, outcome('failing')),
+    /so its bans may be out of date: the importer has no record of importing it from its current source\. Its latest error: /
+  );
+
+  // A list CBL lost access to is said to be one it can no longer read if it was imported before,
+  // and one it cannot read otherwise, as when its row is new.
+  const unknown = outcome('access_lost', {
+    accessLost: UNKNOWN_LIST,
+    error: HTTP_404,
+    headTotal: undefined
+  });
   assert.strictEqual(
-    describeAlert('access_lost', nextSync(rowIn('ok'), lost).values, lost),
-    "CBL can no longer read ban list (ID: 7) on BattleMetrics, as its source is not among the BattleMetrics ban lists the CBL organisation can see, so none of its 43 stored bans are removed from it while it cannot. If the list's owner has stopped sharing it with the CBL organisation, remove the list with /banlist remove, which removes its bans too."
+    alert('access_lost', rowIn('ok'), unknown),
+    "CBL can no longer read ban list (ID: 7) on BattleMetrics, as BattleMetrics answers that it does not know the list (HTTP 404, Unknown ban list), so none of its 43 stored bans are removed from it while it cannot. If the list's owner has stopped sharing it with the CBL organisation, remove the list with /banlist remove, which removes its bans too."
   );
+  for (const before of [null, { ...rowIn('failing', 1), lastSuccessAt: null }])
+    assert.match(
+      alert('access_lost', before, unknown),
+      /^CBL cannot read ban list \(ID: 7\) on BattleMetrics, as BattleMetrics answers/
+    );
   for (const [storedCount, kept] of [
     [0, 'none of its bans are'],
     [1, 'its 1 stored ban is not'],
     [2, 'none of its 2 stored bans are']
   ]) {
-    const few = outcome('access_lost', { storedCount });
+    const few = { ...unknown, storedCount };
     assert.ok(
-      describeAlert('access_lost', nextSync(rowIn('ok'), few).values, few).includes(
-        `can see, so ${kept} removed from it while it cannot. `
+      alert('access_lost', rowIn('ok'), few).includes(
+        `Unknown ban list), so ${kept} removed from it while it cannot. `
       ),
       String(storedCount)
     );
   }
+  // A list BattleMetrics does not list, but whose fetch worked, is said to be so, without the
+  // advice to remove it, as its owner has not taken it from CBL. One whose fetch failed too is
+  // said to be one CBL cannot read.
+  const unlisted = outcome('access_lost');
+  assert.strictEqual(
+    alert('access_lost', rowIn('ok'), unlisted),
+    'Ban list (ID: 7) is not among the BattleMetrics ban lists the CBL organisation can see, although CBL could still read it. Its new bans are saved, but none of its 43 stored bans are removed from it until BattleMetrics lists it again.'
+  );
+  assert.strictEqual(
+    alert('access_lost', rowIn('ok'), { ...unlisted, error: HTTP_503 }),
+    "CBL can no longer read ban list (ID: 7) on BattleMetrics, as its source is not among the BattleMetrics ban lists the CBL organisation can see, so none of its 43 stored bans are removed from it while it cannot. If the list's owner has stopped sharing it with the CBL organisation, remove the list with /banlist remove, which removes its bans too."
+  );
+
   const many = outcome('self_import', { storedCount: 1234 });
   assert.strictEqual(
-    describeAlert('self_import', nextSync(null, many).values, many),
+    alert('self_import', null, many),
     "Ban list (ID: 7) is not imported, as its source is CBL's own export ban list (#12), and importing it would feed the players CBL exports back in as new bans. Its 1,234 stored bans are kept until the list is removed with /banlist remove, which removes them too."
   );
-  const one = outcome('self_import', { storedCount: 1 });
   assert.match(
-    describeAlert('self_import', nextSync(null, one).values, one),
+    alert('self_import', null, outcome('self_import', { storedCount: 1 })),
     /new bans\. Its 1 stored ban is kept until the list is removed with \/banlist remove, which removes the ban too\.$/
   );
-  const none = outcome('self_import', { storedCount: 0 });
   assert.match(
-    describeAlert('self_import', nextSync(null, none).values, none),
+    alert('self_import', null, outcome('self_import', { storedCount: 0 })),
     /new bans\. Remove the list with \/banlist remove\.$/
   );
-  assert.throws(() => describeAlert('held', nextSync(null, outcome('held')).values, {}));
+  assert.throws(() => alert('held', null, outcome('held')));
 }
 
+// Lists that lose access in the same run are posted about together when there are at least 3 of
+// them and they are at least half of the BattleMetrics lists the run tried, as CBL's own token is
+// then the likelier cause.
+for (const [lost, tried, together] of [
+  [2, 2, false],
+  [3, 3, true],
+  [3, 6, true],
+  [3, 7, false],
+  [10, 20, true],
+  [9, 20, false],
+  [20, 20, true]
+])
+  assert.strictEqual(isWidespread(lost, tried), together, `${lost} of ${tried}`);
+assert.strictEqual(
+  describeWidespreadLoss([1, 2, 46], 20),
+  "CBL lost access to 3 of the 20 BattleMetrics ban lists it tried in this run (IDs: 1, 2, 46): it cannot read them, or BattleMetrics does not list them among the ban lists the CBL organisation can see. So many at once points at CBL's BattleMetrics token, or its role in the CBL organisation, rather than at the lists' owners, so check the token before removing any of these lists. None of their bans are removed while this lasts."
+);
+
 console.log(
-  'Ban list sync state checks passed: every change of state, failed runs and their alert, changed sources, the access check, lost access and kept errors.'
+  'Ban list sync state checks passed: every change of state, failed runs and their alert, changed sources, the access check, lost access, runs that cannot tell, widespread losses and kept errors.'
 );

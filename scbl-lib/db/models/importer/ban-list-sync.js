@@ -21,9 +21,9 @@ export default sequelize.define(
     sourceKey: {
       type: DataTypes.CHAR(64)
     },
-    // ok, failing, access_lost (CBL can no longer read the list on BattleMetrics), self_import (the
-    // list's source is one of CBL's own export ban lists) or held (removing the bans the list no
-    // longer has waits for confirmation).
+    // ok, failing, access_lost (CBL cannot read the list on BattleMetrics, or BattleMetrics does not
+    // list it among those CBL can see), self_import (the list's source is one of CBL's own export
+    // ban lists) or held (removing the bans the list no longer has waits for confirmation).
     state: {
       type: DataTypes.STRING(16),
       allowNull: false,
@@ -62,8 +62,8 @@ export default sequelize.define(
       allowNull: false,
       defaultValue: 0
     },
-    // What went wrong with the list's latest import, on one line, without addresses or keys. It is
-    // for the CBL's admins, and is never shown on the website.
+    // What went wrong with the list's latest import, or why CBL cannot read it, on one line, without
+    // addresses or keys. It is for the CBL's admins, and is never shown on the website.
     lastError: {
       type: DataTypes.STRING(500)
     },

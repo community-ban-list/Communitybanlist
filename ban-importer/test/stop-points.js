@@ -108,14 +108,16 @@ function failsOnce(bans) {
 // onFetch(banList, control) before it returns, each ban's save calls hooks.onSave(id) and then
 // waits for its gate in saves.gates, if it has one, and each chunk of bans removed calls
 // hooks.onRemove(). The waits the importer starts and clears are recorded in waits, and take no
-// time once waits.instant is set. The lists' sync state is saved to nowhere, and the check of
-// which BattleMetrics ban lists CBL can see is off, as import-bans.js tests both.
-async function loadBanImporter(lists, { onFetch = () => {}, options } = {}) {
+// time once waits.instant is set. The lists' rows are read from syncs, and each row saved is
+// recorded in syncSaves. The check of which BattleMetrics ban lists CBL can see is off, as
+// import-bans.js tests it and the rows.
+async function loadBanImporter(lists, { onFetch = () => {}, options, syncs = [] } = {}) {
   const events = [];
   const lines = [];
   const saves = { gates: {} };
   const hooks = { onSave() {}, onRemove() {} };
   const waits = { started: [], cleared: [], instant: false };
+  const syncSaves = [];
   class BanFetcher {
     async fetchBanList(banList) {
       events.push(`fetch ${banList.id}`);
@@ -154,7 +156,12 @@ async function loadBanImporter(lists, { onFetch = () => {}, options } = {}) {
         }
       },
       'scbl-lib/db/importer-models': {
-        BanListSync: { findAll: async () => [], upsert: async () => {} }
+        BanListSync: {
+          findAll: async () => syncs.map((row) => ({ ...row })),
+          upsert: async (values) => {
+            syncSaves.push({ ...values });
+          }
+        }
       },
       'scbl-lib/db/models': {
         ExportBanList: { findAll: async () => [] },
@@ -223,9 +230,28 @@ async function loadBanImporter(lists, { onFetch = () => {}, options } = {}) {
     lines,
     saves,
     hooks,
-    waits
+    waits,
+    syncSaves
   };
 }
+
+// A list's row from an earlier run that failed it twice in a row.
+const failedTwice = (id) => ({
+  banList: id,
+  sourceKey: createHash('sha256')
+    .update(JSON.stringify(['battlemetrics', `bm-${id}`]))
+    .digest('hex'),
+  state: 'failing',
+  lastAttemptAt: new Date('2026-10-16T06:00:00.000Z'),
+  lastSuccessAt: new Date('2026-10-15T18:00:00.000Z'),
+  consecutiveFailures: 2,
+  lastError: 'Error: Request failed with status code 502',
+  storedCount: 1,
+  headTotal: null
+});
+// The state and count of failed runs of each row saved, as [list, state, failures].
+const savedRows = (syncSaves) =>
+  syncSaves.map(({ banList, state, consecutiveFailures }) => [banList, state, consecutiveFailures]);
 
 // The import's summary line.
 const summary = (lines) => lines.filter((line) => /^Got /.test(line.message));
@@ -401,12 +427,16 @@ for (const [lock, removes] of [
 
 // A list that could not be fetched is tried again a minute after the others, but the wait ends as
 // soon as the run is asked to stop, which it then does without trying the list again. The import's
-// summary says the run stopped.
+// summary says the run stopped. The list's row, which waited for its second attempt, is saved as
+// the run stops, as the run did fail it, and here, as its 3rd failed run in a row, is posted about.
 {
-  const { importer, control, events, lines, waits } = await loadBanImporter({
-    1: { stored: [0], fetched: failsOnce([0]) },
-    2: { stored: [], fetched: [0] }
-  });
+  const { importer, control, events, lines, waits, syncSaves } = await loadBanImporter(
+    {
+      1: { stored: [0], fetched: failsOnce([0]) },
+      2: { stored: [], fetched: [0] }
+    },
+    { syncs: [failedTwice(1)] }
+  );
   control.setRunLock(heldLock);
   const started = Date.now();
   const result = ended(importer.importBans(), 'the import');
@@ -431,12 +461,27 @@ for (const [lock, removes] of [
       ]
     ]
   );
+  assert.deepStrictEqual(savedRows(syncSaves), [
+    [2, 'ok', 0],
+    [1, 'failing', 3]
+  ]);
+  assert.deepStrictEqual(
+    lines.filter(({ message }) => /^Ban list \(ID: 1\) has failed/.test(message)),
+    [
+      {
+        level: 1,
+        message:
+          'Ban list (ID: 1) has failed to import 3 runs in a row, so its bans may be out of date: it was last imported at 2026-10-15T18:00:00.000Z. Its latest error: Error: Request failed with status code 502',
+        important: true
+      }
+    ]
+  );
 }
 
 // A run asked to stop while the last list of the first pass is imported does not wait to try the
-// failed lists again.
+// failed lists again, and saves the row of the list it would have tried again.
 {
-  const { importer, control, events, hooks, waits } = await loadBanImporter({
+  const { importer, control, events, hooks, waits, syncSaves } = await loadBanImporter({
     1: { stored: [0], fetched: failsOnce([0]) },
     2: { stored: [0, 9], fetched: [0] }
   });
@@ -450,12 +495,34 @@ for (const [lock, removes] of [
     events.filter((event) => event.startsWith('fetch')),
     ['fetch 1', 'fetch 2']
   );
+  assert.deepStrictEqual(savedRows(syncSaves), [
+    [2, 'ok', 0],
+    [1, 'failing', 1]
+  ]);
+}
+
+// A run that loses its run lock saves no row that is still waiting, as another run may then be
+// saving rows: here that of a list it would have tried again.
+{
+  const { importer, control, syncSaves } = await loadBanImporter(
+    {
+      1: { stored: [0], fetched: failsOnce([0]) },
+      2: { stored: [0, 9], fetched: [0] }
+    },
+    { syncs: [failedTwice(1)] }
+  );
+  control.setRunLock(lostLock);
+  const error = await ended(importer.importBans(), 'the import');
+  assert.strictEqual(error.reason, control.LOCK_LOST);
+  assert.deepStrictEqual(syncSaves, []);
 }
 
 // The second attempts stop between ban lists too: a stop requested during one list's second
-// attempt lets it finish, and the next list is not tried again.
+// attempt lets it finish, and the next list is not tried again. The row of the list imported at
+// its second attempt is saved by that attempt, and only then, and that of the list not tried again
+// as the run stops.
 {
-  const { importer, control, events, hooks, lines, waits } = await loadBanImporter({
+  const { importer, control, events, hooks, lines, waits, syncSaves } = await loadBanImporter({
     1: { stored: [0, 9], fetched: failsOnce([0]) },
     2: { stored: [], fetched: [0] },
     3: { stored: [0], fetched: failsOnce([0]) }
@@ -475,15 +542,20 @@ for (const [lock, removes] of [
       'Got 1 deleted ban. Imported 3 ban lists before the run stopped: 2 bans fetched, 2 new, 0 updated, 1 removed, 0 held, 1 list failed.'
     ]
   );
+  assert.deepStrictEqual(savedRows(syncSaves), [
+    [2, 'ok', 0],
+    [1, 'ok', 0],
+    [3, 'failing', 1]
+  ]);
 }
 
 // A stop requested while a list is imported at its second attempt, whether during its fetch or its
 // saves, leaves the list out of the import's summary, as a stop in the first pass does, and the
 // list's own line says what the attempt saved. The saves under way are finished first, and the
-// list is not swept.
+// list is not swept. Its row is saved as its first attempt left it, as the run did fail it.
 for (const during of ['fetch', 'saves']) {
   let fetches = 0;
-  const { importer, control, events, lines, saves, waits } = await loadBanImporter(
+  const { importer, control, events, lines, saves, waits, syncSaves } = await loadBanImporter(
     {
       1: { stored: [0, 9], fetched: [0] },
       2: { stored: [7], fetched: failsOnce([0, 1, 2, 3]) }
@@ -547,6 +619,14 @@ for (const during of ['fetch', 'saves']) {
         undefined
       ]
     ]
+  );
+  assert.deepStrictEqual(
+    savedRows(syncSaves),
+    [
+      [1, 'ok', 0],
+      [2, 'failing', 1]
+    ],
+    during
   );
 }
 

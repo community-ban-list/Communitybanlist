@@ -14,7 +14,8 @@ export const STATES = {
   OK: 'ok',
   // Its latest import failed, e.g. as its source was down.
   FAILING: 'failing',
-  // CBL can no longer read it on BattleMetrics, so none of its bans are removed.
+  // CBL cannot read it on BattleMetrics, or BattleMetrics does not list it among the ban lists the
+  // CBL organisation can see, so none of its bans are removed.
   ACCESS_LOST: 'access_lost',
   // Its source is one of CBL's own export ban lists, so it is neither imported nor swept.
   SELF_IMPORT: 'self_import',
@@ -25,9 +26,20 @@ export const STATES = {
 // A list that fails to import this many runs in a row is posted about, once.
 export const FAILURE_ALERT_RUNS = 3;
 
+// When at least this many lists lose access in the same run, and they are at least half of the
+// BattleMetrics lists the run tried, CBL's own BattleMetrics token, or its role in the CBL
+// organisation, is a likelier cause than the lists' owners, so they are posted about together.
+const WIDESPREAD_LISTS = 3;
+
 // Why the access check says CBL cannot read a list.
 export const NOT_VISIBLE =
   'its source is not among the BattleMetrics ban lists the CBL organisation can see';
+
+// Why a list CBL had lost access to is still taken to have lost it: the run could not tell, as its
+// access check could not be made or the list's fetch failed for another reason, e.g. as
+// BattleMetrics was down. Only a list whose row says CBL had lost access to it is given this.
+export const UNCONFIRMED =
+  'CBL had lost access to it, and this run could not tell whether it has access again';
 
 // BanListSyncs.lastError holds at most this many characters.
 const MAX_ERROR_LENGTH = 500;
@@ -146,13 +158,16 @@ export function stateOf({ selfImport, accessLost, error, held }) {
 // - values: the row's new values;
 // - fields: the columns to write. A list whose type or source was changed starts afresh, so all
 //   of its columns are written, and otherwise only those the import sets;
-// - alerts: what to post about the list: reaching FAILURE_ALERT_RUNS failed runs in a row, and
-//   starting to import a CBL export ban list or losing access, each only when it starts, so never
-//   again while the list stays so;
-// - recovered: why the list is back to normal, if it is.
+// - alerts: what to post about the list: starting to import a CBL export ban list, or losing
+//   access, each only when it starts, so never again while the list stays so; and failing
+//   FAILURE_ALERT_RUNS runs in a row, when it reaches that, or when it starts failing with more,
+//   as after a run in which it imported a CBL export ban list;
+// - recovered: why the list is back to normal, if it is;
+// - previous: the row it was worked out from, as it starts afresh for a new or changed source.
 // A list whose source is a CBL export ban list is never fetched, so its attempt neither fails nor
-// succeeds. A run's second attempt at a list is worked out from the same row as its first, so the
-// run counts once.
+// succeeds. A list CBL is still taken to have lost access to (UNCONFIRMED) keeps why it lost it.
+// A run's second attempt at a list is worked out from the same row as its first, so the run counts
+// once.
 export function nextSync(before, outcome) {
   const reset = !before || before.sourceKey !== outcome.sourceKey;
   const previous = reset ? FRESH : before;
@@ -165,7 +180,8 @@ export function nextSync(before, outcome) {
   else if (attempted) consecutiveFailures = 0;
 
   let lastError = null;
-  if (failed) lastError = cleanError(outcome.error);
+  if (outcome.accessLost === UNCONFIRMED) lastError = previous.lastError;
+  else if (failed) lastError = cleanError(outcome.error);
   else if (outcome.accessLost)
     lastError = cleanError(
       `${outcome.accessLost[0].toUpperCase()}${outcome.accessLost.slice(1)}, so its bans are not checked for removal.`
@@ -187,7 +203,11 @@ export function nextSync(before, outcome) {
   const alerts = [];
   if (state !== previous.state && [STATES.SELF_IMPORT, STATES.ACCESS_LOST].includes(state))
     alerts.push(state);
-  if (state === STATES.FAILING && consecutiveFailures === FAILURE_ALERT_RUNS)
+  if (
+    state === STATES.FAILING &&
+    consecutiveFailures >= FAILURE_ALERT_RUNS &&
+    (consecutiveFailures === FAILURE_ALERT_RUNS || previous.state !== STATES.FAILING)
+  )
     alerts.push(STATES.FAILING);
 
   let recovered = null;
@@ -197,35 +217,50 @@ export function nextSync(before, outcome) {
       recovered = `it was imported again, after failing ${plural(previous.consecutiveFailures, 'run')} in a row`;
   }
 
-  return { values, fields: Object.keys(values), alerts, recovered };
+  return { values, fields: Object.keys(values), alerts, recovered, previous };
 }
 
-// The alert to post about a list, as nextSync asked for, from its new row and the attempt's
-// outcome.
-export function describeAlert(kind, values, outcome) {
+// The alert to post about a list, as nextSync asked for, from what nextSync gave (sync) and the
+// attempt's outcome.
+export function describeAlert(kind, { values, previous }, outcome) {
   const stored = values.storedCount ?? 0;
+  let kept = `none of its ${plural(stored, 'stored ban')} are`;
+  if (stored === 0) kept = 'none of its bans are';
+  else if (stored === 1) kept = 'its 1 stored ban is not';
   switch (kind) {
     case STATES.FAILING:
-      return `Ban list (ID: ${values.banList}) has failed to import ${FAILURE_ALERT_RUNS} runs in a row, so its bans may be out of date: ${
+      return `Ban list (ID: ${values.banList}) has failed to import ${plural(values.consecutiveFailures, 'run')} in a row, so its bans may be out of date: ${
         values.lastSuccessAt
           ? `it was last imported at ${new Date(values.lastSuccessAt).toISOString()}`
-          : 'it has not been imported from its current source yet'
+          : 'the importer has no record of importing it from its current source'
       }. Its latest error: ${values.lastError}`;
-    case STATES.ACCESS_LOST: {
-      let kept = `none of its ${plural(stored, 'stored ban')} are`;
-      if (stored === 0) kept = 'none of its bans are';
-      else if (stored === 1) kept = 'its 1 stored ban is not';
-      return `CBL can no longer read ban list (ID: ${values.banList}) on BattleMetrics, as ${outcome.accessLost}, so ${kept} removed from it while it cannot. If the list's owner has stopped sharing it with the CBL organisation, remove the list with /banlist remove, which removes its bans too.`;
-    }
+    case STATES.ACCESS_LOST:
+      // A list BattleMetrics does not list, but whose bans CBL could still read, has not been
+      // taken from CBL by its owner, as BattleMetrics would then refuse it too.
+      if (outcome.accessLost === NOT_VISIBLE && !outcome.error)
+        return `Ban list (ID: ${values.banList}) is not among the BattleMetrics ban lists the CBL organisation can see, although CBL could still read it. Its new bans are saved, but ${kept} removed from it until BattleMetrics lists it again.`;
+      return `CBL ${previous.lastSuccessAt ? 'can no longer read' : 'cannot read'} ban list (ID: ${values.banList}) on BattleMetrics, as ${outcome.accessLost}, so ${kept} removed from it while it cannot. If the list's owner has stopped sharing it with the CBL organisation, remove the list with /banlist remove, which removes its bans too.`;
     case STATES.SELF_IMPORT: {
-      let kept = `Its ${plural(stored, 'stored ban')} are kept until the list is removed with /banlist remove, which removes them too.`;
-      if (stored === 0) kept = 'Remove the list with /banlist remove.';
+      let left = `Its ${plural(stored, 'stored ban')} are kept until the list is removed with /banlist remove, which removes them too.`;
+      if (stored === 0) left = 'Remove the list with /banlist remove.';
       else if (stored === 1)
-        kept =
+        left =
           'Its 1 stored ban is kept until the list is removed with /banlist remove, which removes the ban too.';
-      return `Ban list (ID: ${values.banList}) is not imported, as its source is CBL's own export ban list (#${outcome.selfImport}), and importing it would feed the players CBL exports back in as new bans. ${kept}`;
+      return `Ban list (ID: ${values.banList}) is not imported, as its source is CBL's own export ban list (#${outcome.selfImport}), and importing it would feed the players CBL exports back in as new bans. ${left}`;
     }
     default:
       throw new Error(`Unknown ban list alert: ${kind}`);
   }
+}
+
+// Whether so many lists lost access in the same run, of the BattleMetrics lists the run tried, that
+// CBL's own token is the likelier cause (see WIDESPREAD_LISTS).
+export function isWidespread(lost, tried) {
+  return lost >= WIDESPREAD_LISTS && lost * 2 >= tried;
+}
+
+// The one alert posted, instead of an alert for each, about the lists that lost access in the same
+// run, as isWidespread says: their IDs, and how many BattleMetrics lists the run tried.
+export function describeWidespreadLoss(banLists, tried) {
+  return `CBL lost access to ${banLists.length} of the ${plural(tried, 'BattleMetrics ban list')} it tried in this run (IDs: ${banLists.join(', ')}): it cannot read them, or BattleMetrics does not list them among the ban lists the CBL organisation can see. So many at once points at CBL's BattleMetrics token, or its role in the CBL organisation, rather than at the lists' owners, so check the token before removing any of these lists. None of their bans are removed while this lasts.`;
 }

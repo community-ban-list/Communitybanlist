@@ -5,7 +5,7 @@ import vm from 'vm';
 import describeError from '../../scbl-lib/utils/describe-error.js';
 
 // Check the importer's migrations, without a database: they are applied once each, in order, on a
-// connection of their own that waits at most 10 seconds for a table, recorded as they are applied,
+// connection of their own that waits at most 3 seconds for a table, recorded as they are applied,
 // and checked against the importer's models.
 
 // The importer's real models, to check the real migrations against. Loading them makes a Sequelize
@@ -200,8 +200,8 @@ const BAN_LIST_SYNC_COLUMNS = [
 
 // On a database without the importer's tables, migration 001 makes ImporterSchemaMigrations and
 // ImporterState, and migration 002 BanListSyncs. Each is recorded, and the run is told, as it is
-// applied. The connection first makes schema changes wait at most 10 seconds for a table, and is
-// closed at the end.
+// applied. The connection first makes schema changes wait at most 3 seconds for a table, as other
+// queries on the table wait behind them, and is closed at the end.
 {
   const database = fakeDatabase();
   const { migrate } = await loadMigrate(database);
@@ -213,7 +213,7 @@ const BAN_LIST_SYNC_COLUMNS = [
     ['001-importer-state', ['001-importer-state']],
     ['002-ban-list-syncs', ALL]
   ]);
-  assert.strictEqual(database.statements[0], 'SET SESSION lock_wait_timeout = 10');
+  assert.strictEqual(database.statements[0], 'SET SESSION lock_wait_timeout = 3');
   assert.deepStrictEqual(database.tables.get('ImporterSchemaMigrations').columns, [
     'id',
     'appliedAt'
@@ -263,7 +263,7 @@ const BAN_LIST_SYNC_COLUMNS = [
   assert.strictEqual(told.length, 2);
   const again = database.statements.slice(before);
   assert.ok(!again.some((sql) => /^(CREATE|INSERT|ALTER|DROP)/.test(sql)));
-  assert.strictEqual(again[0], 'SET SESSION lock_wait_timeout = 10');
+  assert.strictEqual(again[0], 'SET SESSION lock_wait_timeout = 3');
   assert.match(again.at(-1), /information_schema\.COLUMNS/);
   assert.deepStrictEqual(database.migrations, ALL);
 }
@@ -343,8 +343,9 @@ for (const type of [null, 'varchar(255)', 'int; DROP TABLE Bans']) {
   const database = fakeDatabase({
     fail: (sql) =>
       failing && /^CREATE TABLE IF NOT EXISTS ImporterState /.test(sql)
-        ? Object.assign(new Error('Lock wait timeout exceeded; try restarting transaction'), {
-            code: 'ER_LOCK_WAIT_TIMEOUT'
+        ? Object.assign(new Error("Can't create table 'cbl.ImporterState' (errno: 28)"), {
+            errno: 1005,
+            code: 'ER_CANT_CREATE_TABLE'
           })
         : null
   });
@@ -355,7 +356,7 @@ for (const type of [null, 'varchar(255)', 'int; DROP TABLE Bans']) {
   assert.strictEqual(error.migration, '001-importer-state');
   assert.strictEqual(
     error.message,
-    'Importer migration 001-importer-state failed: Error: Lock wait timeout exceeded; try restarting transaction'
+    "Importer migration 001-importer-state failed: Error: Can't create table 'cbl.ImporterState' (errno: 28)"
   );
   assert.deepStrictEqual(database.migrations, []);
   assert.deepStrictEqual(told, []);
@@ -370,13 +371,17 @@ for (const type of [null, 'varchar(255)', 'int; DROP TABLE Bans']) {
 
 // A later migration that fails, e.g. as a long transaction on BanLists kept its foreign key from
 // being made in time, leaves the earlier ones applied and recorded, and is applied by the next run.
+// Its failure says what kept it waiting, and how to find that, as mysql2 gives the timeout with
+// MySQL's error number.
 {
   let failing = true;
   const database = fakeDatabase({
     fail: (sql) =>
       failing && /^CREATE TABLE IF NOT EXISTS BanListSyncs /.test(sql)
         ? Object.assign(new Error('Lock wait timeout exceeded; try restarting transaction'), {
-            code: 'ER_LOCK_WAIT_TIMEOUT'
+            errno: 1205,
+            code: 'ER_LOCK_WAIT_TIMEOUT',
+            sqlState: 'HY000'
           })
         : null
   });
@@ -387,7 +392,13 @@ for (const type of [null, 'varchar(255)', 'int; DROP TABLE Bans']) {
   assert.strictEqual(error.migration, '002-ban-list-syncs');
   assert.strictEqual(
     error.message,
-    'Importer migration 002-ban-list-syncs failed: Error: Lock wait timeout exceeded; try restarting transaction'
+    'Importer migration 002-ban-list-syncs failed: Error: Lock wait timeout exceeded; try restarting transaction. Another connection has a transaction open on a table the migration needs, e.g. one left open in phpMyAdmin, which SELECT * FROM information_schema.innodb_trx shows. The next run tries the migration again.'
+  );
+  // The wait was set, for the connection, before the migration's statements ran.
+  const statements = database.connections[0].queries.map(({ sql }) => sql);
+  assert.ok(
+    statements.indexOf('SET SESSION lock_wait_timeout = 3') <
+      statements.findIndex((sql) => sql.startsWith('CREATE TABLE IF NOT EXISTS BanListSyncs '))
   );
   assert.deepStrictEqual(database.migrations, ['001-importer-state']);
   assert.deepStrictEqual(told, ['001-importer-state']);
