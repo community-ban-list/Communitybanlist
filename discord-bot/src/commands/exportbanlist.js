@@ -53,6 +53,11 @@ const DESCRIPTION_LENGTH = 4096;
 // The longest reason a message shows for one list. The attached files have them in full.
 const REASON_LENGTH = 300;
 
+// How long the admin has to read the preview of the lists outside the limits, which can be long
+// and partly in an attached file, before confirming. Each list is read and checked again just
+// before it is removed, so a list changed meanwhile is not removed as the preview showed it.
+const REVIEW_TIMEOUT = 5 * 60 * 1000;
+
 // What happened on BattleMetrics, as deleteExportBanList gives it, for the log.
 const OUTCOMES = {
   deleted: 'its BattleMetrics ban list was deleted',
@@ -560,7 +565,7 @@ async function removeAllOutsideLimits(interaction) {
       MESSAGE_LENGTH
     ),
     `Remove ${plural(removable.length, 'export ban list')}`,
-    preview
+    { ...preview, timeout: REVIEW_TIMEOUT }
   );
   if (!confirmed) return;
 

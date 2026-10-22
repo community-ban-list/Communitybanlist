@@ -3,11 +3,13 @@ import { ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } from 'dis
 const CONFIRM_TIMEOUT = 60 * 1000;
 
 // Ask the user to confirm a destructive change. extra can add embeds and files to the question,
-// e.g. what the change would remove. Resolves to whether they confirmed it in time.
+// e.g. what the change would remove, and give a timeout in milliseconds other than a minute, e.g.
+// for a question with a long list to read first. Resolves to whether they confirmed it in time.
 export default async function confirm(interaction, content, confirmLabel, extra = {}) {
+  const { timeout = CONFIRM_TIMEOUT, ...payload } = extra;
   const message = await interaction.editReply({
     embeds: [],
-    ...extra,
+    ...payload,
     content,
     components: [
       new ActionRowBuilder().addComponents(
@@ -25,7 +27,7 @@ export default async function confirm(interaction, content, confirmLabel, extra 
     button = await message.awaitMessageComponent({
       componentType: ComponentType.Button,
       filter: (component) => component.user.id === interaction.user.id,
-      time: CONFIRM_TIMEOUT
+      time: timeout
     });
   } catch {
     await interaction.editReply({ content: 'Timed out. Nothing was changed.', components: [] });

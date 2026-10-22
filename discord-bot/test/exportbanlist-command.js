@@ -75,6 +75,8 @@ let visible;
 // whileConfirming runs, e.g. to change a list.
 let answer;
 let whileConfirming;
+// How long each confirmation waited for an answer, in milliseconds.
+let timeouts;
 
 function reset() {
   calls = [];
@@ -88,6 +90,7 @@ function reset() {
   visible = new Set();
   answer = 'confirm';
   whileConfirming = null;
+  timeouts = [];
 }
 
 // Add a list to the database. Reading its Discord webhook, the only way to tell its owner anything,
@@ -247,7 +250,7 @@ function interaction(subcommand, options = {}, { createdTimestamp = Date.now() }
       replies.push(payload);
       return {
         async awaitMessageComponent({ filter, time }) {
-          assert.strictEqual(time, 60 * 1000);
+          timeouts.push(time);
           if (whileConfirming) await whileConfirming();
           if (answer === 'timeout') throw new Error('Collector received no interactions');
           const button = {
@@ -303,9 +306,9 @@ assert.deepStrictEqual(json.options[1].options, []);
 const FIND_RECORDED = ['find all', { type: 'battlemetrics' }];
 
 // Removing one list shows its name, type, owner, players, BattleMetrics ID, whether CBL's
-// BattleMetrics key can see its ban list, and why it is outside today's limits, asks first, and
-// then deletes it as the website does, once no ban importer run is under way. The removal is
-// logged, and the owner is not told.
+// BattleMetrics key can see its ban list, and why it is outside today's limits, asks first, giving
+// a minute to answer, and then deletes it as the website does, once no ban importer run is under
+// way. The removal is logged, and the owner is not told.
 reset();
 addList(12, 'battlemetrics', { battlemetricsID: 'bm-12', players: 1234 });
 visible = new Set(['bm-12', 'partner-list']);
@@ -325,6 +328,7 @@ assert.deepStrictEqual(fieldsOf(shown.embed), [
   ['BattleMetrics ID', "`bm-12`, which CBL's BattleMetrics key can see."],
   ["Today's limits", discord.escapeMarkdown(RULE)]
 ]);
+assert.deepStrictEqual(timeouts, [60 * 1000]);
 assert.deepStrictEqual(calls, [
   ['lock'],
   ['check', [12]],
@@ -608,8 +612,9 @@ assert.deepStrictEqual(audits, []);
 console.log('Removing one export ban list: checks passed.');
 
 // Removing every list outside today's limits previews each, with its type, owner, players and why,
-// and the limits used, then removes them after one confirmation, in ID order, logging each. Lists
-// within the limits are left alone, and no owner is told.
+// and the limits used, then removes them after one confirmation, in ID order, logging each. The
+// admin has five minutes to read the preview and answer. Lists within the limits are left alone,
+// and no owner is told.
 reset();
 addList(30, 'battlemetrics', { battlemetricsID: 'bm-30', players: 25000 });
 addList(31, 'remote', { players: 4206 });
@@ -636,6 +641,7 @@ assert.strictEqual(
   ].join('\n')
 );
 assert.strictEqual(fileOf(shown.reply), undefined);
+assert.deepStrictEqual(timeouts, [5 * 60 * 1000]);
 assert.deepStrictEqual(calls, [
   ['lock'],
   ['check', 'all'],
