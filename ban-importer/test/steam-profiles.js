@@ -242,8 +242,8 @@ const dependencies = {
     normaliseBattlemetricsID: (id) => String(id ?? '').trim()
   }
 };
-// The step, with the real apply-list.js, ban-list-sync.js, run-control.js and steam-id.js, each
-// loaded once.
+// The step, with the real apply-list.js, ban-list-sync.js, planner.js, run-control.js and
+// steam-id.js, each loaded once.
 const modules = new Map();
 const load = (path) => {
   if (!modules.has(path))
@@ -255,7 +255,13 @@ const load = (path) => {
     );
   return modules.get(path);
 };
-const OWN = ['./apply-list.js', './ban-list-sync.js', './run-control.js', './steam-id.js'];
+const OWN = [
+  './apply-list.js',
+  './ban-list-sync.js',
+  './planner.js',
+  './run-control.js',
+  './steam-id.js'
+];
 const module = await load('../src/steam-profiles.js');
 await module.link(async (specifier) => {
   if (OWN.includes(specifier)) return load(`../src/${specifier.slice(2)}`);
