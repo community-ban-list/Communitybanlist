@@ -270,12 +270,12 @@ const NO_ANSWER = `Error: The database did not answer the count within ${ANSWER_
   assert.strictEqual(counts.calls.length, 6);
   assert.strictEqual(logged.length, 1);
 
-  // Back within the limit, which the log also says, lists need no count again.
+  // Back at the limit, which is within it, as the log also says, lists need no count again.
   time = 4 * POPULATION_KEPT;
-  counts.answer = inTurn(19990);
+  counts.answer = inTurn(20000);
   assert.strictEqual(await check('a', 'battlemetrics', before, lower), 'allowed');
   assert.strictEqual(counts.calls.length, 7);
-  assert.deepStrictEqual(logged.slice(1), [POPULATION('19,990', 'BattleMetrics', '20,000', false)]);
+  assert.deepStrictEqual(logged.slice(1), [POPULATION('20,000', 'BattleMetrics', '20,000', false)]);
 
   // When a count fails, the last one is used until the next, here one over the limit.
   time = 5 * POPULATION_KEPT;
@@ -1104,6 +1104,21 @@ const scoringOf = ({ threshold, defaultActivePoints, defaultExpiredPoints, maxBa
     { settings: settingsOf(), configs: [], options: counting }
   ]);
   assert.deepStrictEqual(over.logged, [POPULATION('21,034', 'BattleMetrics', '20,000', true)]);
+}
+
+// A change that could make a list bigger and breaks the points rules is refused with the rules'
+// message before its size is checked, so it uses none of the user's counts and waits for no turn.
+// Here 3 points for an active ban and 1 for an expired ban reach the threshold of 4.
+{
+  const { db, counts, refused } = await mutations({});
+  db.rows.ExportBanList.push(exportBanList('owner', 1));
+  await refused(
+    'updateExportBanList',
+    { id: 1, threshold: 4 },
+    'owner',
+    'One active ban plus one expired ban must not be enough to put a player on an export ban list. Here they can give 4 points (3 for an active ban, plus 1 for an expired ban), so the threshold must be 5 or more. Raise the threshold or lower the points.'
+  );
+  assert.deepStrictEqual(counts.calls, []);
 }
 
 console.log(
