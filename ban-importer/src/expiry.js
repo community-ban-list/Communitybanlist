@@ -32,7 +32,7 @@ const QUEUE_RECALCULATION =
   'UPDATE SteamUsers SET lastRefreshedExport = NULL, lastRefreshedReputationPoints = NULL, lastRefreshedReputationRank = NULL WHERE id IN (?)';
 
 // Mark a batch of bans, each given as { id, steamUser }, as expired, and queue their players, in one
-// transaction. Resolves with how many bans were marked and how many players were queued.
+// transaction. Resolves with how many bans were marked, and the players it queued, each once.
 async function expireBatch(batch, now) {
   const players = [...new Set(batch.map(({ steamUser }) => steamUser))];
   return sequelize.transaction(async (transaction) => {
@@ -41,27 +41,31 @@ async function expireBatch(batch, now) {
       transaction
     });
     await sequelize.query(QUEUE_RECALCULATION, { replacements: [players], transaction });
-    return { bans: affectedRows(result), players: players.length };
+    return { bans: affectedRows(result), players };
   });
 }
 
 // Mark as expired every ban whose expiry has passed but that is not marked so, in transactions of
 // batchSize bans, each of which also queues the bans' players for a recalculation. A transaction
 // that ends in a deadlock, or finds the database unavailable, is run again as a whole. It counts in
-// counts how many bans it found (due) and marked (expired), and how many players it queued
-// (players), also when the run is asked to stop, which it does between transactions. now is the
-// time the bans' expiries are compared with.
+// counts how many bans it found (due) and marked (expired), and how many different players it
+// queued (players), also when the run is asked to stop, which it does between transactions. It
+// counts nothing until it has found the bans. now is the time the bans' expiries are compared with.
 export async function expireBans(counts = {}, { now = new Date(), batchSize = BATCH_SIZE } = {}) {
   const startTime = Date.now();
-  Object.assign(counts, { due: 0, expired: 0, players: 0 });
   const time = sqlTime(now);
 
   Logger.verbose('Expiry', 2, 'Finding bans whose expiry has passed...');
   const due = await retryOperation(() =>
     sequelize.query(FIND_EXPIRED, { replacements: [time], type: QueryTypes.SELECT })
   );
-  counts.due = due.length;
+  // Only now are there counts, so a step that could not find the bans does not say that none had
+  // expired.
+  Object.assign(counts, { due: due.length, expired: 0, players: 0 });
 
+  // The players queued, each counted once, also when their bans fall in different batches, and
+  // only once their batch's transaction has been committed.
+  const queued = new Set();
   for (let i = 0; i < due.length; i += batchSize) {
     reportProgress(i, due.length, 'bans');
     // A run that is asked to stop does so between transactions.
@@ -70,7 +74,8 @@ export async function expireBans(counts = {}, { now = new Date(), batchSize = BA
       expireBatch(due.slice(i, i + batchSize), time)
     );
     counts.expired += bans;
-    counts.players += players;
+    for (const player of players) queued.add(player);
+    counts.players = queued.size;
   }
   reportProgress(due.length, due.length, 'bans');
 

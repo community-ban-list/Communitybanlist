@@ -45,8 +45,9 @@ const OUTCOMES = {
 const DEFAULT_MAX_RUN_SECONDS = 5 * 60 * 60;
 
 // How often the script that starts the importer starts a run. Once no run has succeeded for 3 times
-// this long, the importer posts that it is stale. IMPORTER_CADENCE_SECONDS changes it, e.g. to 3600
-// when runs start every hour.
+// this long, the importer posts that it is stale, and the Steam step refreshes enough profiles each
+// run to keep up at this schedule. IMPORTER_CADENCE_SECONDS changes it, e.g. to 3600 when runs start
+// every hour.
 const DEFAULT_CADENCE_SECONDS = 6 * 60 * 60;
 
 // The longest time a timer can wait for, about 24 days, which limits both settings.
@@ -202,9 +203,10 @@ async function waitForDatabase() {
 }
 
 // Run the importer's steps once, holding the run lock, and resolve with the exit code. Each step is
-// { name, run, counts }: run() does the step's work, and counts(), if given, returns the counts the
-// run record keeps for it. A run that is asked to stop does so between steps. Once the run holds
-// the lock, the importer's migrations are applied before the first step.
+// { name, run, counts }: run(settings) does the step's work, given the run's settings that steps
+// use, { cadenceSeconds }, and counts(), if given, returns the counts the run record keeps for it.
+// A run that is asked to stop does so between steps. Once the run holds the lock, the importer's
+// migrations are applied before the first step.
 //
 // The run's lines about problems, such as why it failed or is stopping, are logged as important, so
 // they reach the log channel even when the run's other messages fill its queue. Its start and its
@@ -573,7 +575,7 @@ export default async function run(steps) {
         stopIfRequested();
         await time(step.name, async () => {
           try {
-            await step.run();
+            await step.run({ cadenceSeconds });
           } finally {
             if (step.counts) record.count(step.name, step.counts);
           }

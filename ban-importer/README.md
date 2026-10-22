@@ -44,8 +44,8 @@ For example, spread over several lines here and shortened:
   "outcome": "finished",
   "exitCode": 0,
   "startedAt": "2026-10-15T19:00:21.975Z",
-  "endedAt": "2026-10-15T19:29:58.958Z",
-  "seconds": 1776.98,
+  "endedAt": "2026-10-15T19:31:15.645Z",
+  "seconds": 1853.67,
   "gitSha": "0e921bf",
   "phases": {
     "waitForDatabase": 0.02,
@@ -54,7 +54,7 @@ For example, spread over several lines here and shortened:
     "migrate": 0.05,
     "importBans": 521.3,
     "expireBans": 0.05,
-    "updateSteamUserInfo": 4.71,
+    "updateSteamUserInfo": 81.4,
     "clearOrphanedUsers": 0.13,
     "updateReputationPoints": 0.81,
     "updateReputationRank": 5.63,
@@ -90,14 +90,14 @@ For example, spread over several lines here and shortened:
     },
     "expireBans": { "due": 4, "expired": 4, "players": 4 },
     "updateSteamUserInfo": {
-      "due": 1234,
+      "due": 5243,
       "new": 31,
-      "updated": 226,
+      "updated": 5238,
       "missing": 3,
       "skipped": 2,
       "unsaved": 0,
-      "left": 1003,
-      "calls": 3
+      "left": 0,
+      "calls": 53
     }
   }
 }
@@ -114,12 +114,12 @@ For example, spread over several lines here and shortened:
 | `phases`               | How long each phase took, in seconds: waiting for the database, taking the run lock, connecting, migrations and each step. |
 | `counts`               | What the steps counted (see below).                                                                                        |
 
-The steps that count what they do keep their counts also when they fail or stop part-way:
+The steps that count what they do keep their counts also when they fail or stop part-way. The expiry and Steam steps start counting once their first read has worked, so one that fails before, e.g. as the database is unavailable, has no counts, rather than counts that say nothing was due:
 
 | Step                  | Counts                                                                                                                                                                                                                                                                                                                                                                    |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `importBans`          | The totals of its summary line, how many of its `lists` it `imported` and, in `banLists`, each list's own counts and errors.                                                                                                                                                                                                                                              |
-| `expireBans`          | How many bans whose expiry has passed it found (`due`) and marked `expired`, and how many `players` it queued for a recalculation.                                                                                                                                                                                                                                        |
+| `expireBans`          | How many bans whose expiry has passed it found (`due`) and marked `expired`, and how many different `players` it queued for a recalculation.                                                                                                                                                                                                                              |
 | `updateSteamUserInfo` | How many Steam users were `due` a refresh and, of those, how many were `new` (never refreshed, or queued for a refresh), how many it `updated`, how many Steam did not have (`missing`), how many it `skipped` as their IDs are not SteamIDs, how many profiles it could not save (`unsaved`), how many are `left` for later runs, and how many `calls` it made to Steam. |
 | `updateExportBans`    | How many `players` it recalculated.                                                                                                                                                                                                                                                                                                                                       |
 | `exportExportBans`    | How many export bans were `queued`, and of those, how many it `created` and `deleted`, and how many `failed`.                                                                                                                                                                                                                                                             |
@@ -147,7 +147,7 @@ A run that never held the lock, e.g. one that was skipped or could not reach the
 
 ### Staleness
 
-The importer is stale when no run has succeeded for 3 times `IMPORTER_CADENCE_SECONDS`, which is 18 hours by default. A run succeeds when it exits 0 and imports at least one ban list, so runs during a BattleMetrics outage, when every list fails, do not count. The importer then posts that it is stale to the log channel, and again every `IMPORTER_CADENCE_SECONDS` while it stays stale. It compares when runs started, so with a run every `IMPORTER_CADENCE_SECONDS`, the alert comes with the 3rd run in a row that does not succeed, however quickly the runs fail, and it allows 5 minutes, or a tenth of the cadence if that is less, for runs that start a little early or late. Set `IMPORTER_CADENCE_SECONDS` to how often the script starts a run.
+The importer is stale when no run has succeeded for 3 times `IMPORTER_CADENCE_SECONDS`, which is 18 hours by default. A run succeeds when it exits 0 and imports at least one ban list, so runs during a BattleMetrics outage, when every list fails, do not count. The importer then posts that it is stale to the log channel, and again every `IMPORTER_CADENCE_SECONDS` while it stays stale. It compares when runs started, so with a run every `IMPORTER_CADENCE_SECONDS`, the alert comes with the 3rd run in a row that does not succeed, however quickly the runs fail, and it allows 5 minutes, or a tenth of the cadence if that is less, for runs that start a little early or late. Set `IMPORTER_CADENCE_SECONDS` to how often the script starts a run, as it also sets how many Steam profiles a run refreshes (see [Steam profiles](#steam-profiles)).
 
 Only the importer checks: at the end of every run that did not succeed, and whenever a start is skipped, as another run holds the lock. So while no run starts at all, nothing is posted. Whichever run or skipped start posts saves when it started, so no other posts again within the cadence.
 
@@ -244,13 +244,13 @@ SELECT COUNT(*) FROM Bans WHERE (expired = 0 OR expired IS NULL) AND expires <= 
 
 ## Steam profiles
 
-Each run refreshes the Steam profiles, the names, profile addresses and avatars, of at most 300 players who were never refreshed, or were queued for a refresh as their bans changed, the newest first, as the export ban lists' alerts name the players they add. After them, it refreshes at most `IMPORTER_STEAM_REFRESH_PER_RUN` players whose profile is due a refresh, 200 by default, in the order of their IDs, carrying on after the last one the run before took, which `ImporterState` keeps as `steamRefreshCursor`, and from the first again once it has reached the last. A profile is due a refresh 7 days after its last one, give or take a day: each player has their own interval, from 6 days up to 8, which comes from their ID (`6 days + CRC32(id) % 172800 seconds`), so the players refreshed in the same run fall due over two days, rather than all in one run week after week.
+Each run refreshes the Steam profiles, the names, profile addresses and avatars, of the players who were never refreshed, or were queued for a refresh as their bans changed, the newest first, as the export ban lists' alerts name the players they add. After them, it refreshes players whose profile is due a refresh, in the order of their IDs, carrying on after the last one the run before took, which `ImporterState` keeps as `steamRefreshCursor`, and from the first again once it has reached the last. A profile is due a refresh 7 days after its last one, give or take a day: each player has their own interval, from 6 days up to 8, which comes from their ID (`6 days + CRC32(id) % 172800 seconds`), so the players refreshed in the same run fall due over two days, rather than all in one run week after week.
 
-Steam is asked for 100 players a call, and each call's profiles are saved with one statement, which marks them refreshed. A player Steam leaves out of its answer, e.g. as the account no longer exists, is tried again a day later rather than on every run: it is marked refreshed a day less than its interval ago, e.g. 6 days ago for a player refreshed every 7 days, and keeps its name. A player whose ID is not a SteamID64 of a player's account, e.g. one saved before SteamIDs were checked, is never sent to Steam: it is skipped and marked as looked at, so it comes up again only once its interval has passed. A profile that cannot be saved, e.g. as its name holds a character the table's character set cannot store, is left out, as the call's other profiles are saved again one at a time; it is tried again a day later, and the run posts how many profiles could not be saved, with the first error.
+A run refreshes at most `IMPORTER_STEAM_REFRESH_PER_RUN` players due a refresh, and 300 new players besides. When there are more new players, e.g. after a ban list was added, they also take the slots of the players due a refresh, so a run refreshes up to 300 plus `IMPORTER_STEAM_REFRESH_PER_RUN` new players; the slots new players leave unused are not given to players due a refresh. Unless it is set, `IMPORTER_STEAM_REFRESH_PER_RUN` is worked out each run from the number of players and `IMPORTER_CADENCE_SECONDS`: enough to refresh every player within the shortest interval, 6 days, with a run every `IMPORTER_CADENCE_SECONDS`. That is about 15% more than intervals of 6 to 8 days need, so the players Steam leaves out, and those a run could not take, e.g. as Steam was down, are caught up on. For about 145,000 players it is about 6,050 a run every 6 hours (61 calls, about a minute and a half), 1,010 every hour and 250 every 15 minutes. It is at least 200, so that runs a minute or two apart still catch up quickly, and at most 10,000. So keep `IMPORTER_CADENCE_SECONDS` at how often runs really start. The console says how many a run takes (`taking at most 6046 due a refresh a run`), and once runs have caught up, the Steam profiles in the run's status show few or none `left for later runs`.
+
+Steam is asked for 100 players a call, and each call's profiles are saved with one statement, which updates the players' rows and marks them refreshed, and never adds a row for a player removed in the meantime. A player Steam leaves out of its answer, e.g. as the account no longer exists, is tried again a day later rather than on every run: it is marked refreshed a day less than its interval ago, e.g. 6 days ago for a player refreshed every 7 days, and keeps its name. A player whose ID is not a SteamID64 of a player's account, e.g. one saved before SteamIDs were checked, is never sent to Steam: it is skipped and marked as looked at, so it comes up again only once its interval has passed. A profile that cannot be saved, e.g. as its name holds a character the table's character set cannot store, is left out, as the call's other profiles are saved again one at a time; it is tried again a day later, and the run posts how many profiles could not be saved, with the first error.
 
 A call that fails, or is answered without a list of players, is posted with its error, and its players stay as they were, so they are taken again: the new ones as new, and the next run carries on from before the first of those due a refresh. Once 2 calls in a row have failed, the step stops, as Steam is then most likely down, and it stops at once when Steam refuses the API key, or still answers HTTP 429 after the Steam client's own retries and pauses. Nothing waits between calls but the Steam client's limit of one request every 1.5 seconds, and each request has 15 seconds to be answered.
-
-200 a run keeps the profiles of about 145,000 players refreshed weekly only with a run about every 15 minutes. With a run every 6 hours, it refreshes 800 profiles a day, so a profile could wait months for its refresh: `IMPORTER_STEAM_REFRESH_PER_RUN=5200` keeps them weekly at that schedule, with about 52 calls, or 80 seconds, a run, and `900` at an hourly one.
 
 ## Database tables
 
@@ -301,13 +301,13 @@ The importer reads the same `DATABASE_URI`, `BATTLEMETRICS_API_KEY`, `BATTLEMETR
 | Variable                         | Default | Description                                                                                                                                                                                                                                                  |
 | -------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `IMPORTER_MAX_RUN_SECONDS`       | `18000` | A run that takes longer stops at its next safe point, and exits at once 60 seconds later if it has not. Keep it shorter than the time between starts.                                                                                                        |
-| `IMPORTER_CADENCE_SECONDS`       | `21600` | How often the script starts a run, which sets when the importer is stale.                                                                                                                                                                                    |
+| `IMPORTER_CADENCE_SECONDS`       | `21600` | How often the script starts a run, which sets when the importer is stale and how many Steam profiles a run refreshes (see [Steam profiles](#steam-profiles)).                                                                                                |
 | `IMPORTER_ALLOW_MASS_REMOVAL`    |         | Ban list IDs, separated by commas, that may lose any number of bans at once in the next run, once they are read in full (see [Removing bans](#removing-bans)). Remove a list from it once its removal is done.                                               |
 | `IMPORTER_ACCESS_CHECK`          | `1`     | `0` turns off the check, once a run, of which BattleMetrics ban lists the CBL organisation can see (see [Ban list states](#ban-list-states)).                                                                                                                |
 | `IMPORTER_SCAN_COUNT_CHECK`      | `1`     | `0` turns off the check that a read of a BattleMetrics list found as many bans as BattleMetrics counts on it (see [Importing a ban list](#importing-a-ban-list)).                                                                                            |
 | `IMPORTER_SCAN_COUNT_CHECK_SKIP` |         | Ban list IDs, separated by commas, that the count check leaves out, for a list whose count BattleMetrics keeps getting wrong. Remove a list from it once its count is right again.                                                                           |
 | `IMPORTER_APPLY_STEAMID_MOVES`   | `0`     | `1` moves a ban whose player is no longer one of its SteamIDs to another of them. Until then such moves are only counted and logged.                                                                                                                         |
-| `IMPORTER_STEAM_REFRESH_PER_RUN` | `200`   | How many players whose Steam profile is due a refresh a run refreshes, at most, after those never refreshed: from `0` to `10000` (see [Steam profiles](#steam-profiles)). An invalid value is replaced with `200`, with a warning posted to the log channel. |
+| `IMPORTER_STEAM_REFRESH_PER_RUN` |         | How many players due a Steam profile refresh a run refreshes, at most: `0` to `10000`. Not set, or invalid, with a warning, it is enough to refresh all within 6 days at `IMPORTER_CADENCE_SECONDS`, at least `200` (see [Steam profiles](#steam-profiles)). |
 | `IMPORTER_DRY_RUN`               | `0`     | `1` makes the run read everything, write nothing and say what the import would change. It runs no other step.                                                                                                                                                |
 | `GIT_SHA`                        |         | The commit the image was built from, shown when a run starts and in its JSON line.                                                                                                                                                                           |
 
@@ -324,3 +324,9 @@ Its first run applies migration `003`. Then:
 A list that the previous version held, as it would have lost at least 25 bans and 10% of them at once, is no longer waiting for `IMPORTER_ALLOW_MASS_REMOVAL`: its missing bans are recorded on the first run, and removed by the next one that still does not find them, unless it seems to have lost all of its bans. The dry run counts them as held.
 
 Going back to the previous image returns to its rules: a list's missing bans are removed at once, unless they reach 25 bans and 10% of the list, which wait for `IMPORTER_ALLOW_MASS_REMOVAL`. The new table stays, and the older importer ignores it.
+
+### Deploying the version that marks expired bans and budgets Steam profiles
+
+Nothing needs to be set: each run works out how many Steam profiles to refresh from `IMPORTER_CADENCE_SECONDS`, so keep that at how often runs start, e.g. `3600` once they start every hour. The first run may mark many bans expired, those of lists that were not fetched for a while, and queue their players. Within a day, the Steam profiles in the run's status should show few or none `left for later runs`. If `IMPORTER_STEAM_REFRESH_PER_RUN` is set instead, e.g. to keep the Steam step short, about `6100` keeps about 145,000 players refreshed weekly with a run every 6 hours, and about `1000` with a run every hour.
+
+Going back to the previous image brings back its Steam step, which refreshes in one run every player not refreshed for 7 days: a few thousand after runs of this version, which adds a few minutes to that run, and more, for longer, if `IMPORTER_STEAM_REFRESH_PER_RUN` was set lower than the schedule needs. The bans this version marked expired stay marked.

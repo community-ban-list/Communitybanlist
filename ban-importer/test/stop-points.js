@@ -890,7 +890,7 @@ function database(query, transaction = async (work) => work({})) {
       if (sql.startsWith('SELECT COUNT(*)')) return [{ due: 250, new: 250 }];
       if (sql.startsWith('SELECT id FROM SteamUsers WHERE lastRefreshedInfo IS NULL'))
         return players;
-      if (sql.startsWith('INSERT INTO SteamUsers')) events.push('save');
+      if (sql.startsWith('UPDATE SteamUsers su JOIN (VALUES')) events.push('save');
       return [{ affectedRows: 0 }, { affectedRows: 0 }];
     }),
     crypto: { createHash },

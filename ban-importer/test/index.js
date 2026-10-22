@@ -29,6 +29,8 @@ const settle = () => new Promise(setImmediate);
 // them. The import is a dry run when dryRun is set, as IMPORTER_DRY_RUN makes it.
 async function loadIndex({ dryRun = false } = {}) {
   const calls = [];
+  // The options a step was given besides its counts, as [name, options].
+  const options = [];
   const output = [];
   const result = deferred();
   const leftWaiting = deferred();
@@ -42,9 +44,10 @@ async function loadIndex({ dryRun = false } = {}) {
 
   // A step that counts what it does is given an object to count in, which it fills in here with
   // its name.
-  const step = (name) => async (counts) => {
+  const step = (name) => async (counts, given) => {
     calls.push(name);
     if (counts) counts.step = name;
+    if (given) options.push([name, { ...given }]);
   };
   const dependencies = {
     'scbl-lib/utils': { describeError, stackTrace },
@@ -115,7 +118,7 @@ async function loadIndex({ dryRun = false } = {}) {
   });
   await module.evaluate();
 
-  return { calls, output, result, leftWaiting, process: fakeProcess, steps: () => steps };
+  return { calls, options, output, result, leftWaiting, process: fakeProcess, steps: () => steps };
 }
 
 // The run is given every step, in order, each named after what it runs, as the run record names
@@ -123,7 +126,7 @@ async function loadIndex({ dryRun = false } = {}) {
 // recalculate players. The import reports its counts for the record, and the expiry step, the Steam
 // step, the export recalculation and the export push count what they do in an object they are
 // given, which the record keeps, also when the step fails part-way. Each run of a step counts
-// afresh.
+// afresh. The Steam step is given how often runs start, which the run gives the steps.
 {
   const index = await loadIndex();
   const names = [
@@ -156,8 +159,9 @@ async function loadIndex({ dryRun = false } = {}) {
       ['exportExportBans', undefined]
     ]
   );
-  for (const step of steps) await step.run();
+  for (const step of steps) await step.run({ cadenceSeconds: 3600 });
   assert.deepStrictEqual(index.calls, names);
+  assert.deepStrictEqual(index.options, [['updateSteamUserInfo', { cadenceSeconds: 3600 }]]);
   assert.deepStrictEqual(counted(), [
     ['importBans', { lists: 2 }],
     ['expireBans', { step: 'expireBans' }],

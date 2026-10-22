@@ -6,10 +6,10 @@ import describeError from '../../scbl-lib/utils/describe-error.js';
 
 // Check the step that marks bans expired once their expiry has passed, without a database: which
 // bans it marks, that it compares their expiries with the time in UTC, that it queues their players
-// for a recalculation in the same transaction, in batches, with their retries, and where it stops.
-// The database is a stand-in that keeps bans and players in memory and runs the statements the
-// step sends as MySQL would, in transactions that a failure rolls back. Waits between attempts are
-// skipped but recorded.
+// for a recalculation in the same transaction, in batches, with their retries, what it counts, and
+// where it stops. The database is a stand-in that keeps bans and players in memory and runs the
+// statements the step sends as MySQL would, in transactions that a failure rolls back. Waits
+// between attempts are skipped but recorded.
 
 // Stand-ins for Sequelize's errors.
 class DatabaseError extends Error {
@@ -33,8 +33,9 @@ const players = new Map();
 const events = [];
 const delays = [];
 const logs = [];
-// Errors for the statements that mark bans expired, and that queue players, to fail with, one each
-// time, in order.
+// Errors for the statements that find the bans whose expiry has passed, that mark bans expired, and
+// that queue players, to fail with, one each time, in order.
+const findErrors = [];
 const markErrors = [];
 const queueErrors = [];
 // Called before the statement that marks bans expired writes them, with their IDs.
@@ -67,6 +68,7 @@ const sequelize = {
     await tick();
     if (sql === FIND_EXPIRED) {
       assert.strictEqual(type, QueryTypes.SELECT);
+      if (findErrors.length > 0) throw findErrors.shift();
       events.push(['find', tx]);
       times.push(replacements[0]);
       const time = timeOf(replacements[0]);
@@ -199,7 +201,7 @@ function addBan(id, steamUser, expires, expired = 0) {
 function reset() {
   bans.clear();
   players.clear();
-  for (const array of [events, delays, logs, markErrors, queueErrors, times, progress])
+  for (const array of [events, delays, logs, findErrors, markErrors, queueErrors, times, progress])
     array.length = 0;
   onMark = null;
   transactions = 0;
@@ -334,6 +336,32 @@ const queued = (id) => players.get(id).lastRefreshedReputationPoints === null;
   assert.ok([...bans.values()].every(({ expired }) => expired === 1));
 }
 
+// A player whose bans fall in different batches is queued in each, and counted once.
+{
+  reset();
+  addBan('5,a', steamID(1), NOW - 3 * HOUR);
+  addBan('5,b', steamID(2), NOW - 3 * HOUR);
+  addBan('5,c', steamID(1), NOW - 2 * HOUR);
+  addBan('5,d', steamID(1), NOW - HOUR);
+  const counts = await expire({ batchSize: 2 });
+  assert.deepStrictEqual(counts, { due: 4, expired: 4, players: 2 });
+  assert.deepStrictEqual(
+    events.filter(([what]) => what === 'queue'),
+    [
+      ['queue', [steamID(1), steamID(2)], 1],
+      ['queue', [steamID(1)], 2]
+    ]
+  );
+  assert.match(logs.at(-1).message, /^Marked 4 of 4 bans .*, and queued their 2 players for a/);
+
+  // Three bans of one player in two batches: one player.
+  reset();
+  addBan('6,a', steamID(7), NOW - 3 * HOUR);
+  addBan('6,b', steamID(7), NOW - 2 * HOUR);
+  addBan('6,c', steamID(7), NOW - HOUR);
+  assert.deepStrictEqual(await expire({ batchSize: 2 }), { due: 3, expired: 3, players: 1 });
+}
+
 // A transaction that ends in a deadlock is rolled back and run again as a whole, after 5 seconds,
 // so no ban is left marked expired without its player queued.
 {
@@ -354,6 +382,19 @@ const queued = (id) => players.get(id).lastRefreshedReputationPoints === null;
     ['commit', 2]
   ]);
   assert.ok(queued(steamID(1)) && queued(steamID(2)));
+}
+
+// A step that cannot find the bans counts nothing, rather than saying that none had expired.
+{
+  reset();
+  addBan('1,a', steamID(1), NOW - HOUR);
+  const error = new DatabaseError("Unknown column 'expired' in 'where clause'", { errno: 1054 });
+  findErrors.push(error);
+  const counts = {};
+  await assert.rejects(expireBans(counts, { now: new Date(NOW) }), (thrown) => thrown === error);
+  assert.deepStrictEqual({ ...counts }, {});
+  assert.deepStrictEqual(events, []);
+  assert.strictEqual(bans.get('1,a').expired, 0);
 }
 
 // An error that running the transaction again cannot fix fails the step, which leaves the batch as
@@ -407,5 +448,5 @@ const queued = (id) => players.get(id).lastRefreshedReputationPoints === null;
 }
 
 console.log(
-  'Expiry checks passed: bans whose expiry has passed are marked expired in UTC, in batches with their players queued, retried as a whole, and stopped between batches.'
+  'Expiry checks passed: bans whose expiry has passed are marked expired in UTC, in batches with their players queued and counted once, retried as a whole, and stopped between batches.'
 );

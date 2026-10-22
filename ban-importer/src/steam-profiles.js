@@ -4,28 +4,39 @@ import { ImporterState } from 'scbl-lib/db/importer-models';
 import { QueryTypes } from 'scbl-lib/db/sequelize';
 import { Logger } from 'scbl-lib/utils';
 
-import { isRetryable, placeholders, retryOperation, sqlTime } from './apply-list.js';
+import { isRetryable, retryOperation, sqlTime } from './apply-list.js';
 import { unquote } from './ban-list-sync.js';
 import { reportProgress, stopIfRequested } from './run-control.js';
 import { isSteamID } from './steam-id.js';
 
-// Refreshing players' Steam profiles, their names and avatars, within a budget for each run. A run
-// takes first the players who were never refreshed or were queued for a refresh as their bans
-// changed, the newest first, then the players whose profile is due a refresh, in the order of their
-// IDs, carrying on from where the last run stopped. It asks Steam for 100 players a call, and saves
-// each call's profiles with one statement. A player Steam leaves out of its answer, e.g. as the
-// account no longer exists, is tried again a day later rather than on every run, and a player whose
-// ID is not a SteamID is never sent to Steam.
+// Refreshing players' Steam profiles, their names and avatars, within a budget for each run, which
+// comes from how often runs start, so each profile is refreshed about once a week whatever the
+// schedule. A run takes first the players who were never refreshed or were queued for a refresh as
+// their bans changed, the newest first, then the players whose profile is due a refresh, in the
+// order of their IDs, carrying on from where the last run stopped. It asks Steam for 100 players a
+// call, and saves each call's profiles with one statement. A player Steam leaves out of its answer,
+// e.g. as the account no longer exists, is tried again a day later rather than on every run, and a
+// player whose ID is not a SteamID is never sent to Steam.
 
-// At most this many players who were never refreshed, or were queued for a refresh, are refreshed
-// in a run, the newest first, as the export ban lists' alerts name the players they add.
+// A run takes this many players who were never refreshed, or were queued for a refresh, the newest
+// first, as the export ban lists' alerts name the players they add. When there are more, e.g. after
+// a ban list was added, they also take the slots of the players due a refresh.
 export const NEW_PER_RUN = 300;
 
-// After them, at most this many players whose profile is due a refresh are refreshed in a run,
-// unless IMPORTER_STEAM_REFRESH_PER_RUN says otherwise, which may be at most MAX_REFRESH_PER_RUN, a
-// hundred calls to Steam.
-export const DEFAULT_REFRESH_PER_RUN = 200;
+// After them, a run takes at most as many players whose profile is due a refresh as
+// IMPORTER_STEAM_REFRESH_PER_RUN says, from 0 up to MAX_REFRESH_PER_RUN, a hundred calls to Steam.
+// Without it, a run takes enough to refresh every player within the shortest interval, 6 days, at
+// a run every IMPORTER_CADENCE_SECONDS (refreshPerRunFor). That is about 15% more than intervals of
+// 6 to 8 days need, so the players Steam leaves out, and those a run could not take, are caught up
+// on. With 145,000 players it is about 6,050 a run every 6 hours, 1,010 every hour and 250 every 15
+// minutes. It is at least MIN_REFRESH_PER_RUN, so that runs a minute or two apart still catch up
+// quickly, and at most MAX_REFRESH_PER_RUN.
+export const MIN_REFRESH_PER_RUN = 200;
 export const MAX_REFRESH_PER_RUN = 10000;
+
+// How often runs start, in seconds, when the step is not told: every 6 hours, as run.js takes it
+// when IMPORTER_CADENCE_SECONDS is not set.
+const DEFAULT_CADENCE_SECONDS = 6 * 60 * 60;
 
 // Steam's GetPlayerSummaries takes at most this many SteamIDs a call.
 export const IDS_PER_CALL = 100;
@@ -43,21 +54,22 @@ const DAY = 24 * 60 * 60;
 // A profile is refreshed every 7 days, give or take a day: each player's own interval, from 6 days
 // up to 8, comes from their ID, so players refreshed in the same run fall due over two days, rather
 // than all in one run week after week. In SQL, in seconds.
-const INTERVAL = `(${6 * DAY} + CRC32(id) % ${2 * DAY})`;
+const SHORTEST_INTERVAL = 6 * DAY;
+const INTERVAL = `(${SHORTEST_INTERVAL} + CRC32(id) % ${2 * DAY})`;
 
 // A player Steam leaves out is tried again this long after, in seconds, rather than on every run:
 // they are marked refreshed this much less than their interval ago (RETRY_STAMP, in SQL), e.g. 6
 // days ago for a player refreshed every 7 days.
 const RETRY_MISSING_AFTER = DAY;
-const RETRY_STAMP = `(${6 * DAY - RETRY_MISSING_AFTER} + CRC32(id) % ${2 * DAY})`;
+const RETRY_STAMP = `(${SHORTEST_INTERVAL - RETRY_MISSING_AFTER} + CRC32(id) % ${2 * DAY})`;
 
 // Whether a player's profile is due a refresh, given the time now, in UTC, as the importer writes
 // every time, so the comparison is right whatever the time zone of the database or the connection.
 // A player never refreshed has no time, and is taken as new instead.
 const IS_DUE = `lastRefreshedInfo < CAST(? AS DATETIME(3)) - INTERVAL ${INTERVAL} SECOND`;
 
-// How many players are due a refresh, and of those how many are new.
-const COUNT_DUE = `SELECT COUNT(*) AS due, COUNT(*) - COUNT(lastRefreshedInfo) AS new FROM SteamUsers WHERE lastRefreshedInfo IS NULL OR ${IS_DUE}`;
+// How many players there are, how many of them are due a refresh, and of those how many are new.
+const COUNT_DUE = `SELECT COUNT(*) AS players, COUNT(CASE WHEN lastRefreshedInfo IS NULL OR ${IS_DUE} THEN 1 END) AS due, COUNT(*) - COUNT(lastRefreshedInfo) AS new FROM SteamUsers`;
 
 // The players never refreshed, or queued for a refresh, the newest first.
 const FIND_NEW =
@@ -69,11 +81,13 @@ const FIND_DUE_AFTER = `SELECT id FROM SteamUsers WHERE id > ? AND ${IS_DUE} ORD
 const FIND_DUE_UP_TO = `SELECT id FROM SteamUsers WHERE id <= ? AND ${IS_DUE} ORDER BY id LIMIT ?`;
 
 // Players' profiles, as Steam gave them, are saved with one statement, which marks them refreshed.
-// MySQL 8.0.19 and later take a row alias, here new, for the values given.
-const SAVE_PROFILES =
-  'INSERT INTO SteamUsers (id, name, profileURL, avatar, avatarMedium, avatarFull, lastRefreshedInfo, createdAt, updatedAt) VALUES';
-const ON_DUPLICATE_PROFILE =
-  'AS new ON DUPLICATE KEY UPDATE name = new.name, profileURL = new.profileURL, avatar = new.avatar, avatarMedium = new.avatarMedium, avatarFull = new.avatarFull, lastRefreshedInfo = new.lastRefreshedInfo, updatedAt = new.updatedAt';
+// It only updates the players' rows, joined by ID with a table of the profiles, which MySQL 8.0.19
+// and later make with VALUES ROW(...), here p. So it never makes a row again for a player removed
+// since the step read them, and needs nothing of the table's other columns.
+const PROFILE_ROW = 'ROW(?, ?, ?, ?, ?, ?)';
+const SAVE_PROFILES = 'UPDATE SteamUsers su JOIN (VALUES';
+const SET_PROFILES =
+  ') AS p (id, name, profileURL, avatar, avatarMedium, avatarFull) ON su.id = p.id SET su.name = p.name, su.profileURL = p.profileURL, su.avatar = p.avatar, su.avatarMedium = p.avatarMedium, su.avatarFull = p.avatarFull, su.lastRefreshedInfo = ?, su.updatedAt = ?';
 
 // Mark players to be tried again RETRY_MISSING_AFTER from now.
 const RETRY_LATER = `UPDATE SteamUsers SET lastRefreshedInfo = CAST(? AS DATETIME(3)) - INTERVAL ${RETRY_STAMP} SECOND WHERE id IN (?)`;
@@ -90,17 +104,25 @@ function formatCount(count) {
   return count.toLocaleString('en-US');
 }
 
+// How many players due a refresh a run takes when IMPORTER_STEAM_REFRESH_PER_RUN is not given, for
+// that many players and a run every cadenceSeconds: enough to refresh them all within the shortest
+// interval, but at least MIN_REFRESH_PER_RUN and at most MAX_REFRESH_PER_RUN.
+export function refreshPerRunFor(players, cadenceSeconds) {
+  const needed = Math.ceil((players * cadenceSeconds) / SHORTEST_INTERVAL);
+  return Math.min(MAX_REFRESH_PER_RUN, Math.max(MIN_REFRESH_PER_RUN, needed));
+}
+
 // Read IMPORTER_STEAM_REFRESH_PER_RUN: a whole number from 0 to MAX_REFRESH_PER_RUN, with spaces or
-// one pair of quotes around it. It is DEFAULT_REFRESH_PER_RUN when it is not given, and an invalid
-// value is replaced with that, with a warning to log.
-export function readRefreshPerRun(value) {
+// one pair of quotes around it. It is defaultCount, which refreshPerRunFor works out from the run's
+// schedule, when it is not given, and an invalid value is replaced with that, with a warning to log.
+export function readRefreshPerRun(value, defaultCount) {
   const setting = unquote(value);
-  if (setting === '') return { count: DEFAULT_REFRESH_PER_RUN };
+  if (setting === '') return { count: defaultCount };
   if (/^[0-9]+$/.test(setting) && Number(setting) <= MAX_REFRESH_PER_RUN)
     return { count: Number(setting) };
   return {
-    count: DEFAULT_REFRESH_PER_RUN,
-    warning: `Warning: IMPORTER_STEAM_REFRESH_PER_RUN must be a whole number from 0 to ${formatCount(MAX_REFRESH_PER_RUN)}, not "${value}", so the default of ${DEFAULT_REFRESH_PER_RUN} is used.`
+    count: defaultCount,
+    warning: `Warning: IMPORTER_STEAM_REFRESH_PER_RUN must be a whole number from 0 to ${formatCount(MAX_REFRESH_PER_RUN)}, not "${value}", so the default for the run's schedule, ${formatCount(defaultCount)}, is used.`
   };
 }
 
@@ -139,23 +161,23 @@ async function forIDs(sql, time, ids) {
   }
 }
 
+// Save the profiles with one statement, which marks them refreshed at time.
 function writeProfiles(profiles, time) {
-  return sequelize.query(
-    `${SAVE_PROFILES} ${placeholders(profiles.length, 9)} ${ON_DUPLICATE_PROFILE}`,
-    {
-      replacements: profiles.flatMap((profile) => [
+  const rows = Array(profiles.length).fill(PROFILE_ROW).join(', ');
+  return sequelize.query(`${SAVE_PROFILES} ${rows}${SET_PROFILES}`, {
+    replacements: [
+      ...profiles.flatMap((profile) => [
         profile.id,
         profile.name,
         profile.profileURL,
         profile.avatar,
         profile.avatarMedium,
-        profile.avatarFull,
-        time,
-        time,
-        time
-      ])
-    }
-  );
+        profile.avatarFull
+      ]),
+      time,
+      time
+    ]
+  });
 }
 
 // Save the profiles with one statement, run again while it fails in a way that could pass. One
@@ -217,18 +239,31 @@ export function nextCursor(ids, dealtWith) {
 // Refresh the Steam profiles of the players that are due, within the run's budget, counting in
 // counts how many were due, of those how many were new, and how many it updated, found missing on
 // Steam, skipped as not SteamIDs and could not save, how many are left for later runs, and how many
-// calls it made, also when the step stops part-way. A run that is asked to stop does so between
-// calls. now is the time the players' last refresh is compared with, and refreshPerRun the setting
-// of how many players due a refresh it takes after the new ones.
+// calls it made, also when the step stops part-way. It counts nothing until it has counted the
+// players due. A run that is asked to stop does so between calls. now is the time the players' last
+// refresh is compared with, refreshPerRun the setting of how many players due a refresh it takes
+// after the new ones, and cadenceSeconds how often runs start, from which it works out how many
+// when that is not set.
 export async function updateSteamUserInfo(
   counts = {},
-  { now = new Date(), refreshPerRun = process.env.IMPORTER_STEAM_REFRESH_PER_RUN } = {}
+  {
+    now = new Date(),
+    refreshPerRun = process.env.IMPORTER_STEAM_REFRESH_PER_RUN,
+    cadenceSeconds = DEFAULT_CADENCE_SECONDS
+  } = {}
 ) {
   const startTime = Date.now();
   const time = sqlTime(now);
+
+  Logger.verbose('Steam', 2, 'Finding Steam users to update...');
+  const [backlog] = await retryOperation(() =>
+    sequelize.query(COUNT_DUE, { replacements: [time], type: QueryTypes.SELECT })
+  );
+  // Only now are there counts, so a step that could not count the players due does not say that
+  // none were due.
   Object.assign(counts, {
-    due: 0,
-    new: 0,
+    due: Number(backlog?.due ?? 0),
+    new: Number(backlog?.new ?? 0),
     updated: 0,
     missing: 0,
     skipped: 0,
@@ -236,33 +271,33 @@ export async function updateSteamUserInfo(
     left: 0,
     calls: 0
   });
-  const setting = readRefreshPerRun(refreshPerRun);
+  const setting = readRefreshPerRun(
+    refreshPerRun,
+    refreshPerRunFor(Number(backlog?.players ?? 0), cadenceSeconds)
+  );
   if (setting.warning) Logger.important('Steam', setting.warning);
 
-  Logger.verbose('Steam', 2, 'Finding Steam users to update...');
-  const [backlog] = await retryOperation(() =>
-    sequelize.query(COUNT_DUE, { replacements: [time], type: QueryTypes.SELECT })
-  );
-  counts.due = Number(backlog?.due ?? 0);
-  counts.new = Number(backlog?.new ?? 0);
-
-  // The players this run takes: the new ones first, then those due a refresh.
+  // The players this run takes: first the new ones, at most NEW_PER_RUN plus the setting, as new
+  // ones beyond NEW_PER_RUN take the slots of the players due a refresh, and then the players due a
+  // refresh, in the slots that are left.
+  const budget = NEW_PER_RUN + setting.count;
   const newIDs =
     counts.new > 0
       ? (
           await retryOperation(() =>
-            sequelize.query(FIND_NEW, { replacements: [NEW_PER_RUN], type: QueryTypes.SELECT })
+            sequelize.query(FIND_NEW, { replacements: [budget], type: QueryTypes.SELECT })
           )
         ).map(({ id }) => id)
       : [];
+  const dueBudget = Math.min(setting.count, budget - newIDs.length);
   const cursor = await readCursor();
   const dueIDs =
-    counts.due > counts.new && setting.count > 0 ? await findDue(time, cursor, setting.count) : [];
+    counts.due > counts.new && dueBudget > 0 ? await findDue(time, cursor, dueBudget) : [];
   const ids = [...newIDs, ...dueIDs];
   Logger.verbose(
     'Steam',
     2,
-    `Updating ${ids.length} Steam users, ${newIDs.length} new and ${dueIDs.length} due a refresh, of ${counts.due} due (${counts.new} new)...`
+    `Updating ${ids.length} Steam users, ${newIDs.length} new and ${dueIDs.length} due a refresh, of ${counts.due} due (${counts.new} new), taking at most ${setting.count} due a refresh a run...`
   );
 
   // The players dealt with: refreshed, found missing on Steam, skipped or not saved.

@@ -408,6 +408,25 @@ for (const [outcome, title, color, mark, reason] of [
     ...LABELS.map((label) => `▫️ ${label} · not run`)
   ]);
 }
+// A step that failed before it counted anything, e.g. as it could not read the database, keeps
+// empty counts, which say nothing, rather than that none had expired or none were due.
+for (const phase of ['expireBans', 'updateSteamUserInfo']) {
+  const index = STEPS.indexOf(phase);
+  const failed = render(
+    ended('failed', {
+      phase,
+      completed: STEPS.slice(0, index),
+      progress: {},
+      counts: { importBans: COUNTS.importBans, [phase]: {} },
+      reason: 'SequelizeConnectionRefusedError: connect ECONNREFUSED'
+    })
+  );
+  const description = lines(failed);
+  const at = description.indexOf(`❌ **${LABELS[index]}** · ${DURATIONS[index]}`);
+  assert.ok(at > 0, phase);
+  assert.strictEqual(description[at + 1], `▫️ ${LABELS[index + 1]} · not run`);
+  assert.ok(description.every((line) => !/none had expired|none were due/.test(line)));
+}
 {
   // A run that stopped between two steps, after one finished, shows that step as finished.
   const between = render(
