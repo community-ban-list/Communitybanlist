@@ -1,6 +1,6 @@
 # CBL Ban Importer
 
-Copies the bans of the partner ban lists into the CBL database and marks the bans whose expiry has passed as expired, then updates the Steam profiles, reputation points and ranks of the players, recalculates the export ban lists and sends their changes to BattleMetrics. One run does all of this and exits. The script that starts the importer runs it every 6 hours, and can run it every hour (see [Running more often](#running-more-often)). Of each list's bans, only those that are new or changed are written (see [Importing a ban list](#importing-a-ban-list)), and a BattleMetrics list is read in full once its last full read is about 30 minutes old, or when it needs to be: otherwise only its newest page is read (see [Head polls and full reads](#head-polls-and-full-reads)).
+Copies the bans of the partner ban lists into the CBL database and marks the bans whose expiry has passed as expired, then updates the Steam profiles, reputation points and ranks of the players, recalculates the export ban lists and sends their changes to BattleMetrics. One run does all of this and exits. The script that starts the importer runs it every 6 hours, and can run it every hour (see [Running more often](#running-more-often)). With `IMPORTER_MODE=loop`, the same image runs as a service instead, in the Portainer stack, with a cycle every 10 minutes (see [Running as a service](#running-as-a-service)). Of each list's bans, only those that are new or changed are written (see [Importing a ban list](#importing-a-ban-list)), and a BattleMetrics list is read in full once its last full read is about 30 minutes old, or when it needs to be: otherwise only its newest page is read (see [Head polls and full reads](#head-polls-and-full-reads)).
 
 ## Running it
 
@@ -14,16 +14,35 @@ docker wait cblimporter # Waits for the run to end, and prints its exit code.
 
 Until the container is removed, `docker inspect -f '{{.State.ExitCode}}' cblimporter` gives the run's exit code and `docker logs cblimporter` its output. Before the next start, the script removes it with `docker rm cblimporter` once the run has ended, never with `docker rm -f`, which kills a run that is still going before it can save its record, and throws away its output with its JSON line.
 
-Only one run works at a time. A run holds a MySQL lock while it works, and a run started meanwhile is skipped, with exit code 75. With the same container name for every run, though, a start while a run is still going fails in Docker, with exit code 125 as the name is in use, and never reaches the importer. A stuck run is then ended by its time limit, `IMPORTER_MAX_RUN_SECONDS`, or at the latest 60 seconds after it, so keep that shorter than the time between starts. For such a start to be skipped instead, and to check whether the importer is stale (see below), give each run a name of its own, e.g. `--name "cblimporter-$(date +%Y%m%d%H%M)" --label cbl-importer`. `docker ps -a --latest --quiet --filter label=cbl-importer` then finds the latest run, and `docker container prune --force --filter label=cbl-importer` removes the containers of the runs that have ended, never one that is still going.
+Only one run works at a time. A run holds two MySQL locks while it works (see [The locks](#the-locks)), and a run started meanwhile, or while the importer service runs, is skipped, with exit code 75. With the same container name for every run, though, a start while a run is still going fails in Docker, with exit code 125 as the name is in use, and never reaches the importer. A stuck run is then ended by its time limit, `IMPORTER_MAX_RUN_SECONDS`, or at the latest 60 seconds after it, so keep that shorter than the time between starts. For such a start to be skipped instead, and to check whether the importer is stale (see below), give each run a name of its own, e.g. `--name "cblimporter-$(date +%Y%m%d%H%M)" --label cbl-importer`. `docker ps -a --latest --quiet --filter label=cbl-importer` then finds the latest run, and `docker container prune --force --filter label=cbl-importer` removes the containers of the runs that have ended, never one that is still going.
 
 ### Exit codes
 
 | Code | Meaning                                                                                                         | What to do                                                                                                  |
 | ---- | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `0`  | The run finished.                                                                                               | Nothing.                                                                                                    |
-| `1`  | The run failed, e.g. it could not reach the database, a step or migration failed, or it lost its run lock.      | Read why in the run's JSON line or the log channel. The next run starts afresh.                             |
+| `1`  | The run failed, e.g. it could not reach the database, a step or migration failed, or it lost its locks.         | Read why in the run's JSON line or the log channel. The next run starts afresh.                             |
 | `3`  | The run stopped part-way, as it received `SIGTERM` or `SIGINT`, or took longer than `IMPORTER_MAX_RUN_SECONDS`. | Nothing, unless it keeps happening. The next run picks up the work.                                         |
-| `75` | The run was skipped, as another run holds the run lock, e.g. one started by hand or under another name.         | Nothing. If no run has succeeded for 3 cadences, e.g. as the other run is stuck, it posts that it is stale. |
+| `75` | The run was skipped, as the importer service or another run, e.g. one started by hand, holds the locks.         | Nothing. If no run has succeeded for 3 cadences, e.g. as the other run is stuck, it posts that it is stale. |
+
+The importer service exits with codes of its own (see [Running as a service](#running-as-a-service)). An `IMPORTER_MODE` that is neither `once` nor `loop` starts nothing, and exits 1.
+
+### The locks
+
+The importer holds two MySQL locks, on a connection of its own, named after the database it works on:
+
+- **The service lock**, `cbl-importer-service:<database>`, for as long as its process runs: a run for its whole run, and the importer service from when it starts until it stops. Only one importer holds it at a time, so a run started meanwhile is skipped.
+- **The run lock**, `cbl-importer:<database>`, while it works on the database: a run for its whole run, and the importer service during each of its cycles, but not between them. The bot checks it before a change that must not happen while the importer works, such as removing an export ban list or giving a ban list a new source, and refuses the change while it is held, so between the service's cycles the bot's commands work. Importers from before the service lock held only the run lock, for their whole run, so the bot still sees their runs, and a cycle of the service that finds the run lock held waits for such a run to end.
+
+A run that finds either lock held is skipped, and its line, its record and any stale alert it posts say which: `The importer service or another run holds the service lock`, which the service holds even between its cycles, when the bot finds the run lock free, or `Another run holds the run lock`, which only a run of an importer from before the service lock holds without the service lock. A service that loses its locks says that it lost its locks, as between cycles it holds only the service lock.
+
+MySQL frees both as soon as their connection closes, e.g. when the importer exits or is killed. The importer uses the connection every minute and, from this version on, has MySQL close it once it has not been used for 5 minutes, rather than after MySQL's usual `wait_timeout` of 8 hours, so an importer cut off from MySQL without closing the connection, e.g. by a network partition, leaves its locks held for at most about 5 minutes. An importer from before the service lock leaves `wait_timeout` as it is, so one that is cut off leaves the run lock held for up to 8 hours, or about 2 hours with TCP keep-alive, and meanwhile the service's cycles wait for it (see [Stops and exit codes](#stops-and-exit-codes)), and the bot refuses the changes it refuses during a run. To see which connections hold the locks, in the CBL database:
+
+```sql
+SELECT IS_USED_LOCK(CONCAT('cbl-importer-service:', DATABASE())) AS service, IS_USED_LOCK(CONCAT('cbl-importer:', DATABASE())) AS run;
+```
+
+Each is the ID of the connection that holds the lock, or `NULL` while it is free. `SHOW PROCESSLIST;` shows how long each connection has been idle: `Time`, in seconds, while its `Command` is `Sleep`. An importer that is still running uses its locks' connection every minute, so one idle for longer belongs to an importer that is gone. `KILL <ID>;` closes a connection, which frees its locks at once. While the importer service runs, it holds the service lock itself, so kill the run lock's holder only when it is another connection than the service lock's: killing the service's own connection only makes the service exit 1 and start again, and its next cycle still waits.
 
 ### The JSON line
 
@@ -119,6 +138,8 @@ For example, spread over several lines here and shortened:
 | `migrations`           | The importer migrations the run applied, if any, also when a later one failed.                                             |
 | `phases`               | How long each phase took, in seconds: waiting for the database, taking the run lock, connecting, migrations and each step. |
 | `counts`               | What the steps counted (see below).                                                                                        |
+| `cycle`                | In loop mode only: the cycle's number, from 1 when the service started.                                                    |
+| `memory`               | In loop mode only: the process's memory as the cycle ended, in MB: `rssMB`, `heapUsedMB`, `heapTotalMB` and `externalMB`.  |
 
 The steps that count what they do keep their counts also when they fail or stop part-way. The expiry and Steam steps start counting once their first read has worked, so one that fails before, e.g. as the database is unavailable, has no counts, rather than counts that say nothing was due:
 
@@ -136,14 +157,15 @@ Each list in `banLists` says how it was read (`read`: `head` or `full`), and for
 
 A run that held the run lock also saves its record in the database, in the importer's `ImporterState` table:
 
-| Row                  | What it holds                                                                                                                                       |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lastRun`            | The latest run's record, as its JSON line shows it.                                                                                                 |
-| `lastSuccessAt`      | When the latest successful run started: one that exited 0 and imported at least one ban list, if any.                                               |
-| `recentRuns`         | The latest 100 runs' records, oldest first, without per-list counts.                                                                                |
-| `lastStaleAlertAt`   | When the run, or the skipped start, that last posted that the importer is stale started.                                                            |
-| `lastRunMessage`     | The ID of the latest run's status message in the log channel, and when that run started (see below).                                                |
-| `steamRefreshCursor` | The ID of the last player due a Steam profile refresh that a run took, after which the next run carries on (see [Steam profiles](#steam-profiles)). |
+| Row                  | What it holds                                                                                                                                                          |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lastRun`            | The latest run's record, as its JSON line shows it.                                                                                                                    |
+| `lastSuccessAt`      | When the latest successful run started: one that exited 0 and imported at least one ban list, if any.                                                                  |
+| `recentRuns`         | The latest 100 runs' records, oldest first, without per-list counts.                                                                                                   |
+| `lastStaleAlertAt`   | When the run, or the skipped start, that last posted that the importer is stale started.                                                                               |
+| `lastRunMessage`     | The ID of the latest run's status message in the log channel, and when that run started (see below).                                                                   |
+| `steamRefreshCursor` | The ID of the last player due a Steam profile refresh that a run took, after which the next run carries on (see [Steam profiles](#steam-profiles)).                    |
+| `importerService`    | The importer service's status message, and when its process started and, once it ended as it should, when and how (see [Running as a service](#running-as-a-service)). |
 
 ```sql
 SELECT name, updatedAt, value FROM ImporterState;
@@ -157,13 +179,15 @@ The importer is stale when no run has succeeded for 3 times `IMPORTER_CADENCE_SE
 
 Only the importer checks: at the end of every run that did not succeed, and whenever a start is skipped, as another run holds the lock. So while no run starts at all, nothing is posted. Whichever run or skipped start posts saves when it started, so no other posts again within the cadence.
 
+The importer service checks at the end of every cycle that did not succeed, except one that ends as the service stops, and, while it stands by for the service lock, or a cycle waits for the run lock, once a cadence. Its cadence is `IMPORTER_CYCLE_SECONDS` unless `IMPORTER_CADENCE_SECONDS` is set, so at a cycle every 10 minutes it is stale after 30 minutes without a successful cycle, and posts so again every 10 minutes while it stays stale.
+
 ### The log channel
 
-The importer posts to `DISCORD_LOG_WEBHOOK` one status message for each run, and otherwise only what may need looking at: failures, removals held for confirmation, invalid settings, dry runs and staleness, each as a message of its own. The import's totals appear in the status message; its summary line (`Got N deleted bans. Imported 20 ban lists: …`) is only printed in the console, with everything else.
+The importer posts to `DISCORD_LOG_WEBHOOK` one status message for each run, and otherwise only what may need looking at: failures, removals held for confirmation, invalid settings, dry runs and staleness, each as a message of its own. The import's totals appear in the status message; its summary line (`Got N deleted bans. Imported 20 ban lists: …`) is only printed in the console, with everything else. The importer service posts differently, as `IMPORTER_LOOP_DISCORD` says (see [Running as a service](#running-as-a-service)), and the rest of this section is about runs in once mode.
 
 As soon as a run holds the run lock, it posts its status, an embed, and keeps it up to date while it goes, editing it at most every 15 seconds. The embed shows that the run is in progress, in blurple, when it started, in each viewer's own time, how long it has taken, the commit it runs and any importer migrations it applied. Below them are the run's steps: each finished one with a tick, its time and what it counted, the one under way with how long it has taken and a bar of how far it has got, e.g. `18,250 / 145,155 players` or `7 / 20 ban lists`, and those still to run.
 
-When the run ends, it edits the embed a last time, before it releases the lock, to show how it ended: finished in green, failed in red, lost its run lock in red, or stopped in orange, as it received `SIGTERM` or `SIGINT` or took longer than `IMPORTER_MAX_RUN_SECONDS`. The embed then shows how long the run took, each step's time and counts (the import's totals as in its summary line, with how many lists it only polled and read in full and the BattleMetrics requests that took, e.g. `20 ban lists: 2,061 bans fetched, 150 new, 0 updated, 0 removed, 0 held, 0 lists failed; 20 polled, 0 read in full, 21 BattleMetrics requests`, the bans marked expired, the Steam profiles updated and those left for later runs, the players recalculated, and the export bans created and deleted), and for a run that did not finish, the phase it ended in and why. A run that is skipped, or fails before it holds the lock, posts no status, only its failure line, if it failed.
+When the run ends, it edits the embed a last time, before it releases the lock, to show how it ended: finished in green, failed in red, lost its locks in red, or stopped in orange, as it received `SIGTERM` or `SIGINT` or took longer than `IMPORTER_MAX_RUN_SECONDS`. The embed then shows how long the run took, each step's time and counts (the import's totals as in its summary line, with how many lists it only polled and read in full and the BattleMetrics requests that took, e.g. `20 ban lists: 2,061 bans fetched, 150 new, 0 updated, 0 removed, 0 held, 0 lists failed; 20 polled, 0 read in full, 21 BattleMetrics requests`, the bans marked expired, the Steam profiles updated and those left for later runs, the players recalculated, and the export bans created and deleted), and for a run that did not finish, the phase it ended in and why. A run that is skipped, or fails before it holds the lock, posts no status, only its failure line, if it failed.
 
 Of the import's lines about each list, only those that need looking at are posted: a list that failed, or was not read in full, one whose bans are held for an admin, on every read of all of it while they are, one whose old source's bans are being replaced, one that lost bans as an admin allowed it, and one whose bans could not all be saved. A list whose missing bans wait for a later read, which needs nothing doing, only goes to the console, as do each new, changed or moved ban, each list that was only polled (`Polled ban list (ID: 46): …`), why a poll read a list in full after all, the BattleMetrics requests of the run, after its summary line, and a list that is not read in full again, after it was not in its last run either, as its first one was posted. In a dry run, every line about a list goes to the console.
 
@@ -334,8 +358,12 @@ The importer reads the same `DATABASE_URI`, `BATTLEMETRICS_API_KEY`, `BATTLEMETR
 
 | Variable                         | Default | Description                                                                                                                                                                                                                                                  |
 | -------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `IMPORTER_MAX_RUN_SECONDS`       | `18000` | A run that takes longer stops at its next safe point, and exits at once 60 seconds later if it has not. Keep it shorter than the time between starts.                                                                                                        |
-| `IMPORTER_CADENCE_SECONDS`       | `21600` | How often the script starts a run, which sets when the importer is stale and how many Steam profiles a run refreshes (see [Steam profiles](#steam-profiles)).                                                                                                |
+| `IMPORTER_MODE`                  | `once`  | `once` runs the steps once and exits. `loop` runs them as the importer service, a cycle at a time, until it is stopped (see [Running as a service](#running-as-a-service)). Any other value starts nothing and exits 1.                                      |
+| `IMPORTER_MAX_RUN_SECONDS`       | `18000` | Once mode: a run that takes longer stops at its next safe point, and exits at once 60 seconds later if it has not. Keep it shorter than the time between starts.                                                                                             |
+| `IMPORTER_CADENCE_SECONDS`       | `21600` | How often the script starts a run, which sets when the importer is stale and how many Steam profiles a run refreshes (see [Steam profiles](#steam-profiles)). In loop mode it is `IMPORTER_CYCLE_SECONDS` unless set.                                        |
+| `IMPORTER_CYCLE_SECONDS`         | `600`   | Loop mode: how often a cycle starts, from the start of one to the start of the next. After a cycle that took longer, the next starts at once.                                                                                                                |
+| `IMPORTER_MAX_CYCLE_SECONDS`     | `900`   | Loop mode: a cycle that takes longer, from when the database answered, stops at its next safe point, and the next one starts. If it has not stopped 60 seconds later, the service exits 1, for Docker to start it again.                                     |
+| `IMPORTER_LOOP_DISCORD`          | `both`  | Loop mode: what the service posts besides alerts: `changes`, `status` or `both` (see [Running as a service](#running-as-a-service)). An invalid value is taken as `both`, with a warning.                                                                    |
 | `IMPORTER_ALLOW_MASS_REMOVAL`    |         | Ban list IDs, separated by commas, that may lose any number of bans at once in the next run, once they are read in full (see [Removing bans](#removing-bans)). Remove a list from it once its removal is done.                                               |
 | `IMPORTER_ACCESS_CHECK`          | `1`     | `0` turns off the check, once a run, of which BattleMetrics ban lists the CBL organisation can see (see [Ban list states](#ban-list-states)).                                                                                                                |
 | `IMPORTER_SCAN_COUNT_CHECK`      | `1`     | `0` turns off the check that a read of a BattleMetrics list found as many bans as BattleMetrics counts on it (see [Importing a ban list](#importing-a-ban-list)).                                                                                            |
@@ -391,3 +419,145 @@ Runs every 15 minutes are for once the importer recalculates only the players wh
 - counts failures in runs rather than in time, so the alert for each list that failed 3 runs in a row comes 45 minutes into a BattleMetrics outage, rather than after 12 hours or more on the 6-hour schedule.
 
 To run every 15 minutes even so, set `IMPORTER_CADENCE_SECONDS=900` and `IMPORTER_MAX_RUN_SECONDS=840`, and have the script start a run every 15 minutes. Each list is then read in full every other run, as its next full read is due 24 to 30 minutes after the start of the run that read it, and polled in between. Runs 15 minutes apart are too far apart for that random fifth to spread the lists' full reads over different runs, so a run that reads them in full takes about as long as a run every 6 hours does, while the import of one that only polls takes seconds, with 20 requests: about 1,800 BattleMetrics requests an hour, 30 a minute on average. A new ban on top of a list reaches CBL within one run, a ban removed from a list within one run too, by drift, or up to two runs later when many are removed at once and wait for a confirming read, and an edit to a ban below a list's newest page, or its expiry, within about 30 minutes, and the time the run that reads the list in full takes to reach it.
+
+The importer service runs every 10 minutes by itself, without the script (see below).
+
+## Running as a service
+
+With `IMPORTER_MODE=loop`, the importer runs as a long-running service, the importer service, in the Portainer stack, rather than once each time the script starts it. It takes the service lock once, when it starts, and keeps it, so no other run starts while it runs, and runs a cycle every `IMPORTER_CYCLE_SECONDS`, 10 minutes by default, from the start of one cycle to the start of the next: a cycle that took 2 minutes is followed by the next 8 minutes later, and one that took longer than 10 minutes by the next at once. Each cycle holds the run lock while it goes, and frees it once its record is saved, so the bot's commands that are refused while a run is under way, such as removing export ban lists or giving a ban list a new source, work between cycles (see [The locks](#the-locks)). Each cycle is a run of the importer: it has the same steps and stop points, its record is saved as a run's is, in `ImporterState`, and it prints a JSON line of its own, which also gives its number (`cycle`), the process's memory (`memory`), and in its `phases` how long it waited for the run lock (`takeRunLock`). The first cycle connects and applies the importer's migrations, as a run does, and so does each cycle after it until one has. The cadence, which sets when the importer is stale and how many Steam profiles a cycle refreshes, is `IMPORTER_CYCLE_SECONDS` unless `IMPORTER_CADENCE_SECONDS` is set, and `IMPORTER_MAX_RUN_SECONDS` is not used.
+
+Until the export recalculation only recalculates the players whose bans changed, each cycle still recalculates every player, about 45 seconds in production, so start the service at a cycle of 10 minutes, as below, rather than at a minute or two. With head polls, about two cycles in three only poll each list's newest bans, and the third reads every list in full, as each list's full read is due 24 to 30 minutes after the cycle that last read it, which takes about 9 minutes in production.
+
+To see the latest cycles:
+
+```bash
+docker logs cbl-importer 2>&1 | grep -F '{"event":"cbl-importer-run"' | tail -n 6 | jq -c '{cycle, outcome, seconds, reason, memory}'
+```
+
+### Stops and exit codes
+
+- **Time limit.** A cycle that takes longer than `IMPORTER_MAX_CYCLE_SECONDS`, 15 minutes by default, counted from when it took the run lock, once the database answered, stops at its next safe point, as a run stops at its time limit, and the next cycle starts at once and carries on with the work. A cycle that has not stopped 60 seconds after its time limit, e.g. as a step is stuck, ends the service: it posts why, prints the cycle's JSON line and exits 1, after at most 5 seconds for its log messages, and once it has stopped the statements the cycle still has running on the database, as at a stop's deadline (below), for Docker to start it again. Docker never restarts a container that is only unhealthy, so the service exits rather than wait. Its status message and row say that it failed, also when a signal came after the time limit, though Docker then does not start it again, and the service does not say that it will.
+- **SIGTERM and SIGINT**, as `docker stop` and a stack update send, stop the cycle under way at its next safe point, or end the wait between cycles at once. The service then shows that it stopped in its status message, saves how it ended, closes the database connections, sends its log messages and releases the locks, and exits 0. A connection that has not closed in time, as its statement is still running, is closed on MySQL's side first (see below). Once the cycle reaches a safe point, all of that takes at most 45 seconds, and less when the safe point came late, so that the service exits within 55 seconds of the signal, inside the 60 seconds of `stop_grace_period`. The next safe point can be minutes away, though, as a BattleMetrics request is sent and answered before it: a request waits for the budget, as a full read of every list or a large export fill can use up the minute's requests, waits a minute once BattleMetrics says few of the key's requests are left, or as long as BattleMetrics asks after it answered 429, up to 5 minutes, and is made up to 3 times when BattleMetrics does not answer, each attempt cut off after 30 seconds. So a cycle that has not reached a safe point 45 seconds after the signal is ended there: the service posts so and prints the cycle's JSON line, as interrupted, with what the phase under way had done by then, its time and, for a step, its counts, and in at most 5 more seconds it saves the cycle's record, shows that it stopped in its status message, with the cycle as the last one, saves how it ended and sends its log messages. It then stops the statements the cycle still has running on the database, closes the locks' connection, which frees them, and exits 0, all within 55 seconds of the signal. A cycle that reaches its safe point meanwhile cuts none of it short, and adds nothing to it. The cycle's step goes on until the service exits, and what it does in those seconds is in no record. A statement it still has running, e.g. one that waits for a row lock, is stopped before the locks are freed, as MySQL would otherwise carry it out, also once another importer holds them: the locks' connection closes the service's other database connections on MySQL's side, with `KILL`, which ends their statements and rolls back what they had not committed. MySQL lets a connection do that to the connections of its own user, and all of the service's use `DATABASE_URI`'s. A BattleMetrics request still waiting for its answer is cut off, as by docker stop's kill: an export ban claimed for it stays claimed, and the next run looks for its ban before it makes it again. The next cycle carries on with the work. A second signal ends the service at once, closing the locks' connection, which frees them. It exits 3 if a cycle was under way, as that cycle's JSON line is printed but not saved, and otherwise with the code the service was already stopping with, 0 or 1.
+- **The locks.** A service that loses its locks, e.g. as MySQL restarted and closed their connection, stops the cycle under way at its next safe point and exits 1, for Docker to start it again, as another run may have taken them meanwhile. A manual run started while the service runs, e.g. with the script, is skipped, with exit code 75, as any other start is, also between cycles. To run the importer by hand, stop the service first (see step 5 below).
+- **Waiting for the run lock.** A cycle that finds the run lock held, as a run of an importer from before the service lock may hold it, e.g. one started by hand with an older image, waits for that run to end, trying again every 15 seconds, and posts once that it waits. Its time limit starts once it holds the run lock. While it waits, its status message, which the service's first cycle posts then, before its migrations, and the health check say so, and the service checks once a cadence whether the importer is stale. A run of an older importer that was cut off from MySQL holds the run lock for as long as MySQL keeps its connection, up to 8 hours: to see which connection holds it, how long it has been idle, and free it, see [The locks](#the-locks).
+- **Standing by.** While another run holds the service lock when the service starts, e.g. the script's last run, or the database cannot be reached to take it, the service stands by, trying again every 15 seconds, and says so in the console. While another run holds the lock, it checks once a cadence whether the importer is stale, as a skipped start does. It posts nothing else until it holds the lock. A process that was cut off from the database without closing its connection, e.g. by a network partition, holds its locks on MySQL until MySQL closes that connection, within 5 minutes, so a service that Docker starts again meanwhile stands by for up to 5 minutes; to free them at once, see [The locks](#the-locks).
+- **The database.** A cycle that finds the database unavailable as it starts waits for it, trying again after 5, 10, 20 and 40 seconds and then every minute, for as long as it takes, and its record shows how long it waited. The locks' connection, though, is used every minute, and fails once MySQL has not answered it for 30 seconds, so an outage at any time that lasts more than 30 seconds can end the service as a lost lock does, with exit code 1, and one of more than 90 seconds always does, as does a restart of MySQL, which closes the connection at once. Docker then starts it again, and the new process stands by until the database answers and it takes the service lock. Only a shorter outage is waited out without exiting.
+- **Failures.** A cycle that fails, e.g. as a step or a migration failed, is posted as a run's failure is, and the next cycle starts as usual. A promise that fails with nothing to handle it fails the cycle it failed in, not the cycles after it.
+
+| Code | Meaning                                                                                                                                                                                                                                    |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `0`  | The service stopped, as it was asked to with `SIGTERM` or `SIGINT`, also when a second signal came between cycles or while it was ending, or its cycle was ended 45 seconds after the signal.                                              |
+| `1`  | It lost its locks, a cycle did not stop within 60 seconds of its time limit, or it failed, also when a second signal came while it was ending for one of these. Docker starts it again, unless `docker stop` or a stack update stopped it. |
+| `3`  | A second signal ended it at once, during a cycle.                                                                                                                                                                                          |
+
+### Health
+
+The service answers on `127.0.0.1:3001` inside its container, and `ban-importer/healthcheck.js` asks it, for the health check that the compose service defines below. Runs in once mode start no server, and the image itself defines no health check, so the script's runs are unaffected. The service is healthy:
+
+- while it holds the service lock and a cycle ended, however it ended, within two cycles and the time limit, 35 minutes at the defaults, or, before its first cycle has ended, it took the lock within that time;
+- while it waits, for its first 10 minutes of waiting: for the database, or for another run to end, as another run holds the run lock as a cycle starts, or the service lock before the service holds it;
+- and not once it is stopping.
+
+Whether its cycles succeed is for the stale alert to say. Docker shows the health check's last answers, each the service's status as JSON, with why it is healthy or not, the last cycle, what it waits for, if anything (`waitingFor`: `database` or `lock`), what it posts to Discord (`discord`: its `IMPORTER_LOOP_DISCORD`, or `off` when it posts nothing at all, as without `DISCORD_LOG_WEBHOOK`), and the process's memory:
+
+```bash
+docker inspect --format '{{json .State.Health}}' cbl-importer | jq '.Log[-1].Output | fromjson'
+```
+
+### The log channel in loop mode
+
+Alerts are posted as runs post them, in every mode: failures, held removals, lost access, staleness, and the service's own lines, such as a signal, a lost lock or a cycle's time limit. Warnings about invalid settings, and that a dry run is on, are posted once, by the first cycle that runs the step they are about, and printed in the console by the later ones, as every cycle has the same settings. What else the service posts, `IMPORTER_LOOP_DISCORD` says:
+
+- **`changes`**: the embed of each cycle that changed something or had a problem, posted once the cycle has ended, drawn as a run's embed is, and titled with the cycle's number, e.g. `CBL update cycle 12 finished`. A cycle changed something when it added, updated or removed bans, which includes a SteamID move it applied, as that updates the ban, marked bans expired, or created or deleted export bans. It had a problem when it failed or was stopped, a list failed, a list read in full held bans that it no longer has, or it posted a line to the log channel, such as a warning or an alert. A quiet cycle, which polled the lists and found nothing new, posts nothing at all. Refreshing Steam profiles and recalculating players are not changes, nor are SteamID moves that are only counted.
+- **`status`**: one status message for the service, edited at most once a minute, while anything it shows changes, and once more, at once, when the service stops: when the service took the service lock, the cycle under way, with its step and how far the step has got, or what it waits for, the database or another run to end, or when the next cycle starts, the last cycle's outcome, duration and changes, and the totals since the last hourly summary. Times are Discord timestamps, which each viewer sees in their own time zone and which stay current between edits. When the service stops or fails, its last edit says so, and why. The message's ID is kept in `ImporterState` (`importerService`), so after a restart the service edits the same message, and posts a new one if it was deleted, as it does when it finds it deleted while it runs. On each whole hour, the first at least half an hour after the service took the service lock, it posts an hourly summary: the cycles run, failed and stopped, the bans added, updated, removed and expired, the export bans created and deleted, the BattleMetrics requests the service sent, retries included, the Steam profiles updated and the slowest cycle.
+- **`both`**, the default: both of these.
+
+`importerService` also says when the process that keeps the message up to date started, and whether it said how it ended. A process that ended without saying so, e.g. as it was killed, ran out of memory, was ended at once by a second signal, or could not reach the database as it ended, is posted about by the next one. When the service's final edit finds the message deleted, and posts it again, the service saves the new message's ID with how it ended, once that edit has been sent, so the next process edits the message that says how this one ended. The end waits for that edit for as long as its time allows, keeping 5 seconds to save the ID, so only an edit that Discord holds up for longer, e.g. for more than half a minute of rate limits, leaves the deleted message's ID, and the next process posts the message once more. The service also corrects the status message of the last run in once mode, as a run does, if it still says that run is in progress.
+
+Without `DISCORD_LOG_WEBHOOK`, or with one that is not a Discord webhook, the service posts nothing at all, not even alerts. It says so in the console when it starts, and the health check gives `"discord": "off"`. The compose service below makes a stack update without `DISCORD_LOG_WEBHOOK` fail instead.
+
+Nothing the service posts waits for Discord, and its messages go through the same queue, with the same limits, as a run's, which the web server and the bot share the webhook with. The status message is edited at most once a minute while a cycle goes, and not between cycles, so at a cycle of 10 minutes, a cycle that only polls edits it about twice, and one that reads every list in full up to about 10 times. Each cycle that changed something adds one post in `changes` and `both` mode, and each hour the summary one more. During an outage of BattleMetrics, every cycle fails its lists, so each posts a line for each list that fails, and its embed, and from 3 cycles on, the stale alert once a cadence: at a cycle of 10 minutes, about 20 lines and an embed every 10 minutes.
+
+### Memory
+
+Nothing grows from one cycle to the next: each cycle has a record of its own, and the import's, the export push's and the steps' own counts are made afresh each cycle. What the export push remembers about owners' webhooks, which webhooks Discord said are deleted and which lists have one that is not a Discord webhook, lasts one cycle, as it lasted one run, so a list whose webhook is not a Discord webhook is posted about once in each cycle that has an alert for it. The service's own state, its signal handlers, its timers, its waits and its status message, is made once, and its totals since the last hourly summary start afresh each hour. Each cycle's JSON line and the health check give the process's memory, to watch over days. `NODE_OPTIONS=--max-old-space-size=768` keeps Node's heap below `mem_limit: 1g`, so a process that ever needed more would fail with an out-of-memory error of Node's own, which Docker restarts and the next process posts about, rather than be killed outright.
+
+### Moving from the script to the service
+
+The service in the Portainer stack, to paste under `services:`. It runs the image of one commit, given in the stack's environment as `IMPORTER_TAG`, e.g. `IMPORTER_TAG=sha-1a2b3c4`, so CI's pushes of `latest` never change it, and the Portainer webhook, which updates the stack after each push, leaves it running as it is. Without `IMPORTER_TAG`, the stack update fails, saying so, rather than run an image nobody chose. The other variables are the stack's, passed by name as the web service has them, and a stack update without any of those the importer needs fails in the same way, rather than start a service that posts nothing, not even alerts, as it would without `DISCORD_LOG_WEBHOOK`, or links owners' alerts to `http://localhost`, as it would without `HOST`. So check that the stack's environment has each of them, as the script's env file does. `BATTLEMETRICS_ORGANIZATION` may be left out, as the importer, like the web server and the bot, then uses CBL's organisation, 56746.
+
+```yaml
+importer:
+  # The importer image of one commit, set in the stack's environment, e.g. IMPORTER_TAG=sha-1a2b3c4.
+  image: werewolfboy13/cblimporter:${IMPORTER_TAG:?set IMPORTER_TAG to the sha- tag of the importer image to run}
+  container_name: cbl-importer
+  depends_on:
+    db:
+      condition: service_healthy
+  environment:
+    # A stack update without any of these fails, saying which.
+    DATABASE_URI: ${DATABASE_URI:?set DATABASE_URI in the stack environment}
+    BATTLEMETRICS_API_KEY: ${BATTLEMETRICS_API_KEY:?set BATTLEMETRICS_API_KEY in the stack environment}
+    STEAM_API_KEY: ${STEAM_API_KEY:?set STEAM_API_KEY in the stack environment}
+    DISCORD_LOG_WEBHOOK: ${DISCORD_LOG_WEBHOOK:?set DISCORD_LOG_WEBHOOK, or the importer service posts no alerts}
+    HOST: ${HOST:?set HOST to the website address, which owners' alerts link to}
+    # Without it, the importer uses CBL's organisation, 56746.
+    BATTLEMETRICS_ORGANIZATION: ${BATTLEMETRICS_ORGANIZATION:-}
+    NODE_OPTIONS: --max-old-space-size=768
+    IMPORTER_MODE: loop
+    IMPORTER_CYCLE_SECONDS: '600'
+    IMPORTER_MAX_CYCLE_SECONDS: '900'
+    IMPORTER_LOOP_DISCORD: both
+    # The importer's own BattleMetrics budget, in the correct spelling. The script's env file may
+    # still have the old BATTLEMETRICS_API_RESERVIOR, which is not needed here.
+    BATTLEMETRICS_API_RESERVOIR: '120'
+  init: true
+  stop_grace_period: 60s
+  healthcheck:
+    test: ['CMD', 'node', '/opt/workdir/ban-importer/healthcheck.js']
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 120s
+  networks:
+    - backend
+    - frontend
+  restart: unless-stopped
+  mem_limit: 1g
+  read_only: true
+  cap_drop:
+    - ALL
+  # The service's log is kept until its container is removed, so it needs a size limit.
+  logging:
+    driver: json-file
+    options:
+      max-size: '50m'
+      max-file: '5'
+```
+
+- **Networks.** In the stack file, the networks are named as the stack declares them, `backend` and `frontend`, which Docker names `cbl_backend` and `cbl_frontend` for the stack `cbl`, the networks the script's `docker run` attaches.
+- **Logging.** The service keeps running, so its log is never removed with its container, as a run's is, and it needs the size limit its `logging:` gives. Until the export recalculation only recalculates the players whose bans changed, every cycle prints about 7 lines for every 250 players, even one that only polls: at production size, about 145,000 players, about 4,300 lines, or 0.4 MB, a cycle, and about 55 MB a day at a cycle of 10 minutes. A cycle that reads lists in full prints about 3 more lines for each page of bans it reads. `driver: json-file` with `max-size: '50m'` and `max-file: '5'` keeps about 4 days of cycles at 10 minutes, and less at shorter cycles; `max-size: '10m'` keeps less than a day. A stack file whose services share their logging settings in an `x-logging: &logging` block, with such a limit, can give this service `logging: *logging` instead, but only then: without that block, `*logging` makes the whole stack file invalid, and Portainer refuses every update of the stack, the CI webhook's included, until it is fixed. The cycles' JSON lines are the lines worth keeping, and `ImporterState` keeps the records of the latest 100 cycles too.
+- **The database's health.** `condition: service_healthy` needs the `db` service to have a health check; if it has none, use `condition: service_started`, as the service waits for the database itself.
+- **Other settings.** Add any of the importer's own settings that the script's env file sets, e.g. `IMPORTER_SCAN_COUNT_CHECK_SKIP` or `IMPORTER_BM_SEARCH_LOOKUP`, but not `IMPORTER_CADENCE_SECONDS` or `IMPORTER_MAX_RUN_SECONDS`: a cadence of an hour, left from the hourly script, would make the service stale only after 3 hours, and give each cycle an hour's worth of Steam profiles. To list the file's variables without their values: `cut -d= -f1 .envimporter`.
+
+To move from the script to the service:
+
+1. Merge, and wait for CI to push `werewolfboy13/cblimporter:sha-<commit>`.
+2. Stop the script's schedule, so it starts no more runs, and let a run that is under way end: `docker wait cblimporter` waits for it.
+3. Add `IMPORTER_TAG=sha-<commit>` to the stack's environment, paste the service under `services:`, and update the stack. The service waits for the database, takes the service lock, standing by while a run still holds it, and starts its first cycle.
+4. Check the first cycles: their JSON lines (above), the health check, which turns healthy at its first check, 30 seconds after the start, and the status message in the log channel. The first cycle may read every list in full, which takes about 9 minutes in production.
+5. Keep the script for runs by hand: a run it starts while the service runs, also between cycles, is skipped, with exit code 75. To run it by hand, stop the service with `docker stop cbl-importer`, run the script, and start the service again with `docker start cbl-importer`. Do it while nothing is being merged: an update of the stack, which the CI webhook makes after every push to master, starts the stopped service again, and a run the script starts after that is skipped. A run already under way holds the locks, so the service then stands by until the run ends.
+
+The bot needs no change for the service: it refuses the changes that must not overlap a run while the run lock is held, as it always has, and the service holds the run lock only during its cycles.
+
+To go back to the script, remove the `importer` service from the stack and update the stack, which stops and removes its container and frees the locks, and then re-enable the script's schedule, whose next run takes them. Stopping the container instead, with `docker stop` or Portainer's Stop button, lasts only until the next update of the stack, which starts it again, and the CI webhook updates the stack after every push to master: the service then holds the service lock again, and every run the script starts is skipped, with exit code 75.
+
+`IMPORTER_TAG` can go back only to an image that has the importer service, from the commit that added it on. An older image has no loop mode or health check: it runs once and exits, and `restart: unless-stopped` starts it again at once, so it would run back to back, each run posting its own status message and refreshing the Steam profiles of a 6-hour cadence. To go back to an importer from before the service, go back to the script, as above, and have the script run that image.
+
+### Changing its settings
+
+Change a setting in the service's environment, in the stack editor, and update the stack. Docker then stops the service, which stops at its next safe point, and starts a new one with the setting, which edits the same status message.
+
+- **`IMPORTER_LOOP_DISCORD`**: `changes`, `status` or `both`, as above, at any time. Going to `changes` leaves the status message as it was last edited, saying the service stopped, until the service goes back to `status` or `both`, when it edits the message again.
+- **`IMPORTER_CYCLE_SECONDS`**: start at `600`. Once the export recalculation only recalculates the players whose bans changed, and after a clean day, go to `120`, then `60`. Keep `IMPORTER_MAX_CYCLE_SECONDS` longer than the longest cycle, one that reads every list in full, about 9 minutes in production, and the health check's window, two cycles and the time limit, follows both.
+- **`IMPORTER_TAG`**: set it to the `sha-` tag of each importer change that is merged, to run it. Setting it back to an earlier tag goes back to that commit, as long as its image has the importer service (see above).

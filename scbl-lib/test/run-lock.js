@@ -146,6 +146,7 @@ async function loadRunLock() {
 
   return {
     takeRunLock: module.namespace.default,
+    takeServiceLock: module.namespace.takeServiceLock,
     isRunLockHeld: module.namespace.isRunLockHeld,
     mysql,
     pool,
@@ -177,14 +178,35 @@ const settle = () => new Promise(setImmediate);
 
 const lockQuery = (connection) => connection.queries.map(({ sql }) => sql);
 
-// GET_LOCK gives 1 when the lock is taken, 0 when another connection holds it, and NULL on error.
-const getLock =
-  (acquired, extra = () => [{ held: 1 }]) =>
-  (sql, values) =>
-    /GET_LOCK/.test(sql) ? [{ acquired, name: 'cbl-importer:cbl' }] : extra(sql, values);
+// The queries that take the locks, as MySQL is sent them.
+const SET_WAIT_TIMEOUT = 'SET SESSION wait_timeout = 300';
+const GET_SERVICE_LOCK =
+  "SELECT GET_LOCK(CONCAT('cbl-importer-service:', DATABASE()), 0) AS acquired, CONCAT('cbl-importer-service:', DATABASE()) AS name";
+const GET_RUN_LOCK =
+  "SELECT GET_LOCK(CONCAT('cbl-importer:', DATABASE()), 0) AS acquired, CONCAT('cbl-importer:', DATABASE()) AS name";
 
-// The lock is taken on a connection of its own, made with the settings the Sequelize pool read
-// from DATABASE_URI, without waiting.
+// What MySQL answers: GET_LOCK gives 1 when a lock is taken, 0 when another connection holds it,
+// and NULL on error, here for the service lock and the run lock, the run lock's answers in turn,
+// the last again and again. RELEASE_LOCK gives released. Other queries are answered by extra.
+const lockAnswers =
+  ({ service = 1, run = 1, released = 1, extra = () => [{ held: 1 }] } = {}) =>
+  (sql, values) => {
+    if (sql === SET_WAIT_TIMEOUT) return [];
+    if (sql === GET_SERVICE_LOCK) return [{ acquired: service, name: 'cbl-importer-service:cbl' }];
+    if (sql === GET_RUN_LOCK) {
+      const acquired = Array.isArray(run) ? (run.length > 1 ? run.shift() : run[0]) : run;
+      return [{ acquired, name: 'cbl-importer:cbl' }];
+    }
+    if (/RELEASE_LOCK\(/.test(sql)) return [{ released }];
+    return extra(sql, values);
+  };
+// GET_LOCK gives acquired for both locks.
+const getLock = (acquired, extra) => lockAnswers({ service: acquired, run: acquired, extra });
+
+// A run's locks, the service lock and the run lock, are taken on a connection of their own, made
+// with the settings the Sequelize pool read from DATABASE_URI, without waiting, once the connection
+// is told to close after 5 minutes idle rather than MySQL's 8 hours, so a connection cut off from
+// the importer, e.g. by a network partition, frees the locks in time.
 {
   const runLock = await loadRunLock();
   const connection = runLock.connectAnswering(getLock(1));
@@ -200,10 +222,8 @@ const getLock =
       charset: 'utf8mb4'
     }
   ]);
-  assert.deepStrictEqual(lockQuery(connection), [
-    "SELECT GET_LOCK(CONCAT('cbl-importer:', DATABASE()), 0) AS acquired, CONCAT('cbl-importer:', DATABASE()) AS name"
-  ]);
-  assert.ok(connection.queries[0].timeout > 0);
+  assert.deepStrictEqual(lockQuery(connection), [SET_WAIT_TIMEOUT, GET_SERVICE_LOCK, GET_RUN_LOCK]);
+  assert.ok(connection.queries.every(({ timeout }) => timeout > 0));
 
   // It is kept alive every minute by a timer that does not keep the process running.
   assert.strictEqual(runLock.intervals.length, 1);
@@ -212,47 +232,59 @@ const getLock =
   assert.ok(keepAlive.unrefed);
   keepAlive.callback();
   await settle();
-  assert.strictEqual(connection.queries[1].sql, 'DO 1');
-  assert.ok(connection.queries[1].timeout > 0);
+  assert.strictEqual(connection.queries[3].sql, 'DO 1');
+  assert.ok(connection.queries[3].timeout > 0);
 
-  // isHeld() asks MySQL whether this connection holds the lock.
+  // isHeld() asks MySQL whether this connection holds both locks.
   assert.strictEqual(await lock.isHeld(), true);
-  assert.deepStrictEqual(connection.queries[2], {
-    sql: 'SELECT IS_USED_LOCK(?) = CONNECTION_ID() AS held',
-    timeout: connection.queries[2].timeout,
-    values: ['cbl-importer:cbl']
+  assert.deepStrictEqual(connection.queries[4], {
+    sql: 'SELECT IS_USED_LOCK(?) = CONNECTION_ID() AND IS_USED_LOCK(?) = CONNECTION_ID() AS held',
+    timeout: connection.queries[4].timeout,
+    values: ['cbl-importer-service:cbl', 'cbl-importer:cbl']
   });
   assert.strictEqual(lock.lost, false);
 
-  // release() frees the lock, closes the connection and stops the keep-alive. Closing the
+  // release() frees the locks, closes the connection and stops the keep-alive. Closing the
   // connection is not reported as losing the lock.
   await lock.release();
-  assert.deepStrictEqual(connection.queries[3].values, ['cbl-importer:cbl']);
-  assert.strictEqual(connection.queries[3].sql, 'SELECT RELEASE_LOCK(?)');
+  assert.deepStrictEqual(connection.queries[5], {
+    sql: 'SELECT RELEASE_ALL_LOCKS()',
+    timeout: connection.queries[5].timeout,
+    values: undefined
+  });
   assert.ok(connection.ended);
   assert.ok(keepAlive.cleared);
   connection.emit('end');
   assert.strictEqual(lock.lost, false);
   assert.strictEqual(await lock.isHeld(), false);
   await lock.release();
-  assert.strictEqual(connection.queries.length, 4);
+  assert.strictEqual(connection.queries.length, 6);
   assert.ok(!connection.socketDestroyed);
   assert.deepStrictEqual(runLock.output, []);
   assert.strictEqual(runLock.timers.size, 0);
 }
 
-// When another run holds the lock, there is no lock and the connection is closed.
-{
+// When another run or the importer service holds the service lock, or a run of an importer from
+// before the service lock holds the run lock, there are no locks and the connection is closed,
+// which frees the service lock if it was taken. It says which lock is held, for the run's line and
+// record. The run lock is not asked for without the service lock.
+for (const [answers, queries, busy] of [
+  [{ service: 0 }, [SET_WAIT_TIMEOUT, GET_SERVICE_LOCK], 'service'],
+  [{ run: 0 }, [SET_WAIT_TIMEOUT, GET_SERVICE_LOCK, GET_RUN_LOCK], 'run'],
+  [{ service: 0, run: 0 }, [SET_WAIT_TIMEOUT, GET_SERVICE_LOCK], 'service']
+]) {
   const runLock = await loadRunLock();
-  const connection = runLock.connectAnswering(getLock(0));
-  assert.strictEqual(await runLock.takeRunLock(), null);
+  const connection = runLock.connectAnswering(lockAnswers(answers));
+  assert.deepStrictEqual({ ...(await runLock.takeRunLock()) }, { busy });
+  assert.deepStrictEqual(lockQuery(connection), queries);
   assert.ok(connection.ended);
+  assert.ok(!connection.socketDestroyed);
   assert.strictEqual(runLock.intervals.length, 0);
 
   // If MySQL does not let it close, its socket is destroyed at once.
-  const stuck = runLock.connectAnswering(getLock(0));
+  const stuck = runLock.connectAnswering(lockAnswers(answers));
   stuck.end = () => Promise.reject(new Error("Can't add new command when connection is closed"));
-  assert.strictEqual(await runLock.takeRunLock(), null);
+  assert.deepStrictEqual({ ...(await runLock.takeRunLock()) }, { busy });
   assert.ok(stuck.socketDestroyed);
 }
 
@@ -263,6 +295,22 @@ const getLock =
   const connection = runLock.connectAnswering(getLock(null));
   await assert.rejects(runLock.takeRunLock(), /Could not take the run lock/);
   assert.ok(connection.ended);
+  for (const answers of [{ run: null }, { service: null }]) {
+    const nothing = runLock.connectAnswering(lockAnswers(answers));
+    await assert.rejects(
+      runLock.takeRunLock(),
+      /^Error: Could not take the run lock: MySQL gave no result for GET_LOCK\.$/
+    );
+    assert.ok(nothing.ended);
+  }
+
+  // A connection that cannot be told its idle time takes no lock.
+  const unset = runLock.connectAnswering(() => {
+    throw new Error("Variable 'wait_timeout' can't be set");
+  });
+  await assert.rejects(runLock.takeRunLock(), /Could not take the run lock: .*wait_timeout/);
+  assert.deepStrictEqual(lockQuery(unset), [SET_WAIT_TIMEOUT]);
+  assert.ok(unset.socketDestroyed);
 
   // Destroying the socket of a connection nothing else listens to is reported as an error, which
   // must not escape.
@@ -353,7 +401,7 @@ for (const [loseLock, reason] of [
   assert.ok(connection.socketDestroyed);
   assert.ok(runLock.intervals[0].cleared);
   connection.emit('end');
-  assert.strictEqual(connection.queries.length, 1);
+  assert.strictEqual(connection.queries.length, 3);
 }
 
 // A query that waits behind one MySQL never answers still gives up in time, as its deadline starts
@@ -434,9 +482,208 @@ for (const [loseLock, reason] of [
   assert.strictEqual(runLock.timers.size, 0);
 }
 
+// The importer service takes only the service lock, on a connection of its own with the same short
+// idle time, and keeps it. Each cycle takes the run lock with beginCycle(), without waiting for it,
+// and frees it with endCycle(), so between cycles only the service lock is held, and the bot's
+// commands that wait for a run to end work. isHeld() asks about the locks it should hold now.
+{
+  const runLock = await loadRunLock();
+  const connection = runLock.connectAnswering(lockAnswers());
+  const lock = await runLock.takeServiceLock({ onLost: () => assert.fail('Not lost') });
+  assert.deepStrictEqual(lockQuery(connection), [SET_WAIT_TIMEOUT, GET_SERVICE_LOCK]);
+  const isUsed = 'SELECT IS_USED_LOCK(?) = CONNECTION_ID() AS held';
+  const bothUsed =
+    'SELECT IS_USED_LOCK(?) = CONNECTION_ID() AND IS_USED_LOCK(?) = CONNECTION_ID() AS held';
+  assert.strictEqual(await lock.isHeld(), true);
+  assert.deepStrictEqual(connection.queries.at(-1), {
+    sql: isUsed,
+    timeout: connection.queries.at(-1).timeout,
+    values: ['cbl-importer-service:cbl']
+  });
+
+  assert.strictEqual(await lock.beginCycle(), true);
+  assert.strictEqual(connection.queries.at(-1).sql, GET_RUN_LOCK);
+  assert.ok(connection.queries.at(-1).timeout > 0);
+  // It is taken once, however often a cycle asks for it.
+  assert.strictEqual(await lock.beginCycle(), true);
+  assert.strictEqual(connection.queries.filter(({ sql }) => sql === GET_RUN_LOCK).length, 1);
+  assert.strictEqual(await lock.isHeld(), true);
+  assert.deepStrictEqual(
+    [connection.queries.at(-1).sql, connection.queries.at(-1).values],
+    [bothUsed, ['cbl-importer-service:cbl', 'cbl-importer:cbl']]
+  );
+
+  await lock.endCycle();
+  assert.deepStrictEqual(
+    [connection.queries.at(-1).sql, connection.queries.at(-1).values],
+    ['SELECT RELEASE_LOCK(?) AS released', ['cbl-importer:cbl']]
+  );
+  // Freed once: a second endCycle() sends nothing.
+  const sent = connection.queries.length;
+  await lock.endCycle();
+  assert.strictEqual(connection.queries.length, sent);
+  assert.strictEqual(await lock.isHeld(), true);
+  assert.deepStrictEqual(connection.queries.at(-1).values, ['cbl-importer-service:cbl']);
+
+  // The next cycle takes it again, and release() frees both.
+  assert.strictEqual(await lock.beginCycle(), true);
+  await lock.release();
+  assert.strictEqual(connection.queries.at(-1).sql, 'SELECT RELEASE_ALL_LOCKS()');
+  assert.ok(connection.ended);
+  assert.strictEqual(await lock.beginCycle(), false);
+  assert.strictEqual(lock.lost, false);
+
+  // Another run or service holds the service lock: no locks.
+  const busy = runLock.connectAnswering(lockAnswers({ service: 0 }));
+  assert.deepStrictEqual({ ...(await runLock.takeServiceLock()) }, { busy: 'service' });
+  assert.deepStrictEqual(lockQuery(busy), [SET_WAIT_TIMEOUT, GET_SERVICE_LOCK]);
+  assert.ok(busy.ended);
+}
+
+// A cycle that finds the run lock held, e.g. by a run of an importer from before the service lock,
+// is told so, and nothing is lost, so it can wait and ask again. A GET_LOCK that gives NULL, a
+// query that fails, or a run lock that MySQL says this connection no longer held when the cycle
+// frees it, loses the locks, and the service is told, once.
+{
+  const runLock = await loadRunLock();
+  const connection = runLock.connectAnswering(lockAnswers({ run: [0, 0, 1] }));
+  const lock = await runLock.takeServiceLock({ onLost: () => assert.fail('Not lost') });
+  assert.deepStrictEqual(
+    [await lock.beginCycle(), await lock.beginCycle(), await lock.beginCycle()],
+    [false, false, true]
+  );
+  assert.strictEqual(connection.queries.filter(({ sql }) => sql === GET_RUN_LOCK).length, 3);
+  await lock.endCycle();
+  assert.strictEqual(lock.lost, false);
+}
+const failing = (message) => () => {
+  throw new Error(message);
+};
+for (const [answers, act, reason] of [
+  [
+    { run: null },
+    async (lock) => assert.strictEqual(await lock.beginCycle(), false),
+    /^MySQL gave no result for GET_LOCK\.$/
+  ],
+  [
+    {},
+    async (lock, connection) => {
+      connection.answer = failing('Connection lost');
+      assert.strictEqual(await lock.beginCycle(), false);
+    },
+    /Connection lost/
+  ],
+  [
+    { released: 0 },
+    async (lock) => {
+      await lock.beginCycle();
+      await lock.endCycle();
+    },
+    /no longer held the run lock/
+  ],
+  [
+    {},
+    async (lock, connection) => {
+      await lock.beginCycle();
+      connection.answer = failing('Query inactivity timeout');
+      await lock.endCycle();
+    },
+    /Query inactivity timeout/
+  ]
+]) {
+  const runLock = await loadRunLock();
+  const connection = runLock.connectAnswering(lockAnswers(answers));
+  const losses = [];
+  const lock = await runLock.takeServiceLock({ onLost: (why) => losses.push(why) });
+  await act(lock, connection);
+  assert.strictEqual(lock.lost, true);
+  assert.strictEqual(losses.length, 1);
+  assert.match(losses[0], reason);
+  assert.ok(connection.socketDestroyed);
+  assert.strictEqual(await lock.beginCycle(), false);
+  assert.strictEqual(await lock.isHeld(), false);
+}
+
+// killConnections() stops the statements the importer still has running on its other connections,
+// e.g. one waiting for a row lock, before it frees the locks: it sends KILL for each connection,
+// one at a time, on the locks' connection, and resolves with those it could not kill. One that is
+// gone already, which MySQL answers with ER_NO_SUCH_THREAD, needs no kill, and an ID that is not a
+// connection's is never sent. It gives up once the time it is given has passed, sending no more,
+// sends nothing once the locks are released or lost, and never fails or loses the locks.
+{
+  const runLock = await loadRunLock();
+  const errorNumbered = (message, errno) => Object.assign(new Error(message), { errno });
+  const connection = runLock.connectAnswering(
+    lockAnswers({
+      extra: (sql) => {
+        if (sql === 'KILL 43') throw errorNumbered('Unknown thread id: 43', 1094);
+        if (sql === 'KILL 44') throw errorNumbered('You are not owner of thread 44', 1095);
+        if (sql.startsWith('KILL ')) return [];
+        return [{ held: 1 }];
+      }
+    })
+  );
+  const lock = await runLock.takeServiceLock({ onLost: () => assert.fail('Not lost') });
+  const sent = connection.queries.length;
+  // The IDs it gives are copied, as arrays made in run-lock.js's context compare as other arrays.
+  assert.deepStrictEqual(
+    [...(await lock.killConnections([42, 43, 44, '45; DROP TABLE Bans', 0, 46], 2000))],
+    [44, '45; DROP TABLE Bans', 0]
+  );
+  assert.deepStrictEqual(lockQuery(connection).slice(sent), [
+    'KILL 42',
+    'KILL 43',
+    'KILL 44',
+    'KILL 46'
+  ]);
+  assert.ok(connection.queries.slice(sent).every(({ timeout }) => timeout > 0));
+  assert.strictEqual(await lock.isHeld(), true);
+
+  // MySQL does not answer the first KILL: it gives up after the 2 seconds given, and sends no more.
+  connection.answer = noAnswer;
+  let missed = null;
+  lock.killConnections([47, 48], 2000).then((ids) => {
+    missed = [...ids];
+  });
+  await settle();
+  runLock.advance(1999);
+  await settle();
+  assert.strictEqual(missed, null);
+  runLock.advance(1);
+  await settle();
+  assert.deepStrictEqual(missed, [47, 48]);
+  assert.deepStrictEqual(lockQuery(connection).slice(-1), ['KILL 47']);
+  // Nor once the first KILL's own wait is over, 30 seconds after it was sent.
+  runLock.advance(30 * 1000);
+  await settle();
+  assert.deepStrictEqual(lockQuery(connection).slice(-1), ['KILL 47']);
+  assert.strictEqual(lock.lost, false);
+
+  // Once the locks are released, e.g. closed at once, nothing is sent, and the first KILL's wait
+  // ends with its connection.
+  lock.destroy();
+  await settle();
+  const queries = connection.queries.length;
+  assert.deepStrictEqual([...(await lock.killConnections([49]))], [49]);
+  assert.strictEqual(connection.queries.length, queries);
+  assert.ok(!lockQuery(connection).includes('KILL 48'));
+  assert.strictEqual(lock.lost, false);
+  assert.deepStrictEqual(runLock.output, []);
+
+  // The same once the locks are lost.
+  const lostConnection = runLock.connectAnswering(lockAnswers());
+  const lost = await runLock.takeServiceLock({ onLost: () => {} });
+  lostConnection.emit('end');
+  assert.strictEqual(lost.lost, true);
+  const before = lostConnection.queries.length;
+  assert.deepStrictEqual([...(await lost.killConnections([50]))], [50]);
+  assert.strictEqual(lostConnection.queries.length, before);
+}
+
 // isRunLockHeld() asks MySQL, on the Sequelize pool rather than a connection of its own, whether a
-// connection holds the lock under the name it is taken by. NULL, MySQL's answer after an error,
-// counts as held.
+// connection holds the run lock under the name it is taken by: a run, or a cycle of the importer
+// service, but not the service between its cycles, which holds only the service lock. NULL, MySQL's
+// answer after an error, counts as held.
 {
   const runLock = await loadRunLock();
   const answers = [];
@@ -456,5 +703,5 @@ for (const [loseLock, reason] of [
 }
 
 console.log(
-  'Run lock checks passed: taking, keeping, losing and releasing it, also when MySQL stops answering, and asking whether a run holds it.'
+  "Run lock checks passed: taking, keeping, losing and releasing a run's locks and the importer service's, with a short idle time, also when MySQL stops answering, which lock another run holds, the run lock taken and freed for each cycle, the importer's other connections killed before the locks are freed, and asking whether a run holds it."
 );

@@ -577,6 +577,19 @@ for (const [players, cadence, count] of [
   );
   // It carried on after the players the first runs took.
   assert.strictEqual(state.get(CURSOR), steamID(450));
+  // The importer service runs the step every cycle with the same setting, which is posted the first
+  // time only, and then printed in the console. Another invalid value is posted again.
+  const levels = [];
+  for (const value of ['lots', 'lots', 'plenty', 'lots']) {
+    logs.length = 0;
+    await updateSteamUserInfo({}, { now: new Date(NOW), refreshPerRun: value });
+    levels.push(
+      ...logs
+        .filter(({ message }) => message.startsWith('Warning: IMPORTER_STEAM_REFRESH_PER_RUN'))
+        .map(({ level }) => level)
+    );
+  }
+  assert.deepStrictEqual(levels, [2, 2, 1, 1]);
 }
 
 // New players come first, and those beyond 300 take the slots of the players due a refresh: with

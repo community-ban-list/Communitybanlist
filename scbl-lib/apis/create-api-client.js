@@ -237,7 +237,7 @@ export default function createApiClient({
 
   // options.repeatable marks a POST or PATCH as safe to make again, as making it twice does no
   // harm, e.g. one that creates an invite.
-  return async function request(method, path, params, data, priority = 5, options = {}) {
+  async function request(method, path, params, data, priority = 5, options = {}) {
     const verb = String(method).toUpperCase();
     const repeatable = options.repeatable === true || REPEATABLE_METHODS.includes(verb);
     for (let attempts = 1; ; attempts++) {
@@ -259,5 +259,10 @@ export default function createApiClient({
         await sleep(wait);
       }
     }
-  };
+  }
+
+  // How many attempts the client has made since the service started, each retry counted, as each
+  // uses the budget, e.g. for the importer service's hourly summary.
+  request.attempts = () => jobCount;
+  return request;
 }

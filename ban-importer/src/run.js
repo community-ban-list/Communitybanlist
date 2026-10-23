@@ -4,6 +4,7 @@ import { describeError, Logger } from 'scbl-lib/utils';
 
 import RunRecord, {
   alertIfStale,
+  LOCK_HOLDERS,
   readRunMessage,
   readSavedRun,
   saveRecord,
@@ -12,12 +13,13 @@ import RunRecord, {
 } from './run-record.js';
 import {
   LOCK_LOST,
+  LOCK_LOST_BEFORE,
+  pause,
   requestStop,
   RunStopped,
   setProgressListener,
   setRunLock,
-  stopIfRequested,
-  stopRequest
+  stopIfRequested
 } from './run-control.js';
 import renderRunStatus, { markEnded, markUnfinished } from './run-status.js';
 import migrate from './schema/migrate.js';
@@ -28,7 +30,8 @@ export const EXIT_CODES = {
   FAILED: 1,
   // Stopped part-way by SIGTERM, SIGINT or the time limit.
   INTERRUPTED: 3,
-  // Skipped, as another run holds the run lock. 75 is EX_TEMPFAIL: try again later.
+  // Skipped, as the importer service or another run holds the locks. 75 is EX_TEMPFAIL: try again
+  // later.
   SKIPPED: 75
 };
 
@@ -54,7 +57,7 @@ const DEFAULT_CADENCE_SECONDS = 6 * 60 * 60;
 const MAX_SECONDS = Math.floor((2 ** 31 - 1) / 1000);
 
 // A run that has not ended this long after reaching its time limit exits at once.
-const HARD_EXIT_DELAY = 60 * 1000;
+export const HARD_EXIT_DELAY = 60 * 1000;
 
 // The database may be restarting when the run starts, so it is tried up to 5 more times, waiting
 // 5, 10, 20, 40 and then 80 seconds.
@@ -67,22 +70,23 @@ const LOG_FLUSH_TIMEOUT = 30 * 1000;
 // At the end of a run, saving its record and checking whether the importer is stale each wait at
 // most RECORD_TIMEOUT, and closing the database connections at most DISCONNECT_TIMEOUT, so a slow
 // or stuck database can never hold up the end of a run, nor make a run that finished fail.
-const RECORD_TIMEOUT = 15 * 1000;
-const DISCONNECT_TIMEOUT = 10 * 1000;
+export const RECORD_TIMEOUT = 15 * 1000;
+export const DISCONNECT_TIMEOUT = 10 * 1000;
 
 // The end of a run that holds the run lock, from saving its record to releasing the lock, takes at
 // most END_TIMEOUT, so a run that docker stop stops, which it gives 60 seconds with
 // --stop-timeout 60, exits in time once it reaches its next safe point. The last RELEASE_RESERVE of
 // it is kept for releasing the lock, which takes at most 5 seconds, and the log messages are sent
 // in what is left after the database.
-const END_TIMEOUT = 45 * 1000;
-const RELEASE_RESERVE = 5 * 1000;
+export const END_TIMEOUT = 45 * 1000;
+export const RELEASE_RESERVE = 5 * 1000;
 
 // Why a run failed that was left waiting for something that can never happen.
-const LEFT_WAITING = 'The run was left waiting for something that can never happen';
+export const LEFT_WAITING = 'The run was left waiting for something that can never happen';
 
-// Why a run stopped that lost its run lock, as its record gives it.
-const STOPPED_LOCK_LOST = `Stopped, as ${LOCK_LOST}`;
+// Why a run stopped that lost its locks, as its record gives it, and as the records of earlier
+// importers give it.
+const STOPPED_LOCK_LOST = [`Stopped, as ${LOCK_LOST}`, `Stopped, as ${LOCK_LOST_BEFORE}`];
 
 // While a run goes, its status in the log channel is drawn again this often, so the time it has
 // taken stays current while nothing else changes. The logger edits it no more often than this.
@@ -95,20 +99,9 @@ async function doSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Wait, but no longer than until the run is asked to stop.
-function pause(ms) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    stopRequest.then(() => {
-      clearTimeout(timer);
-      resolve();
-    });
-  });
-}
-
 // Wait for a promise, but for no longer than ms milliseconds, failing with what took too long, in an
 // error marked timedOut.
-function withTimeout(promise, ms, what) {
+export function withTimeout(promise, ms, what) {
   let timer;
   const timeout = new Promise((resolve, reject) => {
     timer = setTimeout(() => {
@@ -122,7 +115,7 @@ function withTimeout(promise, ms, what) {
 // Send the progress bars' latest values and wait for queued Discord log messages, but for no longer
 // than until deadline, by default LOG_FLUSH_TIMEOUT from now, so a slow or unreachable Discord
 // cannot keep the run from ending.
-async function flushLogs(deadline = Date.now() + LOG_FLUSH_TIMEOUT) {
+export async function flushLogs(deadline = Date.now() + LOG_FLUSH_TIMEOUT) {
   Logger.flush();
   while (Date.now() < deadline && Object.values(Logger.getLogQueue()).some((count) => count > 0))
     await doSleep(Math.min(500, deadline - Date.now()));
@@ -136,9 +129,14 @@ export async function leftWaiting() {
   return endLeftWaiting ? endLeftWaiting() : EXIT_CODES.FAILED;
 }
 
+// Set how leftWaiting ends what is under way, e.g. the importer service, or null once nothing is.
+export function setLeftWaiting(handler) {
+  endLeftWaiting = handler;
+}
+
 // Read a setting given in seconds, or use its default when it is not set. An invalid value is
 // replaced with the default, with a warning.
-function readSeconds(name, defaultSeconds) {
+export function readSeconds(name, defaultSeconds) {
   const value = process.env[name];
   if (value === undefined || value.trim() === '') return defaultSeconds;
 
@@ -150,12 +148,12 @@ function readSeconds(name, defaultSeconds) {
   return defaultSeconds;
 }
 
-// How a run's status names the way the run ended, from its record: a run that lost its run lock
+// How a run's status names the way the run ended, from its record: a run that lost its locks
 // failed, but is named for that.
 function outcomeOf({ exitCode, reason }) {
   if (exitCode === EXIT_CODES.FINISHED) return 'finished';
   if (exitCode === EXIT_CODES.INTERRUPTED) return 'stopped';
-  return reason === STOPPED_LOCK_LOST ? 'lockLost' : 'failed';
+  return STOPPED_LOCK_LOST.includes(reason) ? 'lockLost' : 'failed';
 }
 
 // The status of an earlier run, drawn from the record it saved, for a run whose last edit did not
@@ -182,31 +180,179 @@ function savedStatus(saved, steps) {
   };
 }
 
+// Correct the status message of the run before this one if it still says that run is in progress,
+// as that run's last edit did not reach Discord. A run that saved its record is shown as it ended,
+// from its record, e.g. when Discord was down as it ended, and one that saved none ended without
+// saying how, e.g. as it was killed, so it is marked as having ended without finishing. steps names
+// this run's steps, and foundAt is when it started. The logger does it in the background.
+export async function reviseLastRun(steps, foundAt) {
+  const last = await readRunMessage();
+  if (!last) return;
+  const saved = await readSavedRun(last.startedAt);
+  Logger.reviseMessage(last.messageId, (message) =>
+    saved ? markEnded(message, savedStatus(saved, steps)) : markUnfinished(message, { foundAt })
+  );
+}
+
 // Wait for the database to answer, as the script that starts the importer may have just restarted
-// it.
-async function waitForDatabase() {
+// it, trying again up to retries times, waiting twice as long each time, up to maxDelay. The
+// importer service waits for as long as it takes (retries Infinity). onRetry(err), if given, is
+// told each time the database is not available. A run asked to stop stops waiting.
+export async function waitForDatabase({
+  retries = DATABASE_RETRIES,
+  maxDelay = Infinity,
+  onRetry = null
+} = {}) {
   for (let retry = 1; ; retry++) {
     try {
       await sequelize.authenticate();
       return;
     } catch (err) {
-      if (!isDatabaseUnavailable(err) || retry > DATABASE_RETRIES) throw err;
+      if (!isDatabaseUnavailable(err) || retry > retries) throw err;
 
-      const delay = DATABASE_RETRY_DELAY * 2 ** (retry - 1);
+      const delay = Math.min(maxDelay, DATABASE_RETRY_DELAY * 2 ** Math.min(retry - 1, 20));
+      const count = Number.isFinite(retries) ? `retry ${retry} of ${retries}` : `retry ${retry}`;
       console.log(
-        `The database is not available (${describeError(err)}). Trying again in ${delay / 1000}s (retry ${retry} of ${DATABASE_RETRIES}).`
+        `The database is not available (${describeError(err)}). Trying again in ${delay / 1000}s (${count}).`
       );
+      onRetry?.(err);
       await pause(delay);
       stopIfRequested();
     }
   }
 }
 
-// Run the importer's steps once, holding the run lock, and resolve with the exit code. Each step is
+// Save the record of a run that ended, waiting at most ms. A save that fails, or takes too long, is
+// warned about in the console, and never fails the run. Resolves with whether the database seemed
+// to be down: unavailable, or too slow to answer in time.
+export async function saveRunRecord(ended, ms) {
+  try {
+    await withTimeout(saveRecord(ended), ms, 'Saving the run record');
+    return false;
+  } catch (err) {
+    console.warn(`Warning: could not save the run record: ${describeError(err)}`);
+    return err?.timedOut === true || isDatabaseUnavailable(err);
+  }
+}
+
+// Check whether the importer is stale, and post if it is, waiting at most ms (see alertIfStale).
+// This never fails or holds up the run. Resolves with whether it posted.
+export async function checkStaleness(options, ms = RECORD_TIMEOUT) {
+  try {
+    return await withTimeout(alertIfStale(options), ms, 'Checking whether the CBL update is stale');
+  } catch (err) {
+    console.warn(`Warning: could not check whether the CBL update is stale: ${describeError(err)}`);
+    return false;
+  }
+}
+
+// One run of the importer's steps, or in loop mode one cycle of the importer service: its record,
+// which phases finished, and how far each step got, as the steps report it. Each step is
 // { name, run, counts }: run(settings) does the step's work, given the run's settings that steps
 // use, { cadenceSeconds }, and counts(), if given, returns the counts the run record keeps for it.
-// A run that is asked to stop does so between steps. Once the run holds the lock, the importer's
-// migrations are applied before the first step.
+// onChange, when set, is told whenever a phase starts or ends.
+export class RunState {
+  constructor(steps) {
+    this.steps = steps;
+    this.record = new RunRecord();
+    this.completed = new Set();
+    this.progress = {};
+    this.onChange = null;
+  }
+
+  changed() {
+    this.onChange?.();
+  }
+
+  // Time a phase of the run, and note when the phase starts and once it finished.
+  async time(name, work) {
+    const timed = this.record.time(name, work);
+    this.changed();
+    const result = await timed;
+    this.completed.add(name);
+    this.changed();
+    return result;
+  }
+
+  // Note how far the step under way has got, as it reports it.
+  reportProgress(report) {
+    if (this.record.phase) this.progress[this.record.phase] = report;
+  }
+
+  // Keep in the record what the phase under way has done so far, for a run that ends while the
+  // phase is still under way, as the importer service ends a cycle at once (see loop.js): how long
+  // it has taken, and, for a step, the counts it has given so far. A phase that has ended keeps
+  // its own.
+  keepPhaseSoFar() {
+    const { record } = this;
+    const { phase } = record;
+    if (phase === null || Object.hasOwn(record.phases, phase)) return;
+    record.timePhaseSoFar();
+    const step = this.steps.find(({ name }) => name === phase);
+    if (step?.counts) record.count(phase, step.counts);
+  }
+
+  // Run the steps in order, keeping the counts each gives, also when it fails or stops part-way. A
+  // run that is asked to stop does so between steps, as well as at the steps' own safe points.
+  async runSteps(settings) {
+    for (const step of this.steps) {
+      stopIfRequested();
+      await this.time(step.name, async () => {
+        try {
+          await step.run(settings);
+        } finally {
+          if (step.counts) this.record.count(step.name, step.counts);
+        }
+      });
+    }
+  }
+
+  // The run's status, while it runs or once it has ended, as run-status.js draws it.
+  state() {
+    const { record } = this;
+    const { ended } = record;
+    return {
+      outcome: ended ? outcomeOf(ended) : 'running',
+      startedAt: record.startedAt,
+      at: ended ? Date.parse(ended.endedAt) : Date.now(),
+      seconds: ended?.seconds,
+      gitSha: record.gitSha,
+      steps: this.steps.map((step) => step.name),
+      phases: record.phases,
+      phase: record.phase,
+      phaseStartedAt: record.phaseStartedAt,
+      completed: [...this.completed],
+      progress: this.progress,
+      counts: record.counts,
+      migrations: record.migrations,
+      reason: ended?.reason
+    };
+  }
+
+  // End the run's record and print it as the run's JSON line, once. Returns the exit code it ended
+  // with: a run that finished exits 1 after a promise failed with nothing to handle it, as index.js
+  // then exits 1, and its record says so.
+  end(exitCode, reason) {
+    const { record } = this;
+    if (record.ended) return record.ended.exitCode;
+    let code = exitCode;
+    if (code === EXIT_CODES.FINISHED && process.exitCode) {
+      code = EXIT_CODES.FAILED;
+      reason = 'A promise failed with nothing to handle it';
+    }
+    const ended = record.end(OUTCOMES[code], code, reason);
+    try {
+      console.log(JSON.stringify(ended));
+    } catch (err) {
+      console.warn(`Warning: could not print the run record: ${describeError(err)}`);
+    }
+    return code;
+  }
+}
+
+// Run the importer's steps once, holding the run lock, and resolve with the exit code. Each step is
+// { name, run, counts } (see RunState). A run that is asked to stop does so between steps. Once the
+// run holds the lock, the importer's migrations are applied before the first step.
 //
 // The run's lines about problems, such as why it failed or is stopping, are logged as important, so
 // they reach the log channel even when the run's other messages fill its queue. Its start and its
@@ -218,7 +364,8 @@ async function waitForDatabase() {
 // under way, and edited a last time to show how the run ended, at the start of its end, before the
 // lock is released. A run that is skipped, or fails before it holds the lock, posts no status.
 export default async function run(steps) {
-  const record = new RunRecord();
+  const current = new RunState(steps);
+  const { record } = current;
   const maxRunSeconds = readSeconds('IMPORTER_MAX_RUN_SECONDS', DEFAULT_MAX_RUN_SECONDS);
   const cadenceSeconds = readSeconds('IMPORTER_CADENCE_SECONDS', DEFAULT_CADENCE_SECONDS);
   let lock = null;
@@ -227,46 +374,16 @@ export default async function run(steps) {
   // shows the phases that finished, and how far each step got, as the steps report it.
   let status = null;
   let statusTimer = null;
-  const completed = new Set();
-  const progress = {};
 
   // Draw the run's status, while it runs or once it has ended.
-  const drawStatus = () => {
-    const { ended } = record;
-    return {
-      embeds: [
-        renderRunStatus({
-          outcome: ended ? outcomeOf(ended) : 'running',
-          startedAt: record.startedAt,
-          at: ended ? Date.parse(ended.endedAt) : Date.now(),
-          seconds: ended?.seconds,
-          gitSha: record.gitSha,
-          steps: steps.map((step) => step.name),
-          phases: record.phases,
-          phase: record.phase,
-          phaseStartedAt: record.phaseStartedAt,
-          completed: [...completed],
-          progress,
-          counts: record.counts,
-          migrations: record.migrations,
-          reason: ended?.reason
-        })
-      ]
-    };
-  };
+  const drawStatus = () => ({ embeds: [renderRunStatus(current.state())] });
 
   // Say that the run's status changed, which its next edit shows. It is drawn only then.
   const showStatus = () => status?.update(drawStatus);
+  current.onChange = showStatus;
 
   // Time a phase of the run, and note in its status when the phase starts and once it finished.
-  const time = async (name, work) => {
-    const timed = record.time(name, work);
-    showStatus();
-    const result = await timed;
-    completed.add(name);
-    showStatus();
-    return result;
-  };
+  const time = (name, work) => current.time(name, work);
 
   // Post the run's status, now that the run holds the lock, and keep it up to date: the steps say
   // how far they have got, and it is drawn again every 15 seconds. Without Discord logging there is
@@ -275,7 +392,7 @@ export default async function run(steps) {
     status = Logger.statusMessage(drawStatus);
     if (status.stopped) return;
     setProgressListener((report) => {
-      if (record.phase) progress[record.phase] = report;
+      current.reportProgress(report);
       showStatus();
     });
     const refresh = () => {
@@ -306,24 +423,16 @@ export default async function run(steps) {
   };
 
   // The status message of the run before this one is corrected if it still says that run is in
-  // progress, as that run's last edit did not reach Discord. A run that saved its record is shown
-  // as it ended, from its record, e.g. when Discord was down as it ended, and one that saved none
-  // ended without saying how, e.g. as it was killed, so it is marked as having ended without
-  // finishing. This run's own message is then saved in its place, once it is posted, for the next
-  // run to check. It is all done in the background, and nothing of it holds up or fails the run.
+  // progress (see reviseLastRun). This run's own message is then saved in its place, once it is
+  // posted, for the next run to check. It is all done in the background, and nothing of it holds up
+  // or fails the run.
   const checkLastStatus = async () => {
     if (!status || status.stopped) return;
     try {
-      const last = await readRunMessage();
-      if (last) {
-        const saved = await readSavedRun(last.startedAt);
-        const names = steps.map((step) => step.name);
-        Logger.reviseMessage(last.messageId, (message) =>
-          saved
-            ? markEnded(message, savedStatus(saved, names))
-            : markUnfinished(message, { foundAt: record.startedAt })
-        );
-      }
+      await reviseLastRun(
+        steps.map((step) => step.name),
+        record.startedAt
+      );
       const messageId = await status.posted;
       if (messageId && !finishing) await saveRunMessage({ messageId, startedAt: record.startedAt });
     } catch (err) {
@@ -338,41 +447,8 @@ export default async function run(steps) {
     else console.log(message);
   };
 
-  // End the run's record and print it as the run's JSON line, once. Returns the exit code the
-  // importer exits with: a run that finished exits 1 after a promise failed with nothing to handle
-  // it, as index.js then exits 1, and its record says so.
-  const end = (exitCode, reason) => {
-    if (record.ended) return record.ended.exitCode;
-    let code = exitCode;
-    if (code === EXIT_CODES.FINISHED && process.exitCode) {
-      code = EXIT_CODES.FAILED;
-      reason = 'A promise failed with nothing to handle it';
-    }
-    const ended = record.end(OUTCOMES[code], code, reason);
-    try {
-      console.log(JSON.stringify(ended));
-    } catch (err) {
-      console.warn(`Warning: could not print the run record: ${describeError(err)}`);
-    }
-    return code;
-  };
-
-  // Check whether the importer is stale, and post if it is, waiting at most ms. The check compares
-  // when the run started. This never fails or holds up the run. Resolves with whether it posted.
-  const checkStaleness = async (skipped, ms = RECORD_TIMEOUT) => {
-    try {
-      return await withTimeout(
-        alertIfStale({ cadenceSeconds, skipped, startedAt: record.startedAt }),
-        ms,
-        'Checking whether the CBL update is stale'
-      );
-    } catch (err) {
-      console.warn(
-        `Warning: could not check whether the CBL update is stale: ${describeError(err)}`
-      );
-      return false;
-    }
-  };
+  // End the run's record and print it as the run's JSON line, once (see RunState).
+  const end = (exitCode, reason) => current.end(exitCode, reason);
 
   // Post why the run failed before it held the lock, and wait for the line to be sent. Only a run
   // that is skipped posts nothing, unless the importer is stale, and a failed run must be seen.
@@ -397,20 +473,12 @@ export default async function run(steps) {
       // The time left before the lock is released, but at most limit.
       const left = (limit) => Math.max(0, Math.min(limit, releaseBy - Date.now()));
       try {
-        let databaseDown = false;
-        try {
-          await withTimeout(
-            saveRecord(record.ended),
-            left(RECORD_TIMEOUT),
-            'Saving the run record'
-          );
-        } catch (err) {
-          console.warn(`Warning: could not save the run record: ${describeError(err)}`);
-          databaseDown = err?.timedOut === true || isDatabaseUnavailable(err);
-        }
-
+        const databaseDown = await saveRunRecord(record.ended, left(RECORD_TIMEOUT));
         if (!succeeded(record.ended) && !databaseDown)
-          await checkStaleness(false, left(RECORD_TIMEOUT));
+          await checkStaleness(
+            { cadenceSeconds, skipped: false, startedAt: record.startedAt },
+            left(RECORD_TIMEOUT)
+          );
         if (code === EXIT_CODES.FINISHED) {
           try {
             await withTimeout(
@@ -494,7 +562,7 @@ export default async function run(steps) {
 
   try {
     try {
-      await time('waitForDatabase', waitForDatabase);
+      await time('waitForDatabase', () => waitForDatabase());
     } catch (err) {
       if (err instanceof RunStopped) {
         console.log(err.message);
@@ -509,15 +577,14 @@ export default async function run(steps) {
       );
     }
 
-    // Take the lock before anything else is posted to Discord, so a run that is skipped as another
-    // run holds it posts nothing, unless the importer is stale.
+    // Take the locks before anything else is posted to Discord, so a run that is skipped as another
+    // run holds one posts nothing, unless the importer is stale.
+    let taken;
     try {
-      lock = await time('takeRunLock', () =>
+      taken = await time('takeRunLock', () =>
         takeRunLock({
           onLost: (reason) => {
-            report(
-              `The run lost its run lock (${reason}), so it will stop at its next safe point.`
-            );
+            report(`The run lost its locks (${reason}), so it will stop at its next safe point.`);
             requestStop(LOCK_LOST);
           }
         })
@@ -525,14 +592,21 @@ export default async function run(steps) {
     } catch (err) {
       return end(await failBeforeLock('The CBL update run failed: ', err), describeError(err));
     }
-    if (!lock) {
-      console.log('Skipped this CBL update run, as another run holds the run lock.');
+    if (taken.busy) {
+      // The line and the record say which lock was held, as the importer service holds only the
+      // service lock between its cycles, when the bot finds the run lock free.
+      const held = LOCK_HOLDERS[taken.busy];
+      console.log(`Skipped this CBL update run, as ${held}.`);
       // A run that holds the lock for too long, e.g. as it is stuck, would otherwise make every
       // later start skip without a word. The check needs no run lock, and an alert is sent before
       // the run ends.
-      if (await checkStaleness(true)) await flushLogs();
-      return end(EXIT_CODES.SKIPPED, 'Another run holds the run lock');
+      if (
+        await checkStaleness({ cadenceSeconds, skipped: taken.busy, startedAt: record.startedAt })
+      )
+        await flushLogs();
+      return end(EXIT_CODES.SKIPPED, `${held[0].toUpperCase()}${held.slice(1)}`);
     }
+    lock = taken;
     setRunLock(lock);
     postStatus();
 
@@ -558,29 +632,9 @@ export default async function run(steps) {
       );
       // The importer's tables are there now, with the last run's status message.
       checkLastStatus();
-      if (migrations.applied.length > 0)
-        Logger.verbose(
-          'Core',
-          2,
-          `Applied the importer's migrations ${migrations.applied.join(', ')}.`
-        );
-      if (migrations.unknown.length > 0)
-        Logger.verbose(
-          'Core',
-          2,
-          `The database also has importer migrations from a newer version, which are left as they are: ${migrations.unknown.join(', ')}.`
-        );
+      logMigrations(migrations);
 
-      for (const step of steps) {
-        stopIfRequested();
-        await time(step.name, async () => {
-          try {
-            await step.run({ cadenceSeconds });
-          } finally {
-            if (step.counts) record.count(step.name, step.counts);
-          }
-        });
-      }
+      await current.runSteps({ cadenceSeconds });
 
       exitCode = EXIT_CODES.FINISHED;
       console.log(
@@ -610,4 +664,21 @@ export default async function run(steps) {
     process.off('SIGTERM', onSignal);
     process.off('SIGINT', onSignal);
   }
+}
+
+// Print which of the importer's migrations a run applied, and which the database has from a newer
+// version, if any.
+export function logMigrations(migrations) {
+  if (migrations.applied.length > 0)
+    Logger.verbose(
+      'Core',
+      2,
+      `Applied the importer's migrations ${migrations.applied.join(', ')}.`
+    );
+  if (migrations.unknown.length > 0)
+    Logger.verbose(
+      'Core',
+      2,
+      `The database also has importer migrations from a newer version, which are left as they are: ${migrations.unknown.join(', ')}.`
+    );
 }

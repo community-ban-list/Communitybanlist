@@ -25,9 +25,10 @@ function deferred() {
 const settle = () => new Promise(setImmediate);
 
 // Load index.js with stand-ins for the process, the console and the steps, which record their
-// calls, and for run.js, whose run, and ending of a run left waiting, settle as the test settles
-// them. The import is a dry run when dryRun is set, as IMPORTER_DRY_RUN makes it.
-async function loadIndex({ dryRun = false } = {}) {
+// calls, and for run.js and loop.js, whose run or service, and ending of a run left waiting, settle
+// as the test settles them. The import is a dry run when dryRun is set, as IMPORTER_DRY_RUN makes
+// it, and env is the environment, which says whether the importer runs once or as the service.
+async function loadIndex({ dryRun = false, env = {} } = {}) {
   const calls = [];
   // The options a step was given besides its counts, as [name, options].
   const options = [];
@@ -35,9 +36,13 @@ async function loadIndex({ dryRun = false } = {}) {
   const result = deferred();
   const leftWaiting = deferred();
   let steps = null;
+  // Which ran: run.js's run, once, or loop.js's service, and the IMPORTER_MODE read.
+  const started = [];
+  const modes = [];
 
   // As in Node, exit() without a code exits with process.exitCode, or 0 if that is not set.
   const fakeProcess = new EventEmitter();
+  fakeProcess.env = env;
   fakeProcess.exitCode = undefined;
   fakeProcess.exits = [];
   fakeProcess.exit = (code) => fakeProcess.exits.push(code ?? fakeProcess.exitCode ?? 0);
@@ -82,6 +87,7 @@ async function loadIndex({ dryRun = false } = {}) {
     },
     './src/run.js': {
       default: (given) => {
+        started.push('run');
         steps = given;
         return result.promise;
       },
@@ -89,6 +95,20 @@ async function loadIndex({ dryRun = false } = {}) {
       leftWaiting: () => {
         calls.push('leftWaiting');
         return leftWaiting.promise;
+      }
+    },
+    // The service runs the same steps. IMPORTER_MODE is loop or once, or else invalid.
+    './src/loop.js': {
+      default: (given) => {
+        started.push('loop');
+        steps = given;
+        return result.promise;
+      },
+      readMode: (value) => {
+        modes.push(value);
+        if (value === undefined || value === 'once') return { loop: false };
+        if (value === 'loop') return { loop: true };
+        return { error: `IMPORTER_MODE must be once or loop, not "${value}".` };
       }
     }
   };
@@ -118,7 +138,17 @@ async function loadIndex({ dryRun = false } = {}) {
   });
   await module.evaluate();
 
-  return { calls, options, output, result, leftWaiting, process: fakeProcess, steps: () => steps };
+  return {
+    calls,
+    options,
+    output,
+    result,
+    leftWaiting,
+    started,
+    modes,
+    process: fakeProcess,
+    steps: () => steps
+  };
 }
 
 // The run is given every step, in order, each named after what it runs, as the run record names
@@ -264,6 +294,31 @@ for (const [code, exit] of [
   assert.deepStrictEqual(index.output, []);
 }
 
+// Without IMPORTER_MODE, or with once, the importer runs once, as before. With loop, it runs the
+// same steps as the importer service, and exits with the service's code, as it does with a run's.
+// Any other value starts nothing: the importer says why and exits 1.
+for (const [value, runner] of [
+  [undefined, 'run'],
+  ['once', 'run'],
+  ['loop', 'loop']
+]) {
+  const index = await loadIndex({ env: value === undefined ? {} : { IMPORTER_MODE: value } });
+  assert.deepStrictEqual([index.started, index.modes], [[runner], [value]], `${value}`);
+  assert.strictEqual(Array.from(index.steps()).length, 8);
+  index.result.resolve(runner === 'loop' ? 0 : 75);
+  await settle();
+  assert.deepStrictEqual(index.process.exits, [runner === 'loop' ? 0 : 75]);
+}
+{
+  const index = await loadIndex({ env: { IMPORTER_MODE: 'loops' } });
+  assert.deepStrictEqual(index.started, []);
+  assert.deepStrictEqual(index.output, ['IMPORTER_MODE must be once or loop, not "loops".']);
+  assert.deepStrictEqual(index.process.exits, [1]);
+  // Node finding nothing left to wait for then is not a run left waiting.
+  index.process.emit('beforeExit', 1);
+  assert.deepStrictEqual(index.calls, []);
+}
+
 console.log(
-  'Importer entry point checks passed: the steps, the dry run step, exit codes, unhandled rejections and a run left waiting.'
+  'Importer entry point checks passed: the steps, the dry run step, exit codes, unhandled rejections, a run left waiting, and IMPORTER_MODE.'
 );

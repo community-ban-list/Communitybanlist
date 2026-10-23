@@ -5,6 +5,7 @@ import Core from './src/core.js';
 import BanImporter from './src/ban-importer.js';
 import ExportBanManager from './src/export-ban-manager.js';
 import { expireBans } from './src/expiry.js';
+import runLoop, { readMode } from './src/loop.js';
 import run, { EXIT_CODES, leftWaiting } from './src/run.js';
 import { updateSteamUserInfo } from './src/steam-profiles.js';
 
@@ -92,15 +93,24 @@ process.on('beforeExit', () => {
     .then((exitCode) => process.exit(exitCode));
 });
 
-// Exit with the run's code: 0 finished, 1 failed, 3 stopped part-way by a signal or the time limit,
-// or 75 skipped as another run is active. A run that finished exits 1 after an unhandled rejection,
-// as the run's own exit code and record already say.
-run(steps)
-  .catch((err) => {
-    console.error(`The CBL update run failed: ${describeError(err)}${stackTrace(err)}`);
-    return EXIT_CODES.FAILED;
-  })
-  .then((exitCode) => {
-    ended = true;
-    process.exit(exitCode || process.exitCode);
-  });
+// IMPORTER_MODE=once, the default, runs the steps once and exits with the run's code: 0 finished, 1
+// failed, 3 stopped part-way by a signal or the time limit, or 75 skipped as another run is active.
+// A run that finished exits 1 after an unhandled rejection, as the run's own exit code and record
+// already say. IMPORTER_MODE=loop runs them as the importer service, a cycle at a time, until it is
+// stopped, and exits with the service's code (see loop.js). Any other value starts nothing.
+const mode = readMode(process.env.IMPORTER_MODE);
+if (mode.error) {
+  console.error(mode.error);
+  ended = true;
+  process.exit(EXIT_CODES.FAILED);
+} else {
+  (mode.loop ? runLoop : run)(steps)
+    .catch((err) => {
+      console.error(`The CBL update run failed: ${describeError(err)}${stackTrace(err)}`);
+      return EXIT_CODES.FAILED;
+    })
+    .then((exitCode) => {
+      ended = true;
+      process.exit(exitCode || process.exitCode);
+    });
+}

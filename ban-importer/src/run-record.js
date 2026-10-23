@@ -24,6 +24,21 @@ export const STATE = {
   LAST_RUN_MESSAGE: 'lastRunMessage'
 };
 
+// The ImporterState rows of the importer service, which runs the importer in a loop (see loop.js).
+export const SERVICE_STATE = {
+  // The service's status message in the log channel, which the next process edits rather than
+  // posting another, and whether the process that last kept it up to date said how it ended.
+  SERVICE: 'importerService'
+};
+
+// Why a start was skipped, by the lock it found held (see takeRunLock): the service lock, which the
+// importer service holds for as long as it runs, and a run in once mode for its run, or the run
+// lock alone, which only a run of an importer from before the service lock holds.
+export const LOCK_HOLDERS = {
+  service: 'the importer service or another run holds the service lock',
+  run: 'another run holds the run lock'
+};
+
 // How many runs recentRuns keeps.
 const RECENT_RUNS_KEPT = 100;
 
@@ -62,8 +77,18 @@ function truncate(text) {
 }
 
 // The importer's tables do not exist yet, as no run has applied its migrations.
-function isMissingTable(err) {
+export function isMissingTable(err) {
   return (err?.original ?? err?.parent)?.errno === NO_SUCH_TABLE;
+}
+
+// A copy of a record's counts as they are now, as its JSON line and ImporterState keep them. Counts
+// that JSON cannot hold, which neither could keep, are only copied step by step.
+function copyCounts(counts) {
+  try {
+    return JSON.parse(JSON.stringify(counts));
+  } catch {
+    return { ...counts };
+  }
 }
 
 // A run's summary for recentRuns: its record without the lists in its counts, such as the import's
@@ -90,6 +115,10 @@ export default class RunRecord {
     this.counts = {};
     // The importer migrations the run applied.
     this.migrations = [];
+    // In loop mode, the number of the importer service's cycle, from 1 when the service starts, and
+    // the process's memory as the cycle ended.
+    this.cycle = null;
+    this.memory = null;
     // The record as it ended, once the run has ended.
     this.ended = null;
   }
@@ -106,6 +135,14 @@ export default class RunRecord {
     }
   }
 
+  // Keep how long the phase under way has taken so far as its time, for a record that ends while
+  // the phase is still under way, e.g. as the importer service ends a cycle at once. A phase that
+  // has ended keeps its own time.
+  timePhaseSoFar() {
+    if (this.phase !== null && !Object.hasOwn(this.phases, this.phase))
+      this.phases[this.phase] = seconds(Date.now() - this.phaseStartedAt);
+  }
+
   // Keep the counts a step gives, also when it failed or stopped part-way. Counts that cannot be
   // had only cost the record the step's counts, never the run.
   count(name, getCounts) {
@@ -120,7 +157,9 @@ export default class RunRecord {
   }
 
   // End the record with how the run ended, and return it as its JSON line and ImporterState show
-  // it. reason says why a run did not finish. A record is only ended once.
+  // it. reason says why a run did not finish. A record is only ended once. It keeps its phases and
+  // counts as they are now, so a step that is still running, e.g. once the importer service ended
+  // its cycle at once, changes neither the run's JSON line nor the record saved after it.
   end(outcome, exitCode, reason) {
     if (this.ended) return this.ended;
     const endedAt = Date.now();
@@ -133,12 +172,14 @@ export default class RunRecord {
       seconds: seconds(endedAt - this.startedAt),
       gitSha: this.gitSha
     };
+    if (this.cycle !== null) this.ended.cycle = this.cycle;
     if (reason) this.ended.reason = truncate(reason);
     if (outcome !== 'finished' && outcome !== 'skipped' && this.phase)
       this.ended.phase = this.phase;
     if (this.migrations.length > 0) this.ended.migrations = this.migrations;
-    this.ended.phases = this.phases;
-    this.ended.counts = this.counts;
+    this.ended.phases = { ...this.phases };
+    this.ended.counts = copyCounts(this.counts);
+    if (this.memory) this.ended.memory = this.memory;
     return this.ended;
   }
 }
@@ -200,6 +241,25 @@ export async function saveRunMessage({ messageId, startedAt }) {
   });
 }
 
+// The importer service's row, as { messageId, startedAt, endedAt, outcome }: its status message in
+// the log channel, when the process that last kept it up to date started, and, once that process
+// ended as it should, when and how. Resolves with null when there is none, and leaves out a
+// message ID that is not one.
+export async function readService() {
+  const row = await ImporterState.findByPk(SERVICE_STATE.SERVICE);
+  const value = row?.value;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const { messageId, ...rest } = value;
+  return typeof messageId === 'string' && /^\d+$/.test(messageId) ? value : rest;
+}
+
+// Save the importer service's row (see readService), with times given in milliseconds.
+export async function saveService({ messageId = null, startedAt, endedAt, outcome }) {
+  const value = { messageId, startedAt: isoTime(startedAt) };
+  if (endedAt !== undefined) Object.assign(value, { endedAt: isoTime(endedAt), outcome });
+  await ImporterState.upsert({ name: SERVICE_STATE.SERVICE, value });
+}
+
 // The record of the run that started at startedAt, as lastRunMessage gives it: the latest run's
 // record, or else its summary in recentRuns, e.g. when a run that lost the run lock saved its
 // record after the run that took the lock over. Resolves with null when that run saved no record,
@@ -242,10 +302,19 @@ async function claimStaleAlert(startedAt, cadence, leeway) {
 // Comparing when they ended would make the alert a run late whenever a failed run ends sooner after
 // its start than the last success did. Before the first success, the time is counted from when the
 // importer's tables were made, early in the first run. A start that is skipped, as another run
-// holds the run lock, checks too, as a stuck run would otherwise make every later start skip
-// quietly. Whichever posts saves when it started, with a row lock that needs no run lock, so no
-// other run or skipped start posts it again within the cadence. Resolves with whether it posted.
-export async function alertIfStale({ cadenceSeconds, skipped = false, startedAt = Date.now() }) {
+// holds a lock, checks too, as a stuck run would otherwise make every later start skip quietly,
+// and skipped names the lock it found held, 'service' or 'run', which the alert names too.
+// Whichever posts saves when it started, with a row lock that needs no run lock, so no other run
+// or skipped start posts it again within the cadence. Resolves with whether it posted. The
+// importer service (service) checks at the end of each cycle that did not succeed, and while it
+// stands by for a lock that another run holds (skipped): the service lock as the service starts,
+// or the run lock as a cycle starts. Its cycles start a cadence apart.
+export async function alertIfStale({
+  cadenceSeconds,
+  skipped = false,
+  startedAt = Date.now(),
+  service = false
+}) {
   const now = Date.now();
   const cadence = cadenceSeconds * 1000;
   const leeway = Math.min(STALE_LEEWAY, cadence / 10);
@@ -268,10 +337,13 @@ export async function alertIfStale({ cadenceSeconds, skipped = false, startedAt 
     if (!(await claimStaleAlert(startedAt, cadence, leeway))) return false;
 
     const lastRun = state[STATE.LAST_RUN];
+    const schedule = service
+      ? `The importer service starts a cycle every ${duration(cadence)} (IMPORTER_CADENCE_SECONDS, or else IMPORTER_CYCLE_SECONDS)`
+      : `Runs start every IMPORTER_CADENCE_SECONDS (${duration(cadence)})`;
     const parts = [
       `The CBL update is stale: no run has succeeded for ${duration(now - since)}, since ${
         hadSuccess ? 'the one that started at' : 'its run record began at'
-      } ${isoTime(since)}. Runs start every IMPORTER_CADENCE_SECONDS (${duration(cadence)}), so ${STALE_CADENCES} or more in a row have not succeeded.`
+      } ${isoTime(since)}. ${schedule}, so ${STALE_CADENCES} or more in a row have not succeeded.`
     ];
     if (lastRun?.endedAt) {
       let how = '';
@@ -284,7 +356,12 @@ export async function alertIfStale({ cadenceSeconds, skipped = false, startedAt 
         `The last run ended at ${lastRun.endedAt} with exit code ${lastRun.exitCode}${how}.`
       );
     }
-    if (skipped) parts.push('This start was skipped, as another run holds the run lock.');
+    if (skipped)
+      parts.push(
+        service
+          ? `The importer service is standing by, as another run holds the ${skipped === 'service' ? 'service' : 'run'} lock.`
+          : `This start was skipped, as ${LOCK_HOLDERS[skipped] ?? LOCK_HOLDERS.run}.`
+      );
     Logger.important('Core', parts.join(' '));
     return true;
   } catch (err) {

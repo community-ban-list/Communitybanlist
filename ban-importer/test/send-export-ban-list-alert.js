@@ -13,7 +13,8 @@ const dependencies = {
   'scbl-lib/apis': { steam() {} },
   'scbl-lib/db': { sequelize: {} },
   'scbl-lib/db/models': {
-    ExportBan: {},
+    // No export bans wait to be pushed.
+    ExportBan: { findAll: async () => [] },
     SteamUser: {},
     ExportBanList: {
       async update(values, options) {
@@ -96,4 +97,20 @@ await Core.sendExportBanListAlert(list(5, webhook), message);
 assert.strictEqual(sent.length, attempts);
 assert.ok(!logs.some((line) => line.includes('secret-token')));
 
-console.log('Export ban list alert checks passed: sending, invalid and deleted webhooks.');
+// What a run remembers about webhooks lasts until the next export push starts: in loop mode, each
+// cycle of the importer service pushes its own, so nothing builds up from one cycle to the next. A
+// deleted webhook that could not be removed from its lists is tried once more, and an invalid one
+// reported once more, in each cycle that has an alert for it.
+sendError = null;
+await Core.exportExportBans({});
+await Core.sendExportBanListAlert(list(5, webhook), message);
+assert.strictEqual(sent.length, attempts + 1);
+const reported = logs.length;
+await Core.sendExportBanListAlert(internal, message);
+await Core.sendExportBanListAlert(internal, message);
+assert.strictEqual(logs.filter((line) => line.startsWith('Skipped the Discord Webhook')).length, 2);
+assert.strictEqual(logs.length, reported + 1);
+
+console.log(
+  'Export ban list alert checks passed: sending, invalid and deleted webhooks, and each export push starting afresh.'
+);

@@ -56,10 +56,10 @@ import {
 import {
   checkRunLock,
   LOCK_LOST,
+  pause,
   reportProgress,
   RunStopped,
-  stopIfRequested,
-  stopRequest
+  stopIfRequested
 } from './run-control.js';
 
 // A list that could not be fetched is tried again once the others are done, after this wait, so a
@@ -76,17 +76,6 @@ const MAX_LOGGED_CHANGES = 100;
 // A remote list's file is asked about again, rather than read, only when the list was last
 // imported from it in full, with nothing kept back. Otherwise its row forgets the file.
 const NO_FILE = Object.freeze({ etag: null, lastModified: null, bodyHash: null });
-
-// Wait, but no longer than until the run is asked to stop.
-function pause(ms) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    stopRequest.then(() => {
-      clearTimeout(timer);
-      resolve();
-    });
-  });
-}
 
 // A count written with thousands separators, e.g. 86,919.
 function formatCount(count) {
@@ -287,17 +276,38 @@ export default class BanImporter {
     this.accessCheckResult = this.accessCheck ? 'unused' : 'off';
     this.triedBattlemetrics = new Set();
     this.pendingSyncs = new Map();
+    // Whether the warnings about the settings have been posted, which the first import does.
+    this.warned = false;
   }
 
   async importBans() {
+    // What the last import found and reported is cleared before anything else, so an import that
+    // fails before it imports any list, e.g. as the database cannot be read, reports nothing rather
+    // than the last one's counts: in loop mode, the importer service imports with the same
+    // importer every cycle. The requests are counted in place, as the fetcher counts them too.
+    this.listCount = 0;
+    this.results = [];
+    for (const kind of Object.keys(this.requests)) this.requests[kind] = 0;
+    this.accessCheckResult = this.accessCheck ? 'unused' : 'off';
+    this.visibleBanLists = null;
+    this.triedBattlemetrics.clear();
+    this.pendingSyncs.clear();
+    this.found.clear();
+
     // An invalid IMPORTER_DRY_RUN stops the import before it reads anything. Invalid values of the
     // other settings are posted, as the run goes on with the safer choice, which may not be what
-    // was meant, and so is a dry run, which may have been left on by mistake.
+    // was meant, and so is a dry run, which may have been left on by mistake. They are posted on
+    // the first import only, and later ones print them in the console: in loop mode, the importer
+    // service imports every cycle with the same settings, and would otherwise post them every few
+    // minutes.
     if (this.dryRunError) throw new Error(this.dryRunError);
-    for (const warning of this.warnings) Logger.important('BanImporter', warning);
+    const warn = this.warned
+      ? (line) => Logger.verbose('BanImporter', 2, line)
+      : (line) => Logger.important('BanImporter', line);
+    this.warned = true;
+    for (const warning of this.warnings) warn(warning);
     if (this.dryRun)
-      Logger.important(
-        'BanImporter',
+      warn(
         'IMPORTER_DRY_RUN is on, so this run writes nothing: it only says what the import would change.'
       );
 
@@ -356,12 +366,6 @@ export default class BanImporter {
     // Which lists have bans that a complete read would now remove, as they wait for one, decides
     // which are read in full, so if it cannot be read, nothing is imported either.
     this.pending = await retryOperation(() => readPendingSummary());
-    this.visibleBanLists = null;
-    this.accessCheckResult = this.accessCheck ? 'unused' : 'off';
-    this.triedBattlemetrics.clear();
-    this.pendingSyncs.clear();
-    this.found.clear();
-    for (const kind of Object.keys(this.requests)) this.requests[kind] = 0;
 
     // Each list's read is planned once the run knows the lists' rows: its newest page only, or all
     // of it, and why (see planner.js). The lists only polled are read first, so their new bans are
@@ -386,7 +390,7 @@ export default class BanImporter {
     // The results are kept for the run record, which report() gives them to. The run's status
     // shows how many lists are done.
     this.listCount = banLists.length;
-    const results = (this.results = []);
+    const { results } = this;
     try {
       reportProgress(0, banLists.length, 'ban lists');
       for (const { id } of order) {
