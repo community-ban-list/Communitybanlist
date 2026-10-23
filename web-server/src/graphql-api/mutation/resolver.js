@@ -8,7 +8,14 @@ import {
 } from 'scbl-lib/export-list-limits';
 import Validators from 'scbl-lib/validators';
 
-import audit, { describeChanges, describeConfig, describeList, describeSettings } from './audit.js';
+import audit, {
+  auditCleanup,
+  describeChanges,
+  describeConfig,
+  describeList,
+  describeSettings,
+  quote
+} from './audit.js';
 import checkSize from './check-size.js';
 import refusal from './refusal.js';
 import testWebhook from './test-webhook.js';
@@ -116,10 +123,13 @@ function describeUnfinished(exportBanList, error) {
 }
 
 // How a deletion ended on BattleMetrics, for the log channel's line, from what deleteExportBanList
-// gives and the BattleMetrics ban list the list recorded before it.
+// gives and the BattleMetrics ban list the list recorded before it. 'gone' only says BattleMetrics
+// did not know the ban list, which it also says of one CBL's key cannot see, so the line says no
+// more than ExportBanList's does.
 function describeOutcome(outcome, type, battlemetricsID) {
   if (outcome === 'deleted') return ` and its BattleMetrics ban list ${battlemetricsID}`;
-  if (outcome === 'gone') return `; BattleMetrics no longer had its ban list ${battlemetricsID}`;
+  if (outcome === 'gone')
+    return `; BattleMetrics did not know its ban list ${battlemetricsID}, so it was taken to be deleted already`;
   return type === 'battlemetrics' ? ', which had no BattleMetrics ban list' : '';
 }
 
@@ -211,10 +221,12 @@ export default {
           if (!exportBanLsit.battlemetricsID) {
             const failed = `could not create export ban list ${describeList(exportBanLsit)}, as making its BattleMetrics ban list failed`;
             // A ban list BattleMetrics may have made without saying so is recorded nowhere, so the
-            // line says so, for an admin to look for it on BattleMetrics.
+            // line says what an admin should look for on BattleMetrics, and is posted ahead of
+            // others.
             const unrecorded = error.ambiguous
-              ? ' BattleMetrics may have made the ban list anyway, which nothing records.'
+              ? ` BattleMetrics may have made the ban list anyway, which nothing records: look for ${quote(exportBanLsit.battlemetricsBanListName())} among CBL's ban lists on BattleMetrics, and remove it.`
               : '';
+            const postFailure = error.ambiguous ? auditCleanup : audit;
             try {
               await exportBanLsit.destroy();
             } catch (destroyError) {
@@ -226,7 +238,7 @@ export default {
                   message: destroyError.message
                 }
               );
-              audit(
+              postFailure(
                 context,
                 `${failed}, and the list could not be deleted either, so its owner was asked to delete it.${unrecorded}`,
                 error,
@@ -236,12 +248,15 @@ export default {
                 'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later.'
               );
             }
-            audit(context, `${failed}, so the list was deleted.${unrecorded}`, error);
+            postFailure(context, `${failed}, so the list was deleted.${unrecorded}`, error);
             throw new Error(
               'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.'
             );
           }
-          audit(context, describeUnfinished(exportBanLsit, error), error);
+          // A ban list the list could not be saved with is recorded nowhere, and must be removed
+          // by hand, so that line is posted ahead of others.
+          const postUnfinished = error.stage === 'saving' ? auditCleanup : audit;
+          postUnfinished(context, describeUnfinished(exportBanLsit, error), error);
           throw error;
         }
       }

@@ -7,6 +7,7 @@ import { makeExecutableSchema } from '@graphql-tools/schema';
 
 import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
 import isDiscordWebhookUrl from '../../scbl-lib/utils/discord-webhook-url.js';
+import logText from '../../scbl-lib/utils/log-text.js';
 import Validators from '../../scbl-lib/validators.js';
 import mutationTypeDefs from '../src/graphql-api/mutation/typedef.js';
 
@@ -43,6 +44,7 @@ function discord() {
   const utils = {
     // The lines the resolvers post are checked in export-ban-list-audit.js.
     Logger: { verbose() {}, important() {} },
+    logText,
     isDiscordWebhookUrl,
     async testDiscordWebhook(url) {
       if (!isDiscordWebhookUrl(url)) throw new Error('Invalid Discord Webhook');

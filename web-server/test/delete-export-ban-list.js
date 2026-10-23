@@ -4,6 +4,7 @@ import vm from 'vm';
 
 import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
 import describeError from '../../scbl-lib/utils/describe-error.js';
+import logText from '../../scbl-lib/utils/log-text.js';
 import Validators from '../../scbl-lib/validators.js';
 
 const logs = [];
@@ -56,7 +57,7 @@ const dependencies = {
       }
     }
   },
-  'scbl-lib/utils': { isDiscordWebhookUrl() {}, testDiscordWebhook() {}, Logger }
+  'scbl-lib/utils': { isDiscordWebhookUrl() {}, testDiscordWebhook() {}, Logger, logText }
 };
 const url = new URL('../src/graphql-api/mutation/resolver.js', import.meta.url);
 const module = new vm.SourceTextModule(await readFile(url, 'utf8'), {
@@ -125,8 +126,9 @@ assert.deepStrictEqual(posted, [
   `[WebServer][1] Steam user owner deleted export ban list ${REMOTE_LIST}.`
 ]);
 
-// The other outcomes: a BattleMetrics list whose ban list BattleMetrics no longer had, or that had
-// none.
+// The other outcomes: a BattleMetrics list whose ban list BattleMetrics did not know, which is
+// only taken to be deleted already, as BattleMetrics says the same of a ban list CBL's key cannot
+// see, or that had none.
 posted.length = 0;
 for (const outcome of ['gone', 'none']) {
   list = exportBanList('battlemetrics', async () => outcome);
@@ -134,7 +136,7 @@ for (const outcome of ['gone', 'none']) {
   await remove();
 }
 assert.deepStrictEqual(posted, [
-  `[WebServer][1] Steam user owner deleted export ban list ${BM_LIST}; BattleMetrics no longer had its ban list bm-42.`,
+  `[WebServer][1] Steam user owner deleted export ban list ${BM_LIST}; BattleMetrics did not know its ban list bm-42, so it was taken to be deleted already.`,
   `[WebServer][1] Steam user owner deleted export ban list ${BM_LIST}, which had no BattleMetrics ban list.`
 ]);
 posted.length = 0;

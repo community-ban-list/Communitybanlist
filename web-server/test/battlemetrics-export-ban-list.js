@@ -4,6 +4,7 @@ import vm from 'vm';
 
 import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
 import describeError from '../../scbl-lib/utils/describe-error.js';
+import logText from '../../scbl-lib/utils/log-text.js';
 import Validators from '../../scbl-lib/validators.js';
 
 // Exercise how creating and saving export ban lists handles BattleMetrics failures, without a
@@ -11,8 +12,9 @@ import Validators from '../../scbl-lib/validators.js';
 const logs = [];
 const calls = [];
 // The lines posted to the log channel, as the logger posts them: the line, then its errors, each
-// described in a line by describeError.
+// described in a line by describeError, and those of them posted as important lines.
 const posted = [];
+const important = [];
 const Logger = {
   verbose(module, level, message, ...extras) {
     if (level !== 1) return;
@@ -21,8 +23,16 @@ const Logger = {
     if (errors.length > 0)
       text += `${/\s$/.test(text) ? '' : ' '}${errors.map(describeError).join(', ')}`;
     posted.push(`[${module}][${level}] ${text}`);
+  },
+  important(module, message, ...extras) {
+    this.verbose(module, 1, message, ...extras);
+    important.push(posted.at(-1));
   }
 };
+// The name ExportBanList gives a list's BattleMetrics ban list.
+function battlemetricsBanListName() {
+  return `Community Ban List - ${this.name} (ID: ${this.id})`;
+}
 // The list createExportBanList creates, and the one updateExportBanList finds.
 let created;
 const found = {
@@ -74,7 +84,7 @@ const dependencies = {
       findOne: async () => found
     }
   },
-  'scbl-lib/utils': { isDiscordWebhookUrl() {}, testDiscordWebhook() {}, Logger }
+  'scbl-lib/utils': { isDiscordWebhookUrl() {}, testDiscordWebhook() {}, Logger, logText }
 };
 const url = new URL('../src/graphql-api/mutation/resolver.js', import.meta.url);
 const module = new vm.SourceTextModule(await readFile(url, 'utf8'), {
@@ -133,7 +143,9 @@ const SETTINGS =
 // When BattleMetrics fails to create the ban list, the web server logs which list it was and that
 // BattleMetrics may have created a ban list anyway. The list could never be used without one, so
 // it is deleted, without a transaction, and the owner is told that it was not created. One line
-// is posted, saying who, which list, what failed and why, and never the token the error holds.
+// is posted, saying who, which list, what failed and why, and never the token the error holds. As
+// BattleMetrics may have made a ban list that nothing records, the line says what to look for on
+// BattleMetrics, and is posted as an important line, ahead of others.
 const listError = apiError(
   'BattleMetrics POST ban-lists failed: HTTP 502 (Bad Gateway), so it may have been carried out',
   502,
@@ -143,6 +155,7 @@ const deletions = [];
 created = {
   id: 9,
   battlemetricsID: null,
+  battlemetricsBanListName,
   async createBattlemetricsBanList() {
     throw listError;
   },
@@ -171,16 +184,19 @@ assert.deepStrictEqual(logged(), [
 ]);
 assert.ok(!JSON.stringify(logged()).includes('secret-test-token'));
 assert.deepStrictEqual(posted, [
-  `[WebServer][1] Steam user owner could not create export ban list Server's List "Test" (ID: 9, BattleMetrics), as making its BattleMetrics ban list failed, so the list was deleted. BattleMetrics may have made the ban list anyway, which nothing records. ApiError: ${listError.message}`
+  `[WebServer][1] Steam user owner could not create export ban list Server's List "Test" (ID: 9, BattleMetrics), as making its BattleMetrics ban list failed, so the list was deleted. BattleMetrics may have made the ban list anyway, which nothing records: look for "Community Ban List - Test (ID: 9)" among CBL's ban lists on BattleMetrics, and remove it. ApiError: ${listError.message}`
 ]);
+assert.deepStrictEqual(important, posted);
 
 // If the list cannot be deleted either, that is logged too, and the owner is asked to delete it.
 // The one line gives both failures.
 logs.length = 0;
 posted.length = 0;
+important.length = 0;
 created = {
   id: 13,
   battlemetricsID: null,
+  battlemetricsBanListName,
   async createBattlemetricsBanList() {
     throw listError;
   },
@@ -205,8 +221,9 @@ assert.deepStrictEqual(logged()[1][1], {
   message: 'Database unavailable'
 });
 assert.deepStrictEqual(posted, [
-  `[WebServer][1] Steam user owner could not create export ban list Server's List "Test" (ID: 13, BattleMetrics), as making its BattleMetrics ban list failed, and the list could not be deleted either, so its owner was asked to delete it. BattleMetrics may have made the ban list anyway, which nothing records. ApiError: ${listError.message}, Error: Database unavailable`
+  `[WebServer][1] Steam user owner could not create export ban list Server's List "Test" (ID: 13, BattleMetrics), as making its BattleMetrics ban list failed, and the list could not be deleted either, so its owner was asked to delete it. BattleMetrics may have made the ban list anyway, which nothing records: look for "Community Ban List - Test (ID: 13)" among CBL's ban lists on BattleMetrics, and remove it. ApiError: ${listError.message}, Error: Database unavailable`
 ]);
+assert.deepStrictEqual(important, posted);
 
 // When only the invite fails, the list keeps its BattleMetrics ban list and the owner gets the
 // error, and the log gives the BattleMetrics ban list that was created. The line says the list was
@@ -214,6 +231,7 @@ assert.deepStrictEqual(posted, [
 // stage 'invite'.
 logs.length = 0;
 posted.length = 0;
+important.length = 0;
 deletions.length = 0;
 const inviteError = apiError(
   'BattleMetrics POST ban-lists/list-10/relationships/invites failed after 3 attempts: HTTP 502',
@@ -239,6 +257,8 @@ assert.strictEqual(logged()[0][1].ambiguous, false);
 assert.deepStrictEqual(posted, [
   `[WebServer][1] Steam user owner created export ban list Server's List "Test" (ID: 10, BattleMetrics) with BattleMetrics ban list list-10: ${SETTINGS}. Its invite could not be made, which saving the list tries again: ApiError: ${inviteError.message}`
 ]);
+// The invite is made again when the list is saved, so nothing is left to clean up by hand.
+assert.deepStrictEqual(important, []);
 
 // A list made without trouble is returned, and nothing is logged. A remote list makes no
 // BattleMetrics requests. Each posts one line, saying who created which list, with its settings.

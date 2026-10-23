@@ -3,14 +3,18 @@ import { readFile } from 'fs/promises';
 import vm from 'vm';
 
 import describeError from '../utils/describe-error.js';
+import logText from '../utils/log-text.js';
 
 // Exercise how an export ban list creates its BattleMetrics ban list and invite, and what it posts
 // to the log channel, without a database or network requests.
 const calls = [];
 let reply;
+// The name each new BattleMetrics ban list was asked for.
+const banListNames = [];
 async function battlemetrics(method, endpoint, params, data, priority, options) {
   // The options come from the module's own context, so they are copied before comparing.
   calls.push({ method, endpoint, priority, options: options && { ...options } });
+  if (endpoint === 'ban-lists') banListNames.push(data.data.attributes.name);
   return reply(endpoint);
 }
 
@@ -60,6 +64,7 @@ const dependencies = {
   },
   '../../export-list-limits.js': { checkRules: () => [], DEFAULT_SETTINGS: {} },
   '../../utils/index.js': { Logger },
+  '../../utils/log-text.js': { default: logText },
   '../../config.js': { BATTLEMETRICS_ORGANIZATION: '42', EXPORT_LIST_LIMITS: {} }
 };
 const context = vm.createContext({});
@@ -82,6 +87,9 @@ await module.evaluate();
 const ExportBanList = module.namespace.default;
 
 const OWNER = '76561198000000007';
+// Each list here has a Discord webhook, which no line may give.
+const WEBHOOK =
+  'https://discord.com/api/webhooks/123456789012345678/webhook-token-these-checks-use';
 const exportBanList = (fields) =>
   Object.assign(new ExportBanList(), {
     id: 7,
@@ -89,6 +97,7 @@ const exportBanList = (fields) =>
     server: 'Server',
     type: 'battlemetrics',
     owner: OWNER,
+    discordWebhook: WEBHOOK,
     battlemetricsID: null,
     battlemetricsInvite: null,
     ...fields
@@ -99,6 +108,7 @@ const reset = () => {
   calls.length = 0;
   posted.length = 0;
   saveFailures.length = 0;
+  banListNames.length = 0;
 };
 // The list as the lines name it, with its owner by Steam ID, as nothing is looked up for a line.
 const LIST = `Server's List "Test" (ID: 7, BattleMetrics) of Steam user ${OWNER}`;
@@ -115,12 +125,18 @@ const apiError = (message, status, extra = {}) =>
     ...extra
   });
 
-// No line ever gives a list's invite, as any organisation could use its ban list with it, nor the
-// BattleMetrics API key.
-function checkNoSecrets() {
-  for (const line of posted) {
-    assert.ok(!/code-|accept-invite/.test(line), `A posted line gives an invite: ${line}`);
-    assert.ok(!line.includes(API_KEY), `A posted line gives the API key: ${line}`);
+// No line ever gives a list's invite, as any organisation could use its ban list with it, nor its
+// Discord webhook, with which anyone can post to it, nor the BattleMetrics API key. Each line is on
+// one line. The same goes for the errors thrown, which the website posts.
+function checkNoSecrets(lines = posted) {
+  for (const line of lines) {
+    assert.ok(!/code-|accept-invite/.test(line), `A line gives an invite: ${line}`);
+    assert.ok(
+      !/webhook-token|discord\.com\/api\/webhooks/.test(line),
+      `A line gives a webhook: ${line}`
+    );
+    assert.ok(!line.includes(API_KEY), `A line gives the API key: ${line}`);
+    assert.ok(!/[\r\n\u2028\u2029]/.test(line), `A line has a line break: ${JSON.stringify(line)}`);
   }
 }
 
@@ -146,6 +162,9 @@ assert.deepStrictEqual(posted, [
   `[ExportBanList][1] Created BattleMetrics ban list list-1 for ${LIST}, with its invite.`
 ]);
 checkNoSecrets();
+// The ban list is named after the list, as an admin can look it up on BattleMetrics.
+assert.deepStrictEqual(banListNames, ['Community Ban List - Test (ID: 7)']);
+assert.strictEqual(list.battlemetricsBanListName(), 'Community Ban List - Test (ID: 7)');
 
 // A list loaded with its owner, as checkLimits loads it, names the owner by their Steam name too.
 reset();
@@ -154,6 +173,22 @@ await list.createBattlemetricsBanList();
 assert.deepStrictEqual(posted, [
   `[ExportBanList][1] Created BattleMetrics ban list list-1 for Server's List "Test" (ID: 7, BattleMetrics) of Steam user "Owner Name" (ID: ${OWNER}), with its invite.`
 ]);
+checkNoSecrets();
+
+// The list's name and server, and its owner's Steam name, are their owners' to choose. Each is kept
+// on one line, so it cannot start a line that looks like another module's, and shown as written, so
+// its Markdown cannot hide part of the line or turn into a link.
+reset();
+list = exportBanList({
+  name: 'Bans".\n[DiscordBot][1] admin (1) removed',
+  server: '||AFO',
+  SteamUser: { id: OWNER, name: 'xX_[Owner](https://example.com)' }
+});
+await list.createBattlemetricsBanList();
+assert.deepStrictEqual(posted, [
+  `[ExportBanList][1] Created BattleMetrics ban list list-1 for \\|\\|AFO's List "Bans". \\[DiscordBot\\]\\[1\\] admin (1) removed" (ID: 7, BattleMetrics) of Steam user "xX\\_\\[Owner\\](https://example.com)" (ID: ${OWNER}), with its invite.`
+]);
+checkNoSecrets();
 
 // A list whose invite could not be created keeps its ban list, and gets only the invite when it is
 // tried again. Nothing is posted for the failure, which is thrown with its stage for the caller to
@@ -198,12 +233,24 @@ for (const [stage, failAt, recorded] of [
   if (failAt === 'first save') saveFailures.push(lockTimeout());
   if (failAt === 'second save') saveFailures.push(null, lockTimeout());
   list = exportBanList();
+  let thrown;
   await assert.rejects(list.createBattlemetricsBanList(), (error) => {
     assert.strictEqual(error.stage, stage, failAt);
+    thrown = error;
     return true;
   });
   assert.strictEqual(list.battlemetricsID, recorded, failAt);
   assert.deepStrictEqual(posted, [], failAt);
+  // The website posts the error, so it gives no secret either, though after the second save the
+  // list holds its new invite.
+  checkNoSecrets([thrown.message, describeError(thrown)]);
+  if (failAt === 'second save') {
+    assert.strictEqual(list.battlemetricsInvite, inviteURL('code-3'));
+    assert.strictEqual(
+      describeError(thrown),
+      'Error: Lock wait timeout exceeded; try restarting transaction'
+    );
+  }
 }
 
 // Nothing is created or posted for a list that has its invite, has no BattleMetrics ban list, or

@@ -5,6 +5,7 @@ import vm from 'vm';
 import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
 import describeError from '../../scbl-lib/utils/describe-error.js';
 import isDiscordWebhookUrl from '../../scbl-lib/utils/discord-webhook-url.js';
+import logText from '../../scbl-lib/utils/log-text.js';
 import Validators from '../../scbl-lib/validators.js';
 
 // Make export ban list changes on the website and read what they post to the CBL log channel:
@@ -12,6 +13,7 @@ import Validators from '../../scbl-lib/validators.js';
 // stand-ins for the database, BattleMetrics, Discord and the logger. Each change posts who made it
 // and what it was, ExportBanList posts the BattleMetrics side, and no line ever gives a list's
 // Discord webhook, its BattleMetrics invite or the BattleMetrics API key, even when a change fails.
+// The lists keep their webhooks through the steps, so every kind of line is checked with one.
 
 // The secrets the stand-ins hand out, which no posted line may give: the API key, which the
 // errors of the BattleMetrics client's requests hold, as axios's do, the webhook's address and
@@ -39,9 +41,11 @@ const ALICE = { id: '76561198000000001', name: 'Alice' };
 const as = (user) => ({ user });
 
 // The log channel: each line posted, as the logger posts it, with its errors described in a line
-// by describeError after it, and each line only printed in the console (level 2).
+// by describeError after it, each line only printed in the console (level 2), and the posted lines
+// that went as important ones, ahead of the channel's other messages.
 const posted = [];
 const printed = [];
+const important = [];
 function log(module, level, message, extras) {
   const errors = extras.filter((extra) => typeof extra?.message === 'string');
   let text = `${message}`;
@@ -51,15 +55,21 @@ function log(module, level, message, extras) {
 }
 const Logger = {
   verbose: (module, level, message, ...extras) => log(module, level, message, extras),
-  important: (module, message, ...extras) => log(module, 1, message, extras)
+  important(module, message, ...extras) {
+    log(module, 1, message, extras);
+    important.push(posted.at(-1));
+  }
 };
 
-// Take the lines posted since the last time, checking that none gives a secret.
+// Take the lines posted since the last time, checking that none gives a secret, or has a line
+// break, with which a line could look like two.
 function take() {
   const lines = posted.splice(0);
-  for (const line of [...lines, ...printed])
+  for (const line of [...lines, ...printed]) {
     for (const secret of SECRETS)
       assert.ok(!line.includes(secret), `A line gives ${secret}: ${line}`);
+    assert.ok(!/[\r\n\u2028\u2029]/.test(line), `A line has a line break: ${JSON.stringify(line)}`);
+  }
   return lines;
 }
 
@@ -347,6 +357,7 @@ const {
     'scbl-lib/export-list-limits': exportListLimits,
     'scbl-lib/utils': {
       Logger,
+      logText,
       isDiscordWebhookUrl,
       async testDiscordWebhook(url) {
         tested.push(url);
@@ -361,7 +372,7 @@ const {
 );
 const { LINES_PER_MINUTE } = await load(
   '../src/graphql-api/mutation/audit.js',
-  { 'scbl-lib/utils': { Logger } },
+  { 'scbl-lib/utils': { Logger, logText } },
   vm.createContext({})
 );
 
@@ -439,6 +450,11 @@ assert.deepStrictEqual(take(), [
   `[WebServer][1] ${ALICE_TEXT} updated export ban list ${bmList('Renamed')}: Discord webhook changed.`,
   `[WebServer][1] ${ALICE_TEXT} updated export ban list ${bmList('Renamed')}: Discord webhook set → none.`
 ]);
+// The list gets its webhook back, and keeps it through its invite, configs and deletion below.
+await change('updateExportBanList', { id: bm.id, discordWebhook: WEBHOOK });
+assert.deepStrictEqual(take(), [
+  `[WebServer][1] ${ALICE_TEXT} updated export ban list ${bmList('Renamed')}: Discord webhook none → set.`
+]);
 
 // A list whose invite was not made gets it when it is saved, which ExportBanList posts.
 rows.ExportBanList.find(({ id }) => id === bm.id).battlemetricsInvite = null;
@@ -464,8 +480,23 @@ assert.deepStrictEqual(take(), [
   `[WebServer][1] ${ALICE_TEXT} saved export ban list ${bmList('Renamed')}, but its missing invite to BattleMetrics ban list 98765 could not be made, which saving the list tries again: ApiError: BattleMetrics POST ban-lists/98765/relationships/invites failed after 3 attempts: HTTP 502 (Bad Gateway)`
 ]);
 answers.delete(inviteEndpoint);
-await change('updateExportBanList', { id: bm.id });
-assert.strictEqual(take().length, 1);
+
+// When BattleMetrics makes the invite but the list cannot be saved with it, the changes are saved,
+// and the line says so, with the save's error. The list holds the invite's address by then, but
+// the line never gives it. Saving the list again makes the invite again.
+failures.set('ExportBanList.save', [null, new Error('Lock wait timeout exceeded')]);
+const unsavedInvite = await change('updateExportBanList', { id: bm.id, server: 'Community' });
+assert.ok(unsavedInvite.battlemetricsInvite.endsWith(INVITE_CODE));
+assert.strictEqual(rows.ExportBanList.find(({ id }) => id === bm.id).battlemetricsInvite, null);
+assert.deepStrictEqual(take(), [
+  `[WebServer][1] ${ALICE_TEXT} updated export ban list Community's List "Renamed" (ID: ${bm.id}, BattleMetrics): server "Server" → "Community".`,
+  `[WebServer][1] ${ALICE_TEXT} saved export ban list Community's List "Renamed" (ID: ${bm.id}, BattleMetrics), but its missing invite to BattleMetrics ban list 98765 could not be made, which saving the list tries again: Error: Lock wait timeout exceeded`
+]);
+await change('updateExportBanList', { id: bm.id, server: 'Server' });
+assert.deepStrictEqual(take(), [
+  `[WebServer][1] ${ALICE_TEXT} updated export ban list ${bmList('Renamed')}: server "Community" → "Server".`,
+  `[ExportBanList][1] Created the invite to BattleMetrics ban list 98765 for ${ownedBy(bmList('Renamed'))}.`
+]);
 
 // Adding and deleting a config each post one line: the ban list, with its organisation, and the
 // points it gives.
@@ -491,7 +522,7 @@ assert.deepStrictEqual(take(), [
 await change('deleteExportBanList', { id: bm.id });
 assert.ok(!banLists.has('98765'));
 assert.deepStrictEqual(take(), [
-  `[ExportBanList][1] Deleting BattleMetrics ban list 98765 for ${ownedBy(bmList('Renamed'))}...`,
+  `[ExportBanList][1] Deleting BattleMetrics ban list 98765 for ${ownedBy(bmList('Renamed'))}, which can take minutes.`,
   `[ExportBanList][1] Deleted BattleMetrics ban list 98765 for ${ownedBy(bmList('Renamed'))}, with its invites and subscribers.`,
   `[WebServer][1] ${ALICE_TEXT} deleted export ban list ${bmList('Renamed')} and its BattleMetrics ban list 98765.`
 ]);
@@ -503,8 +534,11 @@ assert.deepStrictEqual(take(), [
 ]);
 
 // A BattleMetrics list with no ban list posts two: ExportBanList's, that it has none to delete,
-// and the website's. One whose ban list BattleMetrics no longer has posts three.
-bm = await change('createExportBanList', { name: 'Bans', server: 'Server', type: 'battlemetrics' });
+// and the website's. One whose ban list BattleMetrics no longer has posts three, which only say
+// that BattleMetrics did not know it, as BattleMetrics says the same of a ban list CBL's key cannot
+// see.
+const bmArgs = { name: 'Bans', server: 'Server', type: 'battlemetrics', discordWebhook: WEBHOOK };
+bm = await change('createExportBanList', bmArgs);
 take();
 rows.ExportBanList.find(({ id }) => id === bm.id).battlemetricsID = null;
 await change('deleteExportBanList', { id: bm.id });
@@ -512,20 +546,20 @@ assert.deepStrictEqual(take(), [
   `[ExportBanList][1] ${ownedBy(bmList())} has no BattleMetrics ban list to delete.`,
   `[WebServer][1] ${ALICE_TEXT} deleted export ban list ${bmList()}, which had no BattleMetrics ban list.`
 ]);
-bm = await change('createExportBanList', { name: 'Bans', server: 'Server', type: 'battlemetrics' });
+bm = await change('createExportBanList', bmArgs);
 take();
 banLists.delete(bm.battlemetricsID);
 await change('deleteExportBanList', { id: bm.id });
 assert.deepStrictEqual(take(), [
-  `[ExportBanList][1] Deleting BattleMetrics ban list ${bm.battlemetricsID} for ${ownedBy(bmList())}...`,
+  `[ExportBanList][1] Deleting BattleMetrics ban list ${bm.battlemetricsID} for ${ownedBy(bmList())}, which can take minutes.`,
   `[ExportBanList][1] BattleMetrics does not know ban list ${bm.battlemetricsID} for ${ownedBy(bmList())} (HTTP 404, Unknown ban list), so it is taken to be deleted already.`,
-  `[WebServer][1] ${ALICE_TEXT} deleted export ban list ${bmList()}; BattleMetrics no longer had its ban list ${bm.battlemetricsID}.`
+  `[WebServer][1] ${ALICE_TEXT} deleted export ban list ${bmList()}; BattleMetrics did not know its ban list ${bm.battlemetricsID}, so it was taken to be deleted already.`
 ]);
 
 // When removing the ban list's invite times out, the client's error names the request's path, with
 // the invite's code in it. The deletion's error, which the owner is shown, and the line the
 // website posts, after the one as the deletion started, give the path without it.
-bm = await change('createExportBanList', { name: 'Bans', server: 'Server', type: 'battlemetrics' });
+bm = await change('createExportBanList', bmArgs);
 take();
 const removal = `ban-lists/${bm.battlemetricsID}/relationships/invites/${INVITE_CODE}`;
 answers.set(`delete ${removal}`, () => {
@@ -536,7 +570,7 @@ await assert.rejects(change('deleteExportBanList', { id: bm.id }), (error) => {
   return true;
 });
 assert.deepStrictEqual(take(), [
-  `[ExportBanList][1] Deleting BattleMetrics ban list ${bm.battlemetricsID} for ${ownedBy(bmList())}...`,
+  `[ExportBanList][1] Deleting BattleMetrics ban list ${bm.battlemetricsID} for ${ownedBy(bmList())}, which can take minutes.`,
   `[WebServer][1] ${ALICE_TEXT} could not delete export ban list ${bmList()}, as deleting its BattleMetrics ban list ${bm.battlemetricsID} failed: ApiError: BattleMetrics deletion failed while removing invites: BattleMetrics DELETE ban-lists/${bm.battlemetricsID}/relationships/invites/[invite code] failed after 3 attempts: timed out after 30s. The local list was retained; any invites or subscriptions already removed remain removed.`
 ]);
 answers.delete(`delete ${removal}`);
@@ -545,7 +579,7 @@ answers.delete(`delete ${removal}`);
 failures.set('ExportBanList.destroy', [new Error('Deadlock found when trying to get lock')]);
 await assert.rejects(change('deleteExportBanList', { id: bm.id }), /Deadlock/);
 assert.deepStrictEqual(take(), [
-  `[ExportBanList][1] Deleting BattleMetrics ban list ${bm.battlemetricsID} for ${ownedBy(bmList())}...`,
+  `[ExportBanList][1] Deleting BattleMetrics ban list ${bm.battlemetricsID} for ${ownedBy(bmList())}, which can take minutes.`,
   `[ExportBanList][1] Deleted BattleMetrics ban list ${bm.battlemetricsID} for ${ownedBy(bmList())}, with its invites and subscribers.`,
   `[WebServer][1] ${ALICE_TEXT} could not delete export ban list ${bmList()}, as deleting it from the database failed: Error: Deadlock found when trying to get lock`
 ]);
@@ -553,7 +587,9 @@ await change('deleteExportBanList', { id: bm.id });
 assert.strictEqual(take().length, 2);
 
 // When BattleMetrics does not create the ban list, the list is deleted and one line says so, with
-// why, and that BattleMetrics may have made it anyway when it did not answer.
+// why. When BattleMetrics did not answer, it may have made the ban list anyway, which nothing
+// records, so the line says what to look for on BattleMetrics, and is posted as an important line,
+// ahead of others.
 answers.set('post ban-lists', () => {
   throw apiError(
     'BattleMetrics POST ban-lists failed: timed out after 30s, so it may have been carried out',
@@ -570,12 +606,25 @@ await refused(
 const unmade = (id) =>
   `[WebServer][1] ${ALICE_TEXT} could not create export ban list ${bmList('Bans', id)}, as making its BattleMetrics ban list failed`;
 let id = nextID - 1;
-assert.deepStrictEqual(take(), [
-  `${unmade(id)}, so the list was deleted. BattleMetrics may have made the ban list anyway, which nothing records. ApiError: BattleMetrics POST ban-lists failed: timed out after 30s, so it may have been carried out`
-]);
+const ambiguous = `${unmade(id)}, so the list was deleted. BattleMetrics may have made the ban list anyway, which nothing records: look for "Community Ban List - Bans (ID: ${id})" among CBL's ban lists on BattleMetrics, and remove it. ApiError: BattleMetrics POST ban-lists failed: timed out after 30s, so it may have been carried out`;
+assert.deepStrictEqual(take(), [ambiguous]);
+assert.deepStrictEqual(important.splice(0), [ambiguous]);
+
+// So does the line when the list cannot be deleted either.
+failures.set('ExportBanList.destroy', [new Error('Database unavailable')]);
+await refused(
+  'createExportBanList',
+  { name: 'Bans', server: 'Server', type: 'battlemetrics' },
+  'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later.'
+);
+id = nextID - 1;
+const ambiguousKept = `${unmade(id)}, and the list could not be deleted either, so its owner was asked to delete it. BattleMetrics may have made the ban list anyway, which nothing records: look for "Community Ban List - Bans (ID: ${id})" among CBL's ban lists on BattleMetrics, and remove it. ApiError: BattleMetrics POST ban-lists failed: timed out after 30s, so it may have been carried out, Error: Database unavailable`;
+assert.deepStrictEqual(take(), [ambiguousKept]);
+assert.deepStrictEqual(important.splice(0), [ambiguousKept]);
+rows.ExportBanList = rows.ExportBanList.filter((row) => row.id !== id);
 
 // When the list cannot be deleted either, the one line gives both failures. BattleMetrics saying
-// no is not a request it may have carried out.
+// no is not a request it may have carried out, so there is nothing to look for on BattleMetrics.
 answers.set('post ban-lists', () => {
   throw apiError('BattleMetrics POST ban-lists failed: HTTP 400 (Bad Request)', {
     status: 400,
@@ -592,11 +641,12 @@ id = nextID - 1;
 assert.deepStrictEqual(take(), [
   `${unmade(id)}, and the list could not be deleted either, so its owner was asked to delete it. ApiError: BattleMetrics POST ban-lists failed: HTTP 400 (Bad Request), Error: Database unavailable`
 ]);
+assert.deepStrictEqual(important, []);
 answers.delete('post ban-lists');
 rows.ExportBanList = rows.ExportBanList.filter((row) => row.id !== id);
 
 // When the list cannot be saved with the ban list BattleMetrics made, the one line gives the ban
-// list, which nothing records, to be removed by hand.
+// list, which nothing records, to be removed by hand, and is posted as an important line.
 failures.set('ExportBanList.save', [new Error('Lock wait timeout exceeded')]);
 await refused(
   'createExportBanList',
@@ -605,9 +655,9 @@ await refused(
 );
 id = nextID - 1;
 const unsaved = String(nextBanList - 1);
-assert.deepStrictEqual(take(), [
-  `[WebServer][1] ${ALICE_TEXT} created export ban list ${bmList('Bans', id)}: ${DEFAULTS}, no Discord webhook. BattleMetrics ban list ${unsaved} was made for it, but saving it to the list failed, so nothing records the ban list, which must be removed on BattleMetrics by hand: Error: Lock wait timeout exceeded`
-]);
+const unsavedLine = `[WebServer][1] ${ALICE_TEXT} created export ban list ${bmList('Bans', id)}: ${DEFAULTS}, no Discord webhook. BattleMetrics ban list ${unsaved} was made for it, but saving it to the list failed, so nothing records the ban list, which must be removed on BattleMetrics by hand: Error: Lock wait timeout exceeded`;
+assert.deepStrictEqual(take(), [unsavedLine]);
+assert.deepStrictEqual(important.splice(0), [unsavedLine]);
 rows.ExportBanList = rows.ExportBanList.filter((row) => row.id !== id);
 
 // When its invite cannot be made, the list keeps its ban list, and the one line says so.
@@ -627,6 +677,21 @@ assert.deepStrictEqual(take(), [
 ]);
 rows.ExportBanList = rows.ExportBanList.filter((row) => row.id !== id);
 
+// So does it when BattleMetrics makes the invite but the list cannot be saved with it. The list
+// holds the invite's address by then, but neither the line nor the error the owner is shown gives
+// it.
+failures.set('ExportBanList.save', [null, new Error('Lock wait timeout exceeded')]);
+const inviteUnsaved = String(nextBanList);
+await refused('createExportBanList', bmArgs, 'Lock wait timeout exceeded');
+id = nextID - 1;
+assert.ok(banLists.get(inviteUnsaved).invites.has(INVITE_CODE));
+assert.deepStrictEqual(take(), [
+  `[WebServer][1] ${ALICE_TEXT} created export ban list ${bmList('Bans', id)} with BattleMetrics ban list ${inviteUnsaved}: ${DEFAULTS}, Discord webhook set. Its invite could not be made, which saving the list tries again: Error: Lock wait timeout exceeded`
+]);
+assert.ok(!JSON.stringify(consoleErrors).includes(INVITE_CODE));
+assert.deepStrictEqual(important, []);
+rows.ExportBanList = rows.ExportBanList.filter((row) => row.id !== id);
+
 // The database's other failures each post a line saying which list and what failed: a list that
 // cannot be created, saved, or have a config added or deleted.
 failures.set('ExportBanList.create', [new Error('Database unavailable')]);
@@ -641,12 +706,19 @@ assert.deepStrictEqual(take(), [
 const kept = await change('createExportBanList', {
   name: 'Kept',
   server: 'Server',
-  type: 'remote'
+  type: 'remote',
+  discordWebhook: WEBHOOK
 });
 const keptList = `Server's List "Kept" (ID: ${kept.id}, remote)`;
 take();
 failures.set('ExportBanList.save', [new Error('Database unavailable')]);
 await refused('updateExportBanList', { id: kept.id, name: 'New' }, 'Database unavailable');
+failures.set('ExportBanList.save', [new Error('Database unavailable')]);
+await refused(
+  'updateExportBanList',
+  { id: kept.id, discordWebhook: OTHER_WEBHOOK },
+  'Database unavailable'
+);
 failures.set('ExportBanListConfig.create', [new Error('Database unavailable')]);
 const configArgs = { exportBanList: kept.id, banList: 3, activePoints: 2, expiredPoints: 1 };
 await refused('createExportBanListConfig', configArgs, 'Database unavailable');
@@ -657,6 +729,7 @@ const KEPT_CONFIG =
   'ban list "Partner Bans" (ID: 3) of organisation "Partner Org", 2 points for an active ban and 1 for an expired ban';
 assert.deepStrictEqual(take(), [
   `[WebServer][1] ${ALICE_TEXT} could not save export ban list ${keptList} (name "Kept" → "New"): Error: Database unavailable`,
+  `[WebServer][1] ${ALICE_TEXT} could not save export ban list ${keptList} (Discord webhook changed): Error: Database unavailable`,
   `[WebServer][1] ${ALICE_TEXT} could not add a config to export ban list ${keptList} (${KEPT_CONFIG}): Error: Database unavailable`,
   `[WebServer][1] ${ALICE_TEXT} added a config to export ban list ${keptList}: ${KEPT_CONFIG}.`,
   `[WebServer][1] ${ALICE_TEXT} could not delete a config from export ban list ${keptList} (${KEPT_CONFIG}): Error: Database unavailable`
@@ -716,28 +789,123 @@ assert.deepStrictEqual(take(), [
   `[WebServer][1] Steam user ${BOB.id} created export ban list Server's List "Bob" (ID: ${bobs.id}, remote): ${DEFAULTS}, no Discord webhook.`
 ]);
 
+// Names are their users' to choose, so each is kept on one line and shown as written, in the
+// website's lines and in ExportBanList's: a line break in a name becomes a space, and the
+// characters Discord reads as Markdown get a backslash.
+const MALLORY = { id: '76561198000000003', name: 'xX_Sniper_Xx||' };
+const MALLORY_TEXT = `Steam user "xX\\_Sniper\\_Xx\\|\\|" (ID: ${MALLORY.id})`;
+const odd = await change(
+  'createExportBanList',
+  { name: 'M\n[DiscordBot][1] admin (1) removed', server: '||AFO', type: 'battlemetrics' },
+  MALLORY
+);
+const ODD_NAME = 'M \\[DiscordBot\\]\\[1\\] admin (1) removed';
+const MASKED = '\\[Main\\](https://example.com/x)';
+const oddList = (name) => `\\|\\|AFO's List "${name}" (ID: ${odd.id}, BattleMetrics)`;
+assert.deepStrictEqual(take(), [
+  `[ExportBanList][1] Created BattleMetrics ban list ${odd.battlemetricsID} for ${oddList(ODD_NAME)} of Steam user ${MALLORY.id}, with its invite.`,
+  `[WebServer][1] ${MALLORY_TEXT} created export ban list ${oddList(ODD_NAME)}: ${DEFAULTS}, no Discord webhook.`
+]);
+await change('updateExportBanList', { id: odd.id, name: '[Main](https://example.com/x)' }, MALLORY);
+assert.deepStrictEqual(take(), [
+  `[WebServer][1] ${MALLORY_TEXT} updated export ban list ${oddList(MASKED)}: name "${ODD_NAME}" → "${MASKED}".`
+]);
+// The names of ban lists and organisations, which CBL's admins choose, are shown the same way.
+rows.Organisation.push({ id: 2, name: 'Org_Name' });
+rows.BanList.push({ id: 4, name: 'Bans\n||x||', organisation: 2 });
+const oddConfig = await change(
+  'createExportBanListConfig',
+  { exportBanList: odd.id, banList: 4, activePoints: 1, expiredPoints: 1 },
+  MALLORY
+);
+await change('deleteExportBanListConfig', { id: oddConfig.id }, MALLORY);
+const ODD_CONFIG =
+  'ban list "Bans \\|\\|x\\|\\|" (ID: 4) of organisation "Org\\_Name", 1 point for an active ban and 1 for an expired ban';
+assert.deepStrictEqual(take(), [
+  `[WebServer][1] ${MALLORY_TEXT} added a config to export ban list ${oddList(MASKED)}: ${ODD_CONFIG}.`,
+  `[WebServer][1] ${MALLORY_TEXT} deleted a config from export ban list ${oddList(MASKED)}: ${ODD_CONFIG}.`
+]);
+await change('deleteExportBanList', { id: odd.id }, MALLORY);
+assert.deepStrictEqual(take(), [
+  `[ExportBanList][1] Deleting BattleMetrics ban list ${odd.battlemetricsID} for ${oddList(MASKED)} of Steam user ${MALLORY.id}, which can take minutes.`,
+  `[ExportBanList][1] Deleted BattleMetrics ban list ${odd.battlemetricsID} for ${oddList(MASKED)} of Steam user ${MALLORY.id}, with its invites and subscribers.`,
+  `[WebServer][1] ${MALLORY_TEXT} deleted export ban list ${oddList(MASKED)} and its BattleMetrics ban list ${odd.battlemetricsID}.`
+]);
+
 // Each user's changes post at most LINES_PER_MINUTE lines a minute. The rest are only printed in
 // the web server's console, and the first of them posts one line saying so. Another user's lines
-// are not held back, and a minute later the user's lines are posted again.
+// are not held back. A failure is always posted, and does not count: here a save that fails, and a
+// BattleMetrics ban list made for a list that could not be saved with it, which must be removed by
+// hand, so its line goes ahead of others. A minute later the user's lines are posted again, after
+// one saying how many went to the console only.
 now += 60 * 1000;
 printed.length = 0;
 for (let i = 0; i < LINES_PER_MINUTE + 2; i++)
   await Mutation.updateExportBanList(null, { id: bobs.id, name: `Bob ${i}` }, as(BOB));
 await Mutation.updateExportBanList(null, { id: kept.id, name: 'Kept again' }, as(ALICE));
+failures.set('ExportBanList.save', [new Error('Database unavailable')]);
+await assert.rejects(Mutation.updateExportBanList(null, { id: bobs.id, name: 'Bob' }, as(BOB)), {
+  message: 'Database unavailable'
+});
+failures.set('ExportBanList.save', [new Error('Lock wait timeout exceeded')]);
+await assert.rejects(
+  Mutation.createExportBanList(
+    null,
+    { name: 'Bob BM', server: 'Server', type: 'battlemetrics' },
+    as(BOB)
+  ),
+  { message: 'Lock wait timeout exceeded' }
+);
+const bobsBM = nextID - 1;
+rows.ExportBanList = rows.ExportBanList.filter((row) => row.id !== bobsBM);
 const bobsList = (name) => `Server's List "${name}" (ID: ${bobs.id}, remote)`;
 const renamed = (i, level = 1) =>
   `[WebServer][${level}] Steam user ${BOB.id} updated export ban list ${bobsList(`Bob ${i}`)}: name "${i === 0 ? 'Bob' : `Bob ${i - 1}`}" → "Bob ${i}".`;
+const bobsUnsaved = `[WebServer][1] Steam user ${BOB.id} created export ban list Server's List "Bob BM" (ID: ${bobsBM}, BattleMetrics): ${DEFAULTS}, no Discord webhook. BattleMetrics ban list ${nextBanList - 1} was made for it, but saving it to the list failed, so nothing records the ban list, which must be removed on BattleMetrics by hand: Error: Lock wait timeout exceeded`;
 assert.deepStrictEqual(take(), [
   ...Array.from({ length: LINES_PER_MINUTE }, (_, i) => renamed(i)),
-  `[WebServer][1] Steam user ${BOB.id}'s changes have posted ${LINES_PER_MINUTE} lines in the last minute, the most for one user, so their next ones are only in the web server's console until there is room again.`,
-  `[WebServer][1] ${ALICE_TEXT} updated export ban list Server's List "Kept again" (ID: ${kept.id}, remote): name "Kept" → "Kept again".`
+  `[WebServer][1] Steam user ${BOB.id}'s changes have posted ${LINES_PER_MINUTE} lines in the last minute, the most for one user, so their next ones are only in the web server's console until there is room again. Failures are still posted.`,
+  `[WebServer][1] ${ALICE_TEXT} updated export ban list Server's List "Kept again" (ID: ${kept.id}, remote): name "Kept" → "Kept again".`,
+  `[WebServer][1] Steam user ${BOB.id} could not save export ban list ${bobsList(`Bob ${LINES_PER_MINUTE + 1}`)} (name "Bob ${LINES_PER_MINUTE + 1}" → "Bob"): Error: Database unavailable`,
+  bobsUnsaved
 ]);
+assert.deepStrictEqual(important.splice(0), [bobsUnsaved]);
 assert.deepStrictEqual(printed, [renamed(LINES_PER_MINUTE, 2), renamed(LINES_PER_MINUTE + 1, 2)]);
 now += 60 * 1000;
 await Mutation.updateExportBanList(null, { id: bobs.id, name: 'Bob' }, as(BOB));
 assert.deepStrictEqual(take(), [
+  `[WebServer][1] Steam user ${BOB.id}'s changes have room in the log channel again, after 2 lines of theirs went to the web server's console only.`,
   `[WebServer][1] Steam user ${BOB.id} updated export ban list ${bobsList('Bob')}: name "Bob ${LINES_PER_MINUTE + 1}" → "Bob".`
 ]);
+// The limit leaves room for setting up a list by hand, with a config for each of CBL's ban lists,
+// about 20, in a minute.
+assert.ok(LINES_PER_MINUTE >= 25);
+
+// Failures take none of a user's room: with a failure among them, a user's LINES_PER_MINUTE
+// changes in a minute are all posted.
+now += 60 * 1000;
+printed.length = 0;
+for (let i = 0; i < LINES_PER_MINUTE - 1; i++)
+  await Mutation.updateExportBanList(null, { id: kept.id, name: `Kept ${i}` }, as(ALICE));
+failures.set('ExportBanList.save', [new Error('Database unavailable')]);
+await assert.rejects(Mutation.updateExportBanList(null, { id: kept.id, name: 'Kept' }, as(ALICE)), {
+  message: 'Database unavailable'
+});
+await Mutation.updateExportBanList(null, { id: kept.id, name: 'Kept' }, as(ALICE));
+const keptAs = (name) => `Server's List "${name}" (ID: ${kept.id}, remote)`;
+assert.deepStrictEqual(take(), [
+  ...Array.from(
+    { length: LINES_PER_MINUTE - 1 },
+    (_, i) =>
+      `[WebServer][1] ${ALICE_TEXT} updated export ban list ${keptAs(`Kept ${i}`)}: name "${i === 0 ? 'Kept again' : `Kept ${i - 1}`}" → "Kept ${i}".`
+  ),
+  `[WebServer][1] ${ALICE_TEXT} could not save export ban list ${keptAs(`Kept ${LINES_PER_MINUTE - 2}`)} (name "Kept ${LINES_PER_MINUTE - 2}" → "Kept"): Error: Database unavailable`,
+  `[WebServer][1] ${ALICE_TEXT} updated export ban list ${keptAs('Kept')}: name "Kept ${LINES_PER_MINUTE - 2}" → "Kept".`
+]);
+assert.deepStrictEqual(printed, []);
+
+// Only the lines that leave something to clean up by hand were posted as important ones.
+assert.deepStrictEqual(important, []);
 
 // What the web server printed with console.error never gives the API key either.
 assert.ok(consoleErrors.length > 0);

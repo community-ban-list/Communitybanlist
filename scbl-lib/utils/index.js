@@ -10,6 +10,7 @@ import sendDiscordWebhook, {
 } from './discord-webhook.js';
 import isDiscordWebhookUrl from './discord-webhook-url.js';
 import Logger from './logger.js';
+import logText from './log-text.js';
 import testDiscordWebhook from './test-discord-webhook.js';
 
 export {
@@ -23,6 +24,7 @@ export {
   isDiscordWebhookUrl,
   isSameBattlemetricsID,
   Logger,
+  logText,
   normaliseBattlemetricsID,
   sendDiscordWebhook,
   stackTrace,

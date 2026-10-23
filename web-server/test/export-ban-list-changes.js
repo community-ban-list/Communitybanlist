@@ -3,6 +3,7 @@ import { readFile } from 'fs/promises';
 import vm from 'vm';
 
 import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
+import logText from '../../scbl-lib/utils/log-text.js';
 import Validators from '../../scbl-lib/validators.js';
 
 // Checks for changes to export ban lists and their configs. Part 1 checks the guard that
@@ -622,6 +623,7 @@ const discordRefuses = {
 const utils = {
   // The lines the resolvers post are checked in export-ban-list-audit.js.
   Logger: { verbose() {}, important() {} },
+  logText,
   isDiscordWebhookUrl: (
     await load('../../scbl-lib/utils/discord-webhook-url.js', {}, webhookContext)
   ).default,

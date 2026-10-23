@@ -63,8 +63,10 @@ let notifications;
 let rows;
 let deletions;
 // The query that loaded each list deleted, in turn, e.g. 'find 12' for findByPk(12), as each query
-// gives instances of its own, as Sequelize's do.
+// gives instances of its own, as Sequelize's do, and for each, the Steam name of the owner the list
+// had loaded with it, which ExportBanList's lines name, and whether its lines were to be important.
 let deletedFrom;
+let deletedWith;
 // Answers to isRunLockHeld, in turn: whether a run holds the lock, or an error. Once they run out,
 // no run holds it.
 let lockAnswers;
@@ -91,6 +93,7 @@ function reset() {
   rows = new Map();
   deletions = new Map();
   deletedFrom = [];
+  deletedWith = [];
   lockAnswers = [];
   visible = new Set();
   answer = 'confirm';
@@ -124,9 +127,13 @@ function addList(
     },
     // Like the shared deletion, a list that is removed no longer records its BattleMetrics ban
     // list.
-    async deleteExportBanList() {
+    async deleteExportBanList(options) {
       calls.push(['delete', id]);
       deletedFrom.push(this.loadedBy);
+      deletedWith.push({
+        owner: this.SteamUser?.name ?? null,
+        important: options?.important ?? false
+      });
       const result = deletions.get(id);
       if (result instanceof Error) throw result;
       rows.delete(id);
@@ -175,10 +182,14 @@ const ExportBanList = {
       }));
     return { limits: LIMITS, lists };
   },
+  // Like Sequelize's, it loads the list without its owner's Steam user.
   async findByPk(id) {
     calls.push(['find', id]);
     const row = rows.get(id);
-    return row ? instance(row.exportBanList, `find ${id}`) : null;
+    if (!row) return null;
+    const found = instance(row.exportBanList, `find ${id}`);
+    delete found.SteamUser;
+    return found;
   },
   // Only the lists whose columns equal the query's, in ID order. The BattleMetrics ban lists CBL's
   // lists record are read this way, so the query must load each list's type and ban list.
@@ -397,8 +408,10 @@ assert.deepStrictEqual(calls, [
   ['find', 12],
   ['delete', 12]
 ]);
-// The list is deleted as it was read after the confirmation, not as the preview showed it.
+// The list is deleted as it was read after the confirmation, not as the preview showed it, with
+// its owner's Steam user as the preview loaded it, for ExportBanList's lines about the deletion.
 assert.deepStrictEqual(deletedFrom, ['find 12']);
+assert.deepStrictEqual(deletedWith, [{ owner: 'Owner 12', important: false }]);
 assert.strictEqual(
   contentOf(replies.at(-1)),
   'Removed export ban list **List 12** (#12) and its BattleMetrics ban list.'
@@ -567,6 +580,19 @@ assert.match(
   /^admin \(1\) removed export ban list "List 25" \(ID: 25, BattleMetrics, BattleMetrics ID: bm-25\) of .*: BattleMetrics did not know its ban list, and whether CBL's BattleMetrics key could see it was not checked, so it may still be on BattleMetrics: check it there\.$/
 );
 
+// A list given to someone else while the removal was confirmed is deleted without its old owner's
+// Steam user, so ExportBanList's lines name its owner by Steam ID alone, rather than by the wrong
+// name.
+reset();
+addList(26, 'battlemetrics', { battlemetricsID: 'bm-26' });
+visible = new Set(['bm-26']);
+whileConfirming = async () => {
+  rows.get(26).exportBanList.owner = '76561198000000099';
+};
+await run('remove', { id: 26 });
+assert.deepStrictEqual(deleted(), [26]);
+assert.deepStrictEqual(deletedWith, [{ owner: null, important: false }]);
+
 // When the deletion fails, the reply and the log say which step failed, and the list is kept.
 reset();
 addList(16, 'battlemetrics', { battlemetricsID: 'bm-16' });
@@ -702,8 +728,14 @@ assert.deepStrictEqual(calls, [
   ['check', [33]],
   ['delete', 33]
 ]);
-// Each list is deleted as it was read again just before, not as the preview showed it.
+// Each list is deleted as it was read again just before, not as the preview showed it, with its
+// owner's Steam user. ExportBanList's lines about each deletion are important, as the bot's are.
 assert.deepStrictEqual(deletedFrom, ['check 30', 'check 31', 'check 33']);
+assert.deepStrictEqual(deletedWith, [
+  { owner: 'Owner 30', important: true },
+  { owner: 'Owner 31', important: true },
+  { owner: 'Owner 33', important: true }
+]);
 assert.deepStrictEqual([...rows.keys()], [32]);
 // Every line is important, the results as well as the start and the summary. Lines of the same
 // importance reach the log channel in the order they were logged, so there the summary comes after

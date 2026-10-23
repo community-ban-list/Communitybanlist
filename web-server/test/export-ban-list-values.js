@@ -4,6 +4,7 @@ import vm from 'vm';
 
 import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
 import isDiscordWebhookUrl from '../../scbl-lib/utils/discord-webhook-url.js';
+import logText from '../../scbl-lib/utils/log-text.js';
 import Validators from '../../scbl-lib/validators.js';
 
 // Checks that the server checks the values of changes to export ban lists and their configs, as
@@ -179,6 +180,7 @@ async function mutations(env) {
       'scbl-lib/utils': {
         // The lines the resolvers post are checked in export-ban-list-audit.js.
         Logger: { verbose() {}, important() {} },
+        logText,
         isDiscordWebhookUrl,
         async testDiscordWebhook(url) {
           tested.push(url);
