@@ -1,7 +1,7 @@
 import { Client, Events, GatewayIntentBits, MessageFlags } from 'discord.js';
 
 import { EXPORT_LIST_LIMIT_PROBLEMS } from 'scbl-lib/config';
-import { connect, disconnect } from 'scbl-lib/db';
+import { connect, disconnect, recordLogMessages, stopRecordingLogMessages } from 'scbl-lib/db';
 import { describeError, Logger, stackTrace } from 'scbl-lib/utils';
 
 import commands from './src/commands/index.js';
@@ -14,6 +14,10 @@ const SHUTDOWN_LOG_TIMEOUT = 5000;
 // Limits on export ban lists set to values that cannot be used, which have their defaults instead.
 // /exportbanlist removes the lists outside the limits, so they must be the web server's.
 for (const problem of EXPORT_LIST_LIMIT_PROBLEMS) console.warn(`Warning: ${problem}`);
+
+// The newest message the bot posts to the log channel is kept in the database, so the importer
+// service can keep its status message below it. It never holds up or fails a command.
+recordLogMessages('bot');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -76,6 +80,8 @@ async function shutdown(code = 0) {
 
   try {
     await client.destroy();
+    // Lines still sent as the bot stops are not written to the database, which is closing.
+    stopRecordingLogMessages();
     await disconnect();
 
     // Give queued log messages a chance to send.

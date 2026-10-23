@@ -79,9 +79,9 @@ async function request(method, url, body, { timeout = DISCORD_WEBHOOK_TIMEOUT } 
   };
   let response;
   try {
-    // A GET has no body.
-    response = await (method === 'get'
-      ? axios.get(url.href, options)
+    // A GET or a DELETE has no body.
+    response = await (method === 'get' || method === 'delete'
+      ? axios[method](url.href, options)
       : axios[method](url.href, body, options));
   } catch (err) {
     if (TIMEOUT_CODES.includes(err.code))
@@ -149,4 +149,11 @@ export async function editDiscordWebhookMessage(
 // or throws a DiscordWebhookError.
 export async function getDiscordWebhookMessage(webhook, messageID) {
   return request('get', messageAddress(webhook, messageID));
+}
+
+// Delete a message a webhook posted, e.g. an old copy of the importer service's status message,
+// with the same checks and time limits as sendDiscordWebhook. Throws a DiscordWebhookError, e.g.
+// with status 404 and code 10008 for a message that no longer exists.
+export async function deleteDiscordWebhookMessage(webhook, messageID) {
+  await request('delete', messageAddress(webhook, messageID));
 }

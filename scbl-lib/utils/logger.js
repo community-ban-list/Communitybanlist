@@ -4,10 +4,12 @@ import Bottleneck from 'bottleneck';
 import describeError, { stackTrace } from './describe-error.js';
 import sendDiscordWebhook, {
   DELETED_WEBHOOK_CODES,
+  deleteDiscordWebhookMessage,
   editDiscordWebhookMessage,
   getDiscordWebhookMessage
 } from './discord-webhook.js';
 import isDiscordWebhookUrl from './discord-webhook-url.js';
+import isNewerMessage, { isMessageID } from './message-id.js';
 
 // Messages to the log channel are sent one at a time, at most one every 400 ms. That is right at
 // Discord's limit for a webhook of 5 every 2 seconds, so a burst can still be rate limited now and
@@ -18,8 +20,9 @@ const MIN_TIME = 400;
 // At most 200 messages, or 80 seconds of them, wait to be sent. When more arrive, the least
 // important are dropped first: progress bars, then other messages, then errors. A run's own lines,
 // such as its start, failure and summary, go ahead of all of these and are never dropped for them,
-// and a status message, such as a run's, goes ahead of those, so its final edit is not lost.
-// Bottleneck sends the lowest numbers first.
+// and a status message, such as a run's, goes ahead of those, so its final edit is not lost, as do
+// the deletes and edits of old copies of a status message. Bottleneck sends the lowest numbers
+// first.
 const MAX_QUEUED = 200;
 const STATUS_PRIORITY = 1;
 const RUN_PRIORITY = 2;
@@ -102,8 +105,10 @@ function messageBody(payload) {
 // something that changes often without drawing it each time. postTimeout, if given, is how long
 // Discord has to answer its post, and with postAgain, a post that failed is made again when the
 // next payload is due, unless Discord refused it (see failed). A message given messageID edits that
-// message, posted earlier, rather than posting a new one, and with repostIfDeleted, a message that
-// turns out to have been deleted is posted again. onPosted is told the ID of each message it posts.
+// message, posted earlier, rather than posting a new one, or, with repost, posts it again at once
+// below newer messages (see repost()), and with repostIfDeleted, a message that turns out to have
+// been deleted is posted again. onPosted(id, replaced) is told the ID of each message it posts, and
+// for a message posted again below newer messages, the ID of the one it replaces.
 class LogMessage {
   constructor(
     logger,
@@ -118,6 +123,7 @@ class LogMessage {
       messageID = null,
       editInterval = EDIT_INTERVAL,
       repostIfDeleted = false,
+      repost = false,
       onPosted = null
     }
   ) {
@@ -131,6 +137,10 @@ class LogMessage {
     this.repostIfDeleted = repostIfDeleted;
     this.onPosted = onPosted;
     this.messageID = messageID;
+    // Whether the message is to be posted again below newer messages, with its next send, and
+    // whether it is being posted again now (see repost()).
+    this.moving = repost && messageID !== null;
+    this.movingNow = false;
     // The latest payload, while it waits to be sent.
     this.waiting = null;
     this.sending = false;
@@ -175,6 +185,28 @@ class LogMessage {
     }
     this.wait(payload);
     this.sendLatest();
+  }
+
+  // Post the message again, as a new message, with payload, as soon as the queue allows rather than
+  // when its next edit is due, e.g. to move it below newer messages in the channel. The message it
+  // replaces is left as it is: onPosted is told both IDs, so whatever moves the message can delete
+  // the old one once the new one's ID is kept. Returns whether it is to be posted again: not while
+  // it already is, nor for a message not posted yet, which is posted below the others anyway, nor
+  // once it has its final payload or has stopped, as such a message is only ever edited.
+  repost(payload) {
+    if (
+      this.stopped ||
+      this.final ||
+      this.moving ||
+      this.movingNow ||
+      this.messageID === null ||
+      this.unposted !== null
+    )
+      return false;
+    this.moving = true;
+    this.wait(payload);
+    this.flush();
+    return true;
   }
 
   // Give the message its final payload, which is sent at once rather than when it is due. Updates
@@ -293,11 +325,21 @@ class LogMessage {
     this.logger.queue(
       this.priority,
       async () => {
+        // Whether to post the message again below newer messages, rather than edit it, is decided
+        // only now: a message given its final payload meanwhile is only edited. A send that was
+        // waiting to be made when the move was asked for, e.g. an edit that was due, is the move,
+        // so the payload given with the move is then sent when the next one is due, rather than at
+        // once as well.
+        const moving = this.moving && !this.final && this.messageID !== null;
+        this.moving = false;
+        this.movingNow = moving;
+        if (moving) this.flushing = false;
         try {
           // The webhook is read only now, as Discord logging is turned off if it turns out to be
           // gone, maybe while this waited.
           const webhook = this.logger.discordWebhook;
           if (!webhook) this.stop();
+          else if (moving) await this.postMessage(webhook, payload, this.messageID);
           else {
             if (this.messageID) await this.editMessage(webhook, payload);
             if (!this.messageID) await this.postMessage(webhook, payload);
@@ -305,9 +347,13 @@ class LogMessage {
         } catch (err) {
           if (!this.logger.webhookGone(err))
             console.warn(
-              `Could not ${this.messageID ? 'update' : 'post'} ${this.name} in the Discord log: ${describeError(err)}`
+              `Could not ${moving ? 'post again' : this.messageID ? 'update' : 'post'} ${this.name} in the Discord log: ${describeError(err)}`
             );
-          this.failed(payload, err);
+          // A message that could not be posted again is still where it was, so the payload waits to
+          // be sent to it as an edit, when the next one is due.
+          if (moving) {
+            if (this.waiting === null) this.wait(payload);
+          } else this.failed(payload, err);
         }
         this.done();
       },
@@ -336,18 +382,21 @@ class LogMessage {
     }
   }
 
-  // Post the message with the payload, and keep its ID, for its later edits and for onPosted.
-  async postMessage(webhook, payload) {
+  // Post the message with the payload, and keep its ID, for its later edits and for onPosted, which
+  // is also told the message it replaces, if it was posted again below newer messages. That one is
+  // left as it is.
+  async postMessage(webhook, payload, replaced) {
     const message = await this.logger.withRetry(() =>
       sendDiscordWebhook(webhook, messageBody(payload), { timeout: this.postTimeout })
     );
     if (!message?.id) throw new Error('Discord did not say which message it posted');
     this.messageID = message.id;
     this.resolvePosted(message.id);
+    this.logger.notePosted(message.id);
     if (this.onPosted) {
       // Whatever onPosted does, e.g. saving the ID, it never holds up or fails the message.
       Promise.resolve()
-        .then(() => this.onPosted(message.id))
+        .then(() => this.onPosted(message.id, replaced))
         .catch((err) =>
           console.warn(
             `Could not keep the ID of ${this.name} in the Discord log: ${describeError(err)}`
@@ -373,6 +422,7 @@ class LogMessage {
 
   done() {
     this.sending = false;
+    this.movingNow = false;
     this.sentAt = Date.now();
     this.sendLatest();
     this.settle();
@@ -416,6 +466,34 @@ class Logger {
     // How many lines have been logged for the log channel, whether or not Discord logging is on,
     // e.g. for the importer service to tell whether a cycle had anything to say.
     this.channelLines = 0;
+
+    // The ID of the newest message the logger has posted to the log channel, or null before the
+    // first, e.g. for the importer service to tell whether its status message is still the newest,
+    // and what is told the ID of each message posted (see setPostListener).
+    this.newestMessageID = null;
+    this.postListener = null;
+  }
+
+  // Tell listener(id) the ID of each message posted to the log channel from now on, e.g. for a
+  // service to keep the newest in the database, or tell nothing any more, with null. It is told in
+  // the background, once each message is posted, so nothing it does holds up, fails or reorders
+  // logging. It must not log to the log channel itself, as that would post another message.
+  setPostListener(listener) {
+    this.postListener = typeof listener === 'function' ? listener : null;
+  }
+
+  // Note a message posted to the log channel: keep its ID if it is the newest yet, and tell the post
+  // listener, if any, in the background (see setPostListener).
+  notePosted(id) {
+    if (!isMessageID(id)) return;
+    if (isNewerMessage(id, this.newestMessageID)) this.newestMessageID = id;
+    const listener = this.postListener;
+    if (!listener) return;
+    Promise.resolve()
+      .then(() => listener(id))
+      .catch((err) =>
+        console.warn(`Could not note a message posted to the Discord log: ${describeError(err)}`)
+      );
   }
 
   verbose(module, verboseness, message, ...extras) {
@@ -492,9 +570,17 @@ class Logger {
   // - editInterval: the time between edits, in milliseconds, rather than 15 seconds;
   // - repostIfDeleted: a message Discord says no longer exists, as someone deleted it, is posted
   //   again, rather than no longer edited;
-  // - onPosted(id): told the ID of each message posted, e.g. to keep it for the next process.
-  // Its sent() settles once its latest payload has been sent, e.g. its final one.
-  statusMessage(payload, { messageID = null, editInterval, repostIfDeleted, onPosted } = {}) {
+  // - repost: the message given by messageID is posted again at once, below newer messages, rather
+  //   than edited where it is (see repost());
+  // - onPosted(id, replaced): told the ID of each message posted, e.g. to keep it for the next
+  //   process, and for a message posted again below newer messages, the ID of the one it replaces,
+  //   which is left for whatever moved it to delete.
+  // Its sent() settles once its latest payload has been sent, e.g. its final one, and its
+  // repost(payload) posts it again below newer messages.
+  statusMessage(
+    payload,
+    { messageID = null, editInterval, repostIfDeleted, repost = false, onPosted } = {}
+  ) {
     return new LogMessage(this, payload, {
       priority: STATUS_PRIORITY,
       name: 'a status message',
@@ -503,29 +589,120 @@ class Logger {
       messageID: typeof messageID === 'string' && /^\d+$/.test(messageID) ? messageID : null,
       editInterval,
       repostIfDeleted,
+      repost,
       onPosted
     });
   }
 
   // Post a message to the log channel once, such as an embed of the importer service's cycle or
   // its hourly summary, ahead of other messages, as a run's own lines go. Like a line, it is tried
-  // again after a network error, as a rare second copy is better than a lost one. Nothing waits for
-  // it, and a failure is only reported in the console. A payload is { content, embeds }.
+  // again after a network error, as a rare second copy is better than a lost one. Nothing has to
+  // wait for it, and a failure is only reported in the console. A payload is { content, embeds }.
+  // Resolves, and never fails, with the message's ID once it is posted, or with null if it was not,
+  // e.g. as Discord refused it or Discord logging is off.
   post(payload) {
-    if (!this.discordWebhook) return;
-    this.queue(RUN_PRIORITY, async () => {
-      // Discord logging may have been turned off while this waited, as its webhook is gone.
-      const webhook = this.discordWebhook;
-      if (!webhook) return;
-      try {
-        await this.withRetry(() => sendDiscordWebhook(webhook, messageBody(payload)), {
-          retryNetwork: true
-        });
-      } catch (err) {
-        if (!this.webhookGone(err))
-          console.warn(`Could not post a message to the Discord log: ${describeError(err)}`);
-      }
+    if (!this.discordWebhook) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      this.queue(
+        RUN_PRIORITY,
+        async () => {
+          let id = null;
+          try {
+            // Discord logging may have been turned off while this waited, as its webhook is gone.
+            const webhook = this.discordWebhook;
+            if (!webhook) return;
+            const message = await this.withRetry(
+              () => sendDiscordWebhook(webhook, messageBody(payload)),
+              { retryNetwork: true }
+            );
+            if (isMessageID(message?.id)) id = message.id;
+            this.notePosted(id);
+          } catch (err) {
+            if (!this.webhookGone(err))
+              console.warn(`Could not post a message to the Discord log: ${describeError(err)}`);
+          } finally {
+            resolve(id);
+          }
+        },
+        () => resolve(null)
+      );
     });
+  }
+
+  // Delete a message the log webhook posted, such as an old copy of the importer service's status
+  // message, in the background, ahead of other messages. It is tried again after a network error,
+  // as deleting a message twice does no harm. Resolves, and never fails, with how it went:
+  // - 'deleted';
+  // - 'gone': Discord says it does not exist, e.g. as someone deleted it already;
+  // - 'refused': Discord refused, with a 4xx other than 429, which it would do again;
+  // - 'failed': it could not be done now, as Discord rate limited or failed it, after it was tried
+  //   once more, or could not be reached, or it was dropped from a full queue, or Discord logging
+  //   is off.
+  deleteMessage(messageID) {
+    if (!this.discordWebhook) return Promise.resolve('failed');
+    return new Promise((resolve) => {
+      this.queue(
+        STATUS_PRIORITY,
+        async () => {
+          let outcome = 'failed';
+          try {
+            const webhook = this.discordWebhook;
+            if (!webhook) return;
+            await this.withRetry(() => deleteDiscordWebhookMessage(webhook, messageID), {
+              retryNetwork: true
+            });
+            outcome = 'deleted';
+          } catch (err) {
+            outcome = this.failedOutcome(err, 'delete');
+          } finally {
+            resolve(outcome);
+          }
+        },
+        () => resolve('failed')
+      );
+    });
+  }
+
+  // Replace what a message the log webhook posted shows with payload, { content, embeds }, in the
+  // background, ahead of other messages, e.g. to say that an old copy of a status message that
+  // could not be deleted is no longer the current one. It is tried again after a network error, as
+  // an edit can safely be made twice. Resolves, and never fails, with how it went, as a delete
+  // does: 'edited', or 'gone', 'refused' or 'failed' (see deleteMessage).
+  editMessage(messageID, payload) {
+    if (!this.discordWebhook) return Promise.resolve('failed');
+    return new Promise((resolve) => {
+      this.queue(
+        STATUS_PRIORITY,
+        async () => {
+          let outcome = 'failed';
+          try {
+            const webhook = this.discordWebhook;
+            if (!webhook) return;
+            await this.withRetry(
+              () => editDiscordWebhookMessage(webhook, messageID, messageBody(payload)),
+              { retryNetwork: true }
+            );
+            outcome = 'edited';
+          } catch (err) {
+            outcome = this.failedOutcome(err, 'change');
+          } finally {
+            resolve(outcome);
+          }
+        },
+        () => resolve('failed')
+      );
+    });
+  }
+
+  // How a delete or an edit of a message the log webhook posted failed (see deleteMessage): 'gone'
+  // when Discord says the message does not exist, 'refused' for any other 4xx but 429, which
+  // Discord would give again, and else 'failed'. The console is told why, as doing says, e.g.
+  // 'delete', unless the message is gone, or the webhook is, which turns Discord logging off.
+  failedOutcome(err, doing) {
+    if (err?.status === 404 && err.code === UNKNOWN_MESSAGE) return 'gone';
+    if (this.webhookGone(err)) return 'failed';
+    console.warn(`Could not ${doing} a message in the Discord log: ${describeError(err)}`);
+    return err?.status >= 400 && err.status < 500 && err.status !== 429 ? 'refused' : 'failed';
   }
 
   // Change a message the log webhook posted earlier, such as the status message of a run that ended
@@ -589,10 +766,11 @@ class Logger {
       // Discord logging may have been turned off while this waited, as its webhook is gone.
       if (!this.discordWebhook) return;
       try {
-        await this.withRetry(
+        const message = await this.withRetry(
           () => sendDiscordWebhook(this.discordWebhook, { content: truncate(content) }),
           { retryNetwork: true }
         );
+        this.notePosted(message?.id);
       } catch (err) {
         if (!this.webhookGone(err))
           console.warn(`Could not send a message to the Discord log: ${describeError(err)}`);

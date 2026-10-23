@@ -768,8 +768,9 @@ for (const skipped of [false, 'run']) {
 }
 
 // The importer service keeps a row of its own, on its own: its status message, when the process
-// that keeps it up to date started, and, once that process ended as it should, when and how. A
-// row whose message is not a Discord message's ID keeps the rest.
+// that keeps it up to date started, and, once that process ended as it should, when and how, and
+// the old copies of its status message still to be deleted. A row whose message is not a Discord
+// message's ID keeps the rest.
 {
   const database = fakeDatabase();
   const { readService, saveService, SERVICE_STATE } = await loadRunRecord(database);
@@ -802,6 +803,32 @@ for (const skipped of [false, 'run']) {
   assert.deepStrictEqual(plain(await readService()), { startedAt: '2026-10-15T12:00:00.000Z' });
   database.state.set('importerService', JSON.stringify({ messageId: '../x', startedAt: 'then' }));
   assert.deepStrictEqual(plain(await readService()), { startedAt: 'then' });
+  // The old copies of the status message still to be deleted, after it was posted again below
+  // newer messages, are kept with it, when there are any, and only their IDs are read back.
+  await saveService({
+    messageId: '1430000000000000030',
+    startedAt: START,
+    oldMessageIds: ['1430000000000000020', '1430000000000000025']
+  });
+  assert.deepStrictEqual(database.read('importerService'), {
+    messageId: '1430000000000000030',
+    startedAt: '2026-10-15T12:00:00.000Z',
+    oldMessageIds: ['1430000000000000020', '1430000000000000025']
+  });
+  assert.deepStrictEqual(plain(await readService()), database.read('importerService'));
+  await saveService({ messageId: '1430000000000000030', startedAt: START, oldMessageIds: [] });
+  assert.deepStrictEqual(Object.keys(database.read('importerService')), ['messageId', 'startedAt']);
+  for (const [oldMessageIds, read] of [
+    [['1430000000000000020', '../x', 7, null], ['1430000000000000020']],
+    [['x'], undefined],
+    ['1430000000000000020', undefined]
+  ]) {
+    database.state.set(
+      'importerService',
+      JSON.stringify({ messageId: '1430000000000000030', startedAt: 'then', oldMessageIds })
+    );
+    assert.deepStrictEqual(plain(await readService()).oldMessageIds, read);
+  }
   for (const value of ['text', null, [1]]) {
     database.state.set('importerService', JSON.stringify(value));
     assert.strictEqual(await readService(), null, JSON.stringify(value));
