@@ -1,4 +1,11 @@
-import { connect, disconnect, sequelize, takeRunLock } from 'scbl-lib/db';
+import {
+  connect,
+  disconnect,
+  flushLogMessages,
+  sequelize,
+  stopRecordingLogMessages,
+  takeRunLock
+} from 'scbl-lib/db';
 import { isDatabaseUnavailable } from 'scbl-lib/db/sequelize';
 import { describeError, Logger } from 'scbl-lib/utils';
 
@@ -81,6 +88,11 @@ export const DISCONNECT_TIMEOUT = 10 * 1000;
 export const END_TIMEOUT = 45 * 1000;
 export const RELEASE_RESERVE = 5 * 1000;
 
+// The end waits at most this long to write the newest message the importer posted to the log
+// channel to the database (see recordNewestMessage), which takes a moment when the database
+// answers, so one that does not cannot take the time the end's log messages need.
+const NEWEST_TIMEOUT = 2 * 1000;
+
 // Why a run failed that was left waiting for something that can never happen.
 export const LEFT_WAITING = 'The run was left waiting for something that can never happen';
 
@@ -110,6 +122,25 @@ export function withTimeout(promise, ms, what) {
     }, ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// Write the newest message the importer posted to the log channel to the database now, if it has
+// not been written yet (see scbl-lib/db/log-channel.js), e.g. the last line of a run, or the line
+// that says the importer service is stopping, so the importer service's next process knows of it
+// (see loop.js), waiting at most ms, and never more than NEWEST_TIMEOUT. what names what is ending,
+// for the console. It never fails the end.
+export async function recordNewestMessage(ms, what) {
+  try {
+    await withTimeout(
+      flushLogMessages(),
+      Math.min(ms, NEWEST_TIMEOUT),
+      'Writing it to the database'
+    );
+  } catch (err) {
+    console.warn(
+      `Warning: could not record the newest message in the log channel as ${what} ended: ${describeError(err)}`
+    );
+  }
 }
 
 // Send the progress bars' latest values and wait for queued Discord log messages, but for no longer
@@ -463,7 +494,10 @@ export default async function run(steps) {
   // database connections if it finished, then send the log messages still waiting, the status's
   // last edit among them, and release the lock, all within END_TIMEOUT. A database that could not
   // save the record in time, or is unavailable, is not asked whether the importer is stale, which
-  // leaves the time for the log messages. Resolves with the exit code.
+  // leaves the time for the log messages. Before it closes the connections, it writes the newest
+  // message the run posted to the database (see recordNewestMessage), and then writes no more: a
+  // message posted after, as the end sends its log messages, is not written, rather than tried on
+  // a closed pool. Resolves with the exit code.
   let finishing = null;
   const finish = (exitCode, reason) => {
     finishing ??= (async () => {
@@ -480,6 +514,8 @@ export default async function run(steps) {
             left(RECORD_TIMEOUT)
           );
         if (code === EXIT_CODES.FINISHED) {
+          await recordNewestMessage(left(RECORD_TIMEOUT), 'the run');
+          stopRecordingLogMessages();
           try {
             await withTimeout(
               disconnect(),

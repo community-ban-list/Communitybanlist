@@ -12,11 +12,13 @@ import sequelize, { QueryTypes } from './sequelize.js';
 //
 // Writing it is best effort, and never holds up or fails logging, nor the service: it is done in
 // the background, at most once every 5 seconds, so a burst of lines costs a write as it starts and
-// one more for its newest message, and one write at a time, so it never uses more than one of the
-// service's database connections. A write that fails, e.g. as the database is down, or as the
-// importer has not made its tables yet in a new database, is tried again a minute later, with the
-// newest message by then, and warned about in the console, once until a write works again. It
-// never logs to the log channel, as that would post another message.
+// then one for its newest message every 5 seconds while it lasts, and one write at a time, so it
+// never uses more than one of the service's database connections. A write that fails, e.g. as the
+// database is down, or as the importer has not made its tables yet in a new database, is tried
+// again a minute later, with the newest message by then, and warned about in the console, once
+// until a write works again. Newer messages wait for that minute too. A write the database never
+// answers is not warned about, and no other write starts until it ends. It never logs to the log
+// channel, as that would post another message.
 
 // The ImporterState row, which holds { messageId, service }.
 export const LAST_LOG_MESSAGE = 'lastLogMessage';

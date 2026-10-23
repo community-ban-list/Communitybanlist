@@ -653,11 +653,7 @@ class Logger {
             });
             outcome = 'deleted';
           } catch (err) {
-            if (err?.status === 404 && err.code === UNKNOWN_MESSAGE) outcome = 'gone';
-            else if (!this.webhookGone(err)) {
-              console.warn(`Could not delete a message in the Discord log: ${describeError(err)}`);
-              if (err?.status >= 400 && err.status < 500 && err.status !== 429) outcome = 'refused';
-            }
+            outcome = this.failedOutcome(err, 'delete');
           } finally {
             resolve(outcome);
           }
@@ -670,14 +666,15 @@ class Logger {
   // Replace what a message the log webhook posted shows with payload, { content, embeds }, in the
   // background, ahead of other messages, e.g. to say that an old copy of a status message that
   // could not be deleted is no longer the current one. It is tried again after a network error, as
-  // an edit can safely be made twice. Resolves, and never fails, with whether it was edited.
+  // an edit can safely be made twice. Resolves, and never fails, with how it went, as a delete
+  // does: 'edited', or 'gone', 'refused' or 'failed' (see deleteMessage).
   editMessage(messageID, payload) {
-    if (!this.discordWebhook) return Promise.resolve(false);
+    if (!this.discordWebhook) return Promise.resolve('failed');
     return new Promise((resolve) => {
       this.queue(
         STATUS_PRIORITY,
         async () => {
-          let edited = false;
+          let outcome = 'failed';
           try {
             const webhook = this.discordWebhook;
             if (!webhook) return;
@@ -685,17 +682,27 @@ class Logger {
               () => editDiscordWebhookMessage(webhook, messageID, messageBody(payload)),
               { retryNetwork: true }
             );
-            edited = true;
+            outcome = 'edited';
           } catch (err) {
-            if (!this.webhookGone(err))
-              console.warn(`Could not change a message in the Discord log: ${describeError(err)}`);
+            outcome = this.failedOutcome(err, 'change');
           } finally {
-            resolve(edited);
+            resolve(outcome);
           }
         },
-        () => resolve(false)
+        () => resolve('failed')
       );
     });
+  }
+
+  // How a delete or an edit of a message the log webhook posted failed (see deleteMessage): 'gone'
+  // when Discord says the message does not exist, 'refused' for any other 4xx but 429, which
+  // Discord would give again, and else 'failed'. The console is told why, as doing says, e.g.
+  // 'delete', unless the message is gone, or the webhook is, which turns Discord logging off.
+  failedOutcome(err, doing) {
+    if (err?.status === 404 && err.code === UNKNOWN_MESSAGE) return 'gone';
+    if (this.webhookGone(err)) return 'failed';
+    console.warn(`Could not ${doing} a message in the Discord log: ${describeError(err)}`);
+    return err?.status >= 400 && err.status < 500 && err.status !== 429 ? 'refused' : 'failed';
   }
 
   // Change a message the log webhook posted earlier, such as the status message of a run that ended

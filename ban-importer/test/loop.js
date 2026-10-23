@@ -108,19 +108,35 @@ function fakeState(events, { rows = {}, tablesMadeAt = null, missing = false } =
 // each message posted to it, a line, an embed or a status message, by the service or by the test
 // as the web server or the bot, is given an ID that grows, as Discord's do, and kept in order, so
 // the test can see which is at the bottom. Deletes go as deleteAnswers says, in turn, and are
-// 'deleted' once it says nothing more, and edits as editAnswers says, true once it says nothing.
+// 'deleted' once it says nothing more, each taking as long as deleteDelays says, in turn, and edits
+// as editAnswers says, 'edited' once it says nothing. With slowLines set, a line the service logs is still being sent, as the logger's queue
+// sends it, until the clock next moves on, or the next message is posted, which waits for it, so
+// until then the service does not know its ID (see loadLoop). landed(id) is told the ID of each
+// such line once it is posted.
 function fakeChannel() {
   let next = 1430000000000000000n;
+  const add = (what, by) => {
+    const id = String(++next);
+    channel.messages.push({ id, what, by, deleted: false });
+    return id;
+  };
   const channel = {
     messages: [],
     deleteAnswers: [],
+    deleteDelays: [],
     editAnswers: [],
     deletes: [],
     edits: [],
+    slowLines: false,
+    sending: [],
+    landed: null,
     post(what, by = 'importer') {
-      const id = String(++next);
-      channel.messages.push({ id, what, by, deleted: false });
-      return id;
+      channel.land();
+      return add(what, by);
+    },
+    // Post the lines still being sent, in turn.
+    land() {
+      for (const what of channel.sending.splice(0)) channel.landed?.(add(what, 'importer'));
     },
     find: (id) => channel.messages.find((message) => message.id === id),
     // What the messages still in the channel show, oldest first.
@@ -207,8 +223,11 @@ function fakeStatus(events, payload, options, channel, Logger) {
 // channel, what the logger posts goes to a stand-in for the log channel (see fakeChannel).
 // recorded.id is the newest message CBL's services wrote to the database, which the service reads
 // (recorded.reads counts the reads, recorded.delay makes each take that long, and recorded.error,
-// when set, fails them), and recorded.flushes counts the writes of the newest message the service
-// posted that it asked for, which never end once recorded.flushHangs is set.
+// when set, fails them), recorded.flushes counts the writes of the newest message the service
+// posted that it asked for, which never end once recorded.flushHangs is set, recorded.written is
+// the newest message the logger had posted at the last of them, and the events have each of those
+// writes, as 'record newest', and the end of the recording, as 'stop recording'. The lines still
+// being sent with channel.slowLines are waiting in the log queue (see fakeChannel).
 async function loadLoop({
   env = {},
   authenticate = async () => {},
@@ -225,7 +244,15 @@ async function loadLoop({
   const posts = [];
   const statuses = [];
   const revisions = [];
-  const recorded = { id: null, reads: 0, flushes: 0, error: null, delay: 0, flushHangs: false };
+  const recorded = {
+    id: null,
+    reads: 0,
+    flushes: 0,
+    written: null,
+    error: null,
+    delay: 0,
+    flushHangs: false
+  };
   const timers = new Set();
   const bm = { requests: 0 };
   let now = START;
@@ -355,13 +382,22 @@ async function loadLoop({
   };
 
   // A line or an embed the logger posts to the channel, if there is one, as the newest message
-  // the logger posted, as the logger keeps it.
-  const toChannel = (what) => {
+  // the logger posted, as the logger keeps it. With channel.slowLines, a line is still being sent
+  // until the clock next moves on, or the next message is posted (see fakeChannel).
+  const toChannel = (what, { line = false } = {}) => {
     if (!channel || !discordLog) return null;
+    if (line && channel.slowLines) {
+      channel.sending.push(what);
+      return null;
+    }
     const id = channel.post(what);
     Logger.newestMessageID = newerMessage(id, Logger.newestMessageID);
     return id;
   };
+  if (channel)
+    channel.landed = (id) => {
+      Logger.newestMessageID = newerMessage(id, Logger.newestMessageID);
+    };
   const Logger = {
     discordWebhook: discordLog ? 'https://discord.com/api/webhooks/1/secret-token' : null,
     channelLines: 0,
@@ -372,7 +408,7 @@ async function loadLoop({
       if (verboseness === 1) {
         this.channelLines++;
         discord.push(text);
-        toChannel(text);
+        toChannel(text, { line: true });
       }
     },
     important(module, message, ...extras) {
@@ -380,10 +416,13 @@ async function loadLoop({
       events.push(`important ${text}`);
       this.channelLines++;
       discord.push(text);
-      toChannel(text);
+      toChannel(text, { line: true });
     },
     flush: () => events.push('flush'),
-    getLogQueue: () => (logQueue.stuck ? { ...emptyQueue, QUEUED: 1 } : emptyQueue),
+    getLogQueue: () =>
+      logQueue.stuck || channel?.sending.length
+        ? { ...emptyQueue, QUEUED: Math.max(1, channel?.sending.length ?? 0) }
+        : emptyQueue,
     statusMessage(payload, options) {
       if (!discordLog)
         return { stopped: true, posted: Promise.resolve(null), update() {}, finish() {} };
@@ -398,18 +437,23 @@ async function loadLoop({
       posts.push({ at: now, embed: copy(payload.embeds[0]) });
       return Promise.resolve(toChannel(payload.embeds[0].title));
     },
-    deleteMessage(id) {
+    // A message that is 'gone' was deleted by someone else.
+    async deleteMessage(id) {
       events.push(`delete ${id}`);
       const answer = channel?.deleteAnswers.shift() ?? 'deleted';
       channel?.deletes.push(id);
-      if (answer === 'deleted' && channel?.find(id)) channel.find(id).deleted = true;
-      return Promise.resolve(answer);
+      const delay = channel?.deleteDelays.shift();
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      if (['deleted', 'gone'].includes(answer) && channel?.find(id))
+        channel.find(id).deleted = true;
+      return answer;
     },
     editMessage(id, payload) {
       events.push(`edit ${id}`);
-      const answer = channel?.editAnswers.shift() ?? true;
+      const answer = channel?.editAnswers.shift() ?? 'edited';
       channel?.edits.push([id, payload.content]);
-      if (answer && channel?.find(id)) channel.find(id).what = payload.content;
+      if (answer === 'edited' && channel?.find(id)) channel.find(id).what = payload.content;
+      if (answer === 'gone' && channel?.find(id)) channel.find(id).deleted = true;
       return Promise.resolve(answer);
     },
     reviseMessage(messageID, revise) {
@@ -430,12 +474,16 @@ async function loadLoop({
         return recorded.id;
       },
       flushLogMessages: async () => {
+        events.push('record newest');
         recorded.flushes++;
+        recorded.written = Logger.newestMessageID;
         if (recorded.flushHangs) await new Promise(() => {});
       },
+      stopRecordingLogMessages: () => events.push('stop recording'),
       // Closing the pool closes its connections, but for those whose statements have not ended.
       disconnect: async () => {
         events.push('disconnect');
+        pool.disconnectedAt = now;
         for (const connection of [...pool.open])
           if (!pool.stuck.has(connection)) await pool.close(connection);
       },
@@ -588,8 +636,10 @@ async function loadLoop({
     },
     // Wait ms milliseconds on the clock, for a step.
     wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    // Move the clock on, running the timers that fall due, in order.
+    // Move the clock on, running the timers that fall due, in order. The lines still being sent
+    // are posted first (see fakeChannel).
     advance(ms) {
+      channel?.land();
       const end = now + ms;
       for (;;) {
         const [next] = [...timers].filter((timer) => timer.at <= end).sort((a, b) => a.at - b.at);
@@ -769,10 +819,15 @@ const importCounts = (counts = {}) => ({
   assert.strictEqual(await service.finish(running), 0);
   assert.strictEqual(service.now(), stoppedAt);
   assert.strictEqual(service.records().length, 3);
-  assert.deepStrictEqual(service.events.slice(-6), [
+  // The newest message it posted, the line that says it is stopping, is written to the database,
+  // once the lines waiting have been sent, and then no more, before the connections are closed.
+  assert.deepStrictEqual(service.events.slice(-9), [
     'status finish',
     'save importerService',
     'status sent',
+    'flush',
+    'record newest',
+    'stop recording',
     'disconnect',
     'flush',
     'release'
@@ -891,12 +946,16 @@ const importCounts = (counts = {}) => ({
   assert.strictEqual(service.now(), START + 180 * SECOND);
   assert.deepStrictEqual(service.process.exits, [1]);
   assert.ok(service.lock.destroyed);
-  // The log messages, the row and the status message's final edit are waited for together.
-  assert.deepStrictEqual(service.events.slice(-6), [
+  // The log messages, the row, the status message's final edit and the newest message's write are
+  // waited for together, and then nothing more is written before the locks' connection closes.
+  assert.deepStrictEqual(service.events.slice(-9), [
     'status finish',
     'flush',
     'status sent',
+    'flush',
+    'record newest',
     'save importerService',
+    'stop recording',
     'destroy',
     'exit 1'
   ]);
@@ -964,6 +1023,9 @@ const importCounts = (counts = {}) => ({
     'status finish',
     'save importerService',
     'status sent',
+    'flush',
+    'record newest',
+    'stop recording',
     'disconnect',
     'flush',
     'release'
@@ -989,7 +1051,9 @@ const importCounts = (counts = {}) => ({
 // A cycle that reaches its safe point late, here 40 seconds after SIGTERM, leaves its end only the
 // time to 55 seconds after the signal, rather than the 45 seconds an end may take, so the locks are
 // still released inside docker stop's 60 seconds: against a database that never answers, and
-// against Discord not answering, when the log messages are waited for only until then.
+// against Discord not answering, when the log messages are waited for only until then. Before
+// it writes the newest message the service posted and closes the database connections, the end
+// waits at most 2 seconds for the lines still to be sent.
 for (const what of ['database', 'discord']) {
   const service = await loadLoop({ env: { IMPORTER_CYCLE_SECONDS: '60' } });
   const running = service.start([
@@ -1008,6 +1072,7 @@ for (const what of ['database', 'discord']) {
   assert.ok(releasedAfter <= 55 * SECOND, `${what}: released ${releasedAfter}ms after SIGTERM`);
   // The end began 40 seconds after the signal, and left the last 5 seconds to release the locks.
   assert.strictEqual(releasedAfter, 50 * SECOND, what);
+  if (what === 'discord') assert.strictEqual(service.pool.disconnectedAt - askedAt, 42 * SECOND);
   assert.strictEqual(service.records()[0].seconds, 60, what);
 }
 
@@ -1326,7 +1391,8 @@ for (const what of ['database', 'discord']) {
 // connection kills each connection the Sequelize pool still has open, within 2 seconds, and only
 // then is it closed. A connection that was closed is left alone, and from then on the pool opens
 // no other, so no statement can start after them. A connection that could not be killed is
-// warned about.
+// warned about. The newest message the service posted is written to the database before, and
+// nothing after, as no connection is left for it.
 {
   const service = await loadLoop({
     env: { IMPORTER_CYCLE_SECONDS: '60', IMPORTER_MAX_CYCLE_SECONDS: '120' }
@@ -1350,7 +1416,13 @@ for (const what of ['database', 'discord']) {
     { ids: [42, 44], ms: 2 * SECOND, at: START + 65 * SECOND }
   ]);
   const killed = service.events.indexOf('kill 42, 44');
-  assert.deepStrictEqual(service.events.slice(killed), ['kill 42, 44', 'destroy', 'exit 0']);
+  assert.deepStrictEqual(service.events.slice(killed - 1), [
+    'stop recording',
+    'kill 42, 44',
+    'destroy',
+    'exit 0'
+  ]);
+  assert.ok(service.events.lastIndexOf('record newest') < killed);
   assert.ok(service.events.lastIndexOf('commit') < killed);
   assert.ok(service.events.lastIndexOf('save importerService') < killed);
   assert.ok(
@@ -1387,10 +1459,10 @@ for (const stuck of [false, true]) {
   service.process.emit('SIGTERM', 'SIGTERM');
   assert.strictEqual(await service.finish(running), 0);
   assert.deepStrictEqual(
-    service.events.slice(-4),
+    service.events.slice(-5),
     stuck
-      ? ['disconnect', 'kill 51', 'flush', 'release']
-      : ['status sent', 'disconnect', 'flush', 'release']
+      ? ['stop recording', 'disconnect', 'kill 51', 'flush', 'release']
+      : ['record newest', 'stop recording', 'disconnect', 'flush', 'release']
   );
   assert.deepStrictEqual(
     service.lock.kills.map(({ ids, ms }) => [ids, ms]),
@@ -2590,8 +2662,8 @@ for (const [stop, code, reason] of [
 // IMPORTER_STATUS_AT_BOTTOM, on by default, keeps the status message below every other message
 // CBL's services post to the log channel. Within seconds of a cycle's embed being in the channel,
 // the status message is posted again below it, the new message's ID is saved in the service's row,
-// with the old one's, and only then is the old one deleted, so the channel always has one. A quiet
-// cycle, which posts nothing, moves nothing. The end only edits it, so the line that says the
+// with the old one's, and only then is the old one deleted, so the channel is never without one. A
+// quiet cycle, which posts nothing, moves nothing. The end only edits it, so the line that says the
 // service is stopping stays below it.
 {
   const channel = fakeChannel();
@@ -2805,7 +2877,7 @@ for (const [stop, code, reason] of [
 }
 
 // An old copy that cannot be deleted, e.g. as Discord is failing, is changed to say the status
-// moved, so it never looks like the current one, and its delete is tried again with each check,
+// moved, so it no longer looks like the current one, and its delete is tried again with each check,
 // once a minute, until it works. One Discord refuses to delete, as it would again, is changed the
 // same way and left. The old copies still to be deleted stay in the service's row, for the next
 // process, also once the service has ended.
@@ -2874,12 +2946,234 @@ for (const [stop, code, reason] of [
   assert.strictEqual(service.state.read('importerService').outcome, 'stopped');
 }
 
+// A copy that Discord refuses to delete, as it would again, is changed to say the status moved,
+// and left once it is. While that change fails, e.g. as Discord is failing then, the copy still
+// looks current, so it is kept, and only the change is tried again, until it works, and the
+// service's row keeps it meanwhile, for the next process to try too. A copy that Discord refuses to
+// change as well is left as it is, as nothing more can be done, and one whose change finds it
+// deleted is forgotten. One that Discord refuses to change, but whose delete only failed, is not
+// changed again, and its delete is tried again until it works. Once the service is ending, no copy
+// is tried again, though the end takes 12 seconds to save the row here.
+for (const [name, deletes, edits, until, expected] of [
+  [
+    'refused, then changed at the third try',
+    ['refused'],
+    ['failed', 'failed'],
+    2 * MINUTE,
+    {
+      deletes: 1,
+      edits: 3,
+      shows: MOVED,
+      kept: false,
+      said: 'Discord refused to delete the old copy of the status message, %s, so it is left, saying that the status moved.'
+    }
+  ],
+  [
+    'refused, and stopped before it is changed',
+    ['refused'],
+    ['failed', 'failed'],
+    10 * SECOND,
+    { deletes: 1, edits: 2, shows: 'CBL importer service running', kept: true, said: null }
+  ],
+  [
+    'refused, and its change refused',
+    ['refused'],
+    ['refused'],
+    2 * MINUTE,
+    {
+      deletes: 1,
+      edits: 1,
+      shows: 'CBL importer service running',
+      kept: false,
+      said: 'Warning: Discord refused to delete the old copy of the status message, %s, and to change it, so it is left as it is.'
+    }
+  ],
+  [
+    'failed, and found deleted by its change',
+    ['failed'],
+    ['gone'],
+    2 * MINUTE,
+    {
+      deletes: 1,
+      edits: 1,
+      shows: null,
+      kept: false,
+      said: 'The old copy of the status message, %s, was deleted already.'
+    }
+  ],
+  [
+    'failed twice, and its change refused',
+    ['failed', 'failed'],
+    ['refused'],
+    25 * SECOND,
+    {
+      deletes: 3,
+      edits: 1,
+      shows: null,
+      kept: false,
+      said: 'Deleted the old copy of the status message, %s.'
+    }
+  ]
+]) {
+  const channel = fakeChannel();
+  const service = await loadLoop({ env: { IMPORTER_CYCLE_SECONDS: '600' }, channel });
+  const running = service.start([
+    step(
+      'importBans',
+      async () => {},
+      () => importCounts({ new: 1 })
+    )
+  ]);
+  channel.deleteAnswers.push(...deletes);
+  channel.editAnswers.push(...edits);
+  await service.runUntil(() => service.records().length === 1, 'the first cycle');
+  const [status] = service.statuses;
+  const first = status.id;
+  await service.runTo(START + REPORT_MOVE + until);
+  await settle();
+  assert.strictEqual(status.reposts, 1, name);
+  service.state.control.upsertDelays.push(12 * SECOND);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0, name);
+  assert.strictEqual(service.timers.size, 0, name);
+  const copy = channel.find(first);
+  assert.deepStrictEqual(
+    {
+      deletes: channel.deletes.filter((id) => id === first).length,
+      edits: channel.edits.filter(([id]) => id === first).length,
+      shows: copy.deleted ? null : copy.what,
+      kept: (service.state.read('importerService').oldMessageIds ?? []).includes(first),
+      said: expected.said && service.printed().includes(format(expected.said, first))
+    },
+    { ...expected, said: expected.said && true },
+    name
+  );
+}
+
+// An old copy that still looks current, as Discord failed both its delete and its change to say
+// the status moved, is tried again 5, 15 and then 30 seconds after each try, rather than only at
+// the next check, and then with each check. Meanwhile the status message is not moved again, also
+// not below a newer line, as that would leave a second such copy: here the check a minute after
+// the move finds a line of the web server's below it, but waits. The check after that deletes the
+// copy at last, and then moves it.
+{
+  const channel = fakeChannel();
+  const service = await loadLoop({ env: { IMPORTER_CYCLE_SECONDS: '600' }, channel });
+  const running = service.start([
+    step(
+      'importBans',
+      async () => {},
+      () => importCounts({ new: 1 })
+    )
+  ]);
+  channel.deleteAnswers.push(...Array(5).fill('failed'));
+  channel.editAnswers.push(...Array(5).fill('failed'));
+  await service.runUntil(() => service.records().length === 1, 'the first cycle');
+  const [status] = service.statuses;
+  const first = status.id;
+  const tries = () => [
+    channel.deletes.filter((id) => id === first).length,
+    channel.edits.filter(([id]) => id === first).length
+  ];
+  await service.runTo(START + REPORT_MOVE);
+  await settle();
+  assert.strictEqual(status.reposts, 1);
+  assert.deepStrictEqual(tries(), [1, 1]);
+  assert.strictEqual(channel.find(first).what, 'CBL importer service running');
+  for (const [seconds, count] of [
+    [7, 1],
+    [8, 2],
+    [22, 2],
+    [23, 3],
+    [52, 3],
+    [53, 4],
+    [62, 4]
+  ]) {
+    await service.runTo(START + seconds * SECOND);
+    await settle();
+    assert.deepStrictEqual(tries(), [count, count], `${seconds}s`);
+    if (seconds === 23)
+      service.recorded.id = channel.post(
+        '[ExportBanList][1] Creating Battlemetrics ban list...',
+        'web'
+      );
+  }
+  // The check a minute after the move tries it again, and fails, so it does not move. After the
+  // three quick tries, only the checks try it.
+  await service.runTo(START + REPORT_MOVE + MINUTE);
+  await settle();
+  assert.deepStrictEqual([tries(), status.reposts], [[5, 5], 1]);
+  assert.strictEqual(
+    channel.shown().at(-1),
+    '[ExportBanList][1] Creating Battlemetrics ban list...'
+  );
+  await service.runTo(START + REPORT_MOVE + 2 * MINUTE - 1);
+  await settle();
+  assert.deepStrictEqual(tries(), [5, 5]);
+  // The next check deletes it, and then moves the status message below the line.
+  await service.runTo(START + REPORT_MOVE + 2 * MINUTE);
+  await settle();
+  assert.deepStrictEqual([tries(), status.reposts], [[6, 5], 2]);
+  assert.strictEqual(channel.find(first).deleted, true);
+  assert.deepStrictEqual(channel.shown().slice(-2), [
+    '[ExportBanList][1] Creating Battlemetrics ban list...',
+    'CBL importer service running'
+  ]);
+  assert.strictEqual(channel.shown().filter((what) => what.startsWith('CBL importer')).length, 1);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
+  assert.strictEqual(service.timers.size, 0);
+}
+
+// A move first waits for the tries of the old copies, so a copy that looked current, and is
+// deleted at last by the try the move makes, holds it up no longer: here the move after cycle 2's
+// embed finds the copy deleted, 2 seconds later, and moves then, rather than at the next check.
+{
+  const channel = fakeChannel();
+  const service = await loadLoop({ env: { IMPORTER_CYCLE_SECONDS: '60' }, channel });
+  let cycle = 0;
+  const running = service.start([
+    step(
+      'importBans',
+      async () => {
+        cycle++;
+        if (cycle === 2) await service.wait(10 * SECOND);
+      },
+      () => importCounts({ new: 1 })
+    )
+  ]);
+  // The move after cycle 1's embed, the three quick tries and the check at 63 seconds fail.
+  channel.deleteAnswers.push(...Array(5).fill('failed'));
+  channel.editAnswers.push(...Array(5).fill('failed'));
+  channel.deleteDelays.push(0, 0, 0, 0, 0, 2 * SECOND);
+  await service.runUntil(() => service.records().length === 1, 'the first cycle');
+  const [status] = service.statuses;
+  const first = status.id;
+  await service.runTo(START + 70 * SECOND);
+  await settle();
+  assert.deepStrictEqual([channel.deletes.length, status.reposts], [5, 1]);
+  assert.strictEqual(channel.shown().at(-1), 'CBL update cycle 2 finished');
+  await service.runTo(START + 75 * SECOND - 1);
+  await settle();
+  assert.strictEqual(status.reposts, 1);
+  await service.runTo(START + 75 * SECOND);
+  await settle();
+  assert.strictEqual(channel.find(first).deleted, true);
+  assert.strictEqual(status.reposts, 2);
+  assert.deepStrictEqual(channel.shown().slice(-2), [
+    'CBL update cycle 2 finished',
+    'CBL importer service running'
+  ]);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
+}
+
 // After a restart, the status message the last process kept up to date is edited where it is only
-// when it is known to be the newest message in the log channel. Every way a process ends posts a
-// line below it, which the database then has, so it is usually posted again at once, below the
-// others, its new ID saved and the old one deleted, as a move does. So it is when the database has
-// no newest message, as before any service wrote one, or cannot be read. The old copies the last
-// process could not delete are deleted first.
+// when it is known to be the newest message in the log channel. A process that says how it ended
+// posts a line below it as it stops, which the database then has, so it is usually posted again at
+// once, below the others, its new ID saved and the old one deleted, as a move does. So it is when
+// the database has no newest message, as before any service wrote one, or cannot be read. The old
+// copies the last process could not delete are deleted first.
 for (const [name, newest, moves] of [
   ['a newer line recorded', 'line', true],
   ['the message newest', 'status', false],
@@ -2935,6 +3229,39 @@ for (const [name, newest, moves] of [
   assert.strictEqual(service.state.read('importerService').messageId, status.id, name);
   service.process.emit('SIGTERM', 'SIGTERM');
   assert.strictEqual(await service.finish(running), 0, name);
+}
+
+// A process that ended without saying how, e.g. as it was killed, posted no line below its status
+// message, so the database may well say that message is the newest. The next process then posts a
+// line saying so, below it, so it posts the status message again at once, below that line, and
+// deletes the old one, rather than edit it where it is, without waiting for the logger to say the
+// line is posted: here the logger is still sending it as the status message is made.
+{
+  const channel = fakeChannel();
+  const saved = channel.post('CBL importer service running');
+  const service = await loadLoop({
+    env: { IMPORTER_CYCLE_SECONDS: '600' },
+    channel,
+    state: {
+      rows: { importerService: { messageId: saved, startedAt: '2026-10-22T10:00:00.000Z' } }
+    }
+  });
+  service.recorded.id = saved;
+  channel.slowLines = true;
+  const running = service.start([step('importBans', () => service.wait(30 * SECOND))]);
+  await service.runUntil(() => service.statuses.length === 1, 'the status message');
+  const [status] = service.statuses;
+  assert.deepStrictEqual([status.options.messageID, status.options.repost], [saved, true]);
+  await service.runTo(START + 10 * SECOND);
+  await settle();
+  assert.deepStrictEqual(channel.shown(), [
+    "The importer service's last process, which started at 2026-10-22T10:00:00.000Z, ended without saying how, e.g. as it was killed, ran out of memory, was ended at once by a second signal, or could not reach the database as it ended.",
+    'CBL importer service running'
+  ]);
+  assert.strictEqual(channel.find(saved).deleted, true);
+  assert.strictEqual(service.state.read('importerService').messageId, status.id);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
 }
 
 // With IMPORTER_STATUS_AT_BOTTOM=0 the status message is edited where it is, as before: not posted
@@ -3081,6 +3408,33 @@ for (const when of ['before the move after the embed', 'during a cycle, at a che
   assert.strictEqual(service.recorded.flushes, 1, when);
   assert.ok(service.lock.releasedAt - askedAt <= 55 * SECOND, when);
   assert.strictEqual(service.timers.size, 0, when);
+}
+
+// The line that says the service is stopping may still be waiting to be sent as the end writes the
+// newest message the service posted, as the status message's final edit goes ahead of lines: here
+// it is, as SIGTERM comes between cycles while a request is under way. The end gives the lines
+// waiting up to 2 seconds to be sent first, so the newest message written is that line, below the
+// status message, and the next process knows its status message is not the newest.
+{
+  const channel = fakeChannel();
+  const service = await loadLoop({ env: { IMPORTER_CYCLE_SECONDS: '600' }, channel });
+  const running = service.start([step('importBans', async () => {})]);
+  await service.runUntil(() => service.records().length === 1, 'the first cycle');
+  await service.runTo(START + MINUTE + SECOND);
+  const [status] = service.statuses;
+  channel.slowLines = true;
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
+  const stopLine = channel.messages.at(-1);
+  assert.strictEqual(
+    stopLine.what,
+    'Received SIGTERM, so the importer service will stop at its next safe point. Send it again to stop at once.'
+  );
+  assert.strictEqual(service.recorded.written, stopLine.id);
+  assert.ok(isNewerMessage(stopLine.id, status.id));
+  const recordedAt = service.events.indexOf('record newest');
+  assert.ok(service.events.lastIndexOf('status sent', recordedAt) < recordedAt);
+  assert.ok(service.lock.releasedAt - (START + MINUTE + SECOND) <= 2 * SECOND);
 }
 
 // The service's row is saved one save at a time, in turn, so a save that is slow, here that of a

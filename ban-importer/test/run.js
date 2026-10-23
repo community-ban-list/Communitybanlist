@@ -135,7 +135,10 @@ function fakeStatus(events, payload, now) {
 // function that is given migrate()'s options and returns it or throws, state sets up the stand-in
 // for ImporterState (see fakeState), and logQueue is what the logger says is waiting to be sent.
 // With discordLog, Discord logging is on, so the run posts its status (see fakeStatus); otherwise
-// the logger gives it a status message that is off, as the real one does.
+// the logger gives it a status message that is off, as the real one does. The events have each
+// write of the newest message the importer posted to the log channel that the run asks for, as
+// 'record newest', which never ends with flushHangs, and the end of that recording, as
+// 'stop recording'.
 async function loadRun({
   env = {},
   authenticate = async () => {},
@@ -146,7 +149,8 @@ async function loadRun({
   disconnect = async () => {},
   state: stateOptions = {},
   logQueue = emptyQueue,
-  discordLog = false
+  discordLog = false,
+  flushHangs = false
 } = {}) {
   const events = [];
   const output = [];
@@ -201,6 +205,11 @@ async function loadRun({
         events.push('disconnect');
         return disconnect();
       },
+      flushLogMessages: async () => {
+        events.push('record newest');
+        if (flushHangs) await new Promise(() => {});
+      },
+      stopRecordingLogMessages: () => events.push('stop recording'),
       sequelize: {
         authenticate: async () => {
           events.push('authenticate');
@@ -399,9 +408,12 @@ function gatedStep(events, name) {
 
 // A run that finishes: it waits for the database, takes the lock before anything is posted to
 // Discord, applies the importer's migrations, runs the steps in order and exits 0, after saving its
-// record, closing the database connections, sending its log messages and releasing the lock. A run
-// that finishes posts nothing itself: its start and end are only printed in the console, the start
-// with the commit and the settings, and so is its record, as one JSON line.
+// record, closing the database connections, sending its log messages and releasing the lock. Just
+// before it closes the connections, it writes the newest message it posted to the log channel to
+// the database, and then writes no more, as a message posted after, as it sends its log messages,
+// would only find the connections closed. A run that finishes posts nothing itself: its start and
+// end are only printed in the console, the start with the commit and the settings, and so is its
+// record, as one JSON line.
 {
   const importer = await loadRun({ env: { GIT_SHA: 'abc1234' } });
   const exitCode = await importer.run([
@@ -421,6 +433,8 @@ function gatedStep(events, name) {
     'export',
     'transaction',
     'commit',
+    'record newest',
+    'stop recording',
     'disconnect',
     'flush',
     'release'
@@ -620,7 +634,9 @@ for (const [busy, held] of [
   ]);
   assert.strictEqual(exitCode, 1);
   assert.ok(!importer.events.includes('export'));
-  assert.ok(!importer.events.includes('disconnect'));
+  // Its database connections stay open until it exits, so it still writes the newest message it
+  // posts as it sends its last ones, such as its failure.
+  assert.ok(!importer.events.some((event) => /^(disconnect|stop recording)$/.test(event)));
   assert.strictEqual(
     importer.important().at(-1),
     'The CBL update run failed: Error: Deadlock found'
@@ -760,7 +776,13 @@ for (const [busy, held] of [
     'Warning: could not save the run record: Error: Lock wait timeout exceeded'
   ]);
   assert.strictEqual(importer.record().outcome, 'finished');
-  assert.deepStrictEqual(importer.events.slice(-3), ['disconnect', 'flush', 'release']);
+  assert.deepStrictEqual(importer.events.slice(-5), [
+    'record newest',
+    'stop recording',
+    'disconnect',
+    'flush',
+    'release'
+  ]);
 }
 {
   const importer = await loadRun({ state: { hang: true } });
@@ -781,7 +803,13 @@ for (const [busy, held] of [
         'Warning: could not save the run record: Error: Saving the run record took longer than 15s'
       )
   );
-  assert.deepStrictEqual(importer.events.slice(-3), ['disconnect', 'flush', 'release']);
+  assert.deepStrictEqual(importer.events.slice(-5), [
+    'record newest',
+    'stop recording',
+    'disconnect',
+    'flush',
+    'release'
+  ]);
   assert.strictEqual(importer.timers.size, 0);
 }
 {
@@ -813,6 +841,31 @@ for (const [busy, held] of [
       )
   );
   assert.deepStrictEqual(importer.events.slice(-2), ['flush', 'release']);
+}
+{
+  // And for writing the newest message the run posted to the database, which is given up after 2
+  // seconds, before the connections are closed, as it only tells the importer service's next
+  // process of the run's last lines.
+  const importer = await loadRun({ flushHangs: true });
+  const run = importer.run([]);
+  await importer.waitForTimer(2000);
+  assert.ok(!importer.events.includes('disconnect'));
+  importer.advance(2000);
+  assert.strictEqual(await run, 0);
+  assert.ok(
+    importer
+      .printed()
+      .includes(
+        'Warning: could not record the newest message in the log channel as the run ended: Error: Writing it to the database took longer than 2s'
+      )
+  );
+  assert.deepStrictEqual(importer.events.slice(-5), [
+    'record newest',
+    'stop recording',
+    'disconnect',
+    'flush',
+    'release'
+  ]);
 }
 
 // The end of a run takes at most 45 seconds, however slow the database and Discord are, so a run
@@ -867,8 +920,10 @@ const sinceEnd = (importer) => importer.now() - Date.parse(importer.record().end
   });
   assert.strictEqual(await importer.runTimers(importer.run([])), 0);
   assert.strictEqual(sinceEnd(importer), 40000);
-  assert.deepStrictEqual(importer.events.slice(-4), [
+  assert.deepStrictEqual(importer.events.slice(-6), [
     'transaction',
+    'record newest',
+    'stop recording',
     'disconnect',
     'flush',
     'release'
@@ -914,13 +969,15 @@ const sinceEnd = (importer) => importer.now() - Date.parse(importer.record().end
     importer.discord[0],
     /^The CBL update is stale: .* The last run ended at 2026-10-15T12:00:00\.000Z with exit code 0, but imported none of its 2 ban lists\.$/
   );
-  assert.deepStrictEqual(importer.events.slice(-9), [
+  assert.deepStrictEqual(importer.events.slice(-11), [
     'transaction',
     'commit',
     'read state',
     'transaction',
     'commit',
     `important ${importer.discord[0]}`,
+    'record newest',
+    'stop recording',
     'disconnect',
     'flush',
     'release'
@@ -1371,6 +1428,8 @@ const STARTED = Math.floor(START / 1000);
     'status finish',
     'transaction',
     'commit',
+    'record newest',
+    'stop recording',
     'disconnect',
     'flush',
     'release'
@@ -1935,5 +1994,5 @@ for (const { saved, recentOnly, title, shown } of [
 }
 
 console.log(
-  'Importer run checks passed: exit codes, the run lock, signals, the time limit, the database wait, migrations, the run record, the end within 45 seconds, a run left waiting, staleness, posted lines, the run status on every way a run ends, and the last run status corrected from its record or marked.'
+  'Importer run checks passed: exit codes, the run lock, signals, the time limit, the database wait, migrations, the run record, the end within 45 seconds, the newest message written before the connections close, a run left waiting, staleness, posted lines, the run status on every way a run ends, and the last run status corrected from its record or marked.'
 );

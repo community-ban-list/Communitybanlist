@@ -197,8 +197,8 @@ const refused = () =>
 }
 
 // A service starts the recorder once, which the logger tells of each message it posts, as the post
-// listener. The first message is written at once, and a burst of them costs one more write, of the
-// newest, 5 seconds after the last write. An older message than one written or waiting is not
+// listener. The first message is written at once, and a burst of them posted together costs one more
+// write, of the newest, 5 seconds after the last write. An older message than one written or waiting is not
 // written. Its timers never keep the process running.
 {
   const channel = await loadLogChannel();

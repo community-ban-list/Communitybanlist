@@ -174,7 +174,8 @@ async function loadWebServer() {
 
 // A database without the importer's tables yet, one that is down, and one that never answers, never
 // stop the web server's lines to the log channel, nor hold them up: each line is sent at once, and
-// the console says once why the newest could not be recorded.
+// the console says once why the newest could not be recorded, but for a database that never
+// answers, whose write never ends, so nothing is said, and no other write starts.
 for (const [name, answer, said] of [
   [
     'missing table',

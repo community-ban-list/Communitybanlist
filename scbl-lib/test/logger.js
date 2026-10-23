@@ -1762,16 +1762,22 @@ for (const env of [{ DISCORD_LOG_WEBHOOK: webhook }, {}]) {
 
 // A message the log webhook posted can be changed, e.g. an old copy of a status message that could
 // not be deleted, to say the status moved, ahead of other messages, tried again after a network
-// error, and the result says whether it was, never failing.
+// error, and the result says how it went, never failing, as for a delete: changed, gone, as
+// someone deleted it, refused, as Discord would refuse it again, or failed, as Discord could not do
+// it now, after it was tried again, or Discord logging is off. A message that is gone is not
+// warned about.
 {
   const editing = await loadLogger();
   let failures = 0;
+  let answer = () => null;
   editing.discord.reply = async ({ type, id }) => {
     if (type === 'edit' && failures-- > 0)
       throw networkError('Could not reach Discord (ECONNRESET)');
+    const err = type === 'edit' && answer();
+    if (err) throw err;
     return { id };
   };
-  assert.strictEqual(await editing.logger.editMessage('5000', { content: 'Moved' }), true);
+  assert.strictEqual(await editing.logger.editMessage('5000', { content: 'Moved' }), 'edited');
   // The embeds are an array made in the logger's own context, so they are compared as JSON.
   assert.strictEqual(
     JSON.stringify(shown(editing.discord.requests)),
@@ -1781,16 +1787,58 @@ for (const env of [{ DISCORD_LOG_WEBHOOK: webhook }, {}]) {
   const retried = editing.logger.editMessage('5000', { content: 'Moved' });
   await until(() => editing.timers.size === 1, 'a retry');
   editing.advance(1000);
-  assert.strictEqual(await retried, true);
-  editing.discord.reply = async () => {
-    throw discordError('Discord answered HTTP 404: Unknown Message (code 10008)', {
-      status: 404,
-      code: 10008
-    });
+  assert.strictEqual(await retried, 'edited');
+  const outcome = async (make, waits = []) => {
+    answer = make;
+    const result = editing.logger.editMessage('5000', { content: 'Moved' });
+    for (const wait of waits) {
+      await until(() => editing.timers.size === 1, 'a retry');
+      editing.advance(wait);
+    }
+    return result;
   };
-  assert.strictEqual(await editing.logger.editMessage('5000', { content: 'Moved' }), false);
+  editing.output.length = 0;
+  assert.strictEqual(
+    await outcome(() =>
+      discordError('Discord answered HTTP 404: Unknown Message (code 10008)', {
+        status: 404,
+        code: 10008
+      })
+    ),
+    'gone'
+  );
+  assert.strictEqual(
+    await outcome(() =>
+      discordError('Discord answered HTTP 403: Missing Access (code 50001)', { status: 403 })
+    ),
+    'refused'
+  );
+  assert.strictEqual(
+    await outcome(() => discordError('Discord answered HTTP 503', { status: 503 }), [1000]),
+    'failed'
+  );
+  assert.strictEqual(
+    await outcome(() => networkError('Could not reach Discord (ECONNRESET)'), [1000, 3000]),
+    'failed'
+  );
+  assert.deepStrictEqual(warnings(editing.output), [
+    'Could not change a message in the Discord log: DiscordWebhookError: Discord answered HTTP 403: Missing Access (code 50001)',
+    'Could not change a message in the Discord log: DiscordWebhookError: Discord answered HTTP 503',
+    'Could not change a message in the Discord log: DiscordWebhookError: Could not reach Discord (ECONNRESET)'
+  ]);
+  // A webhook that is gone turns Discord logging off, as for any request.
+  assert.strictEqual(
+    await outcome(() =>
+      discordError('Discord answered HTTP 401: Invalid Webhook Token (code 50027)', {
+        status: 401,
+        code: 50027
+      })
+    ),
+    'failed'
+  );
+  assert.strictEqual(editing.logger.discordWebhook, null);
   const editingOff = await loadLogger({});
-  assert.strictEqual(await editingOff.logger.editMessage('5000', { content: 'Moved' }), false);
+  assert.strictEqual(await editingOff.logger.editMessage('5000', { content: 'Moved' }), 'failed');
   assert.strictEqual(editingOff.discord.requests.length, 0);
 }
 

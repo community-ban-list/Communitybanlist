@@ -2,9 +2,9 @@ import { battlemetricsRequestCount } from 'scbl-lib/apis';
 import {
   connect,
   disconnect,
-  flushLogMessages,
   readLogMessage,
   sequelize,
+  stopRecordingLogMessages,
   takeServiceLock
 } from 'scbl-lib/db';
 import { describeError, isNewerMessage, Logger, newerMessage } from 'scbl-lib/utils';
@@ -34,6 +34,7 @@ import {
   logMigrations,
   readSeconds,
   RECORD_TIMEOUT,
+  recordNewestMessage,
   RELEASE_RESERVE,
   reviseLastRun,
   RunState,
@@ -104,12 +105,17 @@ const STATUS_EDIT_INTERVAL = 60 * 1000;
 const BOTTOM_CHECK_INTERVAL = 60 * 1000;
 const REPORT_MOVE_DELAY = 3 * 1000;
 
-// What an old copy of the status message that could not be deleted is changed to, so it never
+// What an old copy of the status message that could not be deleted is changed to, so it no longer
 // looks like the current one. Its delete is tried again with the next check or move.
 const MOVED_PAYLOAD = {
   content: "The CBL importer service's status has moved to the bottom of the channel.",
   embeds: []
 };
+
+// An old copy that still looks like the current one, as Discord failed both its delete and that
+// change, is tried again this long after each try, rather than only at the next check, and then
+// with each check (see retryOldCopies).
+const COPY_RETRY_DELAYS = [5 * 1000, 15 * 1000, 30 * 1000];
 
 // docker stop gives the service 60 seconds (stop_grace_period) before it kills it. Once a signal
 // asks the service to stop, its end, from saving the last cycle's record to releasing the locks,
@@ -147,10 +153,10 @@ const HARD_EXIT_FLUSH = 5 * 1000;
 // the edit found deleted and posted again.
 const SENT_RESERVE = 5 * 1000;
 
-// The end waits at most this long to write the newest message the service posted to the database
-// (see recordNewest), which takes a moment when the database answers, so one that does not cannot
-// take the time the end's log messages need.
-const NEWEST_TIMEOUT = 2 * 1000;
+// Before the end writes the newest message the service posted to the database, it waits at most
+// this long for the lines still waiting to be sent, e.g. the one that says it is stopping, which
+// its final edit went ahead of (see recordNewest).
+const LINES_TIMEOUT = 2 * 1000;
 
 // The text of a setting, without spaces or one pair of quotes around it, in lower case, as the
 // importer reads its switches (see unquote in ban-list-sync.js).
@@ -297,13 +303,18 @@ export default async function runLoop(steps) {
   let rowSaves = Promise.resolve();
   // The old copies of the status message, posted before it was posted again below newer messages,
   // that are still to be deleted, by ID, each with whether it may be deleted yet, as the ID of the
-  // message that replaced it has been saved, and whether it was changed to say the status moved, as
-  // it could not be deleted (see deleteOldCopies), and whether they are being deleted. Then,
-  // with IMPORTER_STATUS_AT_BOTTOM, when the message was last posted again, the timers of the next
-  // check and of the move after the service's own embed or summary, and whether a check is reading
-  // the database (see keepAtBottom).
+  // message that replaced it has been saved, whether it was changed to say the status moved, as it
+  // could not be deleted, whether Discord refused to delete it or to change it, and whether it
+  // still looks like the current one, as its last try neither deleted it nor changed it (see
+  // deleteOldCopies). Then the pass that is deleting them, if one is under way, and the timer of
+  // the next try of a copy that still looks current, with how many such tries there have been (see
+  // retryOldCopies). Then, with IMPORTER_STATUS_AT_BOTTOM, when the message was last posted again,
+  // the timers of the next check and of the move after the service's own embed or summary, and
+  // whether a check is reading the database (see keepAtBottom).
   const oldCopies = new Map();
-  let deletingCopies = false;
+  let copiesPass = null;
+  let copiesTimer = null;
+  let copiesRetries = 0;
   let movedAt = -Infinity;
   let bottomTimer = null;
   let reportTimer = null;
@@ -427,52 +438,105 @@ export default async function runLoop(steps) {
     stopping === null &&
     !health.stopping;
 
-  // Delete the old copies of the status message that may be deleted, one at a time, in the
-  // background, also those that may be meanwhile. A copy that cannot be deleted is changed, once, to
-  // say that the status moved, so it never looks like the current one, and its delete is tried
-  // again with the next check or move, unless Discord refused it, as it would again. It never
-  // fails.
-  const deleteOldCopies = async () => {
-    if (deletingCopies || oldCopies.size === 0 || !Logger.discordWebhook) return;
-    deletingCopies = true;
+  // Try each old copy of the status message that may be deleted once, one at a time, also those
+  // that may be meanwhile, as the pass under way (see deleteOldCopies). A copy that cannot be
+  // deleted is changed to say that the status moved, so it no longer looks like the current one,
+  // and its delete is tried again with the next try, until it works. A copy that Discord refuses to
+  // delete, as it would again, is only changed, and is left once it is, or once Discord refuses that
+  // too. Until then it stays among the copies still to be deleted, which the service's row keeps
+  // for the next process. It never fails.
+  const tryOldCopies = async () => {
     const tried = new Set();
     try {
       for (;;) {
         const next = [...oldCopies].find(([id, copy]) => copy.ready && !tried.has(id));
-        if (!next) break;
+        if (!next || !Logger.discordWebhook) break;
         const [id, copy] = next;
         tried.add(id);
-        const outcome = await Logger.deleteMessage(id);
-        if (outcome === 'deleted' || outcome === 'gone') {
-          oldCopies.delete(id);
+        let outcome = copy.refused ? 'refused' : await Logger.deleteMessage(id);
+        copy.refused = outcome === 'refused';
+        if (outcome !== 'deleted' && outcome !== 'gone' && !copy.marked && !copy.unchangeable) {
+          const changed = await Logger.editMessage(id, MOVED_PAYLOAD);
+          if (changed === 'gone') outcome = 'gone';
+          copy.marked = changed === 'edited';
+          copy.unchangeable = changed === 'refused';
+        }
+        const gone = outcome === 'deleted' || outcome === 'gone';
+        copy.looksCurrent = !gone && !copy.marked;
+        if (gone)
           console.log(
             outcome === 'deleted'
               ? `Deleted the old copy of the status message, ${id}.`
               : `The old copy of the status message, ${id}, was deleted already.`
           );
-          continue;
-        }
-        if (!copy.marked) copy.marked = await Logger.editMessage(id, MOVED_PAYLOAD);
-        if (outcome === 'refused') oldCopies.delete(id);
+        else if (copy.refused && copy.marked)
+          console.log(
+            `Discord refused to delete the old copy of the status message, ${id}, so it is left, saying that the status moved.`
+          );
+        else if (copy.refused && copy.unchangeable)
+          console.warn(
+            `Warning: Discord refused to delete the old copy of the status message, ${id}, and to change it, so it is left as it is.`
+          );
+        if (gone || (copy.refused && (copy.marked || copy.unchangeable))) oldCopies.delete(id);
       }
     } catch (err) {
       console.warn(
         `Warning: could not delete the old copies of the status message: ${describeError(err)}`
       );
-    } finally {
-      deletingCopies = false;
     }
+    // The pass ends as it finds no copy left to try, so one that may be deleted from now on gets a
+    // pass of its own.
+    copiesPass = null;
+    retryOldCopies();
+  };
+
+  // Delete the old copies of the status message that may be deleted, in the background (see
+  // tryOldCopies), unless that is under way already, and resolve once they have been tried. The
+  // pass starts once it is kept as the one under way. It never fails.
+  const deleteOldCopies = () => {
+    if (copiesPass === null && oldCopies.size > 0 && Logger.discordWebhook)
+      copiesPass = Promise.resolve().then(tryOldCopies);
+    return copiesPass ?? Promise.resolve();
+  };
+
+  // Whether an old copy still looks like the current status message, as its last try neither
+  // deleted it nor changed it to say the status moved, e.g. as Discord failed both.
+  const copyLooksCurrent = () => [...oldCopies.values()].some((copy) => copy.looksCurrent);
+
+  // While an old copy still looks current, it is tried again 5, 15 and then 30 seconds after each
+  // try, rather than only at the next check, a minute later, and then with each check, until it
+  // works. Once none does, the next such copy starts at 5 seconds again. Not once the service is
+  // ending, as its end saves the copies left, for the next process.
+  const retryOldCopies = () => {
+    if (!copyLooksCurrent()) {
+      copiesRetries = 0;
+      return;
+    }
+    if (
+      copiesTimer !== null ||
+      copiesRetries >= COPY_RETRY_DELAYS.length ||
+      stopping !== null ||
+      health.stopping
+    )
+      return;
+    copiesTimer = setTimeout(() => {
+      copiesTimer = null;
+      deleteOldCopies();
+    }, COPY_RETRY_DELAYS[copiesRetries++]);
+    // It must not keep the process running.
+    copiesTimer.unref?.();
   };
 
   // Move the status message to the bottom of the log channel if a newer message is there: post it
   // again, below that one, and delete the old one once the new one's ID is saved (see startStatus).
   // The newest is the newest the service posted itself, which it knows at once, or, unless this is
   // the move after its own embed or summary (report), the newest in the database, which also has
-  // the web server's and the bot's. It moves at most once a minute, but for that move, and tries
-  // again to delete the old copies that are left. It never fails.
+  // the web server's and the bot's. It moves at most once a minute, but for that move. It first
+  // tries again the old copies that are left, and does not move while one still looks current, as
+  // that would leave one more. It never fails.
   const keepAtBottom = async ({ report = false } = {}) => {
     if (!movable()) return;
-    deleteOldCopies();
+    const deleting = deleteOldCopies();
     let newest = Logger.newestMessageID ?? null;
     if (!report && !readingNewest) {
       readingNewest = true;
@@ -482,8 +546,11 @@ export default async function runLoop(steps) {
         readingNewest = false;
       }
     }
-    if (!movable() || !isNewerMessage(newest, statusID)) return;
+    await deleting;
+    if (!movable() || !isNewerMessage(newerMessage(newest, Logger.newestMessageID), statusID))
+      return;
     if (!report && Date.now() - movedAt < BOTTOM_CHECK_INTERVAL) return;
+    if (copyLooksCurrent()) return;
     if (statusMessage.repost(drawStatus)) {
       movedAt = Date.now();
       scheduleBottomCheck();
@@ -599,7 +666,8 @@ export default async function runLoop(steps) {
       console.warn(`Warning: could not read the importer service row: ${describeError(err)}`);
     }
     statusStarted = true;
-    if (saved?.startedAt && !saved.endedAt)
+    const endedUnsaid = Boolean(saved?.startedAt && !saved.endedAt);
+    if (endedUnsaid)
       Logger.important(
         'Core',
         `The importer service's last process, which started at ${saved.startedAt}, ended without saying how, e.g. as it was killed, ran out of memory, was ended at once by a second signal, or could not reach the database as it ended.`
@@ -617,13 +685,16 @@ export default async function runLoop(steps) {
       console.warn(`Warning: could not save the importer service row: ${describeError(err)}`);
     }
     if (postsStatus) {
-      // The last process's message is below every other only if nothing newer is known: every way a
-      // process ends posts a line below it, which the database has, unless writing it failed.
+      // The last process's message is below every other only if nothing newer is known. A process
+      // that says how it ended posts a line below it as it stops, which the database has, unless
+      // writing it failed. One that did not, e.g. as it was killed, posted none, but this process
+      // has just logged one below it, which the logger may not have posted yet, so the message is
+      // not the newest then either.
       const repost =
         atBottom.on &&
         Boolean(Logger.discordWebhook) &&
         statusID !== null &&
-        !(await isNewest(statusID)) &&
+        (endedUnsaid || !(await isNewest(statusID))) &&
         !health.stopping;
       statusMessage = Logger.statusMessage(drawStatus, {
         messageID: statusID,
@@ -692,21 +763,16 @@ export default async function runLoop(steps) {
 
   // Write the newest message the service posted to the database now, if it has not been written
   // yet, e.g. the line that says the service is stopping, so the next process knows that this
-  // one's status message is not the newest, waiting at most ms, and never more than
-  // NEWEST_TIMEOUT. Only a service with a status message needs it. It never fails the end.
+  // one's status message is not the newest. That line may still be waiting to be sent, as the
+  // status message's final edit goes ahead of lines, so the lines waiting are given half of ms, and
+  // at most LINES_TIMEOUT, to be sent first (see flushLogs), and the write the rest, and never more
+  // than 2 seconds (see recordNewestMessage in run.js). Only a service with a status message needs
+  // it. It never fails the end.
   const recordNewest = async (ms) => {
     if (!statusMessage) return;
-    try {
-      await withTimeout(
-        flushLogMessages(),
-        Math.min(ms, NEWEST_TIMEOUT),
-        'Writing it to the database'
-      );
-    } catch (err) {
-      console.warn(
-        `Warning: could not record the newest message in the log channel as the service ended: ${describeError(err)}`
-      );
-    }
+    const until = Date.now() + ms;
+    await flushLogs(Date.now() + Math.min(ms / 2, LINES_TIMEOUT));
+    await recordNewestMessage(Math.max(0, until - Date.now()), 'the service');
   };
 
   // Stop the statements the service still has running on the Sequelize pool's connections, e.g. as
@@ -742,16 +808,18 @@ export default async function runLoop(steps) {
   // deleted, and post it again, so the end waits for that edit to be sent for as long as it can,
   // keeping SENT_RESERVE, and then saves the row again with the new ID, for the next process to
   // edit the message that says how this one ended. Meanwhile it writes the newest message it
-  // posted to the database (see recordNewest). It never moves the status message: the end only
-  // edits it. A connection that did not close in time, as its statement is still running, has the
-  // statement stopped before the locks are released (see stopStatements). Resolves with the exit
-  // code.
+  // posted to the database (see recordNewest), and then writes no more, as it closes the
+  // connections: a message posted after that, as the end sends its log messages, is not written,
+  // rather than tried on a closed pool. It never moves the status message: the end only edits it.
+  // A connection that did not close in time, as its statement is still running, has the statement
+  // stopped before the locks are released (see stopStatements). Resolves with the exit code.
   const endService = () => {
     finishing ??= (async () => {
       health.stopping = true;
       clearTimeout(summaryTimer);
       clearTimeout(bottomTimer);
       clearTimeout(reportTimer);
+      clearTimeout(copiesTimer);
       current = null;
       currentBefore = null;
       nextAt = null;
@@ -781,6 +849,7 @@ export default async function runLoop(steps) {
             recordNewest(left(RECORD_TIMEOUT))
           ]);
         }
+        stopRecordingLogMessages();
         try {
           await withTimeout(
             disconnect(),
@@ -822,10 +891,11 @@ export default async function runLoop(steps) {
   // endCycleAtOnce), to stop: show how the service ended in its status message, save its row with
   // how it ended, and, with record, the cycle's record, and send the log messages, all by the time
   // given, as at its end (see endService), with a status message that its final edit posted again
-  // saved in the row in the time left. Then stop the statements the cycle's step still has running
-  // (see stopStatements), close the locks' connection, which frees them, and exit with the code the
-  // service is stopping with. This is the service's end, which the service waits for when the
-  // cycle's step ends meanwhile, and which that adds nothing to (see endCycle).
+  // saved in the row in the time left. Then write no more of the newest messages it posts to the
+  // database, stop the statements the cycle's step still has running (see stopStatements), close
+  // the locks' connection, which frees them, and exit with the code the service is stopping with.
+  // This is the service's end, which the service waits for when the cycle's step ends meanwhile,
+  // and which that adds nothing to (see endCycle).
   const endAtOnce = (record, by) => {
     finishing ??= (async () => {
       health.stopping = true;
@@ -833,6 +903,7 @@ export default async function runLoop(steps) {
       clearTimeout(stopTimer);
       clearTimeout(bottomTimer);
       clearTimeout(reportTimer);
+      clearTimeout(copiesTimer);
       finishStatus();
       const saves = prepared || statusStarted;
       const ended = {
@@ -851,6 +922,7 @@ export default async function runLoop(steps) {
         recordNewest(until())
       ]);
       if (saves && statusID !== saved && until() > 0) await saveEnded(ended, statusID, until());
+      stopRecordingLogMessages();
       await stopStatements(STOP_STATEMENTS_TIMEOUT);
       lock?.destroy();
       process.exit(exitCode);
@@ -1304,6 +1376,7 @@ export default async function runLoop(steps) {
     clearTimeout(stopTimer);
     clearTimeout(bottomTimer);
     clearTimeout(reportTimer);
+    clearTimeout(copiesTimer);
     setProgressListener(null);
     process.off('SIGTERM', onSignal);
     process.off('SIGINT', onSignal);
