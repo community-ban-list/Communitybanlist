@@ -291,15 +291,18 @@ assert.deepStrictEqual(
     ['get', 'bans', { 'filter[banList]': 'bm-list', 'page[key]': 'three', 'page[size]': '100' }]
   ]
 );
-// Each page's later attempts have longer, 30 seconds, then 45, and 45 again, and none is made once
-// the run is asked to stop: the BattleMetrics client is given the run control's stopIfRequested, to
-// call before each attempt, and while the request waits. The web server's and the bot's requests
-// give the client neither.
+// Each page has up to 5 attempts, short and soon after each other, as BattleMetrics at times does
+// not answer a page at all: cut off after 15, 15, 20, 30 and 45 seconds, and about 1, 2, 2 and 4
+// seconds apart. None is made once the run is asked to stop: the BattleMetrics client is given the
+// run control's stopIfRequested, to call before each attempt, and while the request waits. The web
+// server's and the bot's requests give the client none of these, so theirs keep its 3 attempts of
+// 30 seconds.
 for (const { data, priority, options } of battlemetricsRequests) {
   assert.deepStrictEqual([data, priority], [undefined, 5]);
-  assert.deepStrictEqual([...options.timeouts], [30000, 45000, 45000]);
+  assert.deepStrictEqual([...options.timeouts], [15000, 15000, 20000, 30000, 45000]);
+  assert.deepStrictEqual([...options.retryDelays], [1000, 2000, 2000, 4000]);
   assert.strictEqual(options.beforeAttempt, stopIfRequested);
-  assert.deepStrictEqual(Object.keys(options).sort(), ['beforeAttempt', 'timeouts']);
+  assert.deepStrictEqual(Object.keys(options).sort(), ['beforeAttempt', 'retryDelays', 'timeouts']);
 }
 // The read gives its first page's ban IDs, with or without a SteamID, and count, which head polls
 // compare their pages with. Each request is counted as one of a read of all of a list.

@@ -23,15 +23,24 @@ const MAX_LAST_MODIFIED_LENGTH = 64;
 const BATTLEMETRICS_BANS = new URL('https://api.battlemetrics.com/bans');
 const BATTLEMETRICS_PAGE_SIZE = 100;
 
-// BattleMetrics answers a page of bans in under a second as a rule, but can take longer than the
-// BattleMetrics client's 30 seconds for a page of a large list, so each page's later attempts have
-// longer: 30 seconds, then 45, and 45 again. Once the run is asked to stop, a page's request makes
-// no more attempts, and stops waiting, for the budget, a pause or another attempt, within a second
-// (see readNextPage), so only an attempt already sent holds the run up, for at most 45 seconds:
-// well within the 60 seconds a run has to stop after its time limit before it is ended at once,
-// which in once mode also has to leave the run the time to end, to save its record and send its
-// log messages. A page that fails every attempt fails its list, as before.
-const BATTLEMETRICS_PAGE_TIMEOUTS = [30 * 1000, 45 * 1000, 45 * 1000];
+// BattleMetrics answers a page of bans in about half a second as a rule, but at times not at all:
+// in production, a few pages of large lists got no answer, not even its headers, at about half of
+// the attempts at them, however long the attempt waited, while an attempt at them that was answered
+// was answered within a second, as one a few seconds later often was. So each page has short
+// attempts, soon after each other: up to 5, cut off after 15, 15, 20, 30 and 45 seconds, about 1,
+// 2, 2 and 4 seconds apart, each wait up to a quarter longer at random, so a page that hangs is
+// asked for again about 16 seconds after it was first asked for, rather than 31. The first attempts
+// are short, as a page is answered within a few seconds but in BattleMetrics' rare slow spells, and
+// the later ones long enough for the slowest answers in those, of up to 29 seconds. A page that is
+// never answered fails its list, as before, after at most about 136 seconds, 125 of attempts and up
+// to 11 of waits, or longer while the budget, a pause or Retry-After holds it up. Once the run is
+// asked to stop, a page's request makes no more attempts, and stops waiting, for the budget, a
+// pause or another attempt, within a second (see readNextPage), so only an attempt already sent
+// holds the run up, for at most 45 seconds, the last attempt's: well within the 60 seconds a run
+// has to stop after its time limit before it is ended at once, which in once mode also has to leave
+// the run the time to end, to save its record and send its log messages.
+const BATTLEMETRICS_PAGE_TIMEOUTS = [15 * 1000, 15 * 1000, 20 * 1000, 30 * 1000, 45 * 1000];
+const BATTLEMETRICS_PAGE_RETRY_DELAYS = [1000, 2000, 2000, 4000];
 
 // A BattleMetrics list is read for at most this many pages, in case its links never end. The
 // largest lists need about 120. With the count check on for the list, it is read for at most as
@@ -445,11 +454,12 @@ export default class BanFetcher {
   }
 
   // Read the next page of a read, once readBattlemetricsPage has checked that it may. Its attempts
-  // have BATTLEMETRICS_PAGE_TIMEOUTS, and a run that is asked to stop meanwhile makes no more of
-  // them: the BattleMetrics client calls stopIfRequested before each attempt, just before it is
-  // sent, and at least every second while the request waits, for its turn in the client's queue, a
-  // pause, Retry-After or another attempt, and the request ends with the RunStopped it throws. So
-  // only an attempt already sent can still hold the run up, by at most 45 seconds.
+  // have BATTLEMETRICS_PAGE_TIMEOUTS, one for each, and BATTLEMETRICS_PAGE_RETRY_DELAYS between
+  // them, and a run that is asked to stop meanwhile makes no more of them: the BattleMetrics client
+  // calls stopIfRequested before each attempt, just before it is sent, and at least every second
+  // while the request waits, for its turn in the client's queue, a pause, Retry-After or another
+  // attempt, and the request ends with the RunStopped it throws. So only an attempt already sent
+  // can still hold the run up, by at most 45 seconds.
   async readNextPage(read, kind) {
     const { banList, counts } = read;
 
@@ -462,6 +472,7 @@ export default class BanFetcher {
     this.requests[kind] = (this.requests[kind] ?? 0) + 1;
     const { data } = await battlemetrics('get', 'bans', read.next, undefined, 5, {
       timeouts: BATTLEMETRICS_PAGE_TIMEOUTS,
+      retryDelays: BATTLEMETRICS_PAGE_RETRY_DELAYS,
       beforeAttempt: stopIfRequested
     });
     if (!data || !Array.isArray(data.data) || !data.links)

@@ -5,19 +5,20 @@
 // A failed request is only made again when that is safe and could help:
 // - GET and DELETE requests are made up to 3 times when the connection failed or timed out, or
 //   the API answered 408, 429 or 5xx. The waits are about 1 s and then 4 s, or as long as the API
-//   asks in Retry-After.
+//   asks in Retry-After. A caller can give a request other attempts (see below).
 // - POST and PATCH requests are made again only after a 429, or when no connection could be made.
 //   The API may have carried out one that timed out, was cut off or failed with 5xx, so its error
 //   is marked ambiguous, for the caller to find out what happened. A caller can mark one that
 //   does no harm when it is carried out twice as repeatable, so it is made again like a GET.
 // - Any other answer fails at once. The error is marked auth when the API refused the credentials.
 //
-// Each attempt has the client's time limit, unless the caller gives its attempts others, e.g. longer
-// ones for the later attempts at a page that the API can be slow to answer (options.timeouts). A
-// caller can also have a request end before an attempt is sent, e.g. as it is stopping
-// (options.beforeAttempt), which the request then also checks at least every second while it
-// waits: for a pause, for its turn in the limiter's queue, or before another attempt. Neither
-// changes which failures are made again.
+// Each attempt has the client's time limit, unless the caller gives its attempts others, which also
+// gives the request as many attempts as it gives limits (options.timeouts), and the waits between
+// them (options.retryDelays), e.g. more and shorter attempts, soon after each other, at a page that
+// the API at times does not answer at all. A caller can also have a request end before an attempt
+// is sent, e.g. as it is stopping (options.beforeAttempt), which the request then also checks at
+// least every second while it waits: for a pause, for its turn in the limiter's queue, or before
+// another attempt. None of them changes which failures are made again.
 //
 // After a 429, or when the API says few requests are left, nothing is sent until the time it
 // gives in Retry-After, or for a minute.
@@ -25,10 +26,13 @@
 // axios's errors hold the request, with its headers and address and so the API keys in them, so a
 // failed request throws an ApiError instead, which describes it by its method and path.
 
+// How many attempts a request has, unless its caller gives its attempts time limits of their own
+// (see attemptsOf).
 const ATTEMPTS = 3;
 
-// The waits before the second and third attempts. Each gets up to a quarter more at random, so
-// requests that failed together are not made again together.
+// The waits before the second and third attempts, unless the caller gives others (see delayOf).
+// Each gets up to a quarter more at random, so requests that failed together are not made again
+// together.
 const RETRY_DELAYS = [1000, 4000];
 
 // How long nothing is sent when the API does not say, and the longest wait honoured, so a wrong
@@ -113,6 +117,21 @@ async function waitFor(ms, stopCheck = null) {
 
 function seconds(ms) {
   return `${Number((ms / 1000).toFixed(1))}s`;
+}
+
+// How many attempts a request has: one for each time limit its caller gives its attempts
+// (options.timeouts), or else ATTEMPTS.
+function attemptsOf(timeouts) {
+  return Array.isArray(timeouts) && timeouts.length > 0 ? timeouts.length : ATTEMPTS;
+}
+
+// The wait before the attempt after attempt number attempts, in milliseconds, before its quarter at
+// random: the caller's for it (options.retryDelays), or else the last the caller gave, or else the
+// client's own for it, or else the last of those.
+function delayOf(retryDelays, attempts) {
+  const given = Array.isArray(retryDelays) ? retryDelays.slice(0, attempts) : [];
+  for (const delay of given.reverse()) if (Number.isFinite(delay) && delay >= 0) return delay;
+  return RETRY_DELAYS[Math.min(attempts, RETRY_DELAYS.length) - 1];
 }
 
 // A header of a response, or null when it has none.
@@ -326,7 +345,7 @@ export default function createApiClient({
   }
 
   // The time limit of attempt number attempts, in milliseconds: the caller's for it, or else the
-  // last the caller gave, or else the client's own.
+  // last the caller gave before it, or else the client's own.
   function limitOf(timeouts, attempts) {
     const given = Array.isArray(timeouts) ? timeouts.slice(0, attempts) : [];
     for (const limit of given.reverse()) if (Number.isFinite(limit) && limit > 0) return limit;
@@ -334,20 +353,26 @@ export default function createApiClient({
   }
 
   // options.repeatable marks a POST or PATCH as safe to make again, as making it twice does no
-  // harm, e.g. one that creates an invite. options.timeouts gives the attempts time limits of
-  // their own, in milliseconds, the first attempt's first, for a request the API can take longer to
-  // answer, e.g. the importer's reads of pages of bans; an attempt it gives none to has the last it
-  // gives. options.beforeAttempt is a stop check: it is called before each attempt, again once the
-  // attempt's turn in the queue has come, just before it is sent, and at least every second while
-  // the request waits, for a pause, for its turn, or before another attempt. One that throws, e.g.
-  // as the caller has been asked to stop, ends the request with what it threw, within a second
-  // while it waits, and nothing more is sent; an attempt already sent still has its time limit.
-  // Without them, as for the web server's and the bot's requests, every attempt has the client's
-  // time limit, and waits as long as it must.
+  // harm, e.g. one that creates an invite. options.timeouts gives the request an attempt for each
+  // time limit in it, in milliseconds, the first attempt's first, rather than ATTEMPTS of the
+  // client's, for a request the API at times does not answer, e.g. the importer's reads of pages of
+  // bans: one that is not a time gives its attempt the last before it, or the client's.
+  // options.retryDelays gives the waits before the second and later attempts, in milliseconds, each
+  // still with up to a quarter more at random, rather than RETRY_DELAYS; an attempt it gives none
+  // to waits the last it gives. A Retry-After or a pause that is longer still wins, and what is
+  // made again is as for any request. options.beforeAttempt is a stop check: it is called before
+  // each attempt, again once the attempt's turn in the queue has come, just before it is sent, and
+  // at least every second while the request waits, for a pause, for its turn, or before another
+  // attempt. One that throws, e.g. as the caller has been asked to stop, ends the request with what
+  // it threw, within a second while it waits, and nothing more is sent; an attempt already sent
+  // still has its time limit. Without them, as for the web server's and the bot's requests, a
+  // request has ATTEMPTS attempts, each with the client's time limit, about 1 and 4 seconds apart,
+  // and waits as long as it must.
   async function request(method, path, params, data, priority = 5, options = {}) {
     const verb = String(method).toUpperCase();
     const repeatable = options.repeatable === true || REPEATABLE_METHODS.includes(verb);
     const stopCheck = typeof options.beforeAttempt === 'function' ? options.beforeAttempt : null;
+    const most = attemptsOf(options.timeouts);
     for (let attempts = 1; ; attempts++) {
       const limit = limitOf(options.timeouts, attempts);
       let error;
@@ -363,8 +388,8 @@ export default function createApiClient({
         const err = thrown ?? {};
         const outcome = classify(err, repeatable);
         error = toApiError(verb, path, err, attempts, outcome, limit);
-        if (outcome !== 'retry' || attempts >= ATTEMPTS) throw error;
-        const delay = RETRY_DELAYS[attempts - 1] * (1 + Math.random() / 4);
+        if (outcome !== 'retry' || attempts >= most) throw error;
+        const delay = delayOf(options.retryDelays, attempts) * (1 + Math.random() / 4);
         wait = Math.max(delay, retryAfter(err.response) ?? 0, pausedUntil - Date.now());
       }
       // A caller that is stopping makes no more attempts, and does not wait for one: the request
@@ -372,7 +397,7 @@ export default function createApiClient({
       try {
         checkStop(stopCheck);
         console.warn(
-          `${error.message}. Trying again in ${seconds(wait)} (attempt ${attempts + 1} of ${ATTEMPTS}).`
+          `${error.message}. Trying again in ${seconds(wait)} (attempt ${attempts + 1} of ${most}).`
         );
         await waitFor(wait, stopCheck);
       } catch (thrown) {

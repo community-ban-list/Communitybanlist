@@ -768,7 +768,7 @@ async function loadBanFetcher({ battlemetrics, get }) {
 // control's stopIfRequested, which the fetcher gives it, before each attempt (see scbl-lib's
 // battlemetrics.js): here the run's time limit comes while the first attempt at the second page
 // waits for its answer, and the client asks before another, so the read stops there, rather than
-// waiting out up to two more attempts.
+// waiting out up to four more attempts (see page-attempts.js, which runs the real client).
 {
   const attempts = [];
   const fetcher = await loadBanFetcher({
