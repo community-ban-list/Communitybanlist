@@ -718,7 +718,8 @@ const importCounts = (counts = {}) => ({
 
 // Cycles start a cycle apart, from the start of one to the start of the next: every
 // IMPORTER_CYCLE_SECONDS, here 10 minutes, however long each takes. Each runs every step, given
-// the cadence, which is the cycle unless IMPORTER_CADENCE_SECONDS is set, and prints its record as
+// the cadence, which is the cycle unless IMPORTER_CADENCE_SECONDS is set, and the cycle, which the
+// import plans its full reads by, and prints its record as
 // a JSON line, with its number and the process's memory, which is saved as a run's is. The service
 // takes the service lock once, and keeps it. Each cycle takes the run lock as it starts and frees
 // it once its record is saved, so between cycles the service holds only the service lock, and the
@@ -751,9 +752,9 @@ const importCounts = (counts = {}) => ({
     [3, 3, false]
   );
   assert.deepStrictEqual(given, [
-    { cadenceSeconds: 600 },
-    { cadenceSeconds: 600 },
-    { cadenceSeconds: 600 }
+    { cadenceSeconds: 600, cycleSeconds: 600 },
+    { cadenceSeconds: 600, cycleSeconds: 600 },
+    { cadenceSeconds: 600, cycleSeconds: 600 }
   ]);
   const records = service.records();
   assert.deepStrictEqual(
@@ -855,7 +856,9 @@ const importCounts = (counts = {}) => ({
 
 // A cycle that takes longer than the cycle is followed by the next one at once, and the one after
 // that starts a cycle after it: with a cycle of 60 seconds, cycles of 90, 10 and 10 seconds start
-// at 0, 90 and 150 seconds. IMPORTER_CADENCE_SECONDS, when set, is the cadence the steps are given.
+// at 0, 90 and 150 seconds. IMPORTER_CADENCE_SECONDS, when set, is the cadence the steps are given,
+// and they are still given the cycle, which the import plans its full reads by, so a cadence left
+// over from the hourly script does not change them.
 {
   const service = await loadLoop({
     env: {
@@ -870,13 +873,17 @@ const importCounts = (counts = {}) => ({
   const running = service.start([
     step('importBans', async (settings) => {
       starts.push((service.now() - START) / SECOND);
-      given.push(settings.cadenceSeconds);
+      given.push([settings.cadenceSeconds, settings.cycleSeconds]);
       await service.wait((durations[starts.length - 1] ?? 10) * SECOND);
     })
   ]);
   await service.runUntil(() => service.records().length === 3, 'three cycles');
   assert.deepStrictEqual(starts, [0, 90, 150]);
-  assert.deepStrictEqual(given, [3600, 3600, 3600]);
+  assert.deepStrictEqual(given, [
+    [3600, 60],
+    [3600, 60],
+    [3600, 60]
+  ]);
   service.process.emit('SIGINT', 'SIGINT');
   assert.strictEqual(await service.finish(running), 0);
 }

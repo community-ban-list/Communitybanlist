@@ -22,6 +22,7 @@ const {
   checkHead,
   compareReads,
   DEFAULT_FULL_SCAN_MINUTES,
+  EARLY_SHARE,
   fullScanSlots,
   latestFullScan,
   MAX_HEAD_PAGES,
@@ -52,8 +53,8 @@ assert.deepStrictEqual(plain(REASONS), {
   REMOTE: 'remote'
 });
 assert.deepStrictEqual(
-  [DEFAULT_FULL_SCAN_MINUTES, PAGE_SIZE, MAX_HEAD_UIDS, MAX_HEAD_PAGES],
-  [30, 100, 100, 10]
+  [DEFAULT_FULL_SCAN_MINUTES, EARLY_SHARE, PAGE_SIZE, MAX_HEAD_UIDS, MAX_HEAD_PAGES],
+  [30, 0.1, 100, 100, 10]
 );
 
 // IMPORTER_FULL_SCAN_MINUTES is a whole number of minutes from 1 to a week, with spaces or one pair
@@ -299,6 +300,29 @@ assert.deepStrictEqual(
   plans.sort(compareReads).map(({ id }) => id),
   [2, 7, 5, 8, 9, 3, 6, 1, 4, 10]
 );
+// The lists read in full as their time has come, periodic, every_run and remote, go the one read in
+// full longest ago first, by the time a read gives with its plan, from the list's row, as a number,
+// a Date or MySQL's text, and one without it first. Those read in full at the same time keep the
+// order they were found in, and so do the lists read for the more urgent reasons, whatever their
+// last full reads.
+const lastRead = (minutes) => NOW - minutes * MINUTE;
+const timely = [
+  { id: 1, read: 'full', reason: 'periodic', lastFullScanAt: lastRead(30) },
+  { id: 2, read: 'full', reason: 'drift', lastFullScanAt: lastRead(10) },
+  { id: 3, read: 'full', reason: 'periodic', lastFullScanAt: new Date(lastRead(45)) },
+  { id: 4, read: 'full', reason: 'remote', lastFullScanAt: lastRead(10) },
+  { id: 5, read: 'full', reason: 'drift', lastFullScanAt: lastRead(50) },
+  { id: 6, read: 'full', reason: 'periodic', lastFullScanAt: '2026-10-22 17:25:00.000' },
+  { id: 7, read: 'head', lastFullScanAt: lastRead(90) },
+  { id: 8, read: 'full', reason: 'every_run', lastFullScanAt: lastRead(31) },
+  { id: 9, read: 'full', reason: 'periodic' },
+  { id: 10, read: 'full', reason: 'periodic', lastFullScanAt: lastRead(30) },
+  { id: 11, read: 'full', reason: 'new', lastFullScanAt: null }
+];
+assert.deepStrictEqual(
+  timely.sort(compareReads).map(({ id }) => id),
+  [7, 11, 2, 5, 9, 3, 6, 8, 1, 10, 4]
+);
 
 // How many pages a read of all of a list takes, about: BattleMetrics' count of its bans at its last
 // read, or else the bans stored, a page for every 100, and at least one, from MySQL's numbers or
@@ -379,7 +403,10 @@ for (const [cadenceSeconds, soonest, latest] of [
       assert.ok(due > readAt + soonest * MINUTE && due <= readAt + latest * MINUTE, which);
     }
 // With runs at least IMPORTER_FULL_SCAN_MINUTES apart, as in once mode every 6 hours, or without a
-// cadence or a slot, a list is next due IMPORTER_FULL_SCAN_MINUTES after its read, as before slots.
+// cadence or a slot, a list is next due IMPORTER_FULL_SCAN_MINUTES after its run planned its reads,
+// less a tenth of it, however late in the run it was read: 27 minutes after the plan with 30, 54
+// with 60 and 4.5 with 5. So a run that starts an interval after this one, or a little less, or
+// that plans its reads a little sooner after its start, finds it due, and reads it in full again.
 for (const [cadenceSeconds, slot] of [
   [1800, SLOT],
   [3600, SLOT],
@@ -387,11 +414,27 @@ for (const [cadenceSeconds, slot] of [
   [null, SLOT],
   [600, null]
 ])
-  assert.strictEqual(
-    next(NOW + 3 * MINUTE, cadenceSeconds, slot),
-    NOW + 33 * MINUTE,
-    String(cadenceSeconds)
-  );
+  for (const readAt of [NOW + 3 * MINUTE, NOW + 14 * MINUTE])
+    assert.strictEqual(
+      nextFullScan({ readAt, plannedAt: NOW, fullScanMinutes: 30, cadenceSeconds, slot }),
+      NOW + 27 * MINUTE,
+      `${cadenceSeconds}, read at ${readAt - NOW}`
+    );
+assert.strictEqual(
+  nextFullScan({
+    readAt: NOW + 40 * MINUTE,
+    plannedAt: NOW,
+    fullScanMinutes: 60,
+    cadenceSeconds: 3600
+  }),
+  NOW + 54 * MINUTE
+);
+assert.strictEqual(
+  nextFullScan({ readAt: NOW + MINUTE, plannedAt: NOW, fullScanMinutes: 5, cadenceSeconds: 600 }),
+  NOW + 4.5 * MINUTE
+);
+// Without a plannedAt, it is counted from the read.
+assert.strictEqual(next(NOW + 3 * MINUTE, 3600), NOW + 30 * MINUTE);
 // Hourly runs with IMPORTER_FULL_SCAN_MINUTES=120 read a list at its slot within 2 hours.
 assert.strictEqual(next(NOW, 3600, 100 * MINUTE, 120), NOW + 100 * MINUTE);
 
@@ -403,7 +446,7 @@ const schedule = (extra) =>
   plain(scheduleAfter({ now: NOW, fullScanMinutes: 30, ...extra }) ?? null);
 const atSlot = { cadenceSeconds: 600, slot: SLOT };
 assert.deepStrictEqual(schedule({ completed: true }), {
-  nextFullScanAt: NOW + 30 * MINUTE,
+  nextFullScanAt: NOW + 27 * MINUTE,
   scanReason: 'periodic'
 });
 assert.deepStrictEqual(schedule({ completed: true, ...atSlot }), {
@@ -423,7 +466,7 @@ assert.deepStrictEqual(schedule({ completed: true, ...atSlot, confirmAt: NOW + 1
   scanReason: 'periodic'
 });
 assert.deepStrictEqual(schedule({ completed: true, confirmAt: NOW + 31 * MINUTE }), {
-  nextFullScanAt: NOW + 30 * MINUTE,
+  nextFullScanAt: NOW + 27 * MINUTE,
   scanReason: 'periodic'
 });
 assert.deepStrictEqual(schedule({ completed: true, ...atSlot, trigger: 'drift' }), {
@@ -437,6 +480,45 @@ for (const trigger of ['drift', 'overflow'])
   });
 assert.strictEqual(schedule({}), null);
 assert.strictEqual(schedule({ confirmAt: NOW + MINUTE, ...atSlot }), null);
+// With runs an interval apart or more, the next periodic read is counted from when the run planned
+// its reads, not from the read, so a list read 13.5 minutes into a run every 30 minutes, with
+// IMPORTER_FULL_SCAN_MINUTES=30, is due 27 minutes after the run planned its reads: the next run
+// reads it in full, also when it plans its reads a few seconds sooner after its start than this
+// one did, and a run started by hand 20 minutes after this one only polls it. Counted from the
+// read, it would be due 43.5 minutes after the plan, so only every other run would read it in
+// full. So with hourly runs and IMPORTER_FULL_SCAN_MINUTES=60, whatever the cadence they are told,
+// and with 10-minute cycles and IMPORTER_FULL_SCAN_MINUTES=10.
+for (const [cadenceSeconds, fullScanMinutes] of [
+  [1800, 30],
+  [3600, 60],
+  [21600, 60],
+  [600, 10]
+]) {
+  const interval = fullScanMinutes * MINUTE;
+  const readAt = NOW + 0.45 * interval;
+  const { nextFullScanAt, scanReason } = scheduleAfter({
+    now: readAt,
+    plannedAt: NOW,
+    fullScanMinutes,
+    cadenceSeconds,
+    slot: SLOT,
+    completed: true
+  });
+  assert.strictEqual(nextFullScanAt, NOW + 0.9 * interval, String(cadenceSeconds));
+  const readThen = rowOf({ lastFullScanAt: readAt, nextFullScanAt, scanReason });
+  const settings = { cadenceSeconds, fullScanMinutes };
+  for (const early of [0, 5 * 1000, 0.09 * interval])
+    assert.deepStrictEqual(
+      plan(readThen, { now: NOW + interval - early, ...settings }),
+      full('periodic'),
+      `${cadenceSeconds}, ${early} ms early`
+    );
+  assert.deepStrictEqual(
+    plan(readThen, { now: NOW + 0.66 * interval, ...settings }),
+    { read: 'head' },
+    `${cadenceSeconds}, by hand`
+  );
+}
 // A list read in full 8 minutes into a cycle that started at its slot is due when its slot comes
 // round again, so the cycle that starts 30 minutes after that one reads it, as it would one read
 // at the cycle's start, and the cycle 20 minutes after it only polls it.
@@ -545,16 +627,21 @@ assert.strictEqual(shouldFollow(newPages(10), seen('a')), false);
 assert.strictEqual(shouldFollow(newPages(2), seen('a'), 2), false);
 
 // Cycles of the importer service, simulated with the planner as the importer uses it: each cycle
-// gives the lists their slots from their rows, plans each list's read at its start, polls the lists
-// not due a full read, then reads the others in full one after another, each taking 0.9 seconds a
-// page, and schedules each one's next full read as the read ends, as the list's row then keeps it.
-// Its other steps take 45 seconds. A cycle starts every cycleSeconds, or at once after one that
-// took longer, as the service's do, and gap, if given, stops the cycles for gap.minutes once
-// gap.after has passed. events(number, start, rows) may change the rows before a cycle plans, and
-// return what else that cycle's plans are given: each list's pending removals (pending, by list),
-// and the lists IMPORTER_ALLOW_MASS_REMOVAL names (allowMassRemoval). A list's sourceKey, if it has
-// one, is its current source. Returns each cycle: when it started and ended, and each list it read
-// in full, with why, its pages, when the read ended, and when the list was last read in full before.
+// gives the lists their slots from their rows, plans each list's read planDelay(number)
+// milliseconds after its start, 0 unless given, polls the lists not due a full read, then reads the
+// others in full one after another, the one read in full longest ago first among those read on
+// time, each taking pageSeconds(time) seconds a page, 0.9 unless given, and schedules each one's
+// next full read as the read ends, as the list's row then keeps it. Its other steps take 45
+// seconds. A cycle that reaches its time limit, maxCycleSeconds after its start, if given, reads
+// no more lists, and its last list stops part-way, keeping its row as it was. A cycle starts every
+// cycleSeconds, or at once after one that took longer, as the service's do, and gap, if given,
+// stops the cycles for gap.minutes once gap.after has passed. The planner is told that runs start
+// every cadenceSeconds, cycleSeconds unless given. events(number, start, rows) may change the rows
+// before a cycle plans, and return what else that cycle's plans are given: each list's pending
+// removals (pending, by list), and the lists IMPORTER_ALLOW_MASS_REMOVAL names (allowMassRemoval).
+// A list's sourceKey, if it has one, is its current source. Returns each cycle: when it started and
+// ended, whether it stopped at its time limit, and each list it read in full, with why, its pages,
+// when the read ended, and when the list was last read in full before.
 const PAGE_SECONDS = 0.9;
 const POLL_SECONDS = 0.5;
 const OTHER_SECONDS = 45;
@@ -573,23 +660,28 @@ const FIRST = NOW + 9 * MINUTE + 35 * 1000;
 function simulate({
   lists = PRODUCTION,
   cycleSeconds = 600,
+  cadenceSeconds = cycleSeconds,
   fullScanMinutes = 30,
   hours = 8,
   start = FIRST,
   rows = new Map(),
   gap = null,
+  planDelay = () => 0,
+  pageSeconds = () => PAGE_SECONDS,
+  maxCycleSeconds = Infinity,
   events = () => ({})
 }) {
   const cycles = [];
   const until = start + hours * HOUR;
   let paused = false;
   for (let at = start; at < until;) {
-    const cycle = { number: cycles.length + 1, start: at, reads: [] };
+    const cycle = { number: cycles.length + 1, start: at, reads: [], stopped: false };
     const extra = events(cycle.number, at, rows) ?? {};
     const slots = fullScanSlots(
       lists.map(({ id }) => ({ id, pages: pagesOf(rows.get(id)) ?? 1 })),
       fullScanMinutes
     );
+    const plannedAt = at + planDelay(cycle.number);
     const plans = lists
       .map((list) => ({
         list,
@@ -599,19 +691,30 @@ function simulate({
           sourceKey: list.sourceKey ?? KEY,
           pending: extra.pending?.get(list.id) ?? null,
           allowMassRemoval: extra.allowMassRemoval?.has(list.id) ?? false,
-          now: at,
+          now: plannedAt,
           fullScanMinutes,
-          cadenceSeconds: cycleSeconds
-        })
+          cadenceSeconds
+        }),
+        lastFullScanAt: rows.get(list.id)?.lastFullScanAt ?? null
       }))
       .sort(compareReads);
-    let clock = at;
+    let clock = plannedAt;
+    const limit = at + maxCycleSeconds * 1000;
     for (const { list, read, reason } of plans) {
+      if (clock >= limit) {
+        cycle.stopped = true;
+        break;
+      }
       if (read === 'head') {
         clock += POLL_SECONDS * 1000;
         continue;
       }
-      clock += pagesFor(list) * PAGE_SECONDS * 1000;
+      clock += pagesFor(list) * pageSeconds(clock) * 1000;
+      if (clock >= limit) {
+        clock = limit;
+        cycle.stopped = true;
+        break;
+      }
       const before = rows.get(list.id);
       cycle.reads.push({
         id: list.id,
@@ -622,8 +725,9 @@ function simulate({
       });
       const { nextFullScanAt, scanReason } = scheduleAfter({
         now: clock,
+        plannedAt,
         fullScanMinutes,
-        cadenceSeconds: cycleSeconds,
+        cadenceSeconds,
         slot: slots.get(list.id),
         completed: true
       });
@@ -639,7 +743,7 @@ function simulate({
         })
       );
     }
-    cycle.end = clock + OTHER_SECONDS * 1000;
+    cycle.end = cycle.stopped ? clock : clock + OTHER_SECONDS * 1000;
     cycles.push(cycle);
     at = Math.max(at + cycleSeconds * 1000, cycle.end);
     if (gap && !paused && at - start >= gap.after) {
@@ -859,6 +963,68 @@ for (const cycleSeconds of [60, 120, 900, 1200]) {
   );
 }
 
+// Runs an interval apart or more read every list in full on every run, however late in its run each
+// list was read, as before slots: runs every 30 minutes with IMPORTER_FULL_SCAN_MINUTES=30, or a
+// little more, every hour with 60, whether they are told a cadence of an hour or of 6 hours, and
+// cycles every 10 minutes with 5 or 10, which take longer than that when they read every list. So
+// do runs that plan their reads a few seconds sooner after their start than the run before.
+for (const [cycleSeconds, cadenceSeconds, fullScanMinutes] of [
+  [1800, 1800, 30],
+  [1830, 1830, 30],
+  [2100, 2100, 30],
+  [3600, 3600, 60],
+  [3600, 21600, 60],
+  [600, 600, 10],
+  [600, 600, 5]
+]) {
+  const which = `runs every ${cycleSeconds} s, told ${cadenceSeconds} s, ${fullScanMinutes} minutes`;
+  const cycles = simulate({
+    cycleSeconds,
+    cadenceSeconds,
+    fullScanMinutes,
+    hours: 12,
+    planDelay: (number) => (number % 2 === 1 ? 3000 : 0)
+  });
+  assert.ok(cycles.length >= 6, which);
+  for (const cycle of cycles)
+    assert.deepStrictEqual(
+      cycle.reads.map(({ id }) => id).sort((a, b) => a - b),
+      PRODUCTION.map(({ id }) => id),
+      `${which}: run ${cycle.number}`
+    );
+}
+
+// When cycles keep stopping at their time limit before they have read every list that is due, as
+// here for 3 hours, with pages taking 2.8 seconds each, the lists one cycle leaves are read first by
+// the next, so every list is still read in full at least 3 times in those hours, and none waits
+// more than an hour, rather than the lists with the highest IDs waiting for the 3 hours, as they
+// would in the order of their IDs. Once BattleMetrics is fast again, the reads spread out again.
+{
+  const slowFrom = FIRST + 2 * HOUR;
+  const slowUntil = FIRST + 5 * HOUR;
+  const cycles = simulate({
+    hours: 9,
+    maxCycleSeconds: 900,
+    pageSeconds: (time) => (time >= slowFrom && time < slowUntil ? 2.8 : PAGE_SECONDS)
+  });
+  const slow = cycles.filter(({ start }) => start >= slowFrom && start < slowUntil);
+  const stopped = slow.filter((cycle) => cycle.stopped).length;
+  assert.ok(stopped >= slow.length / 2, `${stopped} of ${slow.length}`);
+  for (const { id } of PRODUCTION)
+    assert.ok(
+      slow.filter(({ reads }) => reads.some((read) => read.id === id)).length >= 3,
+      `list ${id}`
+    );
+  assert.ok(longestWait(cycles) <= HOUR, String(longestWait(cycles) / MINUTE));
+  assertEven(
+    cycles.filter(({ start }) => start >= slowUntil + 2 * INTERVAL),
+    600,
+    0.6,
+    1.4,
+    'after the slow hours'
+  );
+}
+
 // Once mode is unchanged: with runs every 6 hours, longer apart than IMPORTER_FULL_SCAN_MINUTES,
 // every run reads every list in full, and a run started by hand 5 minutes after one only polls them.
 {
@@ -883,5 +1049,5 @@ for (const cycleSeconds of [60, 120, 900, 1200]) {
 }
 
 console.log(
-  "Planner checks passed: IMPORTER_FULL_SCAN_MINUTES, the newest bans a row keeps, which lists are read in full and why, the order of reads, the lists' slots and when the next full read is due, what a head poll finds about drift and overflow, and simulated cycles: full reads spread out after a bunch and stay even at any cycle length, within 1.5 intervals, the reasons that do not wait, and once mode."
+  "Planner checks passed: IMPORTER_FULL_SCAN_MINUTES, the newest bans a row keeps, which lists are read in full and why, the order of reads, the lists' slots and when the next full read is due, what a head poll finds about drift and overflow, and simulated cycles: full reads spread out after a bunch and stay even at any cycle length, within 1.5 intervals, the reasons that do not wait, runs an interval apart or more reading every list, the oldest first when cycles stop at their time limit, and once mode."
 );

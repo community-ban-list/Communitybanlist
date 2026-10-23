@@ -25,11 +25,13 @@ const BATTLEMETRICS_PAGE_SIZE = 100;
 
 // BattleMetrics answers a page of bans in under a second as a rule, but can take longer than the
 // BattleMetrics client's 30 seconds for a page of a large list, so each page's later attempts have
-// longer: 30 seconds, then 45, then 55. The longest is shorter than the 60 seconds a run has to stop
-// after its time limit before it is ended at once, and once the run is asked to stop, no more
-// attempts are made (see readNextPage), so a slow page never keeps a run from stopping in time. A
-// page that fails every attempt fails its list, as before.
-const BATTLEMETRICS_PAGE_TIMEOUTS = [30 * 1000, 45 * 1000, 55 * 1000];
+// longer: 30 seconds, then 45, and 45 again. Once the run is asked to stop, a page's request makes
+// no more attempts, and stops waiting, for the budget, a pause or another attempt, within a second
+// (see readNextPage), so only an attempt already sent holds the run up, for at most 45 seconds:
+// well within the 60 seconds a run has to stop after its time limit before it is ended at once,
+// which in once mode also has to leave the run the time to end, to save its record and send its
+// log messages. A page that fails every attempt fails its list, as before.
+const BATTLEMETRICS_PAGE_TIMEOUTS = [30 * 1000, 45 * 1000, 45 * 1000];
 
 // A BattleMetrics list is read for at most this many pages, in case its links never end. The
 // largest lists need about 120. With the count check on for the list, it is read for at most as
@@ -420,16 +422,21 @@ export default class BanFetcher {
   // page of bans, or links to a page the read has been to, or elsewhere, with the error marked with
   // the page's number (see atPage). A list with no bans on its first page that still counts some
   // throws as hidden bans. A run that is asked to stop throws RunStopped before the request, and
-  // before any later attempt at it.
+  // before any later attempt at it, marked with the page's number too, so a list stopped part-way
+  // can say where it was.
   async readBattlemetricsPage(read, kind) {
+    const page = read.pages.length + 1;
     // A run that is asked to stop does so between pages, as the largest lists take over a minute to
     // read.
-    stopIfRequested();
+    try {
+      stopIfRequested();
+    } catch (err) {
+      throw atPage(err, page, read.counts.first);
+    }
     if (!read.next) throw new Error('The BattleMetrics list has no more pages to read.');
     if (read.pages.length >= read.maxPages)
       throw new Error(`BattleMetrics gave more than ${read.maxPages} pages of bans for the list.`);
 
-    const page = read.pages.length + 1;
     try {
       return await this.readNextPage(read, kind);
     } catch (err) {
@@ -439,9 +446,10 @@ export default class BanFetcher {
 
   // Read the next page of a read, once readBattlemetricsPage has checked that it may. Its attempts
   // have BATTLEMETRICS_PAGE_TIMEOUTS, and a run that is asked to stop meanwhile makes no more of
-  // them: the request ends with RunStopped, before the next attempt, or once the next attempt's turn
-  // in the BattleMetrics client's queue has come, so only an attempt already sent can still hold the
-  // run up, by at most 55 seconds.
+  // them: the BattleMetrics client calls stopIfRequested before each attempt, just before it is
+  // sent, and at least every second while the request waits, for its turn in the client's queue, a
+  // pause, Retry-After or another attempt, and the request ends with the RunStopped it throws. So
+  // only an attempt already sent can still hold the run up, by at most 45 seconds.
   async readNextPage(read, kind) {
     const { banList, counts } = read;
 

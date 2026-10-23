@@ -76,13 +76,16 @@ const context = vm.createContext({
   Math: Object.assign(Object.create(Math), { random: () => 0.8 })
 });
 
-// A stand-in for Bottleneck that records each job and starts jobs at least 250 ms apart.
+// A stand-in for Bottleneck that records each job and starts jobs at least 250 ms apart. A check
+// can make jobs wait longer for their turn (held), as Bottleneck's do once the minute's budget is
+// used up.
 let limiter;
 class Bottleneck {
   constructor(options) {
     this.options = options;
     this.jobs = [];
     this.nextStart = 0;
+    this.held = 0;
     limiter = this;
   }
 
@@ -90,7 +93,7 @@ class Bottleneck {
 
   schedule(options, task) {
     this.jobs.push({ ...options, at: clock });
-    const start = Math.max(clock, this.nextStart);
+    const start = Math.max(clock + this.held, this.nextStart);
     this.nextStart = start + 250;
     return wait(start - clock).then(() => task());
   }
@@ -385,6 +388,8 @@ const answerAfter = (ms, answer) => (request) =>
       reject(axiosError(request, { code: 'ERR_CANCELED', message: 'canceled' }));
     });
   });
+// Time limits a caller gives its attempts, each longer than the one before, as the importer gives
+// longer ones to its reads of pages of bans (30, 45 and 45 seconds).
 const PAGE_TIMEOUTS = [30000, 45000, 55000];
 
 // A caller can give its attempts time limits of their own, as the importer does for its reads of
@@ -451,69 +456,146 @@ assert.strictEqual(requests.length, 3);
 assertSignals();
 
 // A caller can have a request end before an attempt is sent, as the importer does once its run is
-// asked to stop (beforeAttempt): before the wait for another attempt, and once an attempt's turn in
-// the queue has come, just before it is sent. What it throws ends the request as it is, rather than
-// as a failed attempt, and nothing more is sent. A request whose first attempt it stops sends
-// nothing at all, though its job has used its place in the budget; the client counts only the
-// attempts it sent.
+// asked to stop (beforeAttempt), a check that throws once the request should end: here once the
+// clock reaches a time a check gives. The client calls it before each attempt, again once the
+// attempt's turn in the queue has come, just before it is sent, and at least every second while
+// the request waits, for a pause, for its turn, or before another attempt. What it throws ends the
+// request as it is, rather than as a failed attempt, and nothing more is sent, so a stop that comes
+// while the request waits ends it within a second. An attempt already sent still has its time
+// limit. The client counts only the attempts it sent.
 class Stopped extends Error {}
-const stopping = (from) => {
-  const hook = () => {
-    hook.calls++;
-    if (hook.calls >= from) throw new Stopped('stopping');
-  };
-  hook.calls = 0;
-  return hook;
+const stopAt = (at) => () => {
+  if (clock >= at) throw new Stopped('stopping');
 };
+const stopped = async (promise) => {
+  const thrown = await promise.then(
+    () => assert.fail('The request should have stopped'),
+    (e) => e
+  );
+  assert.ok(thrown instanceof Stopped, String(thrown));
+  return clock;
+};
+// A request whose caller is stopping already makes no attempt, and does not join the queue.
 battlemetrics = await load();
-let beforeAttempt = stopping(1);
-err = await battlemetrics('get', 'bans', {}, undefined, 5, { beforeAttempt }).catch((e) => e);
-assert.ok(err instanceof Stopped, String(err));
-assert.deepStrictEqual([requests.length, limiter.jobs.length, client.requestCount()], [0, 1, 0]);
-// A stop that comes while an attempt waits for its answer makes no attempt after it, and the
-// failed attempt is still logged.
+await stopped(battlemetrics('get', 'bans', {}, undefined, 5, { beforeAttempt: stopAt(clock) }));
+assert.deepStrictEqual([requests.length, limiter.jobs.length, client.requestCount()], [0, 0, 0]);
+// A stop that comes while an attempt waits for its answer makes no attempt after it, once the
+// attempt is cut off, and the failed attempt is still logged.
 battlemetrics = await load();
 limits = PAGE_TIMEOUTS;
-beforeAttempt = stopping(2);
 reply = hang;
-const options = { timeouts: PAGE_TIMEOUTS, beforeAttempt };
-err = await battlemetrics('get', 'bans', {}, undefined, 5, options).catch((e) => e);
-assert.ok(err instanceof Stopped, String(err));
-assert.deepStrictEqual([requests.length, limiter.jobs.length, beforeAttempt.calls], [1, 1, 2]);
+let sentAt = clock;
+let options = { timeouts: PAGE_TIMEOUTS, beforeAttempt: stopAt(clock + 10000) };
+assert.strictEqual(
+  (await stopped(battlemetrics('get', 'bans', {}, undefined, 5, options))) - sentAt,
+  30000
+);
+assert.deepStrictEqual([requests.length, limiter.jobs.length, client.requestCount()], [1, 1, 1]);
 assert.deepStrictEqual(
   logs.map(([line]) => line).filter((line) => line.includes(' failed')),
   [
     'BattleMetrics GET bans failed: timed out after 30s. Not trying again, as the request was stopped.'
   ]
 );
-// A stop that comes during the wait before another attempt, or while it waits in the queue, ends
-// the request once the attempt's turn has come, without sending it.
+// A stop that comes during the wait before another attempt ends the request within a second,
+// without the attempt: here half a second into the 1.2 s wait.
 battlemetrics = await load();
 limits = PAGE_TIMEOUTS;
-beforeAttempt = stopping(3);
 reply = hang;
-err = await battlemetrics('get', 'bans', {}, undefined, 5, {
-  timeouts: PAGE_TIMEOUTS,
-  beforeAttempt
-}).catch((e) => e);
-assert.ok(err instanceof Stopped, String(err));
-assert.deepStrictEqual(
-  [requests.length, limiter.jobs.length, client.requestCount(), beforeAttempt.calls],
-  [1, 2, 1, 3]
+sentAt = clock;
+options = { timeouts: PAGE_TIMEOUTS, beforeAttempt: stopAt(clock + 30500) };
+assert.strictEqual(
+  (await stopped(battlemetrics('get', 'bans', {}, undefined, 5, options))) - sentAt,
+  31000
 );
-// Until it stops a request, it changes nothing: a request it never stops is made as any other, and
-// it is not called for a failure that is not tried again.
+assert.deepStrictEqual([requests.length, limiter.jobs.length, client.requestCount()], [1, 1, 1]);
+assert.deepStrictEqual(
+  logs.map(([line]) => line).filter((line) => line.includes(' failed')),
+  [
+    'BattleMetrics GET bans failed: timed out after 30s. Trying again in 1.2s (attempt 2 of 3).',
+    'BattleMetrics GET bans failed: timed out after 30s. Not trying again, as the request was stopped.'
+  ]
+);
+// So does a stop during the minute's pause after a 429, or during a Retry-After of 5 minutes, which
+// a request without a stop check waits out in full (see below), and during a pause that a request
+// made meanwhile waits out before it joins the queue, which it then never joins.
+for (const headers of [{}, { 'retry-after': '300' }]) {
+  battlemetrics = await load();
+  reply = failWith({ status: 429, headers });
+  sentAt = clock;
+  options = { beforeAttempt: stopAt(clock + 10000) };
+  const during = stopped(
+    wait(5000).then(() => battlemetrics('get', 'bans/2', {}, undefined, 5, options))
+  );
+  assert.strictEqual(
+    (await stopped(battlemetrics('get', 'bans', {}, undefined, 5, options))) - sentAt,
+    10000
+  );
+  assert.strictEqual((await during) - sentAt, 10000);
+  assert.deepStrictEqual([requests.length, limiter.jobs.length], [1, 1], JSON.stringify(headers));
+}
+// And so does a stop while an attempt waits for its turn in the queue, here for a minute: when its
+// turn comes, after the request has ended, the attempt sends nothing, though its job has used its
+// place in the budget.
 battlemetrics = await load();
-beforeAttempt = stopping(Infinity);
+limiter.held = 60000;
+sentAt = clock;
+options = { beforeAttempt: stopAt(clock + 5000) };
+assert.strictEqual(
+  (await stopped(battlemetrics('get', 'bans', {}, undefined, 5, options))) - sentAt,
+  5000
+);
+await wait(70000);
+assert.deepStrictEqual([requests.length, limiter.jobs.length, client.requestCount()], [0, 1, 0]);
+// A stop that comes once its turn has come, while it waits for a pause that began meanwhile, ends
+// it within a second too, before it is sent.
+battlemetrics = await load();
+reply = (request, count) => {
+  if (count === 1) throw axiosError(request, { status: 429, headers: { 'retry-after': '60' } });
+  return { status: 200, headers: {}, data: {} };
+};
+sentAt = clock;
+const first = battlemetrics('get', 'bans/1');
+options = { beforeAttempt: stopAt(clock + 20000) };
+const stoppedAfter =
+  (await stopped(battlemetrics('get', 'bans/2', {}, undefined, 5, options))) - sentAt;
+assert.ok(stoppedAfter >= 20000 && stoppedAfter <= 21000, String(stoppedAfter));
+assert.strictEqual((await first).status, 200);
+assert.deepStrictEqual(
+  requests.map((request) => request.url.slice(-6)),
+  ['bans/1', 'bans/1']
+);
+// Until it stops a request, it changes nothing: a request it never stops is made as any other,
+// with the same attempts and waits, and a failure that is not tried again is not waited on.
+battlemetrics = await load();
 reply = failWith({ status: 503 });
-err = await failure(battlemetrics('get', 'bans', {}, undefined, 5, { beforeAttempt }));
-assert.deepStrictEqual([requests.length, beforeAttempt.calls], [3, 5]);
+err = await failure(
+  battlemetrics('get', 'bans', {}, undefined, 5, { beforeAttempt: stopAt(Infinity) })
+);
+assert.deepStrictEqual([requests.length, gaps()], [3, [1200, 4800]]);
 assert.strictEqual(err.message, 'BattleMetrics GET bans failed after 3 attempts: HTTP 503');
 battlemetrics = await load();
-beforeAttempt = stopping(Infinity);
 reply = failWith({ status: 404 });
-await failure(battlemetrics('get', 'bans', {}, undefined, 5, { beforeAttempt }));
-assert.deepStrictEqual([requests.length, beforeAttempt.calls], [1, 1]);
+await failure(battlemetrics('get', 'bans', {}, undefined, 5, { beforeAttempt: stopAt(Infinity) }));
+assert.strictEqual(requests.length, 1);
+battlemetrics = await load();
+limiter.held = 60000;
+reply = () => ({ status: 200, headers: {}, data: {} });
+sentAt = clock;
+await battlemetrics('get', 'bans', {}, undefined, 5, { beforeAttempt: stopAt(Infinity) });
+assert.deepStrictEqual([requests.length, requests[0].at - sentAt], [1, 60000]);
+// A request without one, as the web server's and the bot's are, never checks: its wait for its turn
+// is the queue's own, and its attempt has only its time limit's timer.
+battlemetrics = await load();
+limiter.held = 60000;
+reply = () => ({ status: 200, headers: {}, data: {} });
+sentAt = clock;
+const timersBefore = timerCount;
+await battlemetrics('get', 'bans');
+assert.deepStrictEqual(
+  [requests.length, requests[0].at - sentAt, timerCount - timersBefore],
+  [1, 60000, 2]
+);
 
 // A POST that its caller marks as repeatable, such as one creating an invite, is tried again like
 // a GET after a 5xx or a timeout. The same POST is not, unless it is marked.
@@ -701,5 +783,5 @@ assertSignals();
 assert.ok(!inspect(logs, { depth: null }).includes(TOKEN));
 
 console.log(
-  "BattleMetrics request checks passed: requests, time limits, callers' own time limits for each attempt and stops before an attempt, final and retried errors, ambiguous and repeatable writes, pauses and concurrent requests."
+  "BattleMetrics request checks passed: requests, time limits, callers' own time limits for each attempt and stops before an attempt and during the waits for one, final and retried errors, ambiguous and repeatable writes, pauses and concurrent requests."
 );

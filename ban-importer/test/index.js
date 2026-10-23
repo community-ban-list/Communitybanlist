@@ -164,7 +164,7 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
 // step, the export recalculation and the export push count what they do in an object they are
 // given, which the record keeps, also when the step fails part-way. Each run of a step counts
 // afresh. The import and the Steam step are given how often runs start, which the run gives the
-// steps.
+// steps, and in loop mode the import also how often cycles start, which it plans its full reads by.
 {
   const index = await loadIndex();
   const names = [
@@ -201,6 +201,13 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
   assert.deepStrictEqual(index.calls, names);
   assert.deepStrictEqual(index.options, [
     ['importBans', { cadenceSeconds: 3600 }],
+    ['updateSteamUserInfo', { cadenceSeconds: 3600 }]
+  ]);
+  index.options.length = 0;
+  for (const step of [steps[0], steps[2]])
+    await step.run({ cadenceSeconds: 3600, cycleSeconds: 600 });
+  assert.deepStrictEqual(index.options, [
+    ['importBans', { cadenceSeconds: 3600, cycleSeconds: 600 }],
     ['updateSteamUserInfo', { cadenceSeconds: 3600 }]
   ]);
   assert.deepStrictEqual(counted(), [

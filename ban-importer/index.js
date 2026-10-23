@@ -49,13 +49,14 @@ function counted(name, work) {
 // imports, writing nothing, as every other step writes. Bans whose expiry has passed are marked
 // expired after the import, which marks those it fetches, and before the steps that recalculate
 // players from whether their bans have expired. The import works out when each list's next full
-// read is due, and the Steam step how many profiles to refresh, from how often runs start.
+// read is due, and the Steam step how many profiles to refresh, from how often runs start: the
+// import from how often cycles start in loop mode (cycleSeconds), as the run's settings give it.
 const steps = [];
 const writes = !banImporter.dryRun;
 if (TASKS_TO_COMPLETE.IMPORT_BANS)
   steps.push({
     name: 'importBans',
-    run: ({ cadenceSeconds } = {}) => banImporter.importBans({ cadenceSeconds }),
+    run: (settings) => banImporter.importBans(settings),
     counts: () => banImporter.report()
   });
 if (TASKS_TO_COMPLETE.EXPIRE_BANS && writes)

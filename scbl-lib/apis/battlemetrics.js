@@ -117,8 +117,9 @@ const request = createApiClient({
 
 // options.repeatable marks a POST as safe to make again after a timeout or a 5xx, for one that does
 // no harm when BattleMetrics carries it out twice. options.timeouts gives each attempt its own time
-// limit, and options.beforeAttempt can end the request before an attempt is sent, as the importer's
-// reads of pages of bans do (see create-api-client.js). The web server and the bot give neither.
+// limit, and options.beforeAttempt can end the request before an attempt is sent, or while it waits
+// for one, as the importer's reads of pages of bans do (see create-api-client.js). The web server
+// and the bot give neither.
 export default async function (method, url, params, data, priority = 5, options) {
   reportBudget();
   return request(method, url, params, data, priority, options);

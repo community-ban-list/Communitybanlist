@@ -55,6 +55,12 @@ export const DEFAULT_FULL_SCAN_MINUTES = 30;
 const MAX_FULL_SCAN_MINUTES = 7 * 24 * 60;
 const MINUTE = 60 * 1000;
 
+// With runs at least IMPORTER_FULL_SCAN_MINUTES apart, a list read in full is next due
+// IMPORTER_FULL_SCAN_MINUTES after its run planned its reads, less this share of it, so the next run
+// finds it due even when that run starts a little early, or plans its reads sooner after its start
+// than this one did, as runs that a schedule starts do (see nextFullScan).
+export const EARLY_SHARE = 0.1;
+
 // BattleMetrics gives a list's bans 100 to a page, so a read of all of a list takes a request for
 // about every 100 of its bans.
 export const PAGE_SIZE = 100;
@@ -185,11 +191,19 @@ export function planRead({
 
 // The order in which a run reads its lists, for sorting them: head polls first, so the new bans of
 // lists that are only polled are saved within seconds of the start, then the lists read in full,
-// the most urgent first. Lists of the same kind keep the order they were found in, as the sort
-// keeps it.
+// the most urgent first. The lists read in full as their time has come (periodic, every_run and
+// remote) go the one read in full longest ago first, by when each was last read in full, which the
+// caller gives with its plan (lastFullScanAt, from the list's row), a list without one first. So
+// when cycles keep stopping at their time limit before they have read every list that is due,
+// e.g. while BattleMetrics is slow for hours, the lists one leaves are read first by the next,
+// rather than the lists with the highest IDs being left every time. Other lists of the same kind
+// keep the order they were found in, as the sort keeps it.
 export function compareReads(a, b) {
   const rank = (plan) => (plan.read === 'head' ? -1 : (PRIORITY[plan.reason] ?? 5));
-  return rank(a) - rank(b);
+  const order = rank(a) - rank(b);
+  if (order !== 0 || rank(a) !== PRIORITY[REASONS.PERIODIC]) return order;
+  const last = (plan) => timeOf(plan.lastFullScanAt) ?? -Infinity;
+  return last(a) - last(b) || 0;
 }
 
 // What a head poll's pages say, once read. pages are the pages read, newest first, each with the
@@ -289,7 +303,8 @@ export function latestFullScan(fullScanMinutes, cadenceSeconds = null) {
   return interval + interval / 2 - Math.min(cadenceOf(cadenceSeconds), interval / 2);
 }
 
-// When a list read in full at readAt is next due to be read in full, in milliseconds:
+// When a list read in full at readAt, in a run that planned its reads at plannedAt, is next due to be
+// read in full, in milliseconds:
 // - with runs less than IMPORTER_FULL_SCAN_MINUTES apart, at its slot (see fullScanSlots), the one
 //   in the IMPORTER_FULL_SCAN_MINUTES up to latestFullScan after readAt. A list read in the run that
 //   started next after its slot, even minutes into that run, is then due at the same slot an
@@ -298,26 +313,38 @@ export function latestFullScan(fullScanMinutes, cadenceSeconds = null) {
 //   later, though never at once, nor sooner than half an interval less a cadence after its read,
 //   so within an interval their full reads are spread over the runs again;
 // - with runs at least IMPORTER_FULL_SCAN_MINUTES apart, such as every 6 hours, or a cadence or slot
-//   that is not known, IMPORTER_FULL_SCAN_MINUTES after readAt, as every such run reads every list
-//   in full anyway.
-export function nextFullScan({ readAt, fullScanMinutes, cadenceSeconds = null, slot = null }) {
+//   that is not known, IMPORTER_FULL_SCAN_MINUTES after plannedAt, less a tenth of it (EARLY_SHARE).
+//   It is counted from when the run planned its reads, as the next run plans its own, not from when
+//   the list was read, so the next run reads every list in full again, however late in this run
+//   each was read: a run every 30 minutes with IMPORTER_FULL_SCAN_MINUTES=30, every hour with 60,
+//   or every 6 hours, reads every list in full on every run, as before slots.
+export function nextFullScan({
+  readAt,
+  plannedAt = readAt,
+  fullScanMinutes,
+  cadenceSeconds = null,
+  slot = null
+}) {
   const interval = fullScanMinutes * MINUTE;
-  if (cadenceOf(cadenceSeconds) >= interval || !Number.isFinite(slot)) return readAt + interval;
+  if (cadenceOf(cadenceSeconds) >= interval || !Number.isFinite(slot))
+    return plannedAt + interval - Math.round(interval * EARLY_SHARE);
   const latest = readAt + latestFullScan(fullScanMinutes, cadenceSeconds);
   return latest - ((((latest - slot) % interval) + interval) % interval);
 }
 
-// The schedule to save in a BattleMetrics list's row after an attempt at it, which ended at now, as
-// { nextFullScanAt, scanReason }, or undefined to keep the one it has:
+// The schedule to save in a BattleMetrics list's row after an attempt at it, which ended at now, in
+// a run that planned its reads at plannedAt, as { nextFullScanAt, scanReason }, or undefined to keep
+// the one it has:
 // - after a full read that completed without an error, the next periodic one (see nextFullScan),
-//   counted from now, which the row keeps as when the list was last read in full, or, when bans it
-//   no longer had wait for a confirming read, the time the first of them is due (confirmAt), if
-//   that is sooner. cadenceSeconds and slot are as for nextFullScan;
+//   counted from now, which the row keeps as when the list was last read in full, or from
+//   plannedAt, or, when bans it no longer had wait for a confirming read, the time the first of
+//   them is due (confirmAt), if that is sooner. cadenceSeconds and slot are as for nextFullScan;
 // - after a head poll that found a reason to read the list in full (trigger), when the read in full
 //   did not complete without an error, at once, with that reason, so the next run reads it in full;
 // - after anything else, as it was. A list whose full read failed is still due one.
 export function scheduleAfter({
   now,
+  plannedAt = now,
   fullScanMinutes,
   cadenceSeconds = null,
   slot = null,
@@ -326,7 +353,13 @@ export function scheduleAfter({
   trigger = null
 }) {
   if (completed) {
-    const periodic = nextFullScan({ readAt: now, fullScanMinutes, cadenceSeconds, slot });
+    const periodic = nextFullScan({
+      readAt: now,
+      plannedAt,
+      fullScanMinutes,
+      cadenceSeconds,
+      slot
+    });
     return confirmAt !== null && confirmAt < periodic
       ? { nextFullScanAt: confirmAt, scanReason: REASONS.REMOVAL }
       : { nextFullScanAt: periodic, scanReason: REASONS.PERIODIC };

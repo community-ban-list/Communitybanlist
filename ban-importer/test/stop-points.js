@@ -621,8 +621,9 @@ for (const [lock, removes] of [
 
 // A stop requested while a list is imported at its second attempt, whether during its fetch or its
 // saves, leaves the list out of the import's summary, as a stop in the first pass does, and the
-// list's own line says what the attempt saved. The batch under way is finished first, and the list
-// is not swept. Its row is saved as its first attempt left it, as the run did fail it.
+// list's own line says what the attempt saved, and how long it had taken, here by a clock that
+// stands still. The batch under way is finished first, and the list is not swept. Its row is saved
+// as its first attempt left it, as the run did fail it.
 for (const during of ['fetch', 'saves']) {
   let fetches = 0;
   const { importer, control, events, lines, saves, waits, syncSaves } = await loadBanImporter(
@@ -634,7 +635,8 @@ for (const during of ['fetch', 'saves']) {
       onFetch: (banList, control) => {
         if (banList.id === 2 && ++fetches === 2 && during === 'fetch')
           control.requestStop('it received SIGTERM');
-      }
+      },
+      options: { clock: () => Date.parse('2026-10-23T15:20:00.000Z') }
     }
   );
   control.setRunLock(heldLock);
@@ -682,8 +684,8 @@ for (const during of ['fetch', 'saves']) {
     [
       'Failed to import ban list (ID: 2) while fetching it, so none of its bans were removed. Error: Request failed with status code 502',
       during === 'saves'
-        ? 'Stopped importing ban list (ID: 2) at the second attempt while saving its bans, as the run is stopping, so none of its bans were removed (4 bans fetched, 4 new, 0 updated).'
-        : 'Stopped importing ban list (ID: 2) at the second attempt while fetching it, as the run is stopping, so none of its bans were removed (4 bans fetched, 0 new, 0 updated).'
+        ? 'Stopped importing ban list (ID: 2) at the second attempt while saving its bans, after 0s, as the run is stopping, so none of its bans were removed (4 bans fetched, 4 new, 0 updated).'
+        : 'Stopped importing ban list (ID: 2) at the second attempt while fetching it, after 0s, as the run is stopping, so none of its bans were removed (4 bans fetched, 0 new, 0 updated).'
     ]
   );
   // The summary line still sums up the lists imported before the stop, in the console only.
@@ -727,7 +729,8 @@ async function loadBanFetcher({ battlemetrics, get }) {
 }
 
 // The fetcher stops between the pages of a BattleMetrics list, as the largest take over a minute
-// to read. Nothing of the list is returned, so nothing of it is saved.
+// to read. Nothing of the list is returned, so nothing of it is saved. The stop says which page the
+// read was to fetch next, for the list's line.
 {
   const pages = [];
   const fetcher = await loadBanFetcher({
@@ -758,6 +761,7 @@ async function loadBanFetcher({ battlemetrics, get }) {
   );
   assert.strictEqual(error.name, 'RunStopped');
   assert.deepStrictEqual(pages, [1, 2]);
+  assert.deepStrictEqual([error.page, error.pages], [3, null]);
 }
 
 // It stops before another attempt at a page too, as the BattleMetrics client calls the run
@@ -802,6 +806,7 @@ async function loadBanFetcher({ battlemetrics, get }) {
   assert.strictEqual(error.name, 'RunStopped');
   assert.strictEqual(error.reason, 'it took longer than 900s');
   assert.deepStrictEqual(attempts, [1, 2]);
+  assert.deepStrictEqual([error.page, error.pages], [2, null]);
 }
 
 // It also stops before another attempt at a remote list.

@@ -93,6 +93,12 @@ function seconds(ms) {
   return Math.round(ms / 10) / 100;
 }
 
+// A length of time for a line, in seconds, to the tenth, e.g. 76.3s, as the BattleMetrics client
+// gives its time limits.
+function secondsText(ms) {
+  return `${Number((ms / 1000).toFixed(1))}s`;
+}
+
 // What the import of a list was doing when it failed, as its line says it: the stage, and for a
 // BattleMetrics list that failed on one of its pages, the page, and how many pages a read of all of
 // the list takes, about, when that is known and not already passed, e.g. fetching page 37 of about
@@ -280,9 +286,12 @@ export default class BanImporter {
       requests: this.requests
     });
 
-    // The number of ban lists the import started with, and a result for each list it imported.
+    // The number of ban lists the import started with, and a result for each list it imported, and
+    // the result of the list it was importing when the run stopped, if it stopped part-way through
+    // one, which is not one of them (see importBanList).
     this.listCount = 0;
     this.results = [];
+    this.stopped = null;
 
     // What the run read at its start: each list's BanListSyncs row, by list, the bans of each list
     // that wait for a confirming read or are held for an admin (see readPendingSummary), when the
@@ -304,24 +313,31 @@ export default class BanImporter {
     this.exportBanLists = [];
     this.visibleBanLists = null;
     this.accessCheckResult = this.accessCheck ? 'unused' : 'off';
+    // How long the access check took, in milliseconds, once it has been read.
+    this.accessCheckMs = null;
     this.triedBattlemetrics = new Set();
     this.pendingSyncs = new Map();
     // Whether the warnings about the settings have been posted, which the first import does.
     this.warned = false;
   }
 
-  // Import every ban list. settings are the run's, as the run gives its steps (see run.js): how
-  // often runs start (cadenceSeconds), which says when each list's next periodic full read is due
-  // (see nextFullScan in planner.js).
-  async importBans({ cadenceSeconds = null } = {}) {
+  // Import every ban list. settings are the run's, as the run gives its steps (see run.js and
+  // loop.js), which say how often runs start, and so when each list's next periodic full read is
+  // due (see nextFullScan in planner.js): in loop mode, how often the service's cycles start
+  // (cycleSeconds, IMPORTER_CYCLE_SECONDS), whatever IMPORTER_CADENCE_SECONDS says, as that only
+  // sets when the service is stale and the Steam step's budget there, and in once mode the run's
+  // cadence (cadenceSeconds, IMPORTER_CADENCE_SECONDS), how often the script starts a run.
+  async importBans({ cadenceSeconds = null, cycleSeconds = null } = {}) {
     // What the last import found and reported is cleared before anything else, so an import that
     // fails before it imports any list, e.g. as the database cannot be read, reports nothing rather
     // than the last one's counts: in loop mode, the importer service imports with the same
     // importer every cycle. The requests are counted in place, as the fetcher counts them too.
-    this.cadenceSeconds =
-      Number.isFinite(cadenceSeconds) && cadenceSeconds > 0 ? cadenceSeconds : null;
+    const every = cycleSeconds ?? cadenceSeconds;
+    this.cadenceSeconds = Number.isFinite(every) && every > 0 ? every : null;
     this.listCount = 0;
     this.results = [];
+    this.stopped = null;
+    this.accessCheckMs = null;
     for (const kind of Object.keys(this.requests)) this.requests[kind] = 0;
     this.accessCheckResult = this.accessCheck ? 'unused' : 'off';
     this.visibleBanLists = null;
@@ -413,9 +429,15 @@ export default class BanImporter {
         .map(({ id }) => ({ id, pages: pagesOf(this.syncs.get(id)) ?? 1 })),
       this.fullScanMinutes
     );
+    // The lists read in full as their time has come are read the one read in full longest ago
+    // first (see compareReads).
     this.plannedAt = this.clock();
     const order = banLists
-      .map((banList) => ({ id: banList.id, ...this.planFor(banList) }))
+      .map((banList) => ({
+        id: banList.id,
+        ...this.planFor(banList),
+        lastFullScanAt: this.syncs.get(banList.id)?.lastFullScanAt ?? null
+      }))
       .sort(compareReads);
     if (!this.accessCheck)
       Logger.verbose(
@@ -467,8 +489,12 @@ export default class BanImporter {
             results[index].ms += failed.ms;
           } catch (err) {
             // A list whose second attempt is stopped part-way is left out of the summary, as one
-            // stopped in the first pass is, since its own line says what the attempt saved.
-            if (err instanceof RunStopped) results.splice(index, 1);
+            // stopped in the first pass is, since its own line says what the attempt saved. The
+            // report gives it on its own, with the time of both of its attempts.
+            if (err instanceof RunStopped) {
+              results.splice(index, 1);
+              if (this.stopped?.id === failed.id) this.stopped.ms += failed.ms;
+            }
             throw err;
           }
           reportProgress(tried + 1, retries.length, 'ban lists tried again');
@@ -510,8 +536,11 @@ export default class BanImporter {
   // attempt the second one makes good is never counted or posted about. And many lists losing
   // access at once can then be posted about together.
   async importBanList(id, attempt = 1) {
-    // How long the attempt took, in milliseconds (ms), once it has ended.
+    // How long the attempt took, in milliseconds (ms), once it has ended, without the time it
+    // waited for the run's access check, which the first BattleMetrics list of the run waits for and
+    // the report gives on its own (see readAccess), so that list does not look slow.
     const startedAt = this.clock();
+    let accessWait = 0;
     const result = {
       id,
       attempt,
@@ -552,7 +581,9 @@ export default class BanImporter {
       if (banList.type === 'battlemetrics') this.triedBattlemetrics.add(id);
       result.lostBefore = this.hadLostAccess(banList);
       result.incompleteBefore = this.wasIncomplete(banList);
+      const checkStartedAt = this.clock();
       const visible = await this.checkAccess(banList);
+      accessWait = this.clock() - checkStartedAt;
       if (visible === false) result.accessLost = NOT_VISIBLE;
       else if (visible === null && result.lostBefore) result.accessLost = UNCONFIRMED;
 
@@ -687,18 +718,19 @@ export default class BanImporter {
     } catch (err) {
       const { stage } = at;
       result.stage = stage;
-      if (err instanceof RunStopped) {
-        result.stopped = true;
-        throw err;
-      }
-      result.error = describeError(err);
-      // A list that failed on one of its pages says which, and how many a read of all of it takes,
-      // about, from BattleMetrics' count on its first page, or before that, from its row.
+      // A list that failed, or was stopped, on one of its pages says which, and how many a read of
+      // all of it takes, about, from BattleMetrics' count on its first page, or before that, from
+      // its row.
       if (stage === 'fetching it' && Number.isInteger(err?.page))
         Object.assign(result, {
           page: err.page,
           pages: Number.isInteger(err.pages) ? err.pages : pagesOf(this.syncs.get(id))
         });
+      if (err instanceof RunStopped) {
+        result.stopped = true;
+        throw err;
+      }
+      result.error = describeError(err);
       // BattleMetrics may have answered that CBL can no longer read the list, which would only
       // happen again later in the run. Its count of the list's bans is kept even so. A list CBL
       // had lost access to that fails for another reason, e.g. as BattleMetrics is down, is still
@@ -722,7 +754,10 @@ export default class BanImporter {
       return result;
     } finally {
       const now = this.clock();
-      result.ms = now - startedAt;
+      result.ms = now - startedAt - accessWait;
+      // A list stopped part-way is left out of the import's results, and the report gives it on its
+      // own (see report).
+      if (result.stopped) this.stopped = result;
       if (!result.gone && !result.stopped) result.state = stateOf(result);
       this.logResult(result);
       // A second attempt that ends, saved or not, takes the place of the first one's row. One that
@@ -942,8 +977,9 @@ export default class BanImporter {
   }
 
   // Read the IDs of the BattleMetrics ban lists the CBL organisation can see, or null when they
-  // cannot be read, which the console is told of.
+  // cannot be read, which the console is told of. How long that took is kept for the report.
   async readAccess() {
+    const startedAt = this.clock();
     try {
       const visible = await readVisibleBanLists();
       this.accessCheckResult = 'ok';
@@ -961,6 +997,8 @@ export default class BanImporter {
         `Could not read which BattleMetrics ban lists the CBL organisation can see, so this run does not check them: ${describeError(err)}`
       );
       return null;
+    } finally {
+      this.accessCheckMs = this.clock() - startedAt;
     }
   }
 
@@ -1045,13 +1083,17 @@ export default class BanImporter {
   // or undefined to keep its row's. A read of all of the list that completed without an error
   // schedules the next one, at the list's slot, or the read that confirms the removal of bans it
   // left waiting, if that is sooner. A poll that found a reason to read the list in full, which was
-  // not then read in full without an error, leaves it due at once, for that reason. The next
-  // periodic read is counted from when the list was read, which its row keeps as lastFullScanAt:
-  // as it falls at the list's slot, a list read late in a run is still due when its slot comes
-  // round again, as one read early is.
+  // not then read in full without an error, leaves it due at once, for that reason. With runs less
+  // than IMPORTER_FULL_SCAN_MINUTES apart, the next periodic read is counted from when the list was
+  // read, which its row keeps as lastFullScanAt: as it falls at the list's slot, a list read late in
+  // a run is still due when its slot comes round again, as one read early is. With runs further
+  // apart, it is counted from when the run planned its reads, as the next runs plan theirs, so a
+  // list read late in a run is due by the next run, as one read early is, rather than by the run
+  // after that.
   scheduleOf(result, now) {
     const schedule = scheduleAfter({
       now: now.getTime(),
+      plannedAt: this.plannedAt,
       fullScanMinutes: this.fullScanMinutes,
       cadenceSeconds: this.cadenceSeconds,
       slot: this.slots.get(result.id) ?? null,
@@ -1328,10 +1370,12 @@ export default class BanImporter {
 
     if (result.stopped) {
       // The import's summary leaves the list out, so this says what it saved before the run
-      // stopped. The next run imports it again.
+      // stopped, where it was, e.g. the page it was fetching, and how long the attempt had taken,
+      // as a list that holds up a run that is stopping is likely the one that made it slow. The
+      // next run imports it again.
       log(
         true,
-        `Stopped importing ${list}${again ? ' at the second attempt' : ''} while ${result.stage}, as the run is stopping, so none of its bans were removed${progress}.`
+        `Stopped importing ${list}${again ? ' at the second attempt' : ''} while ${describeStage(result)}, after ${secondsText(result.ms)}, as the run is stopping, so none of its bans were removed${progress}.`
       );
     } else if (result.error) {
       const removed =
@@ -1453,18 +1497,25 @@ export default class BanImporter {
   }
 
   // The import's counts for the run record: its totals, as in its summary line, how the access
-  // check went, the BattleMetrics requests it made, by what they were for, and each list's own
-  // counts. An import that stopped part-way reports the lists its summary line sums up. A dry run
-  // says so.
+  // check went, and, once it was read, how long it took, in seconds, the BattleMetrics requests it
+  // made, by what they were for, and each list's own counts. An import that stopped part-way
+  // reports the lists its summary line sums up, and, when it stopped part-way through a list, that
+  // list's counts on their own (stopped), with where it stopped (stage, and page for a list
+  // stopped on a page of its bans) and how long it had taken (seconds), both attempts together at
+  // a second attempt, which neither the totals nor banLists count. A dry run says so.
   report() {
     return {
       lists: this.listCount,
       imported: this.results.length,
       ...totals(this.results),
       accessCheck: this.accessCheckResult,
+      ...(this.accessCheckMs === null ? {} : { accessCheckSeconds: seconds(this.accessCheckMs) }),
       requests: { ...this.requests },
       ...(this.dryRun ? { dryRun: true } : {}),
-      banLists: this.results.map(listReport)
+      banLists: this.results.map(listReport),
+      ...(this.stopped
+        ? { stopped: { ...listReport(this.stopped), stage: this.stopped.stage } }
+        : {})
     };
   }
 }

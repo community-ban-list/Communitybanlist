@@ -15,7 +15,9 @@
 // Each attempt has the client's time limit, unless the caller gives its attempts others, e.g. longer
 // ones for the later attempts at a page that the API can be slow to answer (options.timeouts). A
 // caller can also have a request end before an attempt is sent, e.g. as it is stopping
-// (options.beforeAttempt). Neither changes which failures are made again.
+// (options.beforeAttempt), which the request then also checks at least every second while it
+// waits: for a pause, for its turn in the limiter's queue, or before another attempt. Neither
+// changes which failures are made again.
 //
 // After a 429, or when the API says few requests are left, nothing is sent until the time it
 // gives in Retry-After, or for a minute.
@@ -46,6 +48,10 @@ const REPEATABLE_METHODS = ['GET', 'DELETE'];
 
 // At most this many of the API's error titles are given in a message.
 const MAX_TITLES = 3;
+
+// How often a request whose caller can stop it (options.beforeAttempt) checks whether it should
+// while it waits: for a pause, for its turn in the limiter's queue, or before another attempt.
+const STOP_CHECK_INTERVAL = 1000;
 
 export class ApiError extends Error {
   constructor(message, details) {
@@ -78,6 +84,31 @@ class CallerStopped {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Call a caller's stop check, if it gave one, and end the request with what it throws.
+function checkStop(stopCheck) {
+  if (!stopCheck) return;
+  try {
+    stopCheck();
+  } catch (err) {
+    throw new CallerStopped(err);
+  }
+}
+
+// Wait ms milliseconds. With a stop check, the wait is checked at least every STOP_CHECK_INTERVAL,
+// and ends with what the check throws, so a caller that is stopping waits no longer than that.
+// Without one, it is a single wait, as it always was.
+async function waitFor(ms, stopCheck = null) {
+  if (!stopCheck) {
+    await sleep(ms);
+    return;
+  }
+  const until = Date.now() + ms;
+  for (let left = ms; left > 0; left = until - Date.now()) {
+    await sleep(Math.min(left, STOP_CHECK_INTERVAL));
+    checkStop(stopCheck);
+  }
 }
 
 function seconds(ms) {
@@ -141,12 +172,13 @@ export default function createApiClient({
   let jobCount = 0;
   let sent = 0;
 
-  // The time until which nothing is sent.
+  // The time until which nothing is sent. A request waits for it to pass, checking its caller's
+  // stop check meanwhile, if it gave one (see waitFor).
   let pausedUntil = 0;
 
-  async function waitForPause() {
+  async function waitForPause(stopCheck = null) {
     for (let wait = pausedUntil - Date.now(); wait > 0; wait = pausedUntil - Date.now())
-      await sleep(wait);
+      await waitFor(wait, stopCheck);
   }
 
   // Send nothing for a while, or for longer than already planned, and say so when a pause starts.
@@ -230,21 +262,29 @@ export default function createApiClient({
     );
   }
 
-  // One attempt: a job of its own on the limiter, cut off after limit milliseconds. A caller's
-  // beforeAttempt, if it gives one, is called once the attempt's turn has come, just before it is
-  // sent, and if it throws, nothing is sent. The job has still used its place in the budget then.
-  function attempt(method, path, params, data, priority, limit, beforeAttempt) {
+  // One attempt: a job of its own on the limiter, cut off after limit milliseconds. A caller's stop
+  // check (beforeAttempt), if it gives one, is called at least every STOP_CHECK_INTERVAL while the
+  // attempt waits for its turn in the queue, and once its turn has come, after any pause, just
+  // before it is sent. If it throws, the request ends with what it threw, and nothing is sent: an
+  // attempt whose turn comes after its request ended does nothing. The job has still used its
+  // place in the budget then. An attempt once sent is not cut short by a stop: it gets its answer,
+  // or fails, within its time limit.
+  function attempt(method, path, params, data, priority, limit, stopCheck) {
     jobCount++;
-    return limiter.schedule({ priority, id: `${jobPrefix}-${jobCount}` }, async () => {
+    // While the attempt waits for its turn, the timer of the next stop check (checking), and
+    // whether a check has ended the request (ended).
+    let checking = null;
+    let ended = false;
+    const stopChecking = () => {
+      if (checking !== null) clearTimeout(checking);
+      checking = null;
+    };
+    const job = limiter.schedule({ priority, id: `${jobPrefix}-${jobCount}` }, async () => {
+      stopChecking();
+      if (ended) return null;
       // A request queued before a pause began waits for it too.
-      await waitForPause();
-      if (beforeAttempt) {
-        try {
-          beforeAttempt();
-        } catch (err) {
-          throw new CallerStopped(err);
-        }
-      }
+      await waitForPause(stopCheck);
+      checkStop(stopCheck);
       sent++;
       try {
         const response = await send(method, path, params, data, {
@@ -257,6 +297,31 @@ export default function createApiClient({
         checkRateLimit(err?.response);
         throw err;
       }
+    });
+    if (!stopCheck) return job;
+    return new Promise((resolve, reject) => {
+      const check = () => {
+        checking = null;
+        try {
+          stopCheck();
+        } catch (err) {
+          ended = true;
+          reject(new CallerStopped(err));
+          return;
+        }
+        checking = setTimeout(check, STOP_CHECK_INTERVAL);
+      };
+      checking = setTimeout(check, STOP_CHECK_INTERVAL);
+      job.then(
+        (response) => {
+          stopChecking();
+          resolve(response);
+        },
+        (err) => {
+          stopChecking();
+          reject(err);
+        }
+      );
     });
   }
 
@@ -272,42 +337,48 @@ export default function createApiClient({
   // harm, e.g. one that creates an invite. options.timeouts gives the attempts time limits of
   // their own, in milliseconds, the first attempt's first, for a request the API can take longer to
   // answer, e.g. the importer's reads of pages of bans; an attempt it gives none to has the last it
-  // gives. options.beforeAttempt is called before each attempt is sent, once its turn in the queue
-  // has come, and before the wait for each attempt after the first: one that throws, e.g. as the
-  // caller has been asked to stop, ends the request at once, with what it threw, and nothing more
-  // is sent. Without them, as for the web server's and the bot's requests, every attempt has the
-  // client's time limit.
+  // gives. options.beforeAttempt is a stop check: it is called before each attempt, again once the
+  // attempt's turn in the queue has come, just before it is sent, and at least every second while
+  // the request waits, for a pause, for its turn, or before another attempt. One that throws, e.g.
+  // as the caller has been asked to stop, ends the request with what it threw, within a second
+  // while it waits, and nothing more is sent; an attempt already sent still has its time limit.
+  // Without them, as for the web server's and the bot's requests, every attempt has the client's
+  // time limit, and waits as long as it must.
   async function request(method, path, params, data, priority = 5, options = {}) {
     const verb = String(method).toUpperCase();
     const repeatable = options.repeatable === true || REPEATABLE_METHODS.includes(verb);
-    const beforeAttempt =
-      typeof options.beforeAttempt === 'function' ? options.beforeAttempt : null;
+    const stopCheck = typeof options.beforeAttempt === 'function' ? options.beforeAttempt : null;
     for (let attempts = 1; ; attempts++) {
       const limit = limitOf(options.timeouts, attempts);
+      let error;
+      let wait;
       try {
-        // Wait out a pause before joining the limiter's queue, so waiting uses none of the budget.
-        await waitForPause();
-        return await attempt(method, path, params, data, priority, limit, beforeAttempt);
+        // A caller that is stopping makes no attempt. A pause is waited out before the attempt
+        // joins the limiter's queue, so waiting uses none of the budget.
+        if (attempts === 1) checkStop(stopCheck);
+        await waitForPause(stopCheck);
+        return await attempt(method, path, params, data, priority, limit, stopCheck);
       } catch (thrown) {
         if (thrown instanceof CallerStopped) throw thrown.error;
         const err = thrown ?? {};
         const outcome = classify(err, repeatable);
-        const error = toApiError(verb, path, err, attempts, outcome, limit);
+        error = toApiError(verb, path, err, attempts, outcome, limit);
         if (outcome !== 'retry' || attempts >= ATTEMPTS) throw error;
-        // A caller that is stopping makes no more attempts, and does not wait for one.
-        try {
-          beforeAttempt?.();
-        } catch (stop) {
-          console.warn(`${error.message}. Not trying again, as the request was stopped.`);
-          throw stop;
-        }
-
         const delay = RETRY_DELAYS[attempts - 1] * (1 + Math.random() / 4);
-        const wait = Math.max(delay, retryAfter(err.response) ?? 0, pausedUntil - Date.now());
+        wait = Math.max(delay, retryAfter(err.response) ?? 0, pausedUntil - Date.now());
+      }
+      // A caller that is stopping makes no more attempts, and does not wait for one: the request
+      // ends before the wait, or within a second of the stop during it.
+      try {
+        checkStop(stopCheck);
         console.warn(
           `${error.message}. Trying again in ${seconds(wait)} (attempt ${attempts + 1} of ${ATTEMPTS}).`
         );
-        await sleep(wait);
+        await waitFor(wait, stopCheck);
+      } catch (thrown) {
+        if (!(thrown instanceof CallerStopped)) throw thrown;
+        console.warn(`${error.message}. Not trying again, as the request was stopped.`);
+        throw thrown.error;
       }
     }
   }

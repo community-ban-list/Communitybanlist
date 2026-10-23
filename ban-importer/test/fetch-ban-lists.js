@@ -291,12 +291,13 @@ assert.deepStrictEqual(
     ['get', 'bans', { 'filter[banList]': 'bm-list', 'page[key]': 'three', 'page[size]': '100' }]
   ]
 );
-// Each page's later attempts have longer, 30 seconds, then 45, then 55, and none is made once the
-// run is asked to stop: the BattleMetrics client is given the run control's stopIfRequested, to
-// call before each attempt. The web server's and the bot's requests give the client neither.
+// Each page's later attempts have longer, 30 seconds, then 45, and 45 again, and none is made once
+// the run is asked to stop: the BattleMetrics client is given the run control's stopIfRequested, to
+// call before each attempt, and while the request waits. The web server's and the bot's requests
+// give the client neither.
 for (const { data, priority, options } of battlemetricsRequests) {
   assert.deepStrictEqual([data, priority], [undefined, 5]);
-  assert.deepStrictEqual([...options.timeouts], [30000, 45000, 55000]);
+  assert.deepStrictEqual([...options.timeouts], [30000, 45000, 45000]);
   assert.strictEqual(options.beforeAttempt, stopIfRequested);
   assert.deepStrictEqual(Object.keys(options).sort(), ['beforeAttempt', 'timeouts']);
 }
