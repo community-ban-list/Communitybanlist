@@ -447,16 +447,18 @@ export default class BanImporter {
 
   // Import a ban list, read as planFor plans it. A list read in full has its new and changed bans
   // saved, then the bans it no longer has removed, by the rules of planRemovals, or the bans of its
-  // old source if its type or source was changed meanwhile. A list that is only polled has the new
-  // and changed bans on its newest pages saved, and none removed (see pollHead), unless the poll
-  // finds that it needs to be read in full after all, which it then is. A list that cannot be
-  // fetched or saved keeps all of its stored bans, as does a list whose import is stopped part-way
-  // because the run was asked to stop, which then throws RunStopped. So does a list that imports
-  // one of CBL's own export ban lists, which is not fetched at all, and one CBL can no longer read on
-  // BattleMetrics. A list that was not read in full has its new and changed bans saved, but fails,
-  // and keeps all its stored bans. A list whose type or source was changed since its last import
-  // has its old bans replaced by the new source's. In a dry run, nothing is written: the counts say
-  // what the import would have done.
+  // old source if its type or source was changed meanwhile, also when the run was asked to stop
+  // while they were saved. A list that is only polled has the new and changed bans on its newest
+  // pages saved, and none removed (see pollHead), unless the poll finds that it needs to be read in
+  // full after all, which it then is, or that its type or source was changed meanwhile, when the
+  // bans it fetched are removed as for a read in full. A list that cannot be fetched or saved keeps
+  // all of its stored bans, as does a list whose import is stopped part-way because the run was
+  // asked to stop, which then throws RunStopped. So does a list that imports one of CBL's own
+  // export ban lists, which is not fetched at all, and one CBL can no longer read on BattleMetrics.
+  // A list that was not read in full has its new and changed bans saved, but fails, and keeps all
+  // its stored bans. A list whose type or source was changed since its last import has its old bans
+  // replaced by the new source's. In a dry run, nothing is written: the counts say what the import
+  // would have done.
   //
   // How the import went is then saved in the list's BanListSyncs row: at once, or, in the first
   // pass, for a list to be tried again or one CBL cannot read, once every list has been tried. By
@@ -582,15 +584,14 @@ export default class BanImporter {
       // Once its bans are saved, the list's newest page is the one its head polls compare theirs
       // with, if it was read newest first.
       if (scan.head !== undefined) result.head = scan.head;
-      // A run that was asked to stop while the bans were saved ends here, once the batch under way
-      // has been saved.
-      stopIfRequested();
 
       // The list's type or source may have been changed since it was read, by hand or by a
       // /banlist update made just as the run started. The bot deletes the list's bans with the
       // change, but this run may have saved some of the old source's bans again since, so the bans
-      // fetched from it are removed instead of the bans the list no longer has. The new source is
-      // imported on the next run.
+      // fetched from it are removed instead of the bans the list no longer has. That is so even
+      // when the run was asked to stop while they were saved, as they are of a source the list no
+      // longer has, so the list is read again before the run stops. The new source is imported on
+      // the next run.
       at.stage = 'reading it again';
       const current = await retryOperation(() =>
         BanList.findByPk(id, { attributes: ['id', 'type', 'source'] })
@@ -601,17 +602,22 @@ export default class BanImporter {
       }
       const sourceChanged = current.type !== banList.type || current.source !== banList.source;
 
-      // Removing bans must not happen in two runs at once, so it needs the run lock. It is also
-      // skipped once the run is asked to stop, so a list whose saves were cut short is never swept,
-      // as its unsaved bans would look removed. A removal that has started is finished, whatever
-      // happens meanwhile. A list CBL cannot read, or may still not be able to, is never swept,
-      // and nor is a list that was not read in full.
+      // Removing bans must not happen in two runs at once, so it needs the run lock. A removal that
+      // has started is finished, whatever happens meanwhile.
       await checkRunLock();
-      stopIfRequested();
       if (sourceChanged) {
         at.stage = 'removing the bans of its old source';
         await this.removeOldSourceBans(banList, bans, stored, result);
-      } else if (!result.accessLost) {
+        return result;
+      }
+
+      // A run that was asked to stop while the bans were saved ends here, once the batch under way
+      // has been saved, as does one asked to stop since. So a list whose saves were cut short is
+      // never swept, as its unsaved bans would look removed. A list CBL cannot read, or may still
+      // not be able to, is never swept, and nor is a list that was not read in full.
+      at.stage = 'saving its bans';
+      stopIfRequested();
+      if (!result.accessLost) {
         if (!scan.complete) {
           // The bans the read found are not missing, whatever else it missed. Those held for an
           // admin keep their records, for the next complete read to find that they came back.
@@ -696,11 +702,12 @@ export default class BanImporter {
 
   // Poll a BattleMetrics list: read its newest page, and the pages after it while they hold only
   // bans the poll has not seen, as after a burst of new bans, for at most MAX_HEAD_PAGES pages in
-  // all, and save the new and changed bans on them. None of the list's bans are removed. A ban has
-  // been seen when it was on the list's newest page at its last read (its row's headUids), or is
-  // stored. Only the stored bans on the pages read are read from the database. Returns null when
-  // that is all the list needs, or else the read, to be read on to the list's last page as a read of
-  // all of the list (see checkHead), with nothing saved here:
+  // all, and save the new and changed bans on them. None of the list's bans are removed, unless its
+  // type or source was changed while it was polled, when the bans the poll fetched are, as a read
+  // in full removes them. A ban has been seen when it was on the list's newest page at its last
+  // read (its row's headUids), or is stored. Only the stored bans on the pages read are read from
+  // the database. Returns null when that is all the list needs, or else the read, to be read on to
+  // the list's last page as a read of all of the list (see checkHead), with nothing saved here:
   // - when the pages read are all of the list already;
   // - when they hold only new bans, and as many pages as a poll follows (overflow);
   // - when BattleMetrics' count of the list's bans is not its count at the list's last read plus
@@ -775,10 +782,41 @@ export default class BanImporter {
       result.gone = true;
       return null;
     }
+
+    // The list's type or source may have been changed while it was polled, by /banlist update,
+    // which deletes the list's bans and saves the change in one transaction. A batch of the poll's
+    // bans written while that transaction is under way waits for it, and is then saved, which would
+    // leave the old source's bans on the list. So the list is read again once its bans are saved,
+    // as a read in full reads it (see importBanList), and if its type or source has changed, the
+    // bans the poll fetched are removed, as they are of a source the list no longer has. That is so
+    // even when the run was asked to stop while they were saved, e.g. while a batch waited for the
+    // bot's transaction, so the list is read again before the run stops. A change saved after this
+    // read deletes the poll's bans with the list's others, as they were saved before it, unless
+    // /banlist update counted none on the list, which leaves them for the next full read to
+    // replace. The list's row keeps the old source's key, so the next run reads the new source in
+    // full.
+    at.stage = 'reading it again';
+    const current = await retryOperation(() =>
+      BanList.findByPk(banList.id, { attributes: ['id', 'type', 'source'] })
+    );
+    if (!current) {
+      result.gone = true;
+      return null;
+    }
+    if (current.type !== banList.type || current.source !== banList.source) {
+      // Removing bans needs the run lock, as for any list. A removal that has started is finished,
+      // whatever happens meanwhile, and a run asked to stop stops at its next safe point.
+      await checkRunLock();
+      at.stage = 'removing the bans of its old source';
+      await this.removeOldSourceBans(banList, bans, [...stored.values()], result);
+      return null;
+    }
+
     // A run that was asked to stop while the bans were saved ends here, once the batch under way
-    // has been saved, and the list keeps its row: its newest page and count are only saved with all
-    // the bans on the pages, so the next poll still finds the bans not saved, on its newest page as
-    // new ones, or below it by drift.
+    // has been saved, as does one asked to stop since, and the list keeps its row: its newest page
+    // and count are only saved with all the bans on the pages, so the next poll still finds the
+    // bans not saved, on its newest page as new ones, or below it by drift.
+    at.stage = 'saving its bans';
     stopIfRequested();
 
     // Once its bans are saved, the list's newest page, with its count, is the one its next poll

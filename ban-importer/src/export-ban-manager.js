@@ -4,6 +4,7 @@ import { ExportBan, ExportBanList, SteamUser } from 'scbl-lib/db/models';
 import { Op, Transaction } from 'scbl-lib/db/sequelize';
 import { Logger } from 'scbl-lib/utils';
 
+import { retryOperation } from './apply-list.js';
 import { reportProgress, stopIfRequested } from './run-control.js';
 
 // Changed Below on the 14900k. Will need to monitor to make sure issues do not arise.
@@ -67,10 +68,23 @@ function findChanges(generatedBans, exportBans, listTypes) {
   return changes;
 }
 
+// A batch's statements lock the players and bans they read or write. A bot command that deletes ban
+// lists' bans at the same time, e.g. /banlist remove, which does not wait for the importer, locks
+// some of the same rows in another order, so MySQL may end a statement of the batch in a deadlock,
+// which rolls back its transaction, or end one that waited too long for a lock. The statement, or
+// the transaction it was in, is then run again as a whole after 5 seconds, up to 5 times in all, as
+// the import's batches are (see retryOperation), never a statement of a transaction MySQL rolled
+// back. Each can be run again: the read of the export bans the players qualify for writes nothing,
+// and each write changes only the export bans that are still as the batch read them.
+
 // Write the items in statements of at most MAX_ROWS_PER_WRITE, and make none when there are none.
+// Each statement runs on its own, and is run again when it ends in a deadlock or a lock wait
+// timeout (see above).
 async function inStatements(items, write) {
-  for (let i = 0; i < items.length; i += MAX_ROWS_PER_WRITE)
-    await write(items.slice(i, i + MAX_ROWS_PER_WRITE));
+  for (let i = 0; i < items.length; i += MAX_ROWS_PER_WRITE) {
+    const someItems = items.slice(i, i + MAX_ROWS_PER_WRITE);
+    await retryOperation(() => write(someItems));
+  }
 }
 
 // Set the status of the export bans with these IDs. Only export bans that still match the
@@ -124,17 +138,20 @@ export default class ExportBanManager {
         } remaining)... Batch time: ${((Date.now() - currentRunTime) / 1000).toFixed(2)}s`
       );
 
-      // Generate the export bans, by the rule in scbl-lib/db/export-membership.js.
-      const generatedBans = await sequelize.transaction(
-        {
-          isolationLevel: Transaction.ISOLATION_LEVELS.SERIALIZABLE
-        },
-        async (t) => {
-          return membershipForPlayers(
-            batch.map((steamUser) => steamUser.id),
-            { transaction: t }
-          );
-        }
+      // Generate the export bans, by the rule in scbl-lib/db/export-membership.js. A deadlock rolls
+      // back the whole transaction, so the transaction is what is run again (see inStatements).
+      const generatedBans = await retryOperation(() =>
+        sequelize.transaction(
+          {
+            isolationLevel: Transaction.ISOLATION_LEVELS.SERIALIZABLE
+          },
+          async (t) => {
+            return membershipForPlayers(
+              batch.map((steamUser) => steamUser.id),
+              { transaction: t }
+            );
+          }
+        )
       );
 
       Logger.verbose(
@@ -245,17 +262,19 @@ export default class ExportBanManager {
       );
 
       // Mark Steam users as updated.
-      await SteamUser.update(
-        {
-          lastRefreshedExport: Date.now()
-        },
-        {
-          where: {
-            id: {
-              [Op.in]: batch.map((steamUser) => steamUser.id)
+      await retryOperation(() =>
+        SteamUser.update(
+          {
+            lastRefreshedExport: Date.now()
+          },
+          {
+            where: {
+              id: {
+                [Op.in]: batch.map((steamUser) => steamUser.id)
+              }
             }
           }
-        }
+        )
       );
       Logger.verbose(
         'ExportBanManager',

@@ -44,16 +44,15 @@ const LIMITS = {
 };
 const LIMITS_TEXT =
   "Limits used: BattleMetrics lists have at most 20,000 players and a threshold of at least 4, and one active ban plus one expired ban must never be enough; remote lists have at most 40,000 players and a threshold of at least 4, and one active ban plus one expired ban must never be enough. They come from the bot's EXPORT_* settings, which must match the website's.";
-const RUNNING =
-  'The ban importer is running, so nothing was changed. Try again once the run has finished.';
 const PROGRESS_NOTE =
   'This reply can only be updated for 15 minutes after the command, so each result and the summary also go to the CBL log channel.';
 // A message from the website's rules, as checkLimits gives them.
 const RULE =
   'One active ban plus one expired ban must not be enough to put a player on an export ban list. Here they can give 6 points (5 for an active ban, plus 1 for an expired ban), so the threshold must be 7 or more. Raise the threshold or lower the points.';
 
-// What the command did: lookups, run lock checks and deletions in order, the replies it made, what
-// it logged, and anything that could tell a list's owner.
+// What the command did: lookups, run lock checks, of which a removal or a transfer makes none, and
+// deletions in order, the replies it made, what it logged, and anything that could tell a list's
+// owner.
 let calls;
 let replies;
 let audits;
@@ -369,8 +368,8 @@ const FIND_RECORDED = ['find all', { type: 'battlemetrics' }];
 
 // Removing one list shows its name, type, owner, players, BattleMetrics ID, whether CBL's
 // BattleMetrics key can see its ban list, and why it is outside today's limits, asks first, giving
-// a minute to answer, and then deletes it as the website does, once no ban importer run is under
-// way. The removal is logged, and the owner is not told.
+// a minute to answer, and then deletes it as the website does. The removal is logged, and the owner
+// is not told.
 reset();
 addList(12, 'battlemetrics', { battlemetricsID: 'bm-12', players: 1234 });
 visible = new Set(['bm-12', 'partner-list']);
@@ -392,11 +391,9 @@ assert.deepStrictEqual(fieldsOf(shown.embed), [
 ]);
 assert.deepStrictEqual(timeouts, [60 * 1000]);
 assert.deepStrictEqual(calls, [
-  ['lock'],
   ['check', [12]],
   FIND_RECORDED,
   ['visible'],
-  ['lock'],
   ['find', 12],
   ['delete', 12]
 ]);
@@ -518,15 +515,7 @@ for (const { case: name, key, content, field, gone } of [
     assert.deepStrictEqual(fieldsOf(shown.embed)[4], ['BattleMetrics ID', field], name);
     assert.deepStrictEqual(
       calls,
-      [
-        ['lock'],
-        ['check', [21]],
-        FIND_RECORDED,
-        ['visible'],
-        ['lock'],
-        ['find', 21],
-        ['delete', 21]
-      ],
+      [['check', [21]], FIND_RECORDED, ['visible'], ['find', 21], ['delete', 21]],
       name
     );
     const removed =
@@ -644,32 +633,31 @@ for (const [choice, reply] of [
   answer = choice;
   await run('remove', { id: 19 });
   assert.strictEqual(contentOf(replies.at(-1)), reply);
-  assert.deepStrictEqual(calls, [['lock'], ['check', [19]], FIND_RECORDED, ['visible']]);
+  assert.deepStrictEqual(calls, [['check', [19]], FIND_RECORDED, ['visible']]);
   assert.deepStrictEqual(audits, []);
   assert.ok(rows.has(19));
 }
 
-// While a ban importer run holds its lock, nothing is removed: it is checked before the list is
-// shown, and again once the removal is confirmed.
+// A removal does not wait for the ban importer, as the website's Delete button does not, so it
+// goes ahead while a run, or a cycle of the importer service, holds the run lock, which it never
+// asks about.
 reset();
-addList(20, 'remote');
-lockAnswers = [true];
-await assert.rejects(run('remove', { id: 20 }), { message: RUNNING });
-assert.deepStrictEqual(calls, [['lock']]);
-assert.strictEqual(prompt(), null);
-
-reset();
-addList(20, 'remote');
-lockAnswers = [false, true];
-await assert.rejects(run('remove', { id: 20 }), (err) => {
-  assert.ok(err instanceof UserError);
-  assert.strictEqual(err.message, RUNNING);
-  return true;
-});
-assert.deepStrictEqual(calls, [['lock'], ['check', [20]], ['lock']]);
-assert.ok(prompt());
-assert.ok(rows.has(20));
-assert.deepStrictEqual(audits, []);
+addList(20, 'battlemetrics', { battlemetricsID: 'bm-20' });
+visible = new Set(['bm-20']);
+lockAnswers = [true, true, true];
+await run('remove', { id: 20 });
+assert.deepStrictEqual(calls, [
+  ['check', [20]],
+  FIND_RECORDED,
+  ['visible'],
+  ['find', 20],
+  ['delete', 20]
+]);
+assert.ok(!rows.has(20));
+assert.strictEqual(
+  contentOf(replies.at(-1)),
+  'Removed export ban list **List 20** (#20) and its BattleMetrics ban list.'
+);
 
 console.log('Removing one export ban list: checks passed.');
 
@@ -705,17 +693,12 @@ assert.strictEqual(
 assert.strictEqual(fileOf(shown.reply), undefined);
 assert.deepStrictEqual(timeouts, [5 * 60 * 1000]);
 assert.deepStrictEqual(calls, [
-  ['lock'],
   ['check', 'all'],
   ['visible'],
-  ['lock'],
-  ['lock'],
   ['check', [30]],
   ['delete', 30],
-  ['lock'],
   ['check', [31]],
   ['delete', 31],
-  ['lock'],
   ['check', [33]],
   ['delete', 33]
 ]);
@@ -765,7 +748,7 @@ await run('remove_outside_limits');
 assert.deepStrictEqual(replies, [
   `No export ban list is outside today's limits, so nothing was changed.\n${LIMITS_TEXT}`
 ]);
-assert.deepStrictEqual(calls, [['lock'], ['check', 'all']]);
+assert.deepStrictEqual(calls, [['check', 'all']]);
 
 // Lists whose type the limits do not cover are named as not checked.
 reset();
@@ -785,59 +768,31 @@ for (const choice of ['cancel', 'timeout']) {
   addList(37, 'remote');
   answer = choice;
   await run('remove_outside_limits');
-  assert.deepStrictEqual(calls, [['lock'], ['check', 'all']]);
+  assert.deepStrictEqual(calls, [['check', 'all']]);
   assert.deepStrictEqual(deleted(), []);
   assert.deepStrictEqual(audits, []);
   assert.ok(rows.has(37));
 }
 
-// While a ban importer run holds its lock, nothing is removed: it is checked before the preview,
-// once the removal is confirmed, and before each list. A run that starts part-way stops the
-// removal, which says how many were removed and how many are left.
-reset();
-addList(38, 'remote');
-lockAnswers = [true];
-await assert.rejects(run('remove_outside_limits'), { message: RUNNING });
-assert.deepStrictEqual(calls, [['lock']]);
-
-reset();
-addList(38, 'remote');
-lockAnswers = [false, true];
-await run('remove_outside_limits');
-assert.deepStrictEqual(calls, [['lock'], ['check', 'all'], ['lock']]);
-assert.deepStrictEqual(replies.at(-1), { content: RUNNING, embeds: [], attachments: [] });
-assert.deepStrictEqual(audits, []);
-assert.ok(rows.has(38));
-
+// Nor does a removal of the lists outside the limits wait for the ban importer: while a run, or a
+// cycle of the importer service, holds the run lock, which it never asks about, as before the
+// preview, once the removal is confirmed, and before each list, it removes every list, also once
+// a cycle has started part-way, and it says nothing about the importer.
 reset();
 for (const id of [40, 41, 42, 43]) addList(id, 'remote');
-lockAnswers = [false, false, false, false, true];
+lockAnswers = [true, true, true, true, true, true];
 await run('remove_outside_limits');
-assert.deepStrictEqual(deleted(), [40, 41]);
-assert.deepStrictEqual([...rows.keys()], [42, 43]);
+assert.deepStrictEqual(deleted(), [40, 41, 42, 43]);
+assert.deepStrictEqual([...rows.keys()], []);
+assert.ok(!calls.some(([call]) => call === 'lock'));
 summary = replies.at(-1);
 assert.strictEqual(
   summary.content,
-  "Removed 2 of the 4 export ban lists outside today's limits: 2 with nothing to delete on BattleMetrics. 2 were not tried, as the removal stopped.\nStopped, as the ban importer started a run. Run the command again once it has finished."
+  "Removed 4 of the 4 export ban lists outside today's limits: 4 with nothing to delete on BattleMetrics."
 );
-assert.deepStrictEqual(embedOf(summary).description.split('\n').slice(2), [
-  '**List 42** (#42): not tried, as the removal stopped',
-  '**List 43** (#43): not tried, as the removal stopped'
-]);
 assert.strictEqual(
   audits.at(-1),
-  "[important] admin (1) removed 2 of the 4 export ban lists outside today's limits: 2 with nothing to delete on BattleMetrics. 2 were not tried, as the removal stopped. Stopped, as the ban importer started a run. Run the command again once it has finished."
-);
-
-// When the run lock cannot be checked, the removal stops too.
-reset();
-for (const id of [44, 45]) addList(id, 'remote');
-lockAnswers = [false, false, false, new Error('Connection lost')];
-await run('remove_outside_limits');
-assert.deepStrictEqual(deleted(), [44]);
-assert.match(
-  replies.at(-1).content,
-  /\nStopped, as the bot could not check whether the ban importer is running: Connection lost$/
+  "[important] admin (1) removed 4 of the 4 export ban lists outside today's limits: 4 with nothing to delete on BattleMetrics."
 );
 
 // A failed removal does not stop the others. Each result is reported, and the log has each
@@ -1567,5 +1522,5 @@ assert.deepStrictEqual(notifications, []);
 console.log('Transferring an export ban list: checks passed.');
 
 console.log(
-  'Export ban list command checks passed: admin only, previews, confirmations, the run lock, BattleMetrics access, failures, long removals and transfers.'
+  'Export ban list command checks passed: admin only, previews, confirmations, removals that do not wait for the importer, BattleMetrics access, failures, long removals and transfers.'
 );

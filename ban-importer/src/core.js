@@ -10,6 +10,7 @@ import {
 } from 'scbl-lib/utils';
 import { HOST } from 'scbl-lib/config';
 
+import { retryOperation } from './apply-list.js';
 import { checkRunLock, reportProgress, stopIfRequested } from './run-control.js';
 
 const DISCORD_ALERT_CAP = 50;
@@ -33,11 +34,20 @@ const invalidWebhookLists = new Set();
 // rather than growing for as long as the importer service runs.
 
 export default class Core {
+  // The statements that recalculate players' reputation points and ranks each run on their own,
+  // outside a transaction, and lock the players and bans they read as they go. A bot command that
+  // deletes ban lists' bans, such as /banlist remove, which does not wait for the importer, locks
+  // the lists' players and then their bans, in another order, so MySQL may end one of the two in a
+  // deadlock, or end a statement that waited too long for the other. As each statement is a
+  // transaction of its own, MySQL then rolls back that statement alone, and it is run again as a
+  // whole after 5 seconds, up to 5 times in all, as the import's batches are (see retryOperation).
+  // Each works its values out afresh from the bans, so running it again is safe.
   static async clearOrphanedUsers() {
     Logger.verbose('Core', 2, 'Clearing reputation points of orphaned Steam users...');
     const profileStartTime = Date.now();
-    const affectedRows = await sequelize.query(
-      `UPDATE SteamUsers 
+    const affectedRows = await retryOperation(() =>
+      sequelize.query(
+        `UPDATE SteamUsers 
       SET 
       reputationPoints = 0, reputationPointsMonthBefore = 0, lastRefreshedReputationPoints = now(), lastRefreshedReputationRank = now(), lastRefreshedExport = now() 
       WHERE 
@@ -49,7 +59,8 @@ export default class Core {
              and reputationPoints > 0 and isSCBLUser is not null
           ) as X
         )`,
-      { type: sequelize.QueryTypes.BULKUPDATE }
+        { type: sequelize.QueryTypes.BULKUPDATE }
+      )
     );
     Logger.verbose(
       'Core',
@@ -64,8 +75,9 @@ export default class Core {
   static async updateReputationPoints() {
     Logger.verbose('Core', 2, 'Updating reputation points of outdated Steam users...');
     const profileStartTime = Date.now();
-    const affectedRows = await sequelize.query(
-      `
+    const affectedRows = await retryOperation(() =>
+      sequelize.query(
+        `
         UPDATE SteamUsers SU
         LEFT JOIN (
           SELECT
@@ -135,7 +147,8 @@ export default class Core {
           SU.lastRefreshedReputationPoints = NOW()
         WHERE SU.lastRefreshedReputationPoints IS NULL
       `,
-      { type: sequelize.QueryTypes.BULKUPDATE }
+        { type: sequelize.QueryTypes.BULKUPDATE }
+      )
     );
     Logger.verbose(
       'Core',
@@ -161,8 +174,9 @@ export default class Core {
     // and about 0.2 seconds when no rank changed.
     // Leave this at RANK() because that way we can actually count how many ppl were on ranks before this one.
     // DENSE_RANK() fucks counting up when browsing ranks
-    const affectedRows = await sequelize.query(
-      `
+    const affectedRows = await retryOperation(() =>
+      sequelize.query(
+        `
       UPDATE SteamUsers su
       JOIN (
         SELECT id, RANK() OVER (ORDER BY reputationPoints DESC) AS reputationRank
@@ -172,7 +186,8 @@ export default class Core {
           su.lastRefreshedReputationRank = NOW()
       WHERE NOT (su.reputationRank <=> rr.reputationRank) OR su.lastRefreshedReputationRank IS NULL
       `,
-      { type: sequelize.QueryTypes.BULKUPDATE }
+        { type: sequelize.QueryTypes.BULKUPDATE }
+      )
     );
     Logger.verbose(
       'Core',

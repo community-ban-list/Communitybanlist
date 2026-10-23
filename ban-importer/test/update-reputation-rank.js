@@ -16,7 +16,9 @@ const stubs = {
       }
     }
   },
-  'scbl-lib/utils': { Logger: { verbose: (...args) => logs.push(args.slice(2).join('')) } }
+  'scbl-lib/utils': { Logger: { verbose: (...args) => logs.push(args.slice(2).join('')) } },
+  // The statement is run again after a deadlock, which lock-retries.js checks.
+  './apply-list.js': { retryOperation: (operation) => operation() }
 };
 
 const source = await readFile(new URL('../src/core.js', import.meta.url), 'utf8');

@@ -207,6 +207,8 @@ const dependencies = {
       }
     }
   },
+  // The batch's statements are run again after a deadlock, which lock-retries.js checks.
+  './apply-list.js': { retryOperation: (operation) => operation() },
   './run-control.js': {
     stopIfRequested() {},
     reportProgress: (...args) => progress.push(args)
