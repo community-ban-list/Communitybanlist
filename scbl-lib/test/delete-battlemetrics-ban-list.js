@@ -5,6 +5,8 @@ import vm from 'vm';
 const base = 'ban-lists/test-list/relationships';
 let calls;
 let failAt;
+// A request that times out without an answer, so its error gives only the request's path.
+let timeoutAt;
 // The requests, as method and endpoint, that BattleMetrics answers 404, as the record is gone.
 let goneAt;
 // What BattleMetrics answers when the ban list itself is looked up: an answer, or an error.
@@ -32,6 +34,11 @@ const request = async (method, endpoint, params) => {
     error.response = { status: 400, data: { errors: [{ detail: 'Ownership transfer required' }] } };
     throw error;
   }
+  if (method === 'delete' && endpoint === timeoutAt)
+    throw Object.assign(
+      new Error(`BattleMetrics DELETE ${endpoint} failed after 3 attempts: timed out after 30s`),
+      { code: 'ECONNABORTED' }
+    );
   if (goneAt.includes(`${method} ${endpoint}`)) {
     const error = new Error(`BattleMetrics ${method.toUpperCase()} ${endpoint} failed: HTTP 404`);
     error.response = { status: 404, data: { errors: [{ title: 'Not Found' }] } };
@@ -100,6 +107,7 @@ const remove = async (id) => {
 const reset = () => {
   calls = [];
   failAt = null;
+  timeoutAt = null;
   goneAt = [];
   banListAnswer = { data: { data: { type: 'banList', id: 'test-list' } } };
   ownershipError = null;
@@ -211,6 +219,18 @@ for (const endpoint of [
   await assert.rejects(remove('test-list'), /Ownership transfer required/);
   assert.strictEqual(calls[calls.length - 1][1], endpoint);
 }
+// An invite's ID is its code, with which any organisation can use the ban list, so the error for a
+// removal that failed without BattleMetrics saying why gives the request's path without it.
+reset();
+timeoutAt = `${base}/invites/invite-two`;
+await assert.rejects(remove('test-list'), (error) => {
+  assert.strictEqual(
+    error.message,
+    `BattleMetrics deletion failed while removing invites: BattleMetrics DELETE ${base}/invites/[invite code] failed after 3 attempts: timed out after 30s. The local list was retained; any invites or subscriptions already removed remain removed.`
+  );
+  return true;
+});
+assert.strictEqual(calls[calls.length - 1][1], timeoutAt);
 reset();
 failAt = `${base}/organizations/42`;
 await assert.rejects(

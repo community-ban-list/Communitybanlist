@@ -3,10 +3,25 @@ import { readFile } from 'fs/promises';
 import vm from 'vm';
 
 import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
+import describeError from '../../scbl-lib/utils/describe-error.js';
+import logText from '../../scbl-lib/utils/log-text.js';
 import Validators from '../../scbl-lib/validators.js';
 
 const logs = [];
 const calls = [];
+// The lines posted to the log channel, as the logger posts them: the line, then its errors, each
+// described in a line by describeError.
+const posted = [];
+const Logger = {
+  verbose(module, level, message, ...extras) {
+    if (level !== 1) return;
+    const errors = extras.filter((extra) => typeof extra?.message === 'string');
+    let text = `${message}`;
+    if (errors.length > 0)
+      text += `${/\s$/.test(text) ? '' : ' '}${errors.map(describeError).join(', ')}`;
+    posted.push(`[${module}][${level}] ${text}`);
+  }
+};
 let list;
 let lookupError;
 const context = vm.createContext({ console: { error: (...args) => logs.push(args) } });
@@ -42,7 +57,7 @@ const dependencies = {
       }
     }
   },
-  'scbl-lib/utils': { isDiscordWebhookUrl() {}, testDiscordWebhook() {} }
+  'scbl-lib/utils': { isDiscordWebhookUrl() {}, testDiscordWebhook() {}, Logger, logText }
 };
 const url = new URL('../src/graphql-api/mutation/resolver.js', import.meta.url);
 const module = new vm.SourceTextModule(await readFile(url, 'utf8'), {
@@ -76,7 +91,11 @@ const remove = (user = { id: 'owner' }) =>
 // were taken, as the resolver must leave them all to deleteExportBanList, which the Discord bot
 // uses too.
 const exportBanList = (type, deleteExportBanList) => ({
+  id: 42,
+  name: 'List 42',
+  server: 'Server',
   type,
+  battlemetricsID: type === 'battlemetrics' ? 'bm-42' : null,
   deleteExportBanList,
   async deleteBattlemetricsBanList() {
     calls.push('battlemetrics');
@@ -86,17 +105,41 @@ const exportBanList = (type, deleteExportBanList) => ({
   }
 });
 
-// The user's list is deleted with deleteExportBanList, whatever its type, and returned.
+// The user's list is deleted with deleteExportBanList, whatever its type, and returned. One line
+// says who deleted which list, with what happened to its BattleMetrics ban list, which the
+// deletion clears from the list, as the real one does.
+const BM_LIST = `Server's List "List 42" (ID: 42, BattleMetrics)`;
+const REMOTE_LIST = `Server's List "List 42" (ID: 42, remote)`;
 for (const type of ['battlemetrics', 'remote']) {
   calls.length = 0;
-  list = exportBanList(type, async () => {
+  list = exportBanList(type, async function () {
     calls.push('delete');
+    this.battlemetricsID = null;
     return type === 'battlemetrics' ? 'deleted' : 'none';
   });
   assert.strictEqual(await remove(), list);
   assert.deepStrictEqual(calls, ['delete']);
 }
 assert.strictEqual(logs.length, 0);
+assert.deepStrictEqual(posted, [
+  `[WebServer][1] Steam user owner deleted export ban list ${BM_LIST} and its BattleMetrics ban list bm-42.`,
+  `[WebServer][1] Steam user owner deleted export ban list ${REMOTE_LIST}.`
+]);
+
+// The other outcomes: a BattleMetrics list whose ban list BattleMetrics did not know, which is
+// only taken to be deleted already, as BattleMetrics says the same of a ban list CBL's key cannot
+// see, or that had none.
+posted.length = 0;
+for (const outcome of ['gone', 'none']) {
+  list = exportBanList('battlemetrics', async () => outcome);
+  if (outcome === 'none') list.battlemetricsID = null;
+  await remove();
+}
+assert.deepStrictEqual(posted, [
+  `[WebServer][1] Steam user owner deleted export ban list ${BM_LIST}; BattleMetrics did not know its ban list bm-42, so it was taken to be deleted already.`,
+  `[WebServer][1] Steam user owner deleted export ban list ${BM_LIST}, which had no BattleMetrics ban list.`
+]);
+posted.length = 0;
 
 // A failed deletion is logged with the stage that failed, which the error gives, the status and
 // BattleMetrics' errors, but never the error whole.
@@ -134,6 +177,15 @@ list = exportBanList('remote', async () => {
 await assert.rejects(remove(), /Unexpected failure/);
 assert.strictEqual(logs[2][1].stage, 'deletion');
 
+// Each failed deletion posts a line saying which list, what failed and why, from the error's stage
+// and its description, never the error whole, which holds the API key.
+assert.deepStrictEqual(posted, [
+  `[WebServer][1] Steam user owner could not delete export ban list ${BM_LIST}, as deleting its BattleMetrics ban list bm-42 failed: Error: Request failed with status code 400`,
+  `[WebServer][1] Steam user owner could not delete export ban list ${REMOTE_LIST}, as deleting it from the database failed: Error: Deletion failed`,
+  `[WebServer][1] Steam user owner could not delete export ban list ${REMOTE_LIST}: Error: Unexpected failure`
+]);
+assert.ok(!posted.join('\n').includes('secret-test-token'));
+
 lookupError = new Error('Database unavailable');
 await assert.rejects(remove(), (error) => error === lookupError);
 assert.strictEqual(logs[3][1].message, 'Database unavailable');
@@ -147,6 +199,8 @@ await assert.rejects(remove(null), /Please sign in again/);
 assert.strictEqual(logs[5][1].stage, 'authentication');
 assert.strictEqual(logs.length, 6);
 assert.deepStrictEqual(calls, []);
+// Signing in and looking the list up change nothing, so their failures post nothing.
+assert.strictEqual(posted.length, 3);
 
 console.log(
   'Export ban list deletion checks passed: the shared deletion, ownership, and error reporting.'

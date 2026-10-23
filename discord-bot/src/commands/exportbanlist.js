@@ -347,6 +347,10 @@ async function remove(interaction) {
     return;
   }
 
+  // The list read again has no Steam user with it, so ExportBanList's lines about the deletion get
+  // the owner's Steam name from the list as it was shown, unless someone else owns it now.
+  if (current.owner === exportBanList.owner) current.SteamUser = exportBanList.SteamUser;
+
   // The ban list the removal deletes, which it clears from the list: the list's as it is now, which
   // differs from the one shown only when the list was still being made.
   const { battlemetricsID } = current;
@@ -472,7 +476,9 @@ async function removeOne(check, access) {
 
   const description = `${describeExportBanList(current.exportBanList)}, outside today's limits with ${plural(current.players, 'player')}`;
   try {
-    const outcome = await current.exportBanList.deleteExportBanList();
+    // ExportBanList's lines are important, as the removal's own are, so they reach the log channel
+    // in order with them, never after the summary.
+    const outcome = await current.exportBanList.deleteExportBanList({ important: true });
     return { check: current, status: 'removed', outcome, description };
   } catch (error) {
     return { check: current, status: 'failed', reason: failureReason(error), description };
@@ -615,9 +621,9 @@ async function removeAllOutsideLimits(interaction) {
   // Removing a BattleMetrics list takes several requests within the bot's BattleMetrics budget, so
   // the removal can outlast the 15 minutes for which Discord lets the reply be edited. So each
   // list's result and the summary also go to the log channel, all as important lines, as the
-  // start is. Lines of the same importance reach the channel in the order they were logged, so the
-  // summary never goes ahead of a result still waiting to be sent, and none is dropped for other
-  // lines.
+  // start is and as ExportBanList's lines about each deletion are (see removeOne). Lines of the
+  // same importance reach the channel in the order they were logged, so the summary never goes
+  // ahead of a result still waiting to be sent, and none is dropped for other lines.
   const reply = new ReplyUpdater(interaction);
   reply.update({ content: describeProgress(removable.length, []) });
 

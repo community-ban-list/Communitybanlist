@@ -4,6 +4,7 @@ import vm from 'vm';
 
 import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
 import isDiscordWebhookUrl from '../../scbl-lib/utils/discord-webhook-url.js';
+import logText from '../../scbl-lib/utils/log-text.js';
 import Validators from '../../scbl-lib/validators.js';
 
 // Checks for the limit on the players an export ban list can have (mutation/check-size.js). Part 1
@@ -761,6 +762,9 @@ async function mutations(env) {
       'scbl-lib/db/models': db.models,
       'scbl-lib/export-list-limits': exportListLimits,
       'scbl-lib/utils': {
+        // The lines the resolvers post are checked in export-ban-list-audit.js.
+        Logger: { verbose() {}, important() {} },
+        logText,
         isDiscordWebhookUrl,
         async testDiscordWebhook(url) {
           tested.push(url);

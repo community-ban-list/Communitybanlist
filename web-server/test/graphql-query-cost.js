@@ -14,6 +14,7 @@ import { gql } from 'graphql-tag';
 import jwt from 'jsonwebtoken';
 
 import * as exportListLimits from '../../scbl-lib/export-list-limits.js';
+import logText from '../../scbl-lib/utils/log-text.js';
 import Validators from '../../scbl-lib/validators.js';
 import { largestPage } from '../src/graphql-api/core/page-size.js';
 import {
@@ -131,6 +132,9 @@ const packages = {
     Op: { ne: Symbol('ne') }
   },
   'scbl-lib/utils': {
+    // The mutations post their changes to the log channel, which these checks make none of.
+    Logger: { verbose() {}, important() {} },
+    logText,
     calculateRiskRating(points) {
       calls.push({ model: 'utils', method: 'calculateRiskRating' });
       return points / 10;

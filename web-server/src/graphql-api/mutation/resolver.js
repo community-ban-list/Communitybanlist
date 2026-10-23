@@ -8,13 +8,29 @@ import {
 } from 'scbl-lib/export-list-limits';
 import Validators from 'scbl-lib/validators';
 
+import audit, {
+  auditCleanup,
+  describeChanges,
+  describeConfig,
+  describeList,
+  describeSettings,
+  quote
+} from './audit.js';
 import checkSize from './check-size.js';
 import refusal from './refusal.js';
 import testWebhook from './test-webhook.js';
 
+// Each change, and each change that fails after its checks, is posted to the CBL log channel with
+// who made it (audit.js). Changes the checks refuse, before anything is saved, a webhook is tested
+// or BattleMetrics is asked for anything, such as a value out of bounds or a list that does not
+// exist, are only shown to the user, as they change nothing.
+
 // The settings that decide who is on an export ban list, with its configs: its threshold, default
 // points and max ban age.
 const SETTINGS = Object.keys(DEFAULT_SETTINGS);
+
+// The values of a list the log channel's line about a change to it compares.
+const LOGGED_VALUES = ['name', 'server', ...SETTINGS, 'discordWebhook'];
 
 // A list's settings, from its stored row or a change's arguments. Only the arguments given are
 // taken, so a change leaves the others as they are.
@@ -93,6 +109,38 @@ async function loadConfigs(exportBanList) {
   }));
 }
 
+// The log channel's line, up to the error, for a new BattleMetrics list that records a ban list
+// but was not finished, from the stage that createBattlemetricsBanList's error gives.
+function describeUnfinished(exportBanList, error) {
+  const list = describeList(exportBanList);
+  const settings = describeSettings(exportBanList);
+  const id = exportBanList.battlemetricsID;
+  if (error.stage === 'saving')
+    return `created export ban list ${list}: ${settings}. BattleMetrics ban list ${id} was made for it, but saving it to the list failed, so nothing records the ban list, which must be removed on BattleMetrics by hand:`;
+  if (error.stage === 'invite')
+    return `created export ban list ${list} with BattleMetrics ban list ${id}: ${settings}. Its invite could not be made, which saving the list tries again:`;
+  return `created export ban list ${list}: ${settings}. Making its BattleMetrics ban list ${id} failed:`;
+}
+
+// How a deletion ended on BattleMetrics, for the log channel's line, from what deleteExportBanList
+// gives and the BattleMetrics ban list the list recorded before it. 'gone' only says BattleMetrics
+// did not know the ban list, which it also says of one CBL's key cannot see, so the line says no
+// more than ExportBanList's does.
+function describeOutcome(outcome, type, battlemetricsID) {
+  if (outcome === 'deleted') return ` and its BattleMetrics ban list ${battlemetricsID}`;
+  if (outcome === 'gone')
+    return `; BattleMetrics did not know its ban list ${battlemetricsID}, so it was taken to be deleted already`;
+  return type === 'battlemetrics' ? ', which had no BattleMetrics ban list' : '';
+}
+
+// What failed in a deletion, for the log channel's line, from its error's stage.
+function describeFailedDeletion(error, battlemetricsID) {
+  if (error.stage === 'battlemetrics')
+    return `, as deleting its BattleMetrics ban list ${battlemetricsID} failed`;
+  if (error.stage === 'database deletion') return ', as deleting it from the database failed';
+  return '';
+}
+
 // What is logged of a failed BattleMetrics request for an export ban list: the BattleMetrics client
 // says in the message what failed and whether BattleMetrics may have carried it out anyway, and the
 // list's IDs say what there is to clean up. The error is never logged whole.
@@ -139,14 +187,20 @@ export default {
       if (args.discordWebhook) await testWebhook(context, args.discordWebhook);
 
       // Create export ban list.
-      const exportBanLsit = await ExportBanList.create({
-        name: args.name,
-        server: args.server,
-        type: args.type,
-        ...settings,
-        discordWebhook: args.discordWebhook,
-        owner: context.user.id
-      });
+      let exportBanLsit;
+      try {
+        exportBanLsit = await ExportBanList.create({
+          name: args.name,
+          server: args.server,
+          type: args.type,
+          ...settings,
+          discordWebhook: args.discordWebhook,
+          owner: context.user.id
+        });
+      } catch (error) {
+        audit(context, `could not create export ban list ${describeList(args)}:`, error);
+        throw error;
+      }
 
       if (exportBanLsit.type === 'battlemetrics') {
         try {
@@ -165,6 +219,14 @@ export default {
           // a transaction, as f6630b9 tried: createBattlemetricsBanList saves the list outside the
           // transaction, so the save waited on the list's uncommitted row until MySQL gave up.
           if (!exportBanLsit.battlemetricsID) {
+            const failed = `could not create export ban list ${describeList(exportBanLsit)}, as making its BattleMetrics ban list failed`;
+            // A ban list BattleMetrics may have made without saying so is recorded nowhere, so the
+            // line says what an admin should look for on BattleMetrics, and is posted ahead of
+            // others.
+            const unrecorded = error.ambiguous
+              ? ` BattleMetrics may have made the ban list anyway, which nothing records: look for ${quote(exportBanLsit.battlemetricsBanListName())} among CBL's ban lists on BattleMetrics, and remove it.`
+              : '';
+            const postFailure = error.ambiguous ? auditCleanup : audit;
             try {
               await exportBanLsit.destroy();
             } catch (destroyError) {
@@ -176,18 +238,33 @@ export default {
                   message: destroyError.message
                 }
               );
+              postFailure(
+                context,
+                `${failed}, and the list could not be deleted either, so its owner was asked to delete it.${unrecorded}`,
+                error,
+                destroyError
+              );
               throw new Error(
                 'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later.'
               );
             }
+            postFailure(context, `${failed}, so the list was deleted.${unrecorded}`, error);
             throw new Error(
               'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.'
             );
           }
+          // A ban list the list could not be saved with is recorded nowhere, and must be removed
+          // by hand, so that line is posted ahead of others.
+          const postUnfinished = error.stage === 'saving' ? auditCleanup : audit;
+          postUnfinished(context, describeUnfinished(exportBanLsit, error), error);
           throw error;
         }
       }
 
+      audit(
+        context,
+        `created export ban list ${describeList(exportBanLsit)}: ${describeSettings(exportBanLsit)}.`
+      );
       return exportBanLsit;
     },
 
@@ -226,6 +303,9 @@ export default {
       if (args.discordWebhook && args.discordWebhook !== exportBanList.discordWebhook)
         await testWebhook(context, args.discordWebhook);
 
+      // The list as it was, for the log channel's line, which gives only the values that changed.
+      const before = Object.fromEntries(LOGGED_VALUES.map((name) => [name, exportBanList[name]]));
+
       // Update arguments if specified
       if ('name' in args) exportBanList.name = args.name;
       if ('server' in args) exportBanList.server = args.server;
@@ -237,16 +317,39 @@ export default {
       if ('maxBanAge' in args) exportBanList.maxBanAge = args.maxBanAge;
       if ('discordWebhook' in args) exportBanList.discordWebhook = args.discordWebhook;
 
-      await exportBanList.save();
+      // A save that changes nothing, as the edit form sends every value, posts no line.
+      const changes = describeChanges(before, exportBanList).join(', ');
+      try {
+        await exportBanList.save();
+      } catch (error) {
+        // The list as the database still has it. A Sequelize instance's values are read one by
+        // one, as spreading it would not give them.
+        const { id, type } = exportBanList;
+        const list = describeList({ id, type, name: before.name, server: before.server });
+        audit(
+          context,
+          `could not save export ban list ${list}${changes ? ` (${changes})` : ''}:`,
+          error
+        );
+        throw error;
+      }
+      if (changes)
+        audit(context, `updated export ban list ${describeList(exportBanList)}: ${changes}.`);
 
       // A BattleMetrics export ban list whose invite could not be created along with it gets one
-      // now. The changes are saved either way, so a failure is only logged.
+      // now. The changes are saved either way, so a failure is only logged and posted, and the
+      // owner is not shown it.
       try {
         await exportBanList.createBattlemetricsInvite();
       } catch (error) {
         logBattlemetricsFailure(
           'Failed to create the BattleMetrics invite for export ban list:',
           exportBanList,
+          error
+        );
+        audit(
+          context,
+          `saved export ban list ${describeList(exportBanList)}, but its missing invite to BattleMetrics ban list ${exportBanList.battlemetricsID} could not be made, which saving the list tries again:`,
           error
         );
       }
@@ -256,12 +359,18 @@ export default {
 
     deleteExportBanList: async (parent, args, context) => {
       let stage = 'authentication';
+      let exportBanList;
+      // The list and the BattleMetrics ban list it recorded, for the log channel's line, as the
+      // deletion clears the list's BattleMetrics ban list.
+      let list;
+      let battlemetricsID;
+      let outcome;
       try {
         if (!context.user) throw new Error('Please sign in again to delete an export ban list.');
 
         // Get the export ban list.
         stage = 'lookup';
-        const exportBanList = await ExportBanList.findOne({
+        exportBanList = await ExportBanList.findOne({
           where: { id: args.id, owner: context.user.id }
         });
 
@@ -271,9 +380,9 @@ export default {
         // Delete the export ban list, and its BattleMetrics ban list if it has one. Its error
         // says which of these failed.
         stage = 'deletion';
-        await exportBanList.deleteExportBanList();
-
-        return exportBanList;
+        list = describeList(exportBanList);
+        ({ battlemetricsID } = exportBanList);
+        outcome = await exportBanList.deleteExportBanList();
       } catch (error) {
         // Do not log the full Axios error: it includes the API authorization header.
         const response = error.response;
@@ -288,8 +397,21 @@ export default {
             ? errors.map(({ code, title, detail }) => ({ code, title, detail }))
             : undefined
         });
+        // Signing in and looking the list up change nothing, so only a failed deletion is posted.
+        if (stage === 'deletion')
+          audit(
+            context,
+            `could not delete export ban list ${list}${describeFailedDeletion(error, battlemetricsID)}:`,
+            error
+          );
         throw error;
       }
+
+      audit(
+        context,
+        `deleted export ban list ${list}${describeOutcome(outcome, exportBanList.type, battlemetricsID)}.`
+      );
+      return exportBanList;
     },
 
     createExportBanListConfig: async (parent, args, context) => {
@@ -332,11 +454,24 @@ export default {
         { settings, configs: [...configs, added] }
       );
 
-      return ExportBanListConfig.create({
-        exportBanList: args.exportBanList,
-        banList: args.banList,
-        ...points
-      });
+      const list = describeList(exportBanList);
+      let created;
+      try {
+        created = await ExportBanListConfig.create({
+          exportBanList: args.exportBanList,
+          banList: args.banList,
+          ...points
+        });
+      } catch (error) {
+        audit(
+          context,
+          `could not add a config to export ban list ${list} (${describeConfig(added)}):`,
+          error
+        );
+        throw error;
+      }
+      audit(context, `added a config to export ban list ${list}: ${describeConfig(added)}.`);
+      return created;
     },
 
     deleteExportBanListConfig: async (parent, args, context) => {
@@ -359,7 +494,23 @@ export default {
         { settings, configs: configs.filter((config) => config.id !== exportBanListConfig.id) }
       );
 
-      await exportBanListConfig.destroy();
+      // The config as the checks loaded it, with its ban list's and organisation's names.
+      const list = describeList(exportBanList);
+      const { id, banList, activePoints, expiredPoints } = exportBanListConfig;
+      const config = describeConfig(
+        configs.find((loaded) => loaded.id === id) ?? { banList, activePoints, expiredPoints }
+      );
+      try {
+        await exportBanListConfig.destroy();
+      } catch (error) {
+        audit(
+          context,
+          `could not delete a config from export ban list ${list} (${config}):`,
+          error
+        );
+        throw error;
+      }
+      audit(context, `deleted a config from export ban list ${list}: ${config}.`);
       return exportBanListConfig;
     }
   }
