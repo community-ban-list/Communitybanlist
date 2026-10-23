@@ -1,3 +1,4 @@
+import { recordLogMessages } from 'scbl-lib/db';
 import { describeError, stackTrace } from 'scbl-lib/utils';
 
 import Core from './src/core.js';
@@ -28,6 +29,11 @@ process.on('unhandledRejection', (reason) => {
   console.error(`Unhandled promise rejection: ${describeError(reason)}${stackTrace(reason)}`);
   process.exitCode = EXIT_CODES.FAILED;
 });
+
+// The newest message the importer posts to the log channel is kept in the database, as the web
+// server's and the bot's are, so the importer service, also the next process after this one, can
+// tell whether its status message is still below every other (see src/loop.js).
+recordLogMessages('importer');
 
 const banImporter = new BanImporter();
 

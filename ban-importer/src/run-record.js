@@ -27,7 +27,8 @@ export const STATE = {
 // The ImporterState rows of the importer service, which runs the importer in a loop (see loop.js).
 export const SERVICE_STATE = {
   // The service's status message in the log channel, which the next process edits rather than
-  // posting another, and whether the process that last kept it up to date said how it ended.
+  // posting another, or posts again below newer messages, whether the process that last kept it up
+  // to date said how it ended, and the old copies of the message that may still be in the channel.
   SERVICE: 'importerService'
 };
 
@@ -241,22 +242,37 @@ export async function saveRunMessage({ messageId, startedAt }) {
   });
 }
 
-// The importer service's row, as { messageId, startedAt, endedAt, outcome }: its status message in
-// the log channel, when the process that last kept it up to date started, and, once that process
-// ended as it should, when and how. Resolves with null when there is none, and leaves out a
-// message ID that is not one.
+// Whether a value is a Discord message's ID.
+const isMessageID = (value) => typeof value === 'string' && /^\d+$/.test(value);
+
+// The importer service's row, as { messageId, startedAt, endedAt, outcome, oldMessageIds }: its
+// status message in the log channel, when the process that last kept it up to date started, once
+// that process ended as it should, when and how, and, if there are any, the old copies of the
+// status message, posted before it was posted again below newer messages, that are still to be
+// deleted (see loop.js). Resolves with null when there is none, and leaves out IDs that are not
+// messages' IDs.
 export async function readService() {
   const row = await ImporterState.findByPk(SERVICE_STATE.SERVICE);
   const value = row?.value;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const { messageId, ...rest } = value;
-  return typeof messageId === 'string' && /^\d+$/.test(messageId) ? value : rest;
+  const { messageId, oldMessageIds, ...rest } = value;
+  const service = isMessageID(messageId) ? { messageId, ...rest } : rest;
+  const old = Array.isArray(oldMessageIds) ? oldMessageIds.filter(isMessageID) : [];
+  if (old.length > 0) service.oldMessageIds = old;
+  return service;
 }
 
 // Save the importer service's row (see readService), with times given in milliseconds.
-export async function saveService({ messageId = null, startedAt, endedAt, outcome }) {
+export async function saveService({
+  messageId = null,
+  startedAt,
+  endedAt,
+  outcome,
+  oldMessageIds = []
+}) {
   const value = { messageId, startedAt: isoTime(startedAt) };
   if (endedAt !== undefined) Object.assign(value, { endedAt: isoTime(endedAt), outcome });
+  if (oldMessageIds.length > 0) value.oldMessageIds = [...oldMessageIds];
   await ImporterState.upsert({ name: SERVICE_STATE.SERVICE, value });
 }
 

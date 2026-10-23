@@ -36,9 +36,11 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
   const result = deferred();
   const leftWaiting = deferred();
   let steps = null;
-  // Which ran: run.js's run, once, or loop.js's service, and the IMPORTER_MODE read.
+  // Which ran: run.js's run, once, or loop.js's service, and the IMPORTER_MODE read. order also
+  // has which service the newest message posted to the log channel is recorded for, in turn.
   const started = [];
   const modes = [];
+  const order = [];
 
   // As in Node, exit() without a code exits with process.exitCode, or 0 if that is not set.
   const fakeProcess = new EventEmitter();
@@ -55,6 +57,7 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
     if (given) options.push([name, { ...given }]);
   };
   const dependencies = {
+    'scbl-lib/db': { recordLogMessages: (service) => order.push(`record ${service}`) },
     'scbl-lib/utils': { describeError, stackTrace },
     './src/core.js': {
       default: {
@@ -88,6 +91,7 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
     './src/run.js': {
       default: (given) => {
         started.push('run');
+        order.push('run');
         steps = given;
         return result.promise;
       },
@@ -101,6 +105,7 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
     './src/loop.js': {
       default: (given) => {
         started.push('loop');
+        order.push('loop');
         steps = given;
         return result.promise;
       },
@@ -146,6 +151,7 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
     leftWaiting,
     started,
     modes,
+    order,
     process: fakeProcess,
     steps: () => steps
   };
@@ -319,6 +325,18 @@ for (const [value, runner] of [
   assert.deepStrictEqual(index.calls, []);
 }
 
+// The newest message the importer posts to the log channel is written to the database, as the web
+// server's and the bot's are, in both modes, from before the run or the service starts, so the
+// importer service, also its next process, can tell whether its status message is still below
+// every other.
+for (const [env, runner] of [
+  [{}, 'run'],
+  [{ IMPORTER_MODE: 'loop' }, 'loop']
+]) {
+  const index = await loadIndex({ env });
+  assert.deepStrictEqual(index.order, ['record importer', runner]);
+}
+
 console.log(
-  'Importer entry point checks passed: the steps, the dry run step, exit codes, unhandled rejections, a run left waiting, and IMPORTER_MODE.'
+  'Importer entry point checks passed: the steps, the dry run step, exit codes, unhandled rejections, a run left waiting, IMPORTER_MODE, and the newest message posted recorded.'
 );

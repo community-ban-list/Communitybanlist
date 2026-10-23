@@ -1,6 +1,13 @@
 import { battlemetricsRequestCount } from 'scbl-lib/apis';
-import { connect, disconnect, sequelize, takeServiceLock } from 'scbl-lib/db';
-import { describeError, Logger } from 'scbl-lib/utils';
+import {
+  connect,
+  disconnect,
+  flushLogMessages,
+  readLogMessage,
+  sequelize,
+  takeServiceLock
+} from 'scbl-lib/db';
+import { describeError, isNewerMessage, Logger, newerMessage } from 'scbl-lib/utils';
 
 import startHealthCheckServer, { checkHealth } from './health-check-server.js';
 import { isMissingTable, readService, saveService, succeeded } from './run-record.js';
@@ -86,6 +93,24 @@ const DATABASE_MAX_DELAY = 60 * 1000;
 // once. The web server and the bot post to the same webhook, and Discord limits each webhook.
 const STATUS_EDIT_INTERVAL = 60 * 1000;
 
+// With IMPORTER_STATUS_AT_BOTTOM, the status message is kept below the other messages CBL's
+// services post to the log channel (see keepAtBottom). Once a minute the service checks whether a
+// newer one is there: one it posted itself, which it knows of at once, or one the web server, the
+// bot or an earlier process of its own posted, which each writes to the database (see
+// scbl-lib/db/log-channel.js). If so, it posts its status message again, below it, and deletes the
+// old one, at most once a minute, except that its own embed of a cycle and its hourly summary are
+// followed within seconds, once they are in the channel, after a pause that lets the lines posted
+// with them go first.
+const BOTTOM_CHECK_INTERVAL = 60 * 1000;
+const REPORT_MOVE_DELAY = 3 * 1000;
+
+// What an old copy of the status message that could not be deleted is changed to, so it never
+// looks like the current one. Its delete is tried again with the next check or move.
+const MOVED_PAYLOAD = {
+  content: "The CBL importer service's status has moved to the bottom of the channel.",
+  embeds: []
+};
+
 // docker stop gives the service 60 seconds (stop_grace_period) before it kills it. Once a signal
 // asks the service to stop, its end, from saving the last cycle's record to releasing the locks,
 // waits for nothing beyond 55 seconds after the signal, nor beyond END_TIMEOUT after the end began,
@@ -122,6 +147,11 @@ const HARD_EXIT_FLUSH = 5 * 1000;
 // the edit found deleted and posted again.
 const SENT_RESERVE = 5 * 1000;
 
+// The end waits at most this long to write the newest message the service posted to the database
+// (see recordNewest), which takes a moment when the database answers, so one that does not cannot
+// take the time the end's log messages need.
+const NEWEST_TIMEOUT = 2 * 1000;
+
 // The text of a setting, without spaces or one pair of quotes around it, in lower case, as the
 // importer reads its switches (see unquote in ban-list-sync.js).
 function settingText(value) {
@@ -150,6 +180,19 @@ export function readDiscordMode(value) {
   return {
     mode: DEFAULT_DISCORD_MODE,
     warning: `Warning: IMPORTER_LOOP_DISCORD must be changes, status or both, not "${value}", so the importer service posts both.`
+  };
+}
+
+// Whether IMPORTER_STATUS_AT_BOTTOM keeps the status message at the bottom of the log channel, as
+// { on }: on with 1, true, on or yes, or when it is not set, and off with 0, false, off or no, which
+// edits the message where it is. An invalid value is taken as on, the default, with a warning.
+export function readStatusAtBottom(value) {
+  const setting = settingText(value);
+  if (setting === '' || ['1', 'true', 'on', 'yes'].includes(setting)) return { on: true };
+  if (['0', 'false', 'off', 'no'].includes(setting)) return { on: false };
+  return {
+    on: true,
+    warning: `Warning: IMPORTER_STATUS_AT_BOTTOM must be 1 or 0, not "${value}", so the importer service keeps its status message at the bottom of the log channel.`
   };
 }
 
@@ -184,7 +227,9 @@ function memoryNow() {
 // While it goes, it keeps a health server, for the Docker health check (see
 // health-check-server.js). It posts the alerts that runs post, in every mode, and, as
 // IMPORTER_LOOP_DISCORD says, the embed of each cycle that changed something or had a problem,
-// and its status message and hourly summary (see service-status.js). Nothing it posts waits for
+// and its status message and hourly summary (see service-status.js). With
+// IMPORTER_STATUS_AT_BOTTOM, on unless it is 0, it keeps its status message below the other
+// messages CBL's services post to the log channel (see keepAtBottom). Nothing it posts waits for
 // Discord.
 export default async function runLoop(steps) {
   const cycleSeconds = readSeconds('IMPORTER_CYCLE_SECONDS', DEFAULT_CYCLE_SECONDS);
@@ -195,6 +240,7 @@ export default async function runLoop(steps) {
   const discord = readDiscordMode(process.env.IMPORTER_LOOP_DISCORD);
   const postsCycles = discord.mode !== 'status';
   const postsStatus = discord.mode !== 'changes';
+  const atBottom = readStatusAtBottom(process.env.IMPORTER_STATUS_AT_BOTTOM);
   const gitSha = process.env.GIT_SHA || 'unknown';
 
   // What the service is doing, for the health check: when it took the service lock, the cycle
@@ -247,6 +293,21 @@ export default async function runLoop(steps) {
   let statusMessage = null;
   let statusID = null;
   let summaryTimer = null;
+  // The saves of the service's row, one at a time, in turn (see saveRow).
+  let rowSaves = Promise.resolve();
+  // The old copies of the status message, posted before it was posted again below newer messages,
+  // that are still to be deleted, by ID, each with whether it may be deleted yet, as the ID of the
+  // message that replaced it has been saved, and whether it was changed to say the status moved, as
+  // it could not be deleted (see deleteOldCopies), and whether they are being deleted. Then,
+  // with IMPORTER_STATUS_AT_BOTTOM, when the message was last posted again, the timers of the next
+  // check and of the move after the service's own embed or summary, and whether a check is reading
+  // the database (see keepAtBottom).
+  const oldCopies = new Map();
+  let deletingCopies = false;
+  let movedAt = -Infinity;
+  let bottomTimer = null;
+  let reportTimer = null;
+  let readingNewest = false;
   // The end of the service, once it is ending, and by when the locks are released.
   let finishing = null;
   let releaseBy = null;
@@ -338,6 +399,144 @@ export default async function runLoop(steps) {
   // Say that the service's status changed, which its next edit shows, at most once a minute.
   const updateStatus = () => statusMessage?.update(drawStatus);
 
+  // The ID of the newest message in the log channel that CBL's services wrote to the database
+  // (see scbl-lib/db/log-channel.js), null when none has, or undefined when it could not be read,
+  // waiting at most RECORD_TIMEOUT. It never fails.
+  const readNewest = async () => {
+    try {
+      return await withTimeout(
+        readLogMessage(),
+        RECORD_TIMEOUT,
+        'Reading the newest message in the log channel'
+      );
+    } catch (err) {
+      console.warn(
+        `Warning: could not read the newest message in the log channel: ${describeError(err)}`
+      );
+      return undefined;
+    }
+  };
+
+  // Whether the status message may be moved to the bottom of the log channel now: it is kept there,
+  // it has been posted, and the service is not ending, as its end only edits it.
+  const movable = () =>
+    atBottom.on &&
+    statusMessage !== null &&
+    !statusMessage.stopped &&
+    statusID !== null &&
+    stopping === null &&
+    !health.stopping;
+
+  // Delete the old copies of the status message that may be deleted, one at a time, in the
+  // background, also those that may be meanwhile. A copy that cannot be deleted is changed, once, to
+  // say that the status moved, so it never looks like the current one, and its delete is tried
+  // again with the next check or move, unless Discord refused it, as it would again. It never
+  // fails.
+  const deleteOldCopies = async () => {
+    if (deletingCopies || oldCopies.size === 0 || !Logger.discordWebhook) return;
+    deletingCopies = true;
+    const tried = new Set();
+    try {
+      for (;;) {
+        const next = [...oldCopies].find(([id, copy]) => copy.ready && !tried.has(id));
+        if (!next) break;
+        const [id, copy] = next;
+        tried.add(id);
+        const outcome = await Logger.deleteMessage(id);
+        if (outcome === 'deleted' || outcome === 'gone') {
+          oldCopies.delete(id);
+          console.log(
+            outcome === 'deleted'
+              ? `Deleted the old copy of the status message, ${id}.`
+              : `The old copy of the status message, ${id}, was deleted already.`
+          );
+          continue;
+        }
+        if (!copy.marked) copy.marked = await Logger.editMessage(id, MOVED_PAYLOAD);
+        if (outcome === 'refused') oldCopies.delete(id);
+      }
+    } catch (err) {
+      console.warn(
+        `Warning: could not delete the old copies of the status message: ${describeError(err)}`
+      );
+    } finally {
+      deletingCopies = false;
+    }
+  };
+
+  // Move the status message to the bottom of the log channel if a newer message is there: post it
+  // again, below that one, and delete the old one once the new one's ID is saved (see startStatus).
+  // The newest is the newest the service posted itself, which it knows at once, or, unless this is
+  // the move after its own embed or summary (report), the newest in the database, which also has
+  // the web server's and the bot's. It moves at most once a minute, but for that move, and tries
+  // again to delete the old copies that are left. It never fails.
+  const keepAtBottom = async ({ report = false } = {}) => {
+    if (!movable()) return;
+    deleteOldCopies();
+    let newest = Logger.newestMessageID ?? null;
+    if (!report && !readingNewest) {
+      readingNewest = true;
+      try {
+        newest = newerMessage(newest, await readNewest());
+      } finally {
+        readingNewest = false;
+      }
+    }
+    if (!movable() || !isNewerMessage(newest, statusID)) return;
+    if (!report && Date.now() - movedAt < BOTTOM_CHECK_INTERVAL) return;
+    if (statusMessage.repost(drawStatus)) {
+      movedAt = Date.now();
+      scheduleBottomCheck();
+    }
+  };
+
+  // Check once a minute, from the last check or move on, whether the status message is still at the
+  // bottom of the log channel, until the service ends or the message stops.
+  const scheduleBottomCheck = () => {
+    clearTimeout(bottomTimer);
+    bottomTimer = setTimeout(() => {
+      bottomTimer = null;
+      keepAtBottom()
+        .catch((err) =>
+          console.warn(
+            `Warning: could not keep the status message at the bottom: ${describeError(err)}`
+          )
+        )
+        .finally(() => {
+          if (
+            bottomTimer === null &&
+            stopping === null &&
+            !health.stopping &&
+            !statusMessage?.stopped
+          )
+            scheduleBottomCheck();
+        });
+    }, BOTTOM_CHECK_INTERVAL);
+    // It must not keep the process running.
+    bottomTimer.unref?.();
+  };
+
+  // Once the service's own embed of a cycle, or its hourly summary, is in the log channel, as
+  // posting, which Logger.post returned, says with its ID, move the status message below it within
+  // seconds, rather than at the next check.
+  const moveBelow = (posting) => {
+    if (!atBottom.on) return;
+    Promise.resolve(posting)
+      .then((id) => {
+        if (!id || reportTimer !== null || !movable()) return;
+        reportTimer = setTimeout(() => {
+          reportTimer = null;
+          keepAtBottom({ report: true }).catch((err) =>
+            console.warn(
+              `Warning: could not keep the status message at the bottom: ${describeError(err)}`
+            )
+          );
+        }, REPORT_MOVE_DELAY);
+        reportTimer.unref?.();
+      })
+      .catch(() => {});
+  };
+
   // Post the hourly summary when it is due, and start the next hour's totals.
   const scheduleSummary = () => {
     if (!postsStatus) return;
@@ -345,7 +544,7 @@ export default async function runLoop(steps) {
       () => {
         const until = Date.now();
         try {
-          Logger.post({ embeds: [renderHourlySummary(totals, until)] });
+          moveBelow(Logger.post({ embeds: [renderHourlySummary(totals, until)] }));
         } catch (err) {
           console.warn(`Warning: could not post the hourly summary: ${describeError(err)}`);
         }
@@ -359,12 +558,37 @@ export default async function runLoop(steps) {
     summaryTimer.unref?.();
   };
 
+  // Save the service's row, as write() does, once the saves asked for before it are done, or have
+  // failed, so a save never lands after a later one, e.g. one with the ID of a status message that
+  // has moved on, after the one with the ID it moved to, or after the end's, which says how the
+  // service ended. Each save writes the row as it is when its turn comes. A save that has not ended
+  // RECORD_TIMEOUT after the next was asked for, e.g. on a connection that was cut off, holds that
+  // one up no longer. Settles as write() does.
+  const saveRow = (write) => {
+    const saving = withTimeout(rowSaves, RECORD_TIMEOUT, 'The save before')
+      .catch(() => {})
+      .then(write);
+    rowSaves = saving.catch(() => {});
+    return saving;
+  };
+
+  // Whether the message with this ID is known to be the newest that CBL's services posted to the
+  // log channel: the database has one no newer, and the service has posted none newer itself. It is
+  // not known when the database has none, or cannot say.
+  const isNewest = async (id) => {
+    const recorded = await readNewest();
+    return Boolean(recorded) && !isNewerMessage(newerMessage(recorded, Logger.newestMessageID), id);
+  };
+
   // Once the importer's tables are there, in the first cycle: read the service's row, say if the
   // process before this one ended without saying how, e.g. as it was killed or ran out of memory,
   // save this one's, and post the status message, or edit the one the last process kept up to date,
-  // if it is still there. It never holds up or fails the cycle for long. A first cycle that waits
-  // for the run lock does it early, before its migrations, so the status message shows the wait
-  // (see waitForRunLock), unless the importer's tables are not there yet, when it waits for the
+  // if it is still there. With IMPORTER_STATUS_AT_BOTTOM, that one is edited only when it is known
+  // to be the newest message in the log channel, and otherwise posted again at once, below the
+  // others, and deleted, as a move does (see keepAtBottom). The old copies the last process left
+  // are deleted. It never holds up or fails the cycle for long. A first cycle that waits for the run
+  // lock does it early, before its migrations, so the status message shows the wait (see
+  // waitForRunLock), unless the importer's tables are not there yet, when it waits for the
   // migrations to make them. Resolves with whether it was done.
   const startStatus = async ({ early = false } = {}) => {
     let saved = null;
@@ -381,27 +605,63 @@ export default async function runLoop(steps) {
         `The importer service's last process, which started at ${saved.startedAt}, ended without saying how, e.g. as it was killed, ran out of memory, was ended at once by a second signal, or could not reach the database as it ended.`
       );
     statusID = saved?.messageId ?? null;
-    const save = () => saveService({ messageId: statusID, startedAt });
+    for (const id of saved?.oldMessageIds ?? [])
+      if (id !== statusID) oldCopies.set(id, { ready: true, marked: false });
+    const save = () =>
+      saveRow(() =>
+        saveService({ messageId: statusID, startedAt, oldMessageIds: [...oldCopies.keys()] })
+      );
     try {
       await withTimeout(save(), RECORD_TIMEOUT, 'Saving the importer service row');
     } catch (err) {
       console.warn(`Warning: could not save the importer service row: ${describeError(err)}`);
     }
     if (postsStatus) {
+      // The last process's message is below every other only if nothing newer is known: every way a
+      // process ends posts a line below it, which the database has, unless writing it failed.
+      const repost =
+        atBottom.on &&
+        Boolean(Logger.discordWebhook) &&
+        statusID !== null &&
+        !(await isNewest(statusID)) &&
+        !health.stopping;
       statusMessage = Logger.statusMessage(drawStatus, {
         messageID: statusID,
         editInterval: STATUS_EDIT_INTERVAL,
         repostIfDeleted: true,
-        // Each message posted, e.g. as the last one was deleted, is saved for the next process.
-        // Once the service is ending, its end saves the ID with how it ended, once the message's
-        // final edit has been sent (see endService).
-        onPosted: (id) => {
+        repost,
+        // Each message posted, e.g. as the last one was deleted, is saved for the next process at
+        // once. One posted again below newer messages replaces an old copy, which is saved with it,
+        // and deleted only once that save is done, or could not be. Once the service is ending, its
+        // end saves the ID with how it ended, once the message's final edit has been sent (see
+        // endService), and the old copy is deleted at once.
+        onPosted: (id, replaced) => {
           statusID = id;
-          return health.stopping ? undefined : save();
+          const old = replaced && replaced !== id ? { ready: false, marked: false } : null;
+          if (old) {
+            oldCopies.set(replaced, old);
+            console.log(
+              `Posted the status message again, below newer messages in the log channel, as ${id}, so its old copy, ${replaced}, is deleted.`
+            );
+          }
+          const deleteOld = () => {
+            if (old) old.ready = true;
+            return deleteOldCopies();
+          };
+          if (health.stopping) {
+            deleteOld();
+            return undefined;
+          }
+          return withTimeout(save(), RECORD_TIMEOUT, 'Saving the importer service row').finally(
+            deleteOld
+          );
         }
       });
+      if (repost) movedAt = Date.now();
       scheduleSummary();
+      if (atBottom.on && !statusMessage.stopped) scheduleBottomCheck();
     }
+    deleteOldCopies();
     return true;
   };
 
@@ -416,16 +676,36 @@ export default async function runLoop(steps) {
   };
 
   // Save how the service ended in its row, ended being { startedAt, endedAt, outcome }, with the
-  // ID of the status message, waiting at most ms. It never fails the end.
+  // ID of the status message and the old copies of it still to be deleted, waiting at most ms. It
+  // never fails the end.
   const saveEnded = async (ended, messageId, ms) => {
     try {
       await withTimeout(
-        saveService({ ...ended, messageId }),
+        saveRow(() => saveService({ ...ended, messageId, oldMessageIds: [...oldCopies.keys()] })),
         ms,
         'Saving how the importer service ended'
       );
     } catch (err) {
       console.warn(`Warning: could not save how the service ended: ${describeError(err)}`);
+    }
+  };
+
+  // Write the newest message the service posted to the database now, if it has not been written
+  // yet, e.g. the line that says the service is stopping, so the next process knows that this
+  // one's status message is not the newest, waiting at most ms, and never more than
+  // NEWEST_TIMEOUT. Only a service with a status message needs it. It never fails the end.
+  const recordNewest = async (ms) => {
+    if (!statusMessage) return;
+    try {
+      await withTimeout(
+        flushLogMessages(),
+        Math.min(ms, NEWEST_TIMEOUT),
+        'Writing it to the database'
+      );
+    } catch (err) {
+      console.warn(
+        `Warning: could not record the newest message in the log channel as the service ended: ${describeError(err)}`
+      );
     }
   };
 
@@ -461,13 +741,17 @@ export default async function runLoop(steps) {
   // the locks, all in the time left (see left). The status message's final edit may find it
   // deleted, and post it again, so the end waits for that edit to be sent for as long as it can,
   // keeping SENT_RESERVE, and then saves the row again with the new ID, for the next process to
-  // edit the message that says how this one ended. A connection that did not close in time, as its
-  // statement is still running, has the statement stopped before the locks are released (see
-  // stopStatements). Resolves with the exit code.
+  // edit the message that says how this one ended. Meanwhile it writes the newest message it
+  // posted to the database (see recordNewest). It never moves the status message: the end only
+  // edits it. A connection that did not close in time, as its statement is still running, has the
+  // statement stopped before the locks are released (see stopStatements). Resolves with the exit
+  // code.
   const endService = () => {
     finishing ??= (async () => {
       health.stopping = true;
       clearTimeout(summaryTimer);
+      clearTimeout(bottomTimer);
+      clearTimeout(reportTimer);
       current = null;
       currentBefore = null;
       nextAt = null;
@@ -492,7 +776,10 @@ export default async function runLoop(steps) {
               console.warn(`Warning: ${describeError(err)}`);
             }
           }
-          if (statusID !== saved) await saveEnded(ended, statusID, left(RECORD_TIMEOUT));
+          await Promise.all([
+            statusID !== saved && saveEnded(ended, statusID, left(RECORD_TIMEOUT)),
+            recordNewest(left(RECORD_TIMEOUT))
+          ]);
         }
         try {
           await withTimeout(
@@ -544,6 +831,8 @@ export default async function runLoop(steps) {
       health.stopping = true;
       clearTimeout(summaryTimer);
       clearTimeout(stopTimer);
+      clearTimeout(bottomTimer);
+      clearTimeout(reportTimer);
       finishStatus();
       const saves = prepared || statusStarted;
       const ended = {
@@ -558,7 +847,8 @@ export default async function runLoop(steps) {
         saves && saveEnded(ended, saved, until()),
         record && saveRunRecord(record, until()),
         statusMessage &&
-          withTimeout(statusMessage.sent(), until(), "Sending the status message's final edit")
+          withTimeout(statusMessage.sent(), until(), "Sending the status message's final edit"),
+        recordNewest(until())
       ]);
       if (saves && statusID !== saved && until() > 0) await saveEnded(ended, statusID, until());
       await stopStatements(STOP_STATEMENTS_TIMEOUT);
@@ -752,7 +1042,9 @@ export default async function runLoop(steps) {
     });
     if (postsCycles && isNoteworthy(ended, numbers, { lines: Logger.channelLines - before.lines }))
       try {
-        Logger.post({ embeds: [renderRunStatus({ ...cycle.state(), cycle: ended.cycle })] });
+        moveBelow(
+          Logger.post({ embeds: [renderRunStatus({ ...cycle.state(), cycle: ended.cycle })] })
+        );
       } catch (err) {
         console.warn(`Warning: could not post the cycle's embed: ${describeError(err)}`);
       }
@@ -974,10 +1266,14 @@ export default async function runLoop(steps) {
     totals = newTotals(startedAt);
     Object.assign(health, { lockedAt: startedAt, waitingFor: null, waitingSince: null });
     if (discord.warning) Logger.important('Core', discord.warning);
+    if (atBottom.warning) Logger.important('Core', atBottom.warning);
+    const statusPlace = atBottom.on
+      ? ', its status message kept at the bottom of the log channel'
+      : ', its status message edited where it is';
     console.log(
       `Started the CBL importer service (commit ${gitSha}): a cycle every ${cycleSeconds}s, time limit ${maxCycleSeconds}s, cadence ${cadenceSeconds}s, ${
         Logger.discordWebhook
-          ? `posting ${discord.mode} to Discord`
+          ? `posting ${discord.mode} to Discord${postsStatus ? statusPlace : ''}`
           : 'posting nothing to Discord, not even alerts, as Discord logging is off'
       }.`
     );
@@ -1006,6 +1302,8 @@ export default async function runLoop(steps) {
     setLeftWaiting(null);
     clearTimeout(summaryTimer);
     clearTimeout(stopTimer);
+    clearTimeout(bottomTimer);
+    clearTimeout(reportTimer);
     setProgressListener(null);
     process.off('SIGTERM', onSignal);
     process.off('SIGINT', onSignal);

@@ -1,5 +1,5 @@
 import { JWT_AUTH } from 'scbl-lib/config';
-import { connect } from 'scbl-lib/db';
+import { connect, recordLogMessages } from 'scbl-lib/db';
 import { describeError, stackTrace } from 'scbl-lib/utils';
 
 import server from './src/app.js';
@@ -13,6 +13,10 @@ const PORT = process.env.PORT || 80;
 process.on('unhandledRejection', (reason) =>
   console.error(`Unhandled promise rejection: ${describeError(reason)}${stackTrace(reason)}`)
 );
+
+// The newest message the web server posts to the log channel is kept in the database, so the
+// importer service can keep its status message below it. It never holds up or fails a request.
+recordLogMessages('web');
 
 // Anyone who knows the secret that signs sign-in tokens can sign in as anyone, so refuse to start
 // without a private one.
