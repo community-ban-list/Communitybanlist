@@ -37,6 +37,8 @@ const dependencies = {
   'scbl-lib/config': { HOST: 'https://communitybanlist.example' },
   // The reputation steps' retries are checked in lock-retries.js.
   './apply-list.js': { retryOperation: (operation) => operation() },
+  // The reputation points statement is checked in reputation-points.js.
+  './reputation-points.js': { RECALCULATE_POINTS: '' },
   './run-control.js': { checkRunLock: async () => {}, stopIfRequested() {}, reportProgress() {} }
 };
 
