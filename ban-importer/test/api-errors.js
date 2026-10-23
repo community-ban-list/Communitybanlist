@@ -32,6 +32,8 @@ const dependencies = {
     sendDiscordWebhook() {}
   },
   'scbl-lib/config': { HOST: 'https://communitybanlist.example' },
+  // The reputation steps' retries are checked in lock-retries.js.
+  './apply-list.js': { retryOperation: (operation) => operation() },
   './run-control.js': {
     checkRunLock: async () => {},
     stopIfRequested() {},

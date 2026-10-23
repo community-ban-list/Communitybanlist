@@ -758,7 +758,8 @@ async function loadCore(models) {
       Logger,
       sendDiscordWebhook() {}
     },
-    'scbl-lib/config': { HOST: 'https://communitybanlist.example' }
+    'scbl-lib/config': { HOST: 'https://communitybanlist.example' },
+    './apply-list.js': { retryOperation: (operation) => operation() }
   });
 }
 
@@ -1010,7 +1011,8 @@ function database(query, transaction = async (work) => work({})) {
       Op: { in: 'in', notIn: 'notIn', not: 'not', ne: 'ne', or: 'or' },
       Transaction: { ISOLATION_LEVELS: { SERIALIZABLE: 'SERIALIZABLE' } }
     },
-    'scbl-lib/utils': { Logger }
+    'scbl-lib/utils': { Logger },
+    './apply-list.js': { retryOperation: (operation) => operation() }
   });
   const error = await ended(manager.exports.updateExportBans(), 'the export ban update');
   assert.strictEqual(error.name, 'RunStopped');
