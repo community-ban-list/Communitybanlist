@@ -8,7 +8,8 @@ import {
   BATTLEMETRICS_API_RESERVOIR_VARIABLE
 } from '../config.js';
 
-// How long BattleMetrics has to answer a request in full, after which the request is cut off.
+// How long BattleMetrics has to answer a request in full, after which the request is cut off,
+// unless its caller gives its attempts other time limits (options.timeouts, see below).
 const BATTLEMETRICS_TIMEOUT = 30 * 1000;
 
 // BattleMetrics allows 300 requests a minute for the whole API key. The web server and the
@@ -115,7 +116,9 @@ const request = createApiClient({
 });
 
 // options.repeatable marks a POST as safe to make again after a timeout or a 5xx, for one that does
-// no harm when BattleMetrics carries it out twice.
+// no harm when BattleMetrics carries it out twice. options.timeouts gives each attempt its own time
+// limit, and options.beforeAttempt can end the request before an attempt is sent, as the importer's
+// reads of pages of bans do (see create-api-client.js). The web server and the bot give neither.
 export default async function (method, url, params, data, priority = 5, options) {
   reportBudget();
   return request(method, url, params, data, priority, options);

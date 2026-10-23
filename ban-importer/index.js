@@ -48,14 +48,14 @@ function counted(name, work) {
 // gives. A run that is asked to stop does so between them. A dry run (IMPORTER_DRY_RUN) only
 // imports, writing nothing, as every other step writes. Bans whose expiry has passed are marked
 // expired after the import, which marks those it fetches, and before the steps that recalculate
-// players from whether their bans have expired. The Steam step works out how many profiles to
-// refresh from how often runs start.
+// players from whether their bans have expired. The import works out when each list's next full
+// read is due, and the Steam step how many profiles to refresh, from how often runs start.
 const steps = [];
 const writes = !banImporter.dryRun;
 if (TASKS_TO_COMPLETE.IMPORT_BANS)
   steps.push({
     name: 'importBans',
-    run: () => banImporter.importBans(),
+    run: ({ cadenceSeconds } = {}) => banImporter.importBans({ cadenceSeconds }),
     counts: () => banImporter.report()
   });
 if (TASKS_TO_COMPLETE.EXPIRE_BANS && writes)

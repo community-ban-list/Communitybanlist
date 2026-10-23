@@ -23,7 +23,8 @@ export const REASONS = {
   DRIFT: 'drift',
   // Its newest pages held only new bans, more than a head poll follows.
   OVERFLOW: 'overflow',
-  // Its last full read is older than IMPORTER_FULL_SCAN_MINUTES.
+  // Its periodic full read is due, at its slot in IMPORTER_FULL_SCAN_MINUTES (see nextFullScan), or
+  // its last full read is older than a list may wait (see latestFullScan).
   PERIODIC: 'periodic',
   // Head polls are off, so every list is read in full on every run.
   EVERY_RUN: 'every_run',
@@ -47,12 +48,16 @@ const PRIORITY = {
 // The reasons a head poll can find, which are kept in a list's row until a full read is made.
 const TRIGGERS = [REASONS.REMOVAL, REASONS.DRIFT, REASONS.OVERFLOW];
 
-// By default a list is read in full every 30 minutes, less up to a fifth of that at random, so
-// lists read in full together spread out over the runs after. IMPORTER_FULL_SCAN_MINUTES changes it,
-// to at most a week.
+// By default a list is read in full every 30 minutes, at a time of its own in each 30 minutes, its
+// slot, so that the lists' full reads are spread over the runs by their pages (see fullScanSlots).
+// IMPORTER_FULL_SCAN_MINUTES changes it, to at most a week.
 export const DEFAULT_FULL_SCAN_MINUTES = 30;
 const MAX_FULL_SCAN_MINUTES = 7 * 24 * 60;
-export const FULL_SCAN_JITTER = 0.2;
+const MINUTE = 60 * 1000;
+
+// BattleMetrics gives a list's bans 100 to a page, so a read of all of a list takes a request for
+// about every 100 of its bans.
+export const PAGE_SIZE = 100;
 
 // A list's row keeps the IDs of the bans on its newest page, at most a page of them.
 export const MAX_HEAD_UIDS = 100;
@@ -137,12 +142,13 @@ function removalDue({ row, pending, allowMassRemoval, now }) {
 // - allowMassRemoval: whether IMPORTER_ALLOW_MASS_REMOVAL names it;
 // - now, in milliseconds;
 // - headPoll: whether head polls are on;
-// - fullScanMinutes: IMPORTER_FULL_SCAN_MINUTES.
+// - fullScanMinutes: IMPORTER_FULL_SCAN_MINUTES;
+// - cadenceSeconds: how often runs start, or null when it is not known.
 // Returns { read: 'head' } to poll its newest page, or { read: 'full', reason } to read it in full,
 // with the most urgent of the reasons that apply. A list is due its periodic full read once its
-// row's nextFullScanAt has passed, or it has none, or once its last full read is older than
-// fullScanMinutes, so a run every few hours reads every list in full, as runs did before head
-// polls.
+// row's nextFullScanAt has passed, or it has none, or once its last full read is older than a list
+// may wait (see latestFullScan), so a run every few hours reads every list in full, as runs did
+// before head polls. The other reasons do not wait for a list's slot: each is due at once.
 export function planRead({
   type,
   row = null,
@@ -151,7 +157,8 @@ export function planRead({
   allowMassRemoval = false,
   now,
   headPoll = true,
-  fullScanMinutes = DEFAULT_FULL_SCAN_MINUTES
+  fullScanMinutes = DEFAULT_FULL_SCAN_MINUTES,
+  cadenceSeconds = null
 }) {
   const full = (reason) => ({ read: 'full', reason });
   if (row && row.sourceKey !== sourceKey) return full(REASONS.SOURCE);
@@ -165,7 +172,8 @@ export function planRead({
   const nextFullScanAt = timeOf(row.nextFullScanAt);
   const due = nextFullScanAt === null || nextFullScanAt <= now;
   if (due && TRIGGERS.includes(row.scanReason)) return full(row.scanReason);
-  if (due || lastFullScanAt <= now - fullScanMinutes * 60 * 1000) return full(REASONS.PERIODIC);
+  if (due || lastFullScanAt <= now - latestFullScan(fullScanMinutes, cadenceSeconds))
+    return full(REASONS.PERIODIC);
   if (!headPoll) return full(REASONS.EVERY_RUN);
 
   // A head poll compares the list's newest page with the one its last read saw, and BattleMetrics'
@@ -230,33 +238,95 @@ export function shouldFollow(pages, known, maxPages = MAX_HEAD_PAGES) {
   return Boolean(last.next) && pages.length < maxPages && !last.uids.some((uid) => known.has(uid));
 }
 
-// When a list read in full in a run that planned its reads at now is next due to be:
-// fullScanMinutes later, less up to a fifth of that at random, in milliseconds.
-export function nextFullScan(now, fullScanMinutes, random = Math.random) {
-  return now + Math.round(fullScanMinutes * 60 * 1000 * (1 - FULL_SCAN_JITTER * random()));
+// How many pages a read of all of a list takes, about, by its row: BattleMetrics' count of its bans
+// at its last read, or else the bans it has here, a page for every 100 of them, and at least one.
+// null for a list without a row, or whose row has neither count.
+export function pagesOf(row) {
+  for (const value of [row?.headTotal, row?.storedCount]) {
+    const count = Number(value ?? NaN);
+    if (Number.isInteger(count) && count >= 0) return Math.max(1, Math.ceil(count / PAGE_SIZE));
+  }
+  return null;
 }
 
-// The schedule to save in a BattleMetrics list's row after an attempt at it, in a run that planned
-// its reads at now (planRead's now), as { nextFullScanAt, scanReason }, or undefined to keep the one
-// it has:
-// - after a full read that completed without an error, the next periodic one, or, when bans it no
-//   longer had wait for a confirming read, the time the first of them is due (confirmAt), if that
-//   is sooner. The periodic one is counted from now, not from when the list was read, so a run
-//   that starts fullScanMinutes after this one finds the list due, however late in this run it was
-//   read;
+// Each BattleMetrics list's slot: when in each IMPORTER_FULL_SCAN_MINUTES its periodic full read
+// falls due, in milliseconds from the start of the interval. Intervals are counted from midnight UTC
+// on 1 January 1970, so every run finds the same slots, whenever it starts. The lists, in the order
+// of their IDs, share the interval in proportion to how many pages a read of all of each takes
+// (pages, see pagesOf), and each list's slot is the middle of its share. So the lists whose slots
+// fall in any stretch of the interval, such as the time between two cycles of the importer service,
+// take about that stretch's share of all the lists' pages, whatever the stretch, though a list is
+// always read whole: a large list's read falls in one stretch, and the stretches next to it get
+// less. A list that grows or shrinks moves the slots after it by little. lists is [{ id, pages }].
+// Returns the slots, by list ID.
+export function fullScanSlots(lists, fullScanMinutes) {
+  const interval = fullScanMinutes * MINUTE;
+  const shares = [...lists]
+    .map(({ id, pages }) => ({ id, pages: Math.max(1, Number(pages) || 1) }))
+    .sort((a, b) => Number(a.id) - Number(b.id));
+  const total = shares.reduce((sum, { pages }) => sum + pages, 0);
+  const slots = new Map();
+  let before = 0;
+  for (const { id, pages } of shares) {
+    slots.set(id, Math.floor(((before + pages / 2) / total) * interval));
+    before += pages;
+  }
+  return slots;
+}
+
+// How often runs start, in milliseconds, from cadenceSeconds, or Infinity when it is not known.
+function cadenceOf(cadenceSeconds) {
+  return Number.isFinite(cadenceSeconds) && cadenceSeconds > 0 ? cadenceSeconds * 1000 : Infinity;
+}
+
+// How long after its last full read a list may wait for its next one, in milliseconds. With runs
+// starting every cadenceSeconds, up to half of IMPORTER_FULL_SCAN_MINUTES apart, it is 1.5 times
+// IMPORTER_FULL_SCAN_MINUTES less a cadence, so the run that starts next once the list is due
+// starts within 1.5 times IMPORTER_FULL_SCAN_MINUTES of its last full read. With runs further
+// apart, or a cadence that is not known, it is IMPORTER_FULL_SCAN_MINUTES, as before slots.
+export function latestFullScan(fullScanMinutes, cadenceSeconds = null) {
+  const interval = fullScanMinutes * MINUTE;
+  return interval + interval / 2 - Math.min(cadenceOf(cadenceSeconds), interval / 2);
+}
+
+// When a list read in full at readAt is next due to be read in full, in milliseconds:
+// - with runs less than IMPORTER_FULL_SCAN_MINUTES apart, at its slot (see fullScanSlots), the one
+//   in the IMPORTER_FULL_SCAN_MINUTES up to latestFullScan after readAt. A list read in the run that
+//   started next after its slot, even minutes into that run, is then due at the same slot an
+//   interval later. After a run that read many lists in full at once, e.g. the first, or the first
+//   after a long gap, each is due at its own slot, some sooner than an interval later and some
+//   later, though never at once, nor sooner than half an interval less a cadence after its read,
+//   so within an interval their full reads are spread over the runs again;
+// - with runs at least IMPORTER_FULL_SCAN_MINUTES apart, such as every 6 hours, or a cadence or slot
+//   that is not known, IMPORTER_FULL_SCAN_MINUTES after readAt, as every such run reads every list
+//   in full anyway.
+export function nextFullScan({ readAt, fullScanMinutes, cadenceSeconds = null, slot = null }) {
+  const interval = fullScanMinutes * MINUTE;
+  if (cadenceOf(cadenceSeconds) >= interval || !Number.isFinite(slot)) return readAt + interval;
+  const latest = readAt + latestFullScan(fullScanMinutes, cadenceSeconds);
+  return latest - ((((latest - slot) % interval) + interval) % interval);
+}
+
+// The schedule to save in a BattleMetrics list's row after an attempt at it, which ended at now, as
+// { nextFullScanAt, scanReason }, or undefined to keep the one it has:
+// - after a full read that completed without an error, the next periodic one (see nextFullScan),
+//   counted from now, which the row keeps as when the list was last read in full, or, when bans it
+//   no longer had wait for a confirming read, the time the first of them is due (confirmAt), if
+//   that is sooner. cadenceSeconds and slot are as for nextFullScan;
 // - after a head poll that found a reason to read the list in full (trigger), when the read in full
 //   did not complete without an error, at once, with that reason, so the next run reads it in full;
 // - after anything else, as it was. A list whose full read failed is still due one.
 export function scheduleAfter({
   now,
   fullScanMinutes,
+  cadenceSeconds = null,
+  slot = null,
   completed = false,
   confirmAt = null,
-  trigger = null,
-  random = Math.random
+  trigger = null
 }) {
   if (completed) {
-    const periodic = nextFullScan(now, fullScanMinutes, random);
+    const periodic = nextFullScan({ readAt: now, fullScanMinutes, cadenceSeconds, slot });
     return confirmAt !== null && confirmAt < periodic
       ? { nextFullScanAt: confirmAt, scanReason: REASONS.REMOVAL }
       : { nextFullScanAt: periodic, scanReason: REASONS.PERIODIC };

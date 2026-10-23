@@ -107,12 +107,14 @@ const axios = async (request) => {
 
 // Every attempt is cut off 30 s after it is sent, by a signal of its own: one shared with earlier
 // attempts, or made while the attempt waited in the queue or for a pause, could already have
-// aborted.
+// aborted. A check that gives its attempts other time limits sets limits to each request's.
+let limits = null;
 function assertSignals() {
   for (const [i, request] of requests.entries()) {
     const which = `Request ${i + 1}, ${request.method} ${request.url}`;
     assert.ok(request.signal instanceof FakeAbortSignal, which);
-    assert.strictEqual(request.signal.ms, 30000, which);
+    assert.strictEqual(request.signal.ms, limits?.[i] ?? 30000, which);
+    assert.strictEqual(request.timeout, request.signal.ms, which);
     assert.strictEqual(request.signal.createdAt, request.at, which);
     assert.strictEqual(request.abortedWhenSent, false, which);
   }
@@ -167,6 +169,7 @@ async function load() {
   });
   await module.evaluate();
   requests = [];
+  limits = null;
   logs.length = 0;
   reply = () => ({ status: 200, headers: {}, data: { data: [] } });
   client = module.namespace;
@@ -372,6 +375,146 @@ assert.strictEqual(requests.length, 3);
 assert.deepStrictEqual(gaps(), [30000 + 1200, 30000 + 4800]);
 assertSignals();
 
+// An answer that comes after ms, unless the request is cut off first. Its timer goes once the
+// request is cut off, so it moves the clock no further.
+const answerAfter = (ms, answer) => (request) =>
+  new Promise((resolve, reject) => {
+    const timer = fakeTimeout(() => resolve(answer), ms);
+    request.signal.addEventListener('abort', () => {
+      timers = timers.filter((other) => other !== timer);
+      reject(axiosError(request, { code: 'ERR_CANCELED', message: 'canceled' }));
+    });
+  });
+const PAGE_TIMEOUTS = [30000, 45000, 55000];
+
+// A caller can give its attempts time limits of their own, as the importer does for its reads of
+// pages of bans: each attempt is cut off after its own, by a signal of its own, and its error says
+// how long it had. The attempts, the waits between them and what counts as a failure are as for
+// any GET: 3 attempts, about 1 and 4 seconds apart, each a job of its own on the limiter, counted.
+battlemetrics = await load();
+limits = PAGE_TIMEOUTS;
+reply = hang;
+err = await failure(battlemetrics('get', 'bans', {}, undefined, 5, { timeouts: PAGE_TIMEOUTS }));
+assert.strictEqual(requests.length, 3);
+assert.strictEqual(limiter.jobs.length, 3);
+assert.strictEqual(client.requestCount(), 3);
+assert.deepStrictEqual(gaps(), [30000 + 1200, 45000 + 4800]);
+assert.strictEqual(
+  err.message,
+  'BattleMetrics GET bans failed after 3 attempts: timed out after 55s'
+);
+assert.deepStrictEqual(
+  logs.map(([line]) => line).filter((line) => line.includes('Trying again')),
+  [
+    'BattleMetrics GET bans failed: timed out after 30s. Trying again in 1.2s (attempt 2 of 3).',
+    'BattleMetrics GET bans failed after 2 attempts: timed out after 45s. Trying again in 4.8s (attempt 3 of 3).'
+  ]
+);
+// So a page that takes 50 seconds to answer is read at its third attempt, which it would not be
+// without them.
+battlemetrics = await load();
+limits = PAGE_TIMEOUTS;
+const page = { status: 200, headers: {}, data: { data: ['ban'] } };
+reply = answerAfter(50000, page);
+assert.strictEqual(
+  await battlemetrics('get', 'bans', {}, undefined, 5, { timeouts: PAGE_TIMEOUTS }),
+  page
+);
+assert.strictEqual(requests.length, 3);
+battlemetrics = await load();
+reply = answerAfter(50000, page);
+err = await failure(battlemetrics('get', 'bans'));
+assert.strictEqual(
+  err.message,
+  'BattleMetrics GET bans failed after 3 attempts: timed out after 30s'
+);
+// An attempt that a caller's list gives no limit to has the last it gives, and limits that are not
+// a time are left out.
+battlemetrics = await load();
+limits = [45000, 45000, 45000];
+reply = hang;
+await failure(battlemetrics('get', 'bans', {}, undefined, 5, { timeouts: [45000] }));
+battlemetrics = await load();
+limits = [30000, 30000, 20000];
+reply = hang;
+await failure(battlemetrics('get', 'bans', {}, undefined, 5, { timeouts: [null, 'x', 20000] }));
+// Requests made as the web server and the bot make them, without time limits of their own, have
+// the client's 30 seconds for every attempt, whatever else they give, as do the requests above.
+battlemetrics = await load();
+reply = (request, count) => {
+  if (count === 1) throw axiosError(request, { code: 'ECONNABORTED', message: 'timeout' });
+  return { status: 201, headers: {}, data: {} };
+};
+await battlemetrics('post', 'ban-lists/1/relationships/invites', {}, {}, 5, { repeatable: true });
+await battlemetrics('get', 'ban-lists/1', {}, undefined, 2, {});
+assert.strictEqual(requests.length, 3);
+assertSignals();
+
+// A caller can have a request end before an attempt is sent, as the importer does once its run is
+// asked to stop (beforeAttempt): before the wait for another attempt, and once an attempt's turn in
+// the queue has come, just before it is sent. What it throws ends the request as it is, rather than
+// as a failed attempt, and nothing more is sent. A request whose first attempt it stops sends
+// nothing at all, though its job has used its place in the budget; the client counts only the
+// attempts it sent.
+class Stopped extends Error {}
+const stopping = (from) => {
+  const hook = () => {
+    hook.calls++;
+    if (hook.calls >= from) throw new Stopped('stopping');
+  };
+  hook.calls = 0;
+  return hook;
+};
+battlemetrics = await load();
+let beforeAttempt = stopping(1);
+err = await battlemetrics('get', 'bans', {}, undefined, 5, { beforeAttempt }).catch((e) => e);
+assert.ok(err instanceof Stopped, String(err));
+assert.deepStrictEqual([requests.length, limiter.jobs.length, client.requestCount()], [0, 1, 0]);
+// A stop that comes while an attempt waits for its answer makes no attempt after it, and the
+// failed attempt is still logged.
+battlemetrics = await load();
+limits = PAGE_TIMEOUTS;
+beforeAttempt = stopping(2);
+reply = hang;
+const options = { timeouts: PAGE_TIMEOUTS, beforeAttempt };
+err = await battlemetrics('get', 'bans', {}, undefined, 5, options).catch((e) => e);
+assert.ok(err instanceof Stopped, String(err));
+assert.deepStrictEqual([requests.length, limiter.jobs.length, beforeAttempt.calls], [1, 1, 2]);
+assert.deepStrictEqual(
+  logs.map(([line]) => line).filter((line) => line.includes(' failed')),
+  [
+    'BattleMetrics GET bans failed: timed out after 30s. Not trying again, as the request was stopped.'
+  ]
+);
+// A stop that comes during the wait before another attempt, or while it waits in the queue, ends
+// the request once the attempt's turn has come, without sending it.
+battlemetrics = await load();
+limits = PAGE_TIMEOUTS;
+beforeAttempt = stopping(3);
+reply = hang;
+err = await battlemetrics('get', 'bans', {}, undefined, 5, {
+  timeouts: PAGE_TIMEOUTS,
+  beforeAttempt
+}).catch((e) => e);
+assert.ok(err instanceof Stopped, String(err));
+assert.deepStrictEqual(
+  [requests.length, limiter.jobs.length, client.requestCount(), beforeAttempt.calls],
+  [1, 2, 1, 3]
+);
+// Until it stops a request, it changes nothing: a request it never stops is made as any other, and
+// it is not called for a failure that is not tried again.
+battlemetrics = await load();
+beforeAttempt = stopping(Infinity);
+reply = failWith({ status: 503 });
+err = await failure(battlemetrics('get', 'bans', {}, undefined, 5, { beforeAttempt }));
+assert.deepStrictEqual([requests.length, beforeAttempt.calls], [3, 5]);
+assert.strictEqual(err.message, 'BattleMetrics GET bans failed after 3 attempts: HTTP 503');
+battlemetrics = await load();
+beforeAttempt = stopping(Infinity);
+reply = failWith({ status: 404 });
+await failure(battlemetrics('get', 'bans', {}, undefined, 5, { beforeAttempt }));
+assert.deepStrictEqual([requests.length, beforeAttempt.calls], [1, 1]);
+
 // A POST that its caller marks as repeatable, such as one creating an invite, is tried again like
 // a GET after a 5xx or a timeout. The same POST is not, unless it is marked.
 for (const failed of [{ status: 503 }, { code: 'ECONNABORTED', message: 'timeout exceeded' }]) {
@@ -558,5 +701,5 @@ assertSignals();
 assert.ok(!inspect(logs, { depth: null }).includes(TOKEN));
 
 console.log(
-  'BattleMetrics request checks passed: requests, time limits, final and retried errors, ambiguous and repeatable writes, pauses and concurrent requests.'
+  "BattleMetrics request checks passed: requests, time limits, callers' own time limits for each attempt and stops before an attempt, final and retried errors, ambiguous and repeatable writes, pauses and concurrent requests."
 );

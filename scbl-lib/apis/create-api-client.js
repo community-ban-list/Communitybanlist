@@ -12,6 +12,11 @@
 //   does no harm when it is carried out twice as repeatable, so it is made again like a GET.
 // - Any other answer fails at once. The error is marked auth when the API refused the credentials.
 //
+// Each attempt has the client's time limit, unless the caller gives its attempts others, e.g. longer
+// ones for the later attempts at a page that the API can be slow to answer (options.timeouts). A
+// caller can also have a request end before an attempt is sent, e.g. as it is stopping
+// (options.beforeAttempt). Neither changes which failures are made again.
+//
 // After a 429, or when the API says few requests are left, nothing is sent until the time it
 // gives in Retry-After, or for a minute.
 //
@@ -60,6 +65,14 @@ export class ApiError extends Error {
     // Callers read the status and BattleMetrics' errors here, as they did on axios's errors.
     if (details.status)
       this.response = { status: details.status, data: { errors: details.errors } };
+  }
+}
+
+// What a caller's beforeAttempt threw, which ends the request with it as it is, as no attempt was
+// sent, rather than as a failed attempt.
+class CallerStopped {
+  constructor(error) {
+    this.error = error;
   }
 }
 
@@ -124,8 +137,9 @@ export default function createApiClient({
   const clean = (text, length) => redact(text).replace(/\s+/g, ' ').trim().slice(0, length);
 
   // Each job gets an ID of its own, as Bottleneck rejects a job while another with its ID is
-  // waiting or running.
+  // waiting or running. sent counts the attempts sent.
   let jobCount = 0;
+  let sent = 0;
 
   // The time until which nothing is sent.
   let pausedUntil = 0;
@@ -177,8 +191,9 @@ export default function createApiClient({
   }
 
   // An error for a failed request that names its method and path, why it failed and the API's
-  // error titles, but never its address, headers or parameters.
-  function toApiError(method, path, err, attempts, outcome) {
+  // error titles, but never its address, headers or parameters. limit is the last attempt's time
+  // limit.
+  function toApiError(method, path, err, attempts, outcome, limit) {
     const status = err.response?.status;
     const code = typeof err.code === 'string' && err.code ? err.code : undefined;
     const errors = apiErrors(err.response);
@@ -190,7 +205,7 @@ export default function createApiClient({
 
     let reason;
     if (status) reason = `HTTP ${status}`;
-    else if (TIMEOUT_CODES.includes(code)) reason = `timed out after ${seconds(timeout)}`;
+    else if (TIMEOUT_CODES.includes(code)) reason = `timed out after ${seconds(limit)}`;
     else if (NOT_SENT_CODES.includes(code)) reason = `could not connect (${code})`;
     else if (code) reason = `the request failed (${code})`;
     else reason = `the request failed (${err.message ? clean(err.message, 200) : 'no reason'})`;
@@ -215,16 +230,26 @@ export default function createApiClient({
     );
   }
 
-  // One attempt: a job of its own on the limiter.
-  function attempt(method, path, params, data, priority) {
+  // One attempt: a job of its own on the limiter, cut off after limit milliseconds. A caller's
+  // beforeAttempt, if it gives one, is called once the attempt's turn has come, just before it is
+  // sent, and if it throws, nothing is sent. The job has still used its place in the budget then.
+  function attempt(method, path, params, data, priority, limit, beforeAttempt) {
     jobCount++;
     return limiter.schedule({ priority, id: `${jobPrefix}-${jobCount}` }, async () => {
       // A request queued before a pause began waits for it too.
       await waitForPause();
+      if (beforeAttempt) {
+        try {
+          beforeAttempt();
+        } catch (err) {
+          throw new CallerStopped(err);
+        }
+      }
+      sent++;
       try {
         const response = await send(method, path, params, data, {
-          timeout,
-          signal: AbortSignal.timeout(timeout)
+          timeout: limit,
+          signal: AbortSignal.timeout(limit)
         });
         checkRateLimit(response);
         return response;
@@ -235,21 +260,47 @@ export default function createApiClient({
     });
   }
 
+  // The time limit of attempt number attempts, in milliseconds: the caller's for it, or else the
+  // last the caller gave, or else the client's own.
+  function limitOf(timeouts, attempts) {
+    const given = Array.isArray(timeouts) ? timeouts.slice(0, attempts) : [];
+    for (const limit of given.reverse()) if (Number.isFinite(limit) && limit > 0) return limit;
+    return timeout;
+  }
+
   // options.repeatable marks a POST or PATCH as safe to make again, as making it twice does no
-  // harm, e.g. one that creates an invite.
+  // harm, e.g. one that creates an invite. options.timeouts gives the attempts time limits of
+  // their own, in milliseconds, the first attempt's first, for a request the API can take longer to
+  // answer, e.g. the importer's reads of pages of bans; an attempt it gives none to has the last it
+  // gives. options.beforeAttempt is called before each attempt is sent, once its turn in the queue
+  // has come, and before the wait for each attempt after the first: one that throws, e.g. as the
+  // caller has been asked to stop, ends the request at once, with what it threw, and nothing more
+  // is sent. Without them, as for the web server's and the bot's requests, every attempt has the
+  // client's time limit.
   async function request(method, path, params, data, priority = 5, options = {}) {
     const verb = String(method).toUpperCase();
     const repeatable = options.repeatable === true || REPEATABLE_METHODS.includes(verb);
+    const beforeAttempt =
+      typeof options.beforeAttempt === 'function' ? options.beforeAttempt : null;
     for (let attempts = 1; ; attempts++) {
+      const limit = limitOf(options.timeouts, attempts);
       try {
         // Wait out a pause before joining the limiter's queue, so waiting uses none of the budget.
         await waitForPause();
-        return await attempt(method, path, params, data, priority);
+        return await attempt(method, path, params, data, priority, limit, beforeAttempt);
       } catch (thrown) {
+        if (thrown instanceof CallerStopped) throw thrown.error;
         const err = thrown ?? {};
         const outcome = classify(err, repeatable);
-        const error = toApiError(verb, path, err, attempts, outcome);
+        const error = toApiError(verb, path, err, attempts, outcome, limit);
         if (outcome !== 'retry' || attempts >= ATTEMPTS) throw error;
+        // A caller that is stopping makes no more attempts, and does not wait for one.
+        try {
+          beforeAttempt?.();
+        } catch (stop) {
+          console.warn(`${error.message}. Not trying again, as the request was stopped.`);
+          throw stop;
+        }
 
         const delay = RETRY_DELAYS[attempts - 1] * (1 + Math.random() / 4);
         const wait = Math.max(delay, retryAfter(err.response) ?? 0, pausedUntil - Date.now());
@@ -261,8 +312,8 @@ export default function createApiClient({
     }
   }
 
-  // How many attempts the client has made since the service started, each retry counted, as each
+  // How many attempts the client has sent since the service started, each retry counted, as each
   // uses the budget, e.g. for the importer service's hourly summary.
-  request.attempts = () => jobCount;
+  request.attempts = () => sent;
   return request;
 }

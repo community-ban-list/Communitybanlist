@@ -715,7 +715,8 @@ async function loadBanFetcher({ battlemetrics, get }) {
       axios: { default: { get: async (url) => get(url, imported.control) } },
       crypto: { createHash },
       'scbl-lib/apis': {
-        battlemetrics: async (method, endpoint, params) => battlemetrics(params, imported.control)
+        battlemetrics: async (method, endpoint, params, data, priority, options) =>
+          battlemetrics(params, imported.control, options)
       },
       'scbl-lib/utils': { classifyBanReason: () => 'Cheating', Logger }
     },
@@ -757,6 +758,50 @@ async function loadBanFetcher({ battlemetrics, get }) {
   );
   assert.strictEqual(error.name, 'RunStopped');
   assert.deepStrictEqual(pages, [1, 2]);
+}
+
+// It stops before another attempt at a page too, as the BattleMetrics client calls the run
+// control's stopIfRequested, which the fetcher gives it, before each attempt (see scbl-lib's
+// battlemetrics.js): here the run's time limit comes while the first attempt at the second page
+// waits for its answer, and the client asks before another, so the read stops there, rather than
+// waiting out up to two more attempts.
+{
+  const attempts = [];
+  const fetcher = await loadBanFetcher({
+    battlemetrics: async (params, control, options) => {
+      const page = Number(params['page[key]'] || 1);
+      options.beforeAttempt();
+      attempts.push(page);
+      if (page === 2) {
+        control.requestStop('it took longer than 900s');
+        // The attempt times out, and the client asks whether to make another.
+        options.beforeAttempt();
+      }
+      return {
+        data: {
+          data: [
+            {
+              attributes: {
+                uid: `u${page}`,
+                timestamp: '2026-01-01T00:00:00.000Z',
+                identifiers: [{ type: 'steamID', identifier: steamID(page) }]
+              }
+            }
+          ],
+          links: {
+            next: `https://api.battlemetrics.com/bans?filter[banList]=bm-1&page[key]=${page + 1}&page[size]=100`
+          }
+        }
+      };
+    }
+  });
+  const error = await ended(
+    fetcher.fetchBanList({ id: 1, type: 'battlemetrics', source: 'bm-1' }),
+    'the fetch'
+  );
+  assert.strictEqual(error.name, 'RunStopped');
+  assert.strictEqual(error.reason, 'it took longer than 900s');
+  assert.deepStrictEqual(attempts, [1, 2]);
 }
 
 // It also stops before another attempt at a remote list.
@@ -1065,5 +1110,5 @@ function database(query, transaction = async (work) => work({})) {
 }
 
 console.log(
-  'Importer safe point checks passed: ban lists, pages, saves, the sweep, export bans and the batched steps.'
+  'Importer safe point checks passed: ban lists, pages and their later attempts, saves, the sweep, export bans and the batched steps.'
 );

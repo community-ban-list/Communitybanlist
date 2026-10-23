@@ -7,7 +7,8 @@ import classifyBanReason from '../../scbl-lib/utils/classify-ban-reason.js';
 
 // Exercise BanFetcher without network requests. Remote lists and BattleMetrics answer from the
 // stand-ins below, and the waits between attempts are skipped but recorded. The run is never asked
-// to stop here; stop-points.js checks where the fetcher stops.
+// to stop here; stop-points.js checks where the fetcher stops, and scbl-lib's battlemetrics.js what
+// the BattleMetrics client does with the options the fetcher gives it.
 const delays = [];
 const remoteRequests = [];
 const battlemetricsRequests = [];
@@ -32,14 +33,15 @@ const dependencies = {
   },
   crypto: { createHash },
   'scbl-lib/apis': {
-    async battlemetrics(method, endpoint, params) {
-      battlemetricsRequests.push({ method, endpoint, params });
+    async battlemetrics(method, endpoint, params, data, priority, options) {
+      battlemetricsRequests.push({ method, endpoint, params, data, priority, options });
       return { data: battlemetrics(params) };
     }
   },
   'scbl-lib/utils': { classifyBanReason, Logger: { verbose() {} } },
   './run-control.js': { stopIfRequested() {} }
 };
+const { stopIfRequested } = dependencies['./run-control.js'];
 
 const context = vm.createContext({
   URL,
@@ -289,6 +291,15 @@ assert.deepStrictEqual(
     ['get', 'bans', { 'filter[banList]': 'bm-list', 'page[key]': 'three', 'page[size]': '100' }]
   ]
 );
+// Each page's later attempts have longer, 30 seconds, then 45, then 55, and none is made once the
+// run is asked to stop: the BattleMetrics client is given the run control's stopIfRequested, to
+// call before each attempt. The web server's and the bot's requests give the client neither.
+for (const { data, priority, options } of battlemetricsRequests) {
+  assert.deepStrictEqual([data, priority], [undefined, 5]);
+  assert.deepStrictEqual([...options.timeouts], [30000, 45000, 55000]);
+  assert.strictEqual(options.beforeAttempt, stopIfRequested);
+  assert.deepStrictEqual(Object.keys(options).sort(), ['beforeAttempt', 'timeouts']);
+}
 // The read gives its first page's ban IDs, with or without a SteamID, and count, which head polls
 // compare their pages with. Each request is counted as one of a read of all of a list.
 assert.deepStrictEqual(plainCopy(list.head), { uids: ['a', 'b'], total: 6 });
@@ -308,7 +319,9 @@ assert.deepStrictEqual(
 assert.deepStrictEqual([list.bans.length, list.head], [4, null]);
 
 // A page that cannot be fetched, after the BattleMetrics client's own retries, fails the whole
-// list instead of returning the pages before it. So does a page that is not a list of bans.
+// list instead of returning the pages before it. So does a page that is not a list of bans. The
+// error says which page it was, and how many pages a read of all of the list takes, about, by
+// BattleMetrics' count on its first page, if it gave one, for the list's failure to say.
 for (const page of [
   httpError(500),
   { errors: [{ title: 'Unknown error' }] },
@@ -316,14 +329,27 @@ for (const page of [
   { data: [ban('x', steam(9))] },
   { data: [{ type: 'ban' }], links: {} }
 ]) {
-  reset();
-  book({ first: { data: [ban('a', steam(1))], links: { next: link('two') } }, two: page });
-  await assert.rejects(
-    fetcher.fetchBanList(banList),
-    /status code 500|invalid page of bans|ban without an ID/
-  );
-  assert.strictEqual(battlemetricsRequests.length, 2);
+  for (const meta of [undefined, { total: 9217 }]) {
+    reset();
+    book({
+      first: { meta, data: [ban('a', steam(1))], links: { next: link('two') } },
+      two: page
+    });
+    await assert.rejects(fetcher.fetchBanList(banList), (err) => {
+      assert.match(err.message, /status code 500|invalid page of bans|ban without an ID/);
+      assert.deepStrictEqual([err.page, err.pages], [2, meta ? 93 : null]);
+      return true;
+    });
+    assert.strictEqual(battlemetricsRequests.length, 2);
+  }
 }
+// A head poll's first page, and the pages it follows, say so too.
+reset();
+book({ first: httpError(504) });
+await assert.rejects(fetcher.fetchBattlemetricsHead(banList), (err) => {
+  assert.deepStrictEqual([err.page, err.pages, err.response.status], [1, null, 504]);
+  return true;
+});
 
 // Links that lead back to a page already fetched, however they are written, are refused.
 reset();
@@ -413,6 +439,7 @@ await assert.rejects(fetcher.fetchBanList(banList), (err) => {
   );
   assert.strictEqual(err.bansHidden, true);
   assert.strictEqual(err.metaTotal, 11768);
+  assert.deepStrictEqual([err.page, err.pages], [1, 118]);
   return true;
 });
 assert.strictEqual(battlemetricsRequests.length, 1);
@@ -962,5 +989,5 @@ await assert.rejects(fetcher.fetchBanList(remoteList), /the server answered HTTP
 }
 
 console.log(
-  'Ban list fetch checks passed: remote bodies, limits and retries, remote files kept and asked about, BattleMetrics paging, the count check, reads longer than the count, counts that change too much, lists left out of the check, SteamIDs, hidden bans, and head polls read on in full.'
+  "Ban list fetch checks passed: remote bodies, limits and retries, remote files kept and asked about, BattleMetrics paging, each page's attempts' time limits and stops, the page a read failed on, the count check, reads longer than the count, counts that change too much, lists left out of the check, SteamIDs, hidden bans, and head polls read on in full."
 );
