@@ -667,6 +667,29 @@ for (const failure of [
   assert.strictEqual(requests.length + writes.length, 0);
 }
 
+// A deletion needs no ban list, though: an export ban to be deleted that recorded its ban still
+// has it deleted once its list no longer records its BattleMetrics ban list, as a removal of the
+// list leaves it just before CBL's organisation leaves the ban list, which only takes CBL's own ban
+// off that ban list. A claimed one waits, as its ban cannot be looked for without the ban list. The
+// bot's README says so, as removals do not wait for the importer.
+{
+  reset();
+  const cleared = { id: 9, type: 'battlemetrics', battlemetricsID: null };
+  const banID = addBan('bm-9', { note: 'x' });
+  const recorded = exportBan(1, { status: 'TO_BE_DELETED', battlemetricsID: banID }, cleared);
+  const claimed = exportBan(2, { status: 'TO_BE_DELETED', battlemetricsID: 'pending' }, cleared);
+  assert.strictEqual(await recorded.deleteBattlemetricsBan(new Map()), 'deleted');
+  assert.strictEqual(await claimed.deleteBattlemetricsBan(new Map()), 'waiting');
+  assert.deepStrictEqual(
+    requests.map(({ method, endpoint }) => `${method} ${endpoint}`),
+    [`delete bans/${banID}`]
+  );
+  assert.deepStrictEqual(
+    [bmLists.get('bm-9').length, table.has(recorded.id), table.has(claimed.id)],
+    [0, false, true]
+  );
+}
+
 // An export ban deleted while its ban was being made, e.g. along with its list, would leave a ban
 // nothing deletes, so the ban is deleted again.
 {

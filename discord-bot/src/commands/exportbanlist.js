@@ -24,11 +24,13 @@ import {
 // A removal does not wait for the ban importer, as the website's Delete button does not: what a
 // run, or a cycle of the importer service, does meanwhile to the list's export bans it could as
 // well have done just before the removal (see README.md). Before each request to BattleMetrics for
-// an export ban, the importer reads the export ban and its list again, so it sends none once the
-// list is gone, or no longer records its BattleMetrics ban list. It never adds an invite or a
-// subscriber, and a removal takes those off the ban list before CBL's organisation leaves it, so a
-// ban added meanwhile reaches no one once the removal is done. And the export bans the importer
-// works out for a list that is gone cannot be saved, as their list must exist.
+// an export ban, the importer reads the export ban and its list again, so it adds no ban once the
+// list is gone, or no longer records its BattleMetrics ban list. Until the list is gone, it may
+// still delete a ban it recorded, as a deletion needs no ban list: that only takes CBL's own ban
+// off the ban list being removed. It never adds an invite or a subscriber, and a removal takes
+// those off the ban list before CBL's organisation leaves it, so a ban added meanwhile reaches no
+// one once the removal is done. And the export bans the importer works out for a list that is gone
+// cannot be saved, as their list must exist.
 
 const data = new SlashCommandBuilder()
   .setName('exportbanlist')
