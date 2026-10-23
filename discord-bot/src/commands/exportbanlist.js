@@ -1,6 +1,6 @@
 import { AttachmentBuilder, escapeMarkdown, SlashCommandBuilder } from 'discord.js';
 
-import { isRunLockHeld, sequelize } from 'scbl-lib/db';
+import { sequelize } from 'scbl-lib/db';
 import { ExportBanList } from 'scbl-lib/db/models';
 
 import {
@@ -20,6 +20,15 @@ import {
 // limits are found with the website's own rules and the EXPORT_* settings, through ExportBanList's
 // checkLimits, so the bot needs the same settings as the web server. A list given to another user
 // changes only its owner, and neither owner is told either.
+//
+// A removal does not wait for the ban importer, as the website's Delete button does not: what a
+// run, or a cycle of the importer service, does meanwhile to the list's export bans it could as
+// well have done just before the removal (see README.md). Before each request to BattleMetrics for
+// an export ban, the importer reads the export ban and its list again, so it sends none once the
+// list is gone, or no longer records its BattleMetrics ban list. It never adds an invite or a
+// subscriber, and a removal takes those off the ban list before CBL's organisation leaves it, so a
+// ban added meanwhile reaches no one once the removal is done. And the export bans the importer
+// works out for a list that is gone cannot be saved, as their list must exist.
 
 const data = new SlashCommandBuilder()
   .setName('exportbanlist')
@@ -64,9 +73,6 @@ const data = new SlashCommandBuilder()
       )
   );
 
-const IMPORTER_RUNNING =
-  'The ban importer is running, so nothing was changed. Try again once the run has finished.';
-
 // Discord allows 2,000 characters in a message and 4,096 in an embed's description.
 const MESSAGE_LENGTH = 2000;
 const DESCRIPTION_LENGTH = 4096;
@@ -102,12 +108,6 @@ const NEVER_ENOUGH = {
   'one-ban': 'one ban must never be enough',
   none: 'any number of bans can be enough'
 };
-
-// A ban importer run could export bans to a list while it is being removed, so lists are not
-// removed while a run holds its lock.
-async function refuseWhileImporting() {
-  if (await isRunLockHeld()) throw new UserError(IMPORTER_RUNNING);
-}
 
 const hasBattlemetricsBanList = (exportBanList) =>
   exportBanList.type === 'battlemetrics' && Boolean(exportBanList.battlemetricsID);
@@ -309,7 +309,6 @@ function entriesMessage(title, entries, fileName, fileText) {
 
 async function remove(interaction) {
   const id = interaction.options.getInteger('id', true);
-  await refuseWhileImporting();
 
   const {
     lists: [check]
@@ -335,9 +334,6 @@ async function remove(interaction) {
     { embeds: [exportBanListEmbed(check, access)] }
   );
   if (!confirmed) return;
-
-  // A run may have started while the removal was confirmed.
-  await refuseWhileImporting();
 
   // The list as it is now, which its owner may have changed or deleted meanwhile.
   const current = await ExportBanList.findByPk(id);
@@ -540,8 +536,6 @@ async function removeOutsideLimits(interaction) {
 }
 
 async function removeAllOutsideLimits(interaction) {
-  await refuseWhileImporting();
-
   const { limits, lists } = await ExportBanList.checkLimits();
   const outside = lists.filter((check) => check.problems.length > 0);
   const unchecked = lists.filter((check) => !check.checked);
@@ -610,11 +604,6 @@ async function removeAllOutsideLimits(interaction) {
   );
   if (!confirmed) return;
 
-  // A run may have started while the removal was confirmed.
-  if (await isRunLockHeld()) {
-    await interaction.editReply({ content: IMPORTER_RUNNING, embeds: [], attachments: [] });
-    return;
-  }
   audit(
     interaction,
     `started removing ${plural(removable.length, 'export ban list')} outside today's limits.`,
@@ -633,20 +622,6 @@ async function removeAllOutsideLimits(interaction) {
   const results = [];
   let stopped = null;
   for (const check of removable) {
-    // A run that starts during the removal could export bans to a list being removed.
-    let importing;
-    try {
-      importing = await isRunLockHeld();
-    } catch (error) {
-      stopped = `Stopped, as the bot could not check whether the ban importer is running: ${error.message}`;
-      break;
-    }
-    if (importing) {
-      stopped =
-        'Stopped, as the ban importer started a run. Run the command again once it has finished.';
-      break;
-    }
-
     const result = await removeOne(check, access);
     results.push(result);
     const description = result.description ?? describeExportBanList(result.check.exportBanList);
@@ -783,8 +758,8 @@ function afterLastTransfer(makeTransfer) {
 // with its Discord webhook and BattleMetrics invite, and can change or delete it, and the old
 // owner no longer can.
 //
-// Unlike a removal, a transfer is not refused while the ban importer runs: nothing the importer or
-// the exports do reads or writes a list's owner, so a run goes on the same whoever owns the list.
+// A transfer does not wait for the ban importer either: nothing the importer or the exports do
+// reads or writes a list's owner, so a run goes on the same whoever owns the list.
 // Like the website's own changes, the update can wait for rows a run has locked, such as the new
 // owner's Steam user while the run recalculates every player's reputation, which can take most of
 // a minute after a big import, and transfers confirmed meanwhile wait for it in turn. If MySQL
