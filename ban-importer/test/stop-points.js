@@ -323,7 +323,8 @@ const summary = (lines) => lines.filter((line) => /^Got /.test(line.message));
 // A run asked to stop while a list's bans are being saved finishes the batch under way, with its
 // players' updates, in its transaction, and starts no other. The import ends only once that batch
 // is saved, and none of the list's bans are removed, as the bans it did not save would look
-// removed. The next list is not started.
+// removed. The list is read again first, as one whose type or source was changed meanwhile has the
+// bans it fetched removed (see below). The next list is not started.
 {
   let open;
   const { importer, control, events, saves } = await loadBanImporter(
@@ -364,6 +365,7 @@ const summary = (lines) => lines.filter((line) => /^Got /.test(line.message));
     'saved 1,1',
     'reset Steam users',
     'commit',
+    'read list 1',
     'ended'
   ]);
 }
@@ -445,6 +447,32 @@ for (const [lock, removes] of [
   );
   if (removes) assert.ok(Array.isArray(outcome));
   else assert.strictEqual(outcome.reason, control.LOCK_LOST);
+}
+
+// So does a list whose source was changed while the run was asked to stop, as when a batch of its
+// bans waits for /banlist update's transaction and SIGTERM comes meanwhile: the list is read again
+// once the batch is saved, and the bans fetched from its old source are removed, before the run
+// stops at its next safe point, so the next list is not started. Without the run lock, none are.
+for (const [lock, removes] of [
+  [heldLock, true],
+  [lostLock, false]
+]) {
+  const lists = { 1: { stored: [0, 9], fetched: [0, 1, 2] }, 2: { stored: [], fetched: [0] } };
+  const { importer, control, events, hooks } = await loadBanImporter(lists);
+  control.setRunLock(lock);
+  hooks.onSave = (id) => {
+    if (id !== '1,1') return;
+    lists[1].source = 'bm-new';
+    control.requestStop('it received SIGTERM');
+  };
+  const error = await ended(importer.importBans(), 'the import');
+  assert.strictEqual(error.name, 'RunStopped');
+  assert.strictEqual(error.reason, removes ? 'it received SIGTERM' : control.LOCK_LOST);
+  assert.ok(events.includes('saved 1,2'));
+  assert.deepStrictEqual(
+    events.filter((event) => /^(read list|remove) /.test(event)),
+    ['read list 1', 'read list 1', ...(removes ? ['remove 3 bans'] : [])]
+  );
 }
 
 // A stop requested while the run checks its lock before removing bans is honoured before any are
@@ -642,7 +670,13 @@ for (const during of ['fetch', 'saves']) {
       : ['remove 1 bans']
   );
   if (during === 'saves')
-    assert.deepStrictEqual(events.slice(-4), ['saved 2,3', 'reset Steam users', 'commit', 'ended']);
+    assert.deepStrictEqual(events.slice(-5), [
+      'saved 2,3',
+      'reset Steam users',
+      'commit',
+      'read list 2',
+      'ended'
+    ]);
   assert.deepStrictEqual(
     lines.filter(({ important }) => important).map(({ message }) => message),
     [
