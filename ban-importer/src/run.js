@@ -4,6 +4,7 @@ import { describeError, Logger } from 'scbl-lib/utils';
 
 import RunRecord, {
   alertIfStale,
+  LOCK_HOLDERS,
   readRunMessage,
   readSavedRun,
   saveRecord,
@@ -12,6 +13,7 @@ import RunRecord, {
 } from './run-record.js';
 import {
   LOCK_LOST,
+  LOCK_LOST_BEFORE,
   pause,
   requestStop,
   RunStopped,
@@ -28,7 +30,8 @@ export const EXIT_CODES = {
   FAILED: 1,
   // Stopped part-way by SIGTERM, SIGINT or the time limit.
   INTERRUPTED: 3,
-  // Skipped, as another run holds the run lock. 75 is EX_TEMPFAIL: try again later.
+  // Skipped, as the importer service or another run holds the locks. 75 is EX_TEMPFAIL: try again
+  // later.
   SKIPPED: 75
 };
 
@@ -81,8 +84,9 @@ export const RELEASE_RESERVE = 5 * 1000;
 // Why a run failed that was left waiting for something that can never happen.
 export const LEFT_WAITING = 'The run was left waiting for something that can never happen';
 
-// Why a run stopped that lost its run lock, as its record gives it.
-const STOPPED_LOCK_LOST = `Stopped, as ${LOCK_LOST}`;
+// Why a run stopped that lost its locks, as its record gives it, and as the records of earlier
+// importers give it.
+const STOPPED_LOCK_LOST = [`Stopped, as ${LOCK_LOST}`, `Stopped, as ${LOCK_LOST_BEFORE}`];
 
 // While a run goes, its status in the log channel is drawn again this often, so the time it has
 // taken stays current while nothing else changes. The logger edits it no more often than this.
@@ -144,12 +148,12 @@ export function readSeconds(name, defaultSeconds) {
   return defaultSeconds;
 }
 
-// How a run's status names the way the run ended, from its record: a run that lost its run lock
+// How a run's status names the way the run ended, from its record: a run that lost its locks
 // failed, but is named for that.
 function outcomeOf({ exitCode, reason }) {
   if (exitCode === EXIT_CODES.FINISHED) return 'finished';
   if (exitCode === EXIT_CODES.INTERRUPTED) return 'stopped';
-  return reason === STOPPED_LOCK_LOST ? 'lockLost' : 'failed';
+  return STOPPED_LOCK_LOST.includes(reason) ? 'lockLost' : 'failed';
 }
 
 // The status of an earlier run, drawn from the record it saved, for a run whose last edit did not
@@ -560,15 +564,14 @@ export default async function run(steps) {
       );
     }
 
-    // Take the lock before anything else is posted to Discord, so a run that is skipped as another
-    // run holds it posts nothing, unless the importer is stale.
+    // Take the locks before anything else is posted to Discord, so a run that is skipped as another
+    // run holds one posts nothing, unless the importer is stale.
+    let taken;
     try {
-      lock = await time('takeRunLock', () =>
+      taken = await time('takeRunLock', () =>
         takeRunLock({
           onLost: (reason) => {
-            report(
-              `The run lost its run lock (${reason}), so it will stop at its next safe point.`
-            );
+            report(`The run lost its locks (${reason}), so it will stop at its next safe point.`);
             requestStop(LOCK_LOST);
           }
         })
@@ -576,15 +579,21 @@ export default async function run(steps) {
     } catch (err) {
       return end(await failBeforeLock('The CBL update run failed: ', err), describeError(err));
     }
-    if (!lock) {
-      console.log('Skipped this CBL update run, as another run holds the run lock.');
+    if (taken.busy) {
+      // The line and the record say which lock was held, as the importer service holds only the
+      // service lock between its cycles, when the bot finds the run lock free.
+      const held = LOCK_HOLDERS[taken.busy];
+      console.log(`Skipped this CBL update run, as ${held}.`);
       // A run that holds the lock for too long, e.g. as it is stuck, would otherwise make every
       // later start skip without a word. The check needs no run lock, and an alert is sent before
       // the run ends.
-      if (await checkStaleness({ cadenceSeconds, skipped: true, startedAt: record.startedAt }))
+      if (
+        await checkStaleness({ cadenceSeconds, skipped: taken.busy, startedAt: record.startedAt })
+      )
         await flushLogs();
-      return end(EXIT_CODES.SKIPPED, 'Another run holds the run lock');
+      return end(EXIT_CODES.SKIPPED, `${held[0].toUpperCase()}${held.slice(1)}`);
     }
+    lock = taken;
     setRunLock(lock);
     postStatus();
 

@@ -21,7 +21,7 @@ export const TITLES = {
   finished: 'CBL update run finished',
   failed: 'CBL update run failed',
   stopped: 'CBL update run stopped',
-  lockLost: 'CBL update run lost its run lock',
+  lockLost: 'CBL update run lost its locks',
   unfinished: 'CBL update run ended without finishing'
 };
 

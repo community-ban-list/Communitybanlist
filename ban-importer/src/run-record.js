@@ -31,6 +31,14 @@ export const SERVICE_STATE = {
   SERVICE: 'importerService'
 };
 
+// Why a start was skipped, by the lock it found held (see takeRunLock): the service lock, which the
+// importer service holds for as long as it runs, and a run in once mode for its run, or the run
+// lock alone, which only a run of an importer from before the service lock holds.
+export const LOCK_HOLDERS = {
+  service: 'the importer service or another run holds the service lock',
+  run: 'another run holds the run lock'
+};
+
 // How many runs recentRuns keeps.
 const RECENT_RUNS_KEPT = 100;
 
@@ -69,7 +77,7 @@ function truncate(text) {
 }
 
 // The importer's tables do not exist yet, as no run has applied its migrations.
-function isMissingTable(err) {
+export function isMissingTable(err) {
   return (err?.original ?? err?.parent)?.errno === NO_SUCH_TABLE;
 }
 
@@ -274,11 +282,13 @@ async function claimStaleAlert(startedAt, cadence, leeway) {
 // Comparing when they ended would make the alert a run late whenever a failed run ends sooner after
 // its start than the last success did. Before the first success, the time is counted from when the
 // importer's tables were made, early in the first run. A start that is skipped, as another run
-// holds the run lock, checks too, as a stuck run would otherwise make every later start skip
-// quietly. Whichever posts saves when it started, with a row lock that needs no run lock, so no
-// other run or skipped start posts it again within the cadence. Resolves with whether it posted.
-// The importer service (service) checks at the end of each cycle that did not succeed, and while
-// it stands by for the run lock (skipped), and its cycles start a cadence apart.
+// holds a lock, checks too, as a stuck run would otherwise make every later start skip quietly,
+// and skipped names the lock it found held, 'service' or 'run', which the alert names too.
+// Whichever posts saves when it started, with a row lock that needs no run lock, so no other run
+// or skipped start posts it again within the cadence. Resolves with whether it posted. The
+// importer service (service) checks at the end of each cycle that did not succeed, and while it
+// stands by for a lock that another run holds (skipped): the service lock as the service starts,
+// or the run lock as a cycle starts. Its cycles start a cadence apart.
 export async function alertIfStale({
   cadenceSeconds,
   skipped = false,
@@ -329,8 +339,8 @@ export async function alertIfStale({
     if (skipped)
       parts.push(
         service
-          ? 'The importer service is standing by, as another run holds the run lock.'
-          : 'This start was skipped, as another run holds the run lock.'
+          ? `The importer service is standing by, as another run holds the ${skipped === 'service' ? 'service' : 'run'} lock.`
+          : `This start was skipped, as ${LOCK_HOLDERS[skipped] ?? LOCK_HOLDERS.run}.`
       );
     Logger.important('Core', parts.join(' '));
     return true;

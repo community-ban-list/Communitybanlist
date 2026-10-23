@@ -1,5 +1,5 @@
 // A run can be asked to stop part-way: by SIGTERM or SIGINT, by its time limit, or because it lost
-// its run lock. It then stops at the next safe point, e.g. between ban lists or between export
+// its locks. It then stops at the next safe point, e.g. between ban lists or between export
 // bans, and never between a BattleMetrics request and the database save that records it. The
 // steps also say here how far they have got, which the run's status in the log channel shows. In
 // loop mode, each cycle is a run of its own here: a cycle stopped by its time limit is followed by
@@ -7,9 +7,12 @@
 //
 // This file has no imports, so it can be loaded on its own.
 
-// The reason given when the run lost its run lock. That makes it a failed run, not an interrupted
-// one.
-export const LOCK_LOST = 'it lost its run lock';
+// The reason given when the run lost its locks, the service lock and the run lock, which go
+// together with their connection, also when the importer service loses them between cycles, while
+// it holds only the service lock. That makes it a failed run, not an interrupted one. Earlier
+// importers gave LOCK_LOST_BEFORE, which the records they saved still give.
+export const LOCK_LOST = 'it lost its locks';
+export const LOCK_LOST_BEFORE = 'it lost its run lock';
 
 // Why the run was asked to stop, e.g. 'it received SIGTERM', or null while it should carry on.
 let stopReason = null;

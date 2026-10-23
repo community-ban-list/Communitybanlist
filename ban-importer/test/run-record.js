@@ -295,12 +295,12 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
   assert.strictEqual(database.state.size, 0);
 }
 
-// Two runs that save at once, such as a run that lost the run lock and the run that took it over,
+// Two runs that save at once, such as a run that lost its locks and the run that took them over,
 // both keep their summaries in recentRuns, as recentRuns is read with a row lock.
 {
   const database = fakeDatabase();
   const { default: RunRecord, saveRecord, STATE } = await loadRunRecord(database);
-  const lost = new RunRecord().end('failed', 1, 'Stopped, as it lost its run lock');
+  const lost = new RunRecord().end('failed', 1, 'Stopped, as it lost its locks');
   const took = new RunRecord().end('finished', 0);
   await Promise.all([saveRecord(lost), saveRecord(took)]);
   assert.deepStrictEqual(
@@ -392,7 +392,7 @@ const stalenessRows = (lastSuccessAt, extra = {}) => ({
   const nearlyCadence = START + CADENCE - LEEWAY - 1;
   assert.strictEqual(await alertIfStale({ cadenceSeconds, startedAt: nearlyCadence }), false);
   assert.strictEqual(
-    await alertIfStale({ cadenceSeconds, skipped: true, startedAt: nearlyCadence }),
+    await alertIfStale({ cadenceSeconds, skipped: 'run', startedAt: nearlyCadence }),
     false
   );
   assert.strictEqual(discord.length, 1);
@@ -402,7 +402,7 @@ const stalenessRows = (lastSuccessAt, extra = {}) => ({
   const transactions = database.transactions();
   const skippedAt = START + CADENCE;
   assert.strictEqual(
-    await alertIfStale({ cadenceSeconds, skipped: true, startedAt: skippedAt }),
+    await alertIfStale({ cadenceSeconds, skipped: 'run', startedAt: skippedAt }),
     true
   );
   assert.strictEqual(discord.length, 2);
@@ -418,7 +418,7 @@ const stalenessRows = (lastSuccessAt, extra = {}) => ({
   clock.now = skippedAt + 2 * HOUR;
   assert.strictEqual(await alertIfStale({ cadenceSeconds, startedAt: skippedAt }), false);
   assert.strictEqual(
-    await alertIfStale({ cadenceSeconds, skipped: true, startedAt: skippedAt + 2 * HOUR }),
+    await alertIfStale({ cadenceSeconds, skipped: 'run', startedAt: skippedAt + 2 * HOUR }),
     false
   );
   // Nor does a run that started before it, e.g. a stuck run that ends later.
@@ -428,6 +428,18 @@ const stalenessRows = (lastSuccessAt, extra = {}) => ({
   );
   assert.strictEqual(discord.length, 2);
   assert.strictEqual(database.transactions(), transactions + 1);
+
+  // A start that is skipped as the importer service, or another run, holds the service lock, as
+  // the service does between its cycles, when the run lock is free, says so.
+  clock.now = START + 2 * CADENCE;
+  assert.strictEqual(
+    await alertIfStale({ cadenceSeconds, skipped: 'service', startedAt: START + 2 * CADENCE }),
+    true
+  );
+  assert.match(
+    discord[2],
+    / This start was skipped, as the importer service or another run holds the service lock\.$/
+  );
 }
 
 // An alert after a dry run, which finished but imported nothing, says it was one.
@@ -477,7 +489,7 @@ async function schedule() {
       clock.now = Date.parse(time);
       const run = new RunRecord();
       clock.now += 1000;
-      return alertIfStale({ cadenceSeconds, skipped: true, startedAt: run.startedAt });
+      return alertIfStale({ cadenceSeconds, skipped: 'run', startedAt: run.startedAt });
     }
   };
 }
@@ -611,7 +623,7 @@ for (const [minutes, stale] of [
     original: { errno: 1146 }
   });
   const { alertIfStale } = await loadRunRecord(fakeDatabase({ error: missing }));
-  assert.strictEqual(await alertIfStale({ cadenceSeconds, skipped: true }), false);
+  assert.strictEqual(await alertIfStale({ cadenceSeconds, skipped: 'run' }), false);
 
   const { alertIfStale: failing } = await loadRunRecord(
     fakeDatabase({ error: new Error('Connection lost') })
@@ -619,10 +631,10 @@ for (const [minutes, stale] of [
   await assert.rejects(failing({ cadenceSeconds }), /Connection lost/);
 }
 
-// Two that check at the same moment, such as a run that lost the run lock and the run that took it
+// Two that check at the same moment, such as a run that lost its locks and the run that took them
 // over, or a run and a skipped start, post one alert between them, as the alert's row is read with
 // a row lock. The one that loses posts nothing.
-for (const skipped of [false, true]) {
+for (const skipped of [false, 'run']) {
   const database = fakeDatabase({
     rows: stalenessRows(START - 4 * CADENCE, {
       lastStaleAlertAt: JSON.stringify(new Date(START - CADENCE).toISOString())
@@ -659,7 +671,7 @@ for (const skipped of [false, true]) {
 
 // The next run finds the record of the run whose message it checks by when that run started, as
 // lastRunMessage gives it: the latest run's record, or else its summary in recentRuns, e.g. as a
-// run that lost the run lock saved its record after the run that took the lock over. A run that
+// run that lost its locks saved its record after the run that took them over. A run that
 // saved no record, e.g. as it was killed, has none.
 {
   const database = fakeDatabase();
@@ -668,7 +680,7 @@ for (const skipped of [false, true]) {
 
   const earlier = new RunRecord();
   earlier.count('importBans', () => ({ lists: 2, fetched: 30, banLists: [{ id: 1 }, { id: 2 }] }));
-  await saveRecord(earlier.end('failed', 1, 'Stopped, as it lost its run lock'));
+  await saveRecord(earlier.end('failed', 1, 'Stopped, as it lost its locks'));
   clock.now += HOUR;
   const latest = new RunRecord();
   await saveRecord(latest.end('finished', 0));
@@ -763,18 +775,19 @@ for (const skipped of [false, true]) {
 }
 
 // The importer service checks whether the importer is stale as runs do, and its alert says that it
-// starts a cycle every cadence, and, while it stands by for the run lock, that it does.
-{
+// starts a cycle every cadence, and, while it stands by for a lock that another run holds, which:
+// the service lock as it starts, or the run lock as a cycle starts.
+for (const held of ['service', 'run']) {
   const database = fakeDatabase({
     rows: { lastSuccessAt: JSON.stringify(new Date(START - 2 * HOUR).toISOString()) }
   });
   const { alertIfStale, discord } = await loadRunRecord(database);
   assert.strictEqual(
-    await alertIfStale({ cadenceSeconds: 600, skipped: true, startedAt: START, service: true }),
+    await alertIfStale({ cadenceSeconds: 600, skipped: held, startedAt: START, service: true }),
     true
   );
   assert.deepStrictEqual(discord, [
-    'The CBL update is stale: no run has succeeded for 2.0 hours, since the one that started at 2026-10-15T10:00:00.000Z. The importer service starts a cycle every 10 minutes (IMPORTER_CADENCE_SECONDS, or else IMPORTER_CYCLE_SECONDS), so 3 or more in a row have not succeeded. The importer service is standing by, as another run holds the run lock.'
+    `The CBL update is stale: no run has succeeded for 2.0 hours, since the one that started at 2026-10-15T10:00:00.000Z. The importer service starts a cycle every 10 minutes (IMPORTER_CADENCE_SECONDS, or else IMPORTER_CYCLE_SECONDS), so 3 or more in a row have not succeeded. The importer service is standing by, as another run holds the ${held} lock.`
   ]);
 }
 

@@ -393,8 +393,8 @@ const running = {
 }
 
 // Once the service has ended, its message says how: stopped, in orange, as it was asked to, or
-// failed, in red, e.g. as it lost its run lock, which Docker restarts it after. It no longer shows a
-// cycle under way or the next cycle.
+// failed, in red, e.g. as it lost its locks, which Docker restarts it after, unless a signal, e.g.
+// from docker stop, had asked it to stop. It no longer shows a cycle under way or the next cycle.
 {
   const stopped = render({
     ...running,
@@ -416,11 +416,21 @@ const running = {
     lines(stopped).at(-1),
     `**Stopped** <t:${UNIX + 1800}:f>, as it received SIGTERM.`
   );
-  const failed = render({ ...running, outcome: 'failed', reason: 'it lost its run lock' });
+  const failed = render({ ...running, outcome: 'failed', reason: 'it lost its locks' });
   assert.deepStrictEqual([failed.title, failed.color], ['CBL importer service failed', 0xed4245]);
   assert.match(
     lines(failed).at(-1),
-    /^\*\*Failed\*\* <t:\d+:f>, as it lost its run lock\. Docker restarts it\.$/
+    /^\*\*Failed\*\* <t:\d+:f>, as it lost its locks\. Docker restarts it\.$/
+  );
+  const signalled = render({
+    ...running,
+    outcome: 'failed',
+    reason: 'cycle 1 did not stop at its time limit',
+    restarts: false
+  });
+  assert.match(
+    lines(signalled).at(-1),
+    /^\*\*Failed\*\* <t:\d+:f>, as cycle 1 did not stop at its time limit\.$/
   );
   // Anything else is drawn as failed.
   assert.strictEqual(

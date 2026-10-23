@@ -106,8 +106,8 @@ const reasonAt = (given, minutes) => {
   return [healthy, reason];
 };
 
-// While it holds the run lock, it is healthy as long as a cycle ended within the window, or, before
-// its first cycle has ended, it took the lock within it.
+// While it holds the service lock, it is healthy as long as a cycle ended within the window, or,
+// before its first cycle has ended, it took the lock within it.
 const ended = {
   cycles: 4,
   lastCycle: { cycle: 4, outcome: 'failed', endedAt: START + 40 * MINUTE, seconds: 12 }
@@ -166,7 +166,10 @@ assert.deepStrictEqual(reasonAt({ ...standingBy, waitingFor: 'database' }, 1), [
   'it has been waiting for the database for 1 minute'
 ]);
 assert.deepStrictEqual(check(standingBy, 1).holdsLock, false);
-assert.deepStrictEqual(reasonAt({ lockedAt: null }, 1), [false, 'it does not hold the run lock']);
+assert.deepStrictEqual(reasonAt({ lockedAt: null }, 1), [
+  false,
+  'it does not hold the service lock'
+]);
 // Once it is stopping, it is not.
 assert.deepStrictEqual(reasonAt({ ...ended, stopping: true }, 41), [
   false,

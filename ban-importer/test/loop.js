@@ -41,26 +41,38 @@ const copy = (value) => JSON.parse(JSON.stringify(value));
 
 // A stand-in for the ImporterState and ImporterSchemaMigrations tables, holding JSON text as the
 // database would. A transaction's writes are kept once it commits. Once control.hang is set,
-// transactions and writes never end, and once control.down is set, transactions fail as they do
-// while the database is unavailable.
-function fakeState(events, { rows = {}, tablesMadeAt = null } = {}) {
+// transactions and writes never end, once control.down is set, transactions fail as they do while
+// the database is unavailable, and while control.delay is set, each transaction takes that long,
+// on the test's clock (control.sleep). With missing, the tables do not exist until control.missing
+// is cleared, as the migrations do.
+function fakeState(events, { rows = {}, tablesMadeAt = null, missing = false } = {}) {
   const state = new Map(Object.entries(rows).map(([name, value]) => [name, JSON.stringify(value)]));
   const read = (name) => (state.has(name) ? JSON.parse(state.get(name)) : undefined);
-  const control = { hang: false, down: false };
+  const control = { hang: false, down: false, delay: 0, sleep: null, missing };
   const never = () => new Promise(() => {});
+  // MySQL's error for a table that does not exist.
+  const noTable = () => {
+    if (control.missing)
+      throw Object.assign(new Error("Table 'cbl.ImporterState' doesn't exist"), {
+        original: { errno: 1146 }
+      });
+  };
 
   const ImporterState = {
     async findAll({ where: { name } }) {
       events.push('read state');
+      noTable();
       return [...name]
         .filter((key) => state.has(key))
         .map((key) => ({ name: key, value: read(key) }));
     },
     async findByPk(name) {
+      noTable();
       return state.has(name) ? { name, value: read(name) } : null;
     },
     // A write outside a transaction is kept at once.
     async upsert({ name, value }, { transaction } = {}) {
+      noTable();
       if (transaction) transaction.writes.push([name, JSON.stringify(value)]);
       else {
         if (control.hang) return never();
@@ -74,6 +86,7 @@ function fakeState(events, { rows = {}, tablesMadeAt = null } = {}) {
     events.push('transaction');
     if (control.hang) return never();
     if (control.down) throw unavailable();
+    if (control.delay > 0) await control.sleep(control.delay);
     const current = { LOCK: { UPDATE: 'UPDATE' }, writes: [] };
     const result = await work(current);
     for (const [name, value] of current.writes) state.set(name, value);
@@ -125,10 +138,10 @@ function fakeStatus(events, payload, options) {
 // Load loop.js, with the real run.js, run record, run-control.js and drawings, and stand-ins for
 // the database, the importer's locks, the migrations, the logger, the BattleMetrics client's count
 // of its requests, the health server's http and the process. lockAnswers are what each attempt to
-// take the service lock finds, in turn, the last one again and again: 'free', 'busy', or an error
-// it fails with, and runLockAnswers what each cycle's attempts to take the run lock find: 'free' or
-// 'busy'. With discordLog, Discord logging is on. Once logQueue.stuck is set, the log queue never
-// empties, as when Discord does not answer.
+// take the service lock finds, in turn, the last one again and again: 'free', 'busy', 'hang', when
+// MySQL never answers, or an error it fails with, and runLockAnswers what each cycle's attempts to
+// take the run lock find: 'free' or 'busy'. With discordLog, Discord logging is on. Once
+// logQueue.stuck is set, the log queue never empties, as when Discord does not answer.
 async function loadLoop({
   env = {},
   authenticate = async () => {},
@@ -287,7 +300,8 @@ async function loadLoop({
         events.push('takeServiceLock');
         const answer = answers.length > 1 ? answers.shift() : answers[0];
         if (answer instanceof Error) throw answer;
-        if (answer === 'busy') return null;
+        if (answer === 'busy') return { busy: 'service' };
+        if (answer === 'hang') return new Promise(() => {});
         lock.onLost = onLost;
         return lock;
       }
@@ -301,6 +315,8 @@ async function loadLoop({
     './schema/migrate.js': {
       default: async (options) => {
         events.push('migrate');
+        // The migrations make the importer's tables, if they were not there.
+        state.control.missing = false;
         if (typeof migrations === 'function') return migrations(options);
         for (const id of migrations.applied) options.onApplied(id);
         return migrations;
@@ -314,6 +330,7 @@ async function loadLoop({
     timers.add(timer);
     return timer;
   };
+  state.control.sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const context = vm.createContext({
     console: {
       log: (...args) => output.push(format(...args)),
@@ -830,10 +847,14 @@ for (const what of ['database', 'discord']) {
   assert.strictEqual(service.records()[0].seconds, 60, what);
 }
 
+// A cycle that has not reached a safe point 45 seconds after SIGTERM, e.g. as a BattleMetrics
+// request waits out a pause the API asked for, or is tried again, is ended there, so docker stop
+// never has to kill the service: its JSON line says it was interrupted, and why, and in at most 5
+// more seconds its record is saved, its status message shows that the service stopped, the
+// service's row says so, and the log messages are sent. Then the locks' connection is closed, and
+// the service exits 0, as it was asked to stop. Nothing more is saved or posted if the step ends
+// after all.
 {
-  // A cycle asked to stop by SIGTERM that then reaches its time limit, e.g. as a request waits for
-  // the BattleMetrics budget, says nothing more about it, but still exits at once if it does not
-  // stop within 60 seconds of the limit.
   const service = await loadLoop({
     env: { IMPORTER_CYCLE_SECONDS: '60', IMPORTER_MAX_CYCLE_SECONDS: '120' }
   });
@@ -841,28 +862,140 @@ for (const what of ['database', 'discord']) {
     step('importBans', () => service.wait(150 * SECOND)),
     step('exportExportBans', async () => service.events.push('export'))
   ]);
-  await service.runTo(START + 30 * SECOND);
+  await service.runTo(START + 20 * SECOND);
   service.process.emit('SIGTERM', 'SIGTERM');
-  assert.strictEqual(await service.finish(running), 0);
-  assert.strictEqual(service.now(), START + 150 * SECOND);
+  await service.runTo(START + 64 * SECOND);
+  assert.deepStrictEqual(service.process.exits, []);
+  await service.runUntil(() => service.process.exits.length > 0, 'the service to exit');
+  assert.deepStrictEqual([service.process.exits, service.now()], [[0], START + 65 * SECOND]);
+  assert.ok(service.lock.destroyed);
+  const why = 'Cycle 1 did not reach a safe point within 45s of SIGTERM';
   assert.deepStrictEqual(service.important(), [
     'Received SIGTERM, so the importer service will stop at its next safe point. Send it again to stop at once.',
-    'The CBL update cycle 1 stopped before it finished, as it received SIGTERM.'
+    `${why}, so the importer service is ending it there, and stopping now.`
   ]);
-  assert.deepStrictEqual(service.process.exits, []);
+  const [record] = service.records();
+  assert.deepStrictEqual(
+    [record.outcome, record.exitCode, record.phase, record.reason, record.seconds],
+    ['interrupted', 3, 'importBans', `${why}, so it ended there`, 65]
+  );
+  assert.deepStrictEqual(service.state.read('lastRun'), record);
+  assert.deepStrictEqual(service.state.read('importerService'), {
+    messageId: null,
+    startedAt: '2026-10-22T14:07:00.000Z',
+    endedAt: new Date(START + 65 * SECOND).toISOString(),
+    outcome: 'stopped'
+  });
+  const final = service.statuses[0].embed();
+  assert.strictEqual(final.title, 'CBL importer service stopped');
+  assert.match(final.description, /\*\*Stopped\*\* <t:\d+:f>, as it received SIGTERM\.$/);
+  const saved = service.events.length;
+  // The test's process.exit() returns: the step ends after all, but nothing more is saved.
+  assert.strictEqual(await service.finish(running), 0);
+  assert.deepStrictEqual(
+    service.events.slice(saved).filter((event) => /^(save |transaction|post )/.test(event)),
+    []
+  );
+  assert.strictEqual(service.records().length, 1);
+  assert.ok(!service.events.includes('export'));
 }
+// A time limit that comes first does not change that: the cycle is ended 45 seconds after SIGTERM,
+// before the time limit's hard exit, and the service stopped.
 {
   const service = await loadLoop({
     env: { IMPORTER_CYCLE_SECONDS: '60', IMPORTER_MAX_CYCLE_SECONDS: '120' }
   });
   const stuck = deferred();
   const running = service.start([step('importBans', () => stuck.promise)]);
-  await service.runTo(START + 30 * SECOND);
+  await service.runTo(START + 130 * SECOND);
+  assert.strictEqual(service.control.isStopping(), true);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  await service.runUntil(() => service.process.exits.length > 0, 'the service to exit');
+  assert.deepStrictEqual([service.process.exits, service.now()], [[0], START + 175 * SECOND]);
+  assert.strictEqual(service.state.read('importerService').outcome, 'stopped');
+  // The hard exit that was due at 180 seconds does nothing more.
+  service.advance(START + 200 * SECOND - service.now());
+  for (let i = 0; i < 3; i++) await settle();
+  assert.deepStrictEqual(service.process.exits, [0]);
+  stuck.resolve();
+  assert.strictEqual(await service.finish(running), 0);
+}
+// A cycle whose time limit's hard exit comes before that, as SIGTERM came 30 seconds after the time
+// limit, failed: its status message, its row, its record and its exit code all say so. It is not
+// said that Docker starts it again, as Docker does not start again a service that docker stop
+// stopped.
+{
+  const service = await loadLoop({
+    env: { IMPORTER_CYCLE_SECONDS: '60', IMPORTER_MAX_CYCLE_SECONDS: '120' }
+  });
+  const stuck = deferred();
+  const running = service.start([step('importBans', () => stuck.promise)]);
+  await service.runTo(START + 150 * SECOND);
   service.process.emit('SIGTERM', 'SIGTERM');
   await service.runUntil(() => service.process.exits.length > 0, 'the service to exit');
   assert.deepStrictEqual([service.process.exits, service.now()], [[1], START + 180 * SECOND]);
+  assert.strictEqual(
+    service.important().at(-1),
+    'Cycle 1 did not stop within 60s of its time limit, so the importer service is exiting.'
+  );
+  const final = service.statuses[0].embed();
+  assert.strictEqual(final.title, 'CBL importer service failed');
+  assert.match(
+    final.description,
+    /\*\*Failed\*\* <t:\d+:f>, as cycle 1 did not stop at its time limit\.$/
+  );
+  assert.strictEqual(service.state.read('importerService').outcome, 'failed');
+  const [record] = service.records();
+  assert.deepStrictEqual(
+    [record.outcome, record.exitCode, record.reason],
+    ['failed', 1, 'Cycle 1 did not stop within 60s of its time limit, so the importer exited']
+  );
+  // The stop's deadline, due at 195 seconds, does nothing more.
+  service.advance(START + 200 * SECOND - service.now());
+  for (let i = 0; i < 3; i++) await settle();
+  assert.deepStrictEqual(service.process.exits, [1]);
   stuck.resolve();
   await service.finish(running);
+}
+// A service that is not yet holding the service lock, as MySQL does not answer it, exits 45 seconds
+// after SIGTERM too.
+{
+  const service = await loadLoop({ lockAnswers: ['hang'] });
+  service.start([step('importBans', () => service.events.push('import'))]);
+  for (let i = 0; i < 3; i++) await settle();
+  service.advance(10 * SECOND);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  await service.runTo(START + 54 * SECOND);
+  assert.deepStrictEqual(service.process.exits, []);
+  await service.runTo(START + 55 * SECOND);
+  assert.deepStrictEqual(service.process.exits, [0]);
+  assert.strictEqual(
+    service.printed().at(-1),
+    'The importer service stopped before it took the service lock, as it received SIGTERM.'
+  );
+  assert.ok(!service.events.includes('import'));
+}
+// The 55 seconds count from the signal: a service that stops for another reason, as it lost its
+// locks, gives its end its usual time, which nothing cuts short, also when its cycle reaches its
+// safe point a minute later. Here each save takes a second.
+{
+  const service = await loadLoop({ env: { IMPORTER_CYCLE_SECONDS: '600' } });
+  const running = service.start([
+    step('importBans', () => service.wait(90 * SECOND)),
+    step('exportExportBans', async () => service.events.push('export'))
+  ]);
+  await service.runTo(START + 20 * SECOND);
+  service.state.control.delay = SECOND;
+  service.lock.onLost('Connection lost');
+  assert.strictEqual(await service.finish(running), 1);
+  const [record] = service.records();
+  assert.deepStrictEqual(
+    [record.outcome, record.reason, record.seconds],
+    ['failed', 'Stopped, as it lost its locks', 90]
+  );
+  assert.deepStrictEqual(service.state.read('lastRun'), record);
+  assert.ok(!service.printed().some((line) => line.startsWith('Warning: could not save')));
+  assert.deepStrictEqual(service.process.exits, []);
 }
 
 // A second signal ends the service at once, closing the lock's connection: the cycle under way
@@ -891,10 +1024,11 @@ for (const what of ['database', 'discord']) {
   assert.strictEqual(service.records().length, 1);
 }
 
-// A service that loses the run lock, e.g. as MySQL restarted, stops at its next safe point and
-// exits 1, as another run may have taken the lock, for Docker to start it again: during a cycle,
-// which fails, between cycles, at once, without another cycle, and when a cycle finds at its start
-// that it no longer holds the lock.
+// A service that loses its locks, e.g. as MySQL restarted, stops at its next safe point and exits
+// 1, as another run may have taken them, for Docker to start it again: during a cycle, which fails,
+// between cycles, at once, without another cycle, and when a cycle finds at its start that it no
+// longer holds them, or that their connection is gone as it takes the run lock. Between cycles it
+// holds only the service lock, so it says it lost its locks, not the run lock.
 {
   const service = await loadLoop();
   const gate = deferred();
@@ -910,15 +1044,15 @@ for (const what of ['database', 'discord']) {
   const [record] = service.records();
   assert.deepStrictEqual(
     [record.outcome, record.exitCode, record.reason],
-    ['failed', 1, 'Stopped, as it lost its run lock']
+    ['failed', 1, 'Stopped, as it lost its locks']
   );
   assert.deepStrictEqual(service.important(), [
-    'The importer service lost its run lock (Connection lost: The server closed the connection.), so it will stop at its next safe point and exit, for Docker to start it again.',
-    'The CBL update cycle 1 stopped before it finished, as it lost its run lock.'
+    'The importer service lost its locks (Connection lost: The server closed the connection.), so it will stop at its next safe point and exit, for Docker to start it again.',
+    'The CBL update cycle 1 stopped before it finished, as it lost its locks.'
   ]);
   const final = service.statuses[0].embed();
   assert.strictEqual(final.title, 'CBL importer service failed');
-  assert.match(final.description, /as it lost its run lock\. Docker restarts it\.$/);
+  assert.match(final.description, /as it lost its locks\. Docker restarts it\.$/);
   assert.strictEqual(service.state.read('importerService').outcome, 'failed');
 }
 {
@@ -926,10 +1060,16 @@ for (const what of ['database', 'discord']) {
   const running = service.start([step('importBans', () => service.wait(30 * SECOND))]);
   await service.runUntil(() => service.records().length === 1, 'the first cycle');
   await service.runTo(START + 5 * MINUTE);
+  assert.strictEqual(service.lock.runHeld, false);
   service.lock.onLost('Connection lost');
   assert.strictEqual(await service.finish(running), 1);
   assert.strictEqual(service.now(), START + 5 * MINUTE);
   assert.strictEqual(service.records().length, 1);
+  assert.strictEqual(
+    service.important().at(-1),
+    'The importer service lost its locks (Connection lost), so it will stop at its next safe point and exit, for Docker to start it again.'
+  );
+  assert.match(service.statuses[0].embed().description, /as it lost its locks\. Docker restarts/);
 }
 {
   const service = await loadLoop({ env: { IMPORTER_CYCLE_SECONDS: '60' } });
@@ -940,9 +1080,30 @@ for (const what of ['database', 'discord']) {
   const second = service.records()[1];
   assert.deepStrictEqual(
     [second.outcome, second.phase, second.reason],
-    ['failed', 'takeRunLock', 'Stopped, as it lost its run lock']
+    ['failed', 'takeRunLock', 'Stopped, as it lost its locks']
   );
   assert.strictEqual(service.events.filter((event) => event === 'import').length, 1);
+}
+{
+  // The connection went while the service waited between cycles, which the next cycle finds as it
+  // takes the run lock.
+  const service = await loadLoop({ env: { IMPORTER_CYCLE_SECONDS: '60' } });
+  const running = service.start([step('importBans', () => service.events.push('import'))]);
+  await service.runUntil(() => service.records().length === 1, 'the first cycle');
+  service.lock.beginCycle = async () => {
+    service.lock.onLost('Error: The client was disconnected by the server because of inactivity.');
+    return false;
+  };
+  assert.strictEqual(await service.finish(running), 1);
+  const second = service.records()[1];
+  assert.deepStrictEqual(
+    [second.outcome, second.phase, second.reason],
+    ['failed', 'takeRunLock', 'Stopped, as it lost its locks']
+  );
+  assert.match(
+    service.important().at(-2),
+    /^The importer service lost its locks \(Error: The client/
+  );
 }
 
 // The database being unavailable between cycles does not end the service: the next cycle waits
@@ -1053,7 +1214,7 @@ for (const what of ['database', 'discord']) {
     [200, false, 'lock', 'it has been waiting for another run to end for 9 minutes']
   );
   assert.deepStrictEqual(service.discord, [
-    'The CBL update is stale: no run has succeeded for 2.0 hours, since the one that started at 2026-10-22T12:07:00.000Z. The importer service starts a cycle every 10 minutes (IMPORTER_CADENCE_SECONDS, or else IMPORTER_CYCLE_SECONDS), so 3 or more in a row have not succeeded. The last run ended at 2026-10-22T12:10:00.000Z with exit code 1 (Error: Lost). The importer service is standing by, as another run holds the run lock.'
+    'The CBL update is stale: no run has succeeded for 2.0 hours, since the one that started at 2026-10-22T12:07:00.000Z. The importer service starts a cycle every 10 minutes (IMPORTER_CADENCE_SECONDS, or else IMPORTER_CYCLE_SECONDS), so 3 or more in a row have not succeeded. The last run ended at 2026-10-22T12:10:00.000Z with exit code 1 (Error: Lost). The importer service is standing by, as another run holds the service lock.'
   ]);
   assert.deepStrictEqual(service.printed(), [
     'Another run holds the service lock, so the importer service stands by, trying again every 15s.',
@@ -1147,8 +1308,8 @@ for (const what of ['database', 'discord']) {
   // goes, until its time limit's hard exit ends the service, which is then stopping.
   await service.runTo(START + 10 * MINUTE + SECOND);
   assert.deepStrictEqual([service.health().status, service.health().cycle], [200, 2]);
-  await service.runTo(START + 26 * MINUTE + SECOND);
-  assert.deepStrictEqual(service.process.exits, [1]);
+  await service.runUntil(() => service.process.exits.length > 0, 'the hard exit');
+  assert.deepStrictEqual([service.process.exits, service.now()], [[1], START + 26 * MINUTE]);
   assert.deepStrictEqual(
     [service.health().status, service.health().reason],
     [503, 'the importer service is stopping']
@@ -1584,6 +1745,39 @@ for (const how of ['stopped', 'failed']) {
   stuck.resolve();
   if (how === 'failed') await service.finish(running);
 }
+// The end waits for that edit for as long as it can, keeping 5 seconds to save the row again, so a
+// slow Discord, which posts the message again 20 seconds after SIGTERM, still has its new ID saved.
+{
+  const service = await loadLoop({
+    env: { IMPORTER_CYCLE_SECONDS: '600' },
+    state: {
+      rows: {
+        importerService: {
+          messageId: '111',
+          startedAt: '2026-10-22T13:00:00.000Z',
+          endedAt: '2026-10-22T13:59:00.000Z',
+          outcome: 'stopped'
+        }
+      }
+    }
+  });
+  const running = service.start([step('importBans', () => service.wait(5 * SECOND))]);
+  await service.runUntil(() => service.records().length === 1, 'the first cycle');
+  await service.runTo(service.now() + 10 * SECOND);
+  const [status] = service.statuses;
+  status.finalEdit = (options) => service.wait(20 * SECOND).then(() => options.onPosted('222'));
+  const askedAt = service.now();
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
+  assert.deepStrictEqual(service.state.read('importerService'), {
+    messageId: '222',
+    startedAt: '2026-10-22T14:07:00.000Z',
+    endedAt: new Date(askedAt).toISOString(),
+    outcome: 'stopped'
+  });
+  assert.strictEqual(service.lock.releasedAt - askedAt, 20 * SECOND);
+  assert.ok(!service.printed().some((line) => /final edit took longer/.test(line)));
+}
 
 // A second signal ends the service at once, closing the locks' connection, but nothing is cut
 // short between cycles, nor once the service is ending, so it exits with the code it was stopping
@@ -1683,11 +1877,90 @@ for (const [cause, code] of [
   service.process.emit('SIGTERM', 'SIGTERM');
   assert.strictEqual(await service.finish(running), 0);
 }
+// The service's first cycle shows that it waits for the run lock in the status message too, as the
+// switch from the script's runs to the service may find a run of an earlier importer under way: it
+// reads the service's row and posts the status message, or edits the last process's, as it starts
+// to wait, before the migrations, which still wait for the run lock. A service stopped while it
+// waits saves how it ended in its row, so the next process does not say it ended without saying
+// how.
+for (const stop of [false, true]) {
+  const service = await loadLoop({
+    env: { IMPORTER_CYCLE_SECONDS: '60' },
+    runLockAnswers: ['busy', 'busy', 'free'],
+    state: {
+      rows: {
+        importerService: {
+          messageId: '555',
+          startedAt: '2026-10-22T10:00:00.000Z',
+          endedAt: '2026-10-22T14:06:00.000Z',
+          outcome: 'stopped'
+        }
+      }
+    }
+  });
+  const running = service.start([step('importBans', async () => {})]);
+  await service.runTo(START + 10 * SECOND);
+  assert.strictEqual(service.statuses.length, 1, `${stop}`);
+  const [status] = service.statuses;
+  assert.strictEqual(status.options.messageID, '555');
+  assert.strictEqual(
+    status.first.description.split('\n')[3],
+    `⏳ **Cycle 1** · started <t:${START / 1000}:R> · waiting for another run to end since <t:${START / 1000}:R>`
+  );
+  assert.ok(!service.events.includes('migrate'));
+  assert.deepStrictEqual(service.state.read('importerService'), {
+    messageId: '555',
+    startedAt: '2026-10-22T14:07:00.000Z'
+  });
+  if (stop) {
+    service.process.emit('SIGTERM', 'SIGTERM');
+    assert.strictEqual(await service.finish(running), 0);
+    assert.deepStrictEqual(service.state.read('importerService'), {
+      messageId: '555',
+      startedAt: '2026-10-22T14:07:00.000Z',
+      endedAt: new Date(START + 10 * SECOND).toISOString(),
+      outcome: 'stopped'
+    });
+    assert.strictEqual(service.events.filter((event) => event === 'migrate').length, 0);
+    continue;
+  }
+  await service.runUntil(() => service.records().length === 1, 'the first cycle');
+  assert.deepStrictEqual(
+    [service.records()[0].outcome, service.records()[0].phases.takeRunLock],
+    ['finished', 30]
+  );
+  assert.deepStrictEqual(service.statuses, [status]);
+  assert.strictEqual(service.events.filter((event) => event === 'migrate').length, 1);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
+}
+// Before the importer's tables exist, there is no row to read, nor to keep the message's ID in, so
+// the status message waits for the migrations, as it does when nothing waits.
+{
+  const service = await loadLoop({
+    env: { IMPORTER_CYCLE_SECONDS: '60' },
+    runLockAnswers: ['busy', 'busy', 'free'],
+    state: { missing: true }
+  });
+  const running = service.start([step('importBans', async () => {})]);
+  await service.runTo(START + 10 * SECOND);
+  assert.deepStrictEqual(service.statuses, []);
+  await service.runUntil(() => service.records().length === 1, 'the first cycle');
+  assert.strictEqual(service.statuses.length, 1);
+  assert.deepStrictEqual(service.state.read('importerService'), {
+    messageId: null,
+    startedAt: '2026-10-22T14:07:00.000Z'
+  });
+  assert.ok(!service.printed().some((line) => line.includes('could not read the importer')));
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
+}
+
 // A cycle asked to stop while it waits for the run lock stops at once, and one whose locks are lost
 // meanwhile ends the service with exit code 1.
 for (const [stop, code, reason] of [
   [(service) => service.process.emit('SIGTERM', 'SIGTERM'), 0, 'Stopped, as it received SIGTERM'],
-  [(service) => service.lock.onLost('Connection lost'), 1, 'Stopped, as it lost its run lock']
+  [(service) => service.lock.onLost('Connection lost'), 1, 'Stopped, as it lost its locks']
 ]) {
   const service = await loadLoop({ runLockAnswers: ['busy'] });
   const running = service.start([step('importBans', () => service.events.push('import'))]);

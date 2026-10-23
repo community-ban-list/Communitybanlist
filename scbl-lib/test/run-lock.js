@@ -266,15 +266,16 @@ const getLock = (acquired, extra) => lockAnswers({ service: acquired, run: acqui
 
 // When another run or the importer service holds the service lock, or a run of an importer from
 // before the service lock holds the run lock, there are no locks and the connection is closed,
-// which frees the service lock if it was taken. The run lock is not asked for without the service
-// lock.
-for (const [answers, queries] of [
-  [{ service: 0 }, [SET_WAIT_TIMEOUT, GET_SERVICE_LOCK]],
-  [{ run: 0 }, [SET_WAIT_TIMEOUT, GET_SERVICE_LOCK, GET_RUN_LOCK]]
+// which frees the service lock if it was taken. It says which lock is held, for the run's line and
+// record. The run lock is not asked for without the service lock.
+for (const [answers, queries, busy] of [
+  [{ service: 0 }, [SET_WAIT_TIMEOUT, GET_SERVICE_LOCK], 'service'],
+  [{ run: 0 }, [SET_WAIT_TIMEOUT, GET_SERVICE_LOCK, GET_RUN_LOCK], 'run'],
+  [{ service: 0, run: 0 }, [SET_WAIT_TIMEOUT, GET_SERVICE_LOCK], 'service']
 ]) {
   const runLock = await loadRunLock();
   const connection = runLock.connectAnswering(lockAnswers(answers));
-  assert.strictEqual(await runLock.takeRunLock(), null);
+  assert.deepStrictEqual({ ...(await runLock.takeRunLock()) }, { busy });
   assert.deepStrictEqual(lockQuery(connection), queries);
   assert.ok(connection.ended);
   assert.ok(!connection.socketDestroyed);
@@ -283,7 +284,7 @@ for (const [answers, queries] of [
   // If MySQL does not let it close, its socket is destroyed at once.
   const stuck = runLock.connectAnswering(lockAnswers(answers));
   stuck.end = () => Promise.reject(new Error("Can't add new command when connection is closed"));
-  assert.strictEqual(await runLock.takeRunLock(), null);
+  assert.deepStrictEqual({ ...(await runLock.takeRunLock()) }, { busy });
   assert.ok(stuck.socketDestroyed);
 }
 
@@ -534,7 +535,7 @@ for (const [loseLock, reason] of [
 
   // Another run or service holds the service lock: no locks.
   const busy = runLock.connectAnswering(lockAnswers({ service: 0 }));
-  assert.strictEqual(await runLock.takeServiceLock(), null);
+  assert.deepStrictEqual({ ...(await runLock.takeServiceLock()) }, { busy: 'service' });
   assert.deepStrictEqual(lockQuery(busy), [SET_WAIT_TIMEOUT, GET_SERVICE_LOCK]);
   assert.ok(busy.ended);
 }
@@ -626,5 +627,5 @@ for (const [answers, act, reason] of [
 }
 
 console.log(
-  "Run lock checks passed: taking, keeping, losing and releasing a run's locks and the importer service's, with a short idle time, also when MySQL stops answering, the run lock taken and freed for each cycle, and asking whether a run holds it."
+  "Run lock checks passed: taking, keeping, losing and releasing a run's locks and the importer service's, with a short idle time, also when MySQL stops answering, which lock another run holds, the run lock taken and freed for each cycle, and asking whether a run holds it."
 );

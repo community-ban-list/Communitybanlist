@@ -214,7 +214,9 @@ function describeLast(last) {
 //   outcome as its record names it, or null before the first;
 // - nextAt: when the next cycle starts, between cycles;
 // - totals: the totals from the last hourly summary on (see newTotals);
-// - reason: why the service stopped or failed.
+// - reason: why the service stopped or failed;
+// - restarts: whether Docker starts a service that failed again, as it does unless a signal, e.g.
+//   from docker stop, asked it to stop first. It does, unless this is false.
 // Times are in milliseconds. Discord shows each time in each viewer's own time zone, and how long
 // ago or until, so the message stays current between its edits.
 export default function renderServiceStatus(state) {
@@ -266,7 +268,7 @@ export default function renderServiceStatus(state) {
       '',
       outcome === 'stopped'
         ? `**Stopped** ${discordTime(at, 'f')}${reason}.`
-        : `**Failed** ${discordTime(at, 'f')}${reason}. Docker restarts it.`
+        : `**Failed** ${discordTime(at, 'f')}${reason}.${state.restarts === false ? '' : ' Docker restarts it.'}`
     );
   }
 

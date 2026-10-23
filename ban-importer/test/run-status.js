@@ -271,7 +271,7 @@ for (const [done, total, cells] of [
 }
 
 // A run that ended gets a title and colour for how it ended: finished in green, failed in red,
-// stopped in orange, and lost its run lock in red. Its time is how long it took, and each step that
+// stopped in orange, and lost its locks in red. Its time is how long it took, and each step that
 // finished shows its time and counts.
 // completed lists the steps that finished, after the phases before them, or, for a run that ended
 // in one of those, the phases that finished.
@@ -337,13 +337,7 @@ for (const [outcome, title, color, mark, reason] of [
     'SequelizeDatabaseError: Deadlock found when trying to get lock; try restarting transaction'
   ],
   ['stopped', 'CBL update run stopped', 0xe67e22, '⏹️', 'Stopped, as it received SIGTERM'],
-  [
-    'lockLost',
-    'CBL update run lost its run lock',
-    0xed4245,
-    '⏹️',
-    'Stopped, as it lost its run lock'
-  ]
+  ['lockLost', 'CBL update run lost its locks', 0xed4245, '⏹️', 'Stopped, as it lost its locks']
 ]) {
   const embed = render(ended(outcome, { ...recalculation, reason }));
   assert.strictEqual(embed.title, title);
@@ -782,7 +776,7 @@ for (const state of [
     ['finished', {}],
     ['failed', { ...recalculation, reason: 'Error: Deadlock found' }],
     ['stopped', { ...recalculation, reason: 'Stopped, as it received SIGTERM' }],
-    ['lockLost', { ...recalculation, reason: 'Stopped, as it lost its run lock' }]
+    ['lockLost', { ...recalculation, reason: 'Stopped, as it lost its locks' }]
   ]) {
     const state = ended(outcome, options);
     const revised = copy(markEnded(message, state));
@@ -811,7 +805,7 @@ for (const [outcome, title] of [
   ['finished', 'CBL update cycle 12 finished'],
   ['failed', 'CBL update cycle 12 failed'],
   ['stopped', 'CBL update cycle 12 stopped'],
-  ['lockLost', 'CBL update cycle 12 lost its run lock']
+  ['lockLost', 'CBL update cycle 12 lost its locks']
 ]) {
   const embed = render({ ...ended(outcome), cycle: 12 });
   assert.strictEqual(embed.title, title);

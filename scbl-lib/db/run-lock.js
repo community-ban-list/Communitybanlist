@@ -219,7 +219,9 @@ class RunLock {
 }
 
 // Take the service lock, and, with run, the run lock too, on a connection of their own, without
-// waiting for them. Resolves with the locks, or with null if another connection holds either.
+// waiting for them. Resolves with the locks, or, if another connection holds either, with
+// { busy } naming the one it holds: 'service', or 'run' when only the run lock is held, as by a
+// run of an importer from before the service lock.
 async function takeLocks({ onLost, run }) {
   const what = run ? 'the run lock' : 'the service lock';
   let connection;
@@ -247,21 +249,25 @@ async function takeLocks({ onLost, run }) {
     return new RunLock(connection, { serviceName: service.name, runName: runLock?.name }, onLost);
   // Closing the connection frees a lock it took.
   await close(connection);
-  if (locks.some(({ busy }) => busy)) return null;
+  if (service.busy) return { busy: 'service' };
+  if (runLock?.busy) return { busy: 'run' };
   throw new Error(`Could not take ${what}: ${NO_RESULT}`);
 }
 
 // Take the importer's locks for a run in once mode, the service lock and the run lock, without
-// waiting for them. Resolves with the locks, or with null if another run, or the importer service,
-// holds either. onLost(reason) is called if they are lost later, e.g. because their connection
-// dropped. Errors never include the connection settings.
+// waiting for them. Resolves with the locks, or with { busy } if another run, or the importer
+// service, holds either: { busy: 'service' } while the importer service, or another run, holds the
+// service lock, and { busy: 'run' } while only the run lock is held, by a run of an importer from
+// before the service lock. onLost(reason) is called if they are lost later, e.g. because their
+// connection dropped. Errors never include the connection settings.
 export default async function takeRunLock({ onLost } = {}) {
   return takeLocks({ onLost, run: true });
 }
 
 // Take the service lock for the importer service, without waiting for it. Resolves with the locks,
-// whose beginCycle and endCycle take and free the run lock for each cycle, or with null if another
-// run, or another service, holds it. onLost is called as for takeRunLock.
+// whose beginCycle and endCycle take and free the run lock for each cycle, or with
+// { busy: 'service' } if another run, or another service, holds it. onLost is called as for
+// takeRunLock.
 export async function takeServiceLock({ onLost } = {}) {
   return takeLocks({ onLost, run: false });
 }

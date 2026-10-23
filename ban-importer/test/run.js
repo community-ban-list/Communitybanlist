@@ -129,16 +129,17 @@ function fakeStatus(events, payload, now) {
 }
 
 // Load run.js with stand-ins for the database, the run lock, the migrations, the logger and the
-// process, and a clock that only moves when the test moves it. takeRunLockError, when given, is
-// what taking the lock fails with, migrations is what migrate() resolves with or a function that
-// is given migrate()'s options and returns it or throws, state sets up the stand-in for
-// ImporterState (see fakeState), and logQueue is what the logger says is waiting to be sent. With
-// discordLog, Discord logging is on, so the run posts its status (see fakeStatus); otherwise the
-// logger gives it a status message that is off, as the real one does.
+// process, and a clock that only moves when the test moves it. busy, when given, is the lock that
+// another run holds, 'service' or 'run', which takeRunLock then says, takeRunLockError, when
+// given, is what taking the lock fails with, migrations is what migrate() resolves with or a
+// function that is given migrate()'s options and returns it or throws, state sets up the stand-in
+// for ImporterState (see fakeState), and logQueue is what the logger says is waiting to be sent.
+// With discordLog, Discord logging is on, so the run posts its status (see fakeStatus); otherwise
+// the logger gives it a status message that is off, as the real one does.
 async function loadRun({
   env = {},
   authenticate = async () => {},
-  lockFree = true,
+  busy = null,
   takeRunLockError = null,
   migrations = { applied: [], unknown: [] },
   connect = async () => {},
@@ -210,7 +211,7 @@ async function loadRun({
       takeRunLock: async ({ onLost }) => {
         events.push('takeRunLock');
         if (takeRunLockError) throw takeRunLockError;
-        if (!lockFree) return null;
+        if (busy) return { busy };
         lock.onLost = onLost;
         return lock;
       }
@@ -511,36 +512,39 @@ function gatedStep(events, name) {
   assert.ok(!importer.state.state.has('lastSuccessAt'));
 }
 
-// When another run holds the lock, the run is skipped with exit code 75 and one line in the
-// console, besides its record. It posts nothing to Discord, and saves nothing, but it checks
-// whether the importer is stale, as a run that is stuck holding the lock would make every later
-// start skip.
-{
-  const importer = await loadRun({ lockFree: false });
+// When another run holds the locks, the run is skipped with exit code 75 and one line in the
+// console, besides its record, which say which lock is held: the service lock, which the importer
+// service holds, also between its cycles, when the run lock is free, or only the run lock, as a run
+// of an importer from before the service lock holds it. It posts nothing to Discord, and saves
+// nothing, but it checks whether the importer is stale, as a run that is stuck holding the lock
+// would make every later start skip.
+for (const [busy, held] of [
+  ['service', 'the importer service or another run holds the service lock'],
+  ['run', 'another run holds the run lock']
+]) {
+  const importer = await loadRun({ busy });
   const exitCode = await importer.run([step('import', () => importer.events.push('import'))]);
   assert.strictEqual(exitCode, 75);
   assert.deepStrictEqual(importer.events, ['authenticate', 'takeRunLock', 'read state']);
-  assert.deepStrictEqual(importer.printed(), [
-    'Skipped this CBL update run, as another run holds the run lock.'
-  ]);
+  assert.deepStrictEqual(importer.printed(), [`Skipped this CBL update run, as ${held}.`]);
   assert.deepStrictEqual(importer.discord, []);
   assert.strictEqual(importer.state.state.size, 0);
   const record = importer.record();
   assert.strictEqual(record.outcome, 'skipped');
   assert.strictEqual(record.exitCode, 75);
-  assert.strictEqual(record.reason, 'Another run holds the run lock');
+  assert.strictEqual(record.reason, `${held[0].toUpperCase()}${held.slice(1)}`);
   assert.ok(!('phase' in record));
 }
 
 // A skipped start that finds no run has succeeded for 3 cadences posts that the importer is stale,
 // and sends it before it ends, unless a run or skipped start posted within the cadence. It saves
-// when it started as the time of the alert, and nothing else.
+// when it started as the time of the alert, and nothing else. The alert says which lock is held.
 {
   const rows = {
     lastSuccessAt: new Date(START - 19 * HOUR).toISOString(),
     lastRun: { endedAt: '2026-10-15T06:00:00.000Z', exitCode: 1, reason: 'Error: Lost' }
   };
-  const importer = await loadRun({ lockFree: false, state: { rows } });
+  const importer = await loadRun({ busy: 'run', state: { rows } });
   assert.strictEqual(await importer.run([]), 75);
   assert.deepStrictEqual(importer.discord, [
     'The CBL update is stale: no run has succeeded for 19.0 hours, since the one that started at 2026-10-14T17:00:00.000Z. Runs start every IMPORTER_CADENCE_SECONDS (6.0 hours), so 3 or more in a row have not succeeded. The last run ended at 2026-10-15T06:00:00.000Z with exit code 1 (Error: Lost). This start was skipped, as another run holds the run lock.'
@@ -563,12 +567,23 @@ function gatedStep(events, name) {
   assert.strictEqual(importer.record().outcome, 'skipped');
 
   const alerted = await loadRun({
-    lockFree: false,
+    busy: 'run',
     state: { rows: { ...rows, lastStaleAlertAt: new Date(START - 5 * HOUR).toISOString() } }
   });
   assert.strictEqual(await alerted.run([]), 75);
   assert.deepStrictEqual(alerted.discord, []);
   assert.ok(!alerted.events.includes('flush'));
+
+  // While the importer service, or another run, holds the service lock.
+  const service = await loadRun({ busy: 'service', state: { rows } });
+  assert.strictEqual(await service.run([]), 75);
+  assert.strictEqual(service.discord.length, 1);
+  assert.ok(
+    service.discord[0].endsWith(
+      ' This start was skipped, as the importer service or another run holds the service lock.'
+    ),
+    service.discord[0]
+  );
 }
 
 // A run that cannot take the lock failed, rather than being skipped: it exits 1, not 75, and unlike
@@ -1268,20 +1283,20 @@ for (const [value, seconds, warning] of [
   const run = importer.run([first.step, step('export', () => importer.events.push('export'))]);
   await first.started;
   importer.lock.onLost('Connection lost: The server closed the connection.');
-  assert.match(importer.important().at(-1), /^The run lost its run lock \(Connection lost/);
+  assert.match(importer.important().at(-1), /^The run lost its locks \(Connection lost/);
   first.finish();
 
   assert.strictEqual(await run, 1);
   assert.ok(!importer.events.includes('export'));
   assert.strictEqual(
     importer.important().at(-1),
-    'The CBL update run stopped before it finished, as it lost its run lock.'
+    'The CBL update run stopped before it finished, as it lost its locks.'
   );
   assert.deepStrictEqual(importer.events.slice(-2), ['flush', 'release']);
   const record = importer.record();
   assert.deepStrictEqual(
     [record.outcome, record.exitCode, record.reason],
-    ['failed', 1, 'Stopped, as it lost its run lock']
+    ['failed', 1, 'Stopped, as it lost its locks']
   );
 }
 
@@ -1296,7 +1311,7 @@ for (const [value, seconds, warning] of [
   importer.process.emit('SIGTERM', 'SIGTERM');
   first.finish();
   assert.strictEqual(await run, 1);
-  assert.match(importer.important().at(-1), /as it lost its run lock\.$/);
+  assert.match(importer.important().at(-1), /as it lost its locks\.$/);
 }
 
 // Steps that delete or export bans check the lock first, and end the run with exit code 1 if it is
@@ -1388,7 +1403,8 @@ const STARTED = Math.floor(START / 1000);
 
 // A run that is skipped, or that fails before it holds the lock, posts no status.
 for (const options of [
-  { lockFree: false },
+  { busy: 'service' },
+  { busy: 'run' },
   { takeRunLockError: new Error('ER_LOCK_DEADLOCK') },
   {
     authenticate: async () => {
@@ -1484,10 +1500,10 @@ for (const { stop, env, exitCode, title, color, mark, reason } of [
   {
     stop: (importer) => importer.lock.onLost('Connection lost: The server closed the connection.'),
     exitCode: 1,
-    title: 'CBL update run lost its run lock',
+    title: 'CBL update run lost its locks',
     color: 0xed4245,
     mark: '⏹️',
-    reason: 'Stopped, as it lost its run lock'
+    reason: 'Stopped, as it lost its locks'
   },
   {
     stop: (importer) => importer.leftWaiting(),
@@ -1732,8 +1748,10 @@ const last = { messageId: '800', startedAt: '2026-10-15T06:00:00.000Z' };
 // A run whose last edit did not reach Discord, e.g. as Discord was down while it ended, but which
 // saved its record, is shown by the next run as it ended, drawn from that record, rather than
 // marked as having ended without finishing. The record is the latest run's, or a summary in
-// recentRuns, e.g. for a run that lost its run lock and saved its record after the run that took
-// the lock over. The steps are this run's, and those its record has no time for were not run.
+// recentRuns, e.g. for a run that lost its locks and saved its record after the run that took
+// them over. A record that an earlier importer saved, when it lost its run lock, is shown as one
+// that lost its locks. The steps are this run's, and those its record has no time for were not
+// run.
 const inProgress = {
   id: '800',
   content: null,
@@ -1792,9 +1810,14 @@ for (const { saved, recentOnly, title, shown } of [
     shown: ending('❌', 'Error: Deadlock found')
   },
   {
-    saved: { outcome: 'failed', exitCode: 1, reason: 'Stopped, as it lost its run lock' },
+    saved: { outcome: 'failed', exitCode: 1, reason: 'Stopped, as it lost its locks' },
     recentOnly: true,
-    title: 'CBL update run lost its run lock',
+    title: 'CBL update run lost its locks',
+    shown: ending('⏹️', 'Stopped, as it lost its locks')
+  },
+  {
+    saved: { outcome: 'failed', exitCode: 1, reason: 'Stopped, as it lost its run lock' },
+    title: 'CBL update run lost its locks',
     shown: ending('⏹️', 'Stopped, as it lost its run lock')
   },
   {

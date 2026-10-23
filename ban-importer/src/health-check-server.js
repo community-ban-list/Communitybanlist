@@ -5,7 +5,8 @@ import http from 'http';
 // starts no server.
 export const HEALTH_CHECK_PORT = 3001;
 
-// While the service waits for the database or the run lock, it is healthy for this long.
+// While the service waits for the database, or for a lock that another run holds, it is healthy for
+// this long.
 export const WAIT_LIMIT = 10 * 60 * 1000;
 
 const minutes = (ms) => {
@@ -63,7 +64,7 @@ export function checkHealth(health, now) {
   return unhealthy(
     waitingFor
       ? `it has been waiting for ${waiting} for ${minutes(waited)}, more than the ${minutes(WAIT_LIMIT)} allowed`
-      : 'it does not hold the run lock'
+      : 'it does not hold the service lock'
   );
 }
 

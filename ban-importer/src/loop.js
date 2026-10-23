@@ -3,7 +3,7 @@ import { connect, disconnect, takeServiceLock } from 'scbl-lib/db';
 import { describeError, Logger } from 'scbl-lib/utils';
 
 import startHealthCheckServer, { checkHealth } from './health-check-server.js';
-import { readService, saveService, succeeded } from './run-record.js';
+import { isMissingTable, readService, saveService, succeeded } from './run-record.js';
 import {
   clearStop,
   isStopping,
@@ -58,7 +58,8 @@ import migrate from './schema/migrate.js';
 // The service stops only when it is asked to, by SIGTERM or SIGINT, or when it can no longer go on
 // safely: when it loses its locks, or when a cycle does not stop within 60 seconds of its time
 // limit. It then exits 1, for Docker to start it again, as Docker never restarts a container that
-// is only unhealthy.
+// is only unhealthy. Once a signal asks it to stop, a cycle that has not reached a safe point within
+// 45 seconds is ended there, so the service still exits before docker stop kills it.
 
 // How the importer runs (IMPORTER_MODE): once, the default, runs the steps once and exits, as the
 // script that starts the importer has it, and loop runs them as the importer service.
@@ -83,15 +84,30 @@ const DATABASE_MAX_DELAY = 60 * 1000;
 // once. The web server and the bot post to the same webhook, and Discord limits each webhook.
 const STATUS_EDIT_INTERVAL = 60 * 1000;
 
-// docker stop gives the service 60 seconds (stop_grace_period) before it kills it. Once the service
-// is asked to stop, its end, from saving the last cycle's record to releasing the locks, waits for
-// nothing beyond 55 seconds after it was asked, nor beyond END_TIMEOUT after the end began, as a
-// run's end does, so a cycle that reaches its safe point late leaves its end less time.
+// docker stop gives the service 60 seconds (stop_grace_period) before it kills it. Once a signal
+// asks the service to stop, its end, from saving the last cycle's record to releasing the locks,
+// waits for nothing beyond 55 seconds after the signal, nor beyond END_TIMEOUT after the end began,
+// as a run's end does, so a cycle that reaches its safe point late leaves its end less time. An end
+// for any other reason, e.g. lost locks, takes up to END_TIMEOUT, as nothing kills the service then.
 const STOP_GRACE = 55 * 1000;
+
+// Once a signal asks the service to stop, a cycle that has not reached a safe point this long after
+// it is ended there, and the service ends at once (see onStopDeadline), in the 5 seconds left before
+// STOP_GRACE less RELEASE_RESERVE. The next safe point can be minutes away: a BattleMetrics request
+// waits for the budget, for a minute once BattleMetrics says few of the key's requests are left,
+// for as long as it asks after a 429, up to 5 minutes, and for up to 3 attempts, each cut off after
+// 30 seconds. Ending the cycle there loses nothing that docker stop's kill, which would come next,
+// would not.
+const STOP_DEADLINE = 45 * 1000;
 
 // A cycle that has not stopped 60 seconds after its time limit ends the service at once, after
 // waiting at most this long for its log messages to be sent, so the log channel says why.
 const HARD_EXIT_FLUSH = 5 * 1000;
+
+// The end waits for the status message's final edit to be sent until this long before it releases
+// the locks, which leaves the time to save the service's row again, with the ID of a message that
+// the edit found deleted and posted again.
+const SENT_RESERVE = 5 * 1000;
 
 // The text of a setting, without spaces or one pair of quotes around it, in lower case, as the
 // importer reads its switches (see unquote in ban-list-sync.js).
@@ -148,7 +164,8 @@ function memoryNow() {
 // on, and resolve with its exit code: 0 once it stopped as it was asked to, 1 once it lost its
 // locks, a cycle did not stop within 60 seconds of its time limit, or it failed, and 3 when a
 // second signal ended it at once during a cycle. A second signal between cycles, or while the
-// service ends, exits with the code it was stopping with. Each step is { name, run, counts } (see
+// service ends, exits with the code it was stopping with, and so does a service whose cycle did not
+// reach a safe point within 45 seconds of the first signal. Each step is { name, run, counts } (see
 // RunState in run.js).
 //
 // While it goes, it keeps a health server, for the Docker health check (see
@@ -190,10 +207,15 @@ export default async function runLoop(steps) {
   }));
 
   let lock = null;
-  // Why the service is stopping, once it is, with the exit code that gives and when it was asked.
+  // Why the service is stopping, once it is, with the exit code that gives.
   let stopping = null;
   let exitCode = EXIT_CODES.FINISHED;
-  let stopAt = null;
+  // How many signals asked the service to stop, the first one's name and when it came, and the
+  // timer that ends a cycle that has not reached a safe point in time after it (see STOP_DEADLINE).
+  let signals = 0;
+  let signalName = null;
+  let signalAt = null;
+  let stopTimer = null;
   // The cycle under way, as a RunState.
   let current = null;
   // Whether a cycle has connected and applied the importer's migrations, which the first does.
@@ -204,7 +226,9 @@ export default async function runLoop(steps) {
   let totals = newTotals(Date.now());
   let last = null;
   let nextAt = null;
-  // The service's status message, its ID, and the timer for the next hourly summary.
+  // Whether the service has read and saved its row, and posted its status message if it posts one
+  // (see startStatus), the message, its ID, and the timer for the next hourly summary.
+  let statusStarted = false;
   let statusMessage = null;
   let statusID = null;
   let summaryTimer = null;
@@ -225,16 +249,18 @@ export default async function runLoop(steps) {
     if (stopping !== null) return;
     stopping = reason;
     exitCode = code;
-    stopAt = Date.now();
     requestStop(reason);
   };
 
   // How long the service's end may still wait for something, at most limit. Once it is stopping,
-  // it ends by STOP_GRACE after it was asked, or END_TIMEOUT after it began to end, if that is
-  // sooner, keeping the last RELEASE_RESERVE for releasing the locks.
+  // it ends by END_TIMEOUT after it began to end, or, once a signal asked it to stop, by
+  // STOP_GRACE after the signal, if that is sooner, keeping the last RELEASE_RESERVE for releasing
+  // the locks.
   const left = (limit) => {
     if (stopping === null) return limit;
-    releaseBy ??= Math.min(Date.now() + END_TIMEOUT, stopAt + STOP_GRACE) - RELEASE_RESERVE;
+    releaseBy ??=
+      Math.min(Date.now() + END_TIMEOUT, signalAt === null ? Infinity : signalAt + STOP_GRACE) -
+      RELEASE_RESERVE;
     return Math.max(0, Math.min(limit, releaseBy - Date.now()));
   };
 
@@ -265,7 +291,10 @@ export default async function runLoop(steps) {
           last,
           nextAt,
           totals,
-          reason: stopping
+          reason: stopping,
+          // Docker starts again a service that exits by itself, but not one that docker stop or a
+          // stack update stopped, with a signal.
+          restarts: signals === 0
         })
       ]
     };
@@ -297,14 +326,19 @@ export default async function runLoop(steps) {
   // Once the importer's tables are there, in the first cycle: read the service's row, say if the
   // process before this one ended without saying how, e.g. as it was killed or ran out of memory,
   // save this one's, and post the status message, or edit the one the last process kept up to date,
-  // if it is still there. It never holds up or fails the cycle for long.
-  const startStatus = async () => {
+  // if it is still there. It never holds up or fails the cycle for long. A first cycle that waits
+  // for the run lock does it early, before its migrations, so the status message shows the wait
+  // (see waitForRunLock), unless the importer's tables are not there yet, when it waits for the
+  // migrations to make them. Resolves with whether it was done.
+  const startStatus = async ({ early = false } = {}) => {
     let saved = null;
     try {
       saved = await withTimeout(readService(), RECORD_TIMEOUT, 'Reading the importer service row');
     } catch (err) {
+      if (early && isMissingTable(err)) return false;
       console.warn(`Warning: could not read the importer service row: ${describeError(err)}`);
     }
+    statusStarted = true;
     if (saved?.startedAt && !saved.endedAt)
       Logger.important(
         'Core',
@@ -332,6 +366,7 @@ export default async function runLoop(steps) {
       });
       scheduleSummary();
     }
+    return true;
   };
 
   // Show how the service ended in its status message, sent at once. Drawing it never fails the end.
@@ -361,9 +396,9 @@ export default async function runLoop(steps) {
   // End the service, once: show how it ended in its status message, save that it ended as it
   // should, close the database connections, then send the log messages still waiting and release
   // the locks, all in the time left (see left). The status message's final edit may find it
-  // deleted, and post it again, so once that edit has been sent, the row is saved again with the
-  // new ID, for the next process to edit the message that says how this one ended. Resolves with
-  // the exit code.
+  // deleted, and post it again, so the end waits for that edit to be sent for as long as it can,
+  // keeping SENT_RESERVE, and then saves the row again with the new ID, for the next process to
+  // edit the message that says how this one ended. Resolves with the exit code.
   const endService = () => {
     finishing ??= (async () => {
       health.stopping = true;
@@ -372,7 +407,7 @@ export default async function runLoop(steps) {
       nextAt = null;
       finishStatus();
       try {
-        if (prepared) {
+        if (prepared || statusStarted) {
           const ended = {
             startedAt,
             endedAt: Date.now(),
@@ -384,7 +419,7 @@ export default async function runLoop(steps) {
             try {
               await withTimeout(
                 statusMessage.sent(),
-                left(RECORD_TIMEOUT),
+                Math.max(0, left(Infinity) - SENT_RESERVE),
                 "Sending the status message's final edit"
               );
             } catch (err) {
@@ -429,50 +464,101 @@ export default async function runLoop(steps) {
     process.exit(code);
   };
 
+  // End the service at once, without waiting for the cycle under way, whose JSON line has been
+  // printed, to stop: show how the service ended in its status message, save its row with how it
+  // ended, and, with record, the cycle's record, and send the log messages, all by the time given,
+  // as at its end (see endService), with a status message that its final edit posted again saved
+  // in the row in the time left. Then close the locks' connection, which frees them, and exit with
+  // the code the service is stopping with. A cycle that ends meanwhile adds nothing (see endCycle).
+  const endAtOnce = async (record, by) => {
+    finishing ??= Promise.resolve(exitCode);
+    health.stopping = true;
+    clearTimeout(summaryTimer);
+    clearTimeout(stopTimer);
+    finishStatus();
+    const saves = prepared || statusStarted;
+    const ended = {
+      startedAt,
+      endedAt: Date.now(),
+      outcome: exitCode === EXIT_CODES.FINISHED ? 'stopped' : 'failed'
+    };
+    const saved = statusID;
+    const until = () => Math.max(0, by - Date.now());
+    await Promise.allSettled([
+      flushLogs(by),
+      saves && saveEnded(ended, saved, until()),
+      record && saveRunRecord(record, until()),
+      statusMessage &&
+        withTimeout(statusMessage.sent(), until(), "Sending the status message's final edit")
+    ]);
+    if (saves && statusID !== saved && until() > 0) await saveEnded(ended, statusID, until());
+    lock?.destroy();
+    process.exit(exitCode);
+  };
+
   // A cycle that did not stop within 60 seconds of its time limit, e.g. as a step is stuck, ends the
   // service: the cycle's JSON line is printed, the failure posted and shown in the status message,
   // and the process exits 1, once the log messages are sent and the service's row says how it
-  // ended, or 5 seconds have passed. As at the service's end (see endService), a status message
-  // that its final edit posted again is saved in the row, in the time left.
+  // ended, or 5 seconds have passed (see endAtOnce). It failed, also when a signal had asked it to
+  // stop before, as its row and exit code say, and Docker then does not start it again. An end that
+  // has begun ends in time by itself.
   const exitStuck = async (cycle) => {
+    if (finishing !== null) return;
     const why = `Cycle ${cycle.record.cycle} did not stop within ${HARD_EXIT_DELAY / 1000}s of its time limit`;
     Logger.important(
       'Core',
-      `${why}, so the importer service is exiting, for Docker to start it again.`
+      `${why}, so the importer service is exiting${signals === 0 ? ', for Docker to start it again' : ''}.`
     );
-    stopService(`cycle ${cycle.record.cycle} did not stop at its time limit`, EXIT_CODES.FAILED);
+    stopping = `cycle ${cycle.record.cycle} did not stop at its time limit`;
+    exitCode = EXIT_CODES.FAILED;
+    requestStop(stopping);
     cycle.end(EXIT_CODES.FAILED, `${why}, so the importer exited`);
-    finishing ??= Promise.resolve(EXIT_CODES.FAILED);
-    health.stopping = true;
-    finishStatus();
-    const by = Date.now() + HARD_EXIT_FLUSH;
-    const ended = { startedAt, endedAt: Date.now(), outcome: 'failed' };
-    const saved = statusID;
-    await Promise.allSettled([
-      flushLogs(by),
-      prepared && saveEnded(ended, saved, HARD_EXIT_FLUSH),
-      statusMessage &&
-        withTimeout(
-          statusMessage.sent(),
-          HARD_EXIT_FLUSH,
-          "Sending the status message's final edit"
-        )
-    ]);
-    if (prepared && statusID !== saved && Date.now() < by)
-      await saveEnded(ended, statusID, by - Date.now());
-    lock?.destroy();
-    process.exit(EXIT_CODES.FAILED);
+    await endAtOnce(null, Date.now() + HARD_EXIT_FLUSH);
   };
 
-  // The first SIGTERM or SIGINT asks the service to stop at its next safe point, and a second one
-  // ends it at once.
-  let signals = 0;
+  // STOP_DEADLINE after the first signal: a cycle that has not reached a safe point, e.g. as a
+  // BattleMetrics request waits for the budget, is ended there, as stopped, and the service ends at
+  // once, saving the cycle's record too, by STOP_GRACE after the signal less RELEASE_RESERVE. It
+  // exits with the code it was stopping with, 0 after the signal. A service that has not taken the
+  // service lock yet exits at once. One that is ending, or between cycles, ends in time by itself.
+  const onStopDeadline = () => {
+    stopTimer = null;
+    if (finishing !== null) return;
+    if (current && !current.record.ended) {
+      const cycle = current;
+      const why = `Cycle ${cycle.record.cycle} did not reach a safe point within ${STOP_DEADLINE / 1000}s of ${signalName}`;
+      Logger.important(
+        'Core',
+        `${why}, so the importer service is ending it there, and stopping now.`
+      );
+      cycle.record.memory = memoryNow();
+      cycle.end(
+        exitCode === EXIT_CODES.FINISHED ? EXIT_CODES.INTERRUPTED : EXIT_CODES.FAILED,
+        `${why}, so it ended there`
+      );
+      endAtOnce(cycle.record.ended, signalAt + STOP_GRACE - RELEASE_RESERVE).catch(() =>
+        process.exit(exitCode)
+      );
+    } else if (!lock) {
+      console.log(`The importer service stopped before it took the service lock, as ${stopping}.`);
+      process.exit(exitCode);
+    }
+  };
+
+  // The first SIGTERM or SIGINT asks the service to stop at its next safe point, which it must
+  // reach within STOP_DEADLINE (see onStopDeadline), and a second one ends it at once.
   const onSignal = (signal) => {
     signals++;
     if (signals > 1) {
       exitNow(`Received ${signal} again`);
       return;
     }
+    signalName = signal;
+    signalAt = Date.now();
+    stopTimer = setTimeout(onStopDeadline, STOP_DEADLINE);
+    // It must not keep the process running, which would hide a service left waiting for something
+    // that can never happen (see setLeftWaiting).
+    stopTimer.unref?.();
     report(
       `Received ${signal}, so the importer service will stop at its next safe point. Send it again to stop at once.`
     );
@@ -480,25 +566,26 @@ export default async function runLoop(steps) {
   };
 
   // Lost locks mean another run may now hold them, so the service stops at its next safe point and
-  // exits 1, for Docker to start it again. Both locks go with their connection.
+  // exits 1, for Docker to start it again, unless a signal asked it to stop first. Both locks go
+  // with their connection, and between cycles the service holds only the service lock.
   const onLost = (reason) => {
     report(
-      `The importer service lost its run lock (${reason}), so it will stop at its next safe point and exit, for Docker to start it again.`
+      `The importer service lost its locks (${reason}), so it will stop at its next safe point${signals === 0 ? ' and exit, for Docker to start it again' : ''}.`
     );
     stopService(LOCK_LOST, EXIT_CODES.FAILED);
   };
 
   // Take a lock, standing by while another run holds it, or the database cannot be reached to take
   // it, and trying again every 15 seconds, for as long as it takes: the service lock as the service
-  // starts, and the run lock at the start of each cycle (see waitForRunLock). take() resolves with
-  // the lock, or with nothing while another run holds it, and fails while the database cannot be
-  // reached. describe(problem) says why it waits, which the console is told at most every 5
-  // minutes, and with post, the log channel the first time. The health check and the status
-  // message show what it waits for, and while another run holds the lock, the service checks once
-  // a cadence whether the importer is stale, as a skipped start does. Resolves with what take()
-  // gave, also when the service was asked to stop as it took the lock, or with null once the
-  // service is asked to stop.
-  const standBy = async (take, { describe, post = false }) => {
+  // starts, and the run lock at the start of each cycle (see waitForRunLock), as held names it,
+  // 'service' or 'run'. take() resolves with the lock, or with nothing while another run holds it,
+  // and fails while the database cannot be reached. describe(problem) says why it waits, which the
+  // console is told at most every 5 minutes, and with post, the log channel the first time, after
+  // which onWait, if given, is called. The health check and the status message show what it waits
+  // for, and while another run holds the lock, the service checks once a cadence whether the
+  // importer is stale, as a skipped start does. Resolves with what take() gave, also when the
+  // service was asked to stop as it took the lock, or with null once the service is asked to stop.
+  const standBy = async (take, { held, describe, post = false, onWait = null }) => {
     let loggedAt = -Infinity;
     let checkedAt = -Infinity;
     let waited = false;
@@ -526,12 +613,13 @@ export default async function runLoop(steps) {
         if (post && !waited) Logger.important('Core', describe(problem));
         else console.log(describe(problem));
       }
+      if (!waited && onWait) await onWait();
       waited = true;
       if (!problem && Date.now() - checkedAt >= cadenceSeconds * 1000) {
         checkedAt = Date.now();
         await checkStaleness({
           cadenceSeconds,
-          skipped: true,
+          skipped: held,
           startedAt: checkedAt,
           service: true
         });
@@ -543,13 +631,18 @@ export default async function runLoop(steps) {
   // Take the run lock for a cycle, numbered number, which the cycle holds while it works, so the
   // bot refuses the changes that must not overlap a run until it ends. Another run may hold it,
   // e.g. one that an importer from before the service lock started by hand, which took only the
-  // run lock, and the cycle then waits for it to end (see standBy). A cycle asked to stop
-  // meanwhile, or whose locks are lost, stops here.
+  // run lock, and the cycle then waits for it to end (see standBy). The service's first cycle
+  // shows the wait in the status message, which it then posts, as later cycles do (see
+  // startStatus). A cycle asked to stop meanwhile, or whose locks are lost, stops here.
   const waitForRunLock = async (number) => {
     await standBy(() => lock.beginCycle(), {
+      held: 'run',
       describe: () =>
         `Another run holds the run lock, e.g. one started by hand with an importer from before the importer service, so cycle ${number} waits for it, trying again every ${LOCK_RETRY_DELAY / 1000}s.`,
-      post: true
+      post: true,
+      onWait: async () => {
+        if (!statusStarted) await startStatus({ early: true });
+      }
     });
     stopIfRequested();
     Object.assign(health, { waitingFor: null, waitingSince: null });
@@ -558,8 +651,11 @@ export default async function runLoop(steps) {
   // End a cycle: print its JSON line, show it in the status message and post its embed if it is
   // worth one, then save its record, and check whether the importer is stale if the cycle did not
   // succeed, unless the service is stopping, which leaves the time for its last messages. before
-  // holds the log channel's lines and the BattleMetrics requests when the cycle started.
+  // holds the log channel's lines and the BattleMetrics requests when the cycle started. A cycle
+  // that ends once the service has begun to end without it, e.g. at once (see endAtOnce), has been
+  // dealt with by that end.
   const endCycle = async (cycle, code, reason, before) => {
+    if (finishing !== null) return;
     const { record } = cycle;
     record.memory = memoryNow();
     cycle.end(code, reason);
@@ -699,7 +795,8 @@ export default async function runLoop(steps) {
               `Warning: could not check the last run's status message: ${describeError(err)}`
             )
           );
-        await startStatus();
+        // Unless the cycle has started it already, as it waited for the run lock.
+        if (!statusStarted) await startStatus();
       }
 
       await cycle.runSteps({ cadenceSeconds });
@@ -749,12 +846,20 @@ export default async function runLoop(steps) {
   });
 
   try {
-    lock = await standBy(() => takeServiceLock({ onLost }), {
-      describe: (problem) =>
-        problem
-          ? `The importer service could not take the service lock (${describeError(problem)}), so it tries again every ${LOCK_RETRY_DELAY / 1000}s.`
-          : `Another run holds the service lock, so the importer service stands by, trying again every ${LOCK_RETRY_DELAY / 1000}s.`
-    });
+    lock = await standBy(
+      async () => {
+        const taken = await takeServiceLock({ onLost });
+        // Another run, or another service, holds the service lock.
+        return taken.busy ? null : taken;
+      },
+      {
+        held: 'service',
+        describe: (problem) =>
+          problem
+            ? `The importer service could not take the service lock (${describeError(problem)}), so it tries again every ${LOCK_RETRY_DELAY / 1000}s.`
+            : `Another run holds the service lock, so the importer service stands by, trying again every ${LOCK_RETRY_DELAY / 1000}s.`
+      }
+    );
     // A signal may have asked the service to stop as it took the lock.
     if (lock && stopping !== null) {
       await lock.release();
@@ -800,6 +905,7 @@ export default async function runLoop(steps) {
   } finally {
     setLeftWaiting(null);
     clearTimeout(summaryTimer);
+    clearTimeout(stopTimer);
     setProgressListener(null);
     process.off('SIGTERM', onSignal);
     process.off('SIGINT', onSignal);
