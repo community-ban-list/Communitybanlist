@@ -620,6 +620,8 @@ const discordRefuses = {
   }
 };
 const utils = {
+  // The lines the resolvers post are checked in export-ban-list-audit.js.
+  Logger: { verbose() {}, important() {} },
   isDiscordWebhookUrl: (
     await load('../../scbl-lib/utils/discord-webhook-url.js', {}, webhookContext)
   ).default,

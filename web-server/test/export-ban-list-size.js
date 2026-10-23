@@ -761,6 +761,8 @@ async function mutations(env) {
       'scbl-lib/db/models': db.models,
       'scbl-lib/export-list-limits': exportListLimits,
       'scbl-lib/utils': {
+        // The lines the resolvers post are checked in export-ban-list-audit.js.
+        Logger: { verbose() {}, important() {} },
         isDiscordWebhookUrl,
         async testDiscordWebhook(url) {
           tested.push(url);

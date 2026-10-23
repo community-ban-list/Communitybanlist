@@ -41,6 +41,8 @@ const mistyped = (id) => `https://discord.com/api/webhooks/${id}/mistyped`;
 function discord() {
   const sent = [];
   const utils = {
+    // The lines the resolvers post are checked in export-ban-list-audit.js.
+    Logger: { verbose() {}, important() {} },
     isDiscordWebhookUrl,
     async testDiscordWebhook(url) {
       if (!isDiscordWebhookUrl(url)) throw new Error('Invalid Discord Webhook');

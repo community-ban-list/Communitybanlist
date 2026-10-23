@@ -28,6 +28,18 @@ const TYPE_NAMES = { battlemetrics: 'BattleMetrics', remote: 'remote' };
 // A whole number as the messages write it, with commas: 20,000.
 const formatNumber = (value) => value.toLocaleString('en-US');
 
+// The list a line in the log channel is about, as the importer names lists (ban-importer's
+// core.js), with its type and owner: the owner's Steam ID, and their Steam name when the list was
+// loaded with its SteamUser, as checkLimits loads it. Nothing is looked up for a line, so a line can
+// never fail or hold up a change. The channel is for CBL's admins only, but a line never gives the
+// list's Discord webhook or BattleMetrics invite, as anyone with either can use it.
+function describeList(exportBanList) {
+  const { id, name, server, type, owner } = exportBanList;
+  const ownerName = exportBanList.SteamUser?.name;
+  const steamUser = ownerName ? `Steam user "${ownerName}" (ID: ${owner})` : `Steam user ${owner}`;
+  return `${server}'s List "${name}" (ID: ${id}, ${TYPE_NAMES[type] ?? type}) of ${steamUser}`;
+}
+
 // The problems of a stored list under today's limits, or null when its type has none to check it
 // against: those of its settings and configs under its type's points rules, for the whole list, as
 // checkRules gives them, and one when it has more players than its type's cap (0 for none).
@@ -63,6 +75,52 @@ async function saveBattlemetricsBanList(exportBanList, battlemetricsID, battleme
     exportBanList.battlemetricsInvite = previous.battlemetricsInvite;
     throw error;
   }
+}
+
+// Throw an error with the stage of a list's creation it failed in, for the caller to say what
+// failed, as deleteExportBanList's errors give theirs.
+const failedAt = (stage) => (error) => {
+  error.stage = stage;
+  throw error;
+};
+
+// Create the invite other organisations accept to use a list's BattleMetrics ban list, and save it
+// to the list. A second invite does no harm, as it is never shown and is deleted with the list, so
+// the request is made again after a timeout or a 5xx.
+async function addBattlemetricsInvite(exportBanList) {
+  const {
+    data: { data: inviteData }
+  } = await battlemetrics(
+    'post',
+    `ban-lists/${exportBanList.battlemetricsID}/relationships/invites`,
+    {},
+    {
+      data: {
+        type: 'banListInvite',
+        attributes: {
+          limit: null,
+          permManage: false,
+          permCreate: false,
+          permUpdate: false,
+          permDelete: false
+        },
+        relationships: {
+          organization: {
+            data: {
+              type: 'organization',
+              id: BATTLEMETRICS_ORGANIZATION
+            }
+          }
+        }
+      }
+    },
+    5,
+    { repeatable: true }
+  );
+
+  exportBanList.battlemetricsInvite = `https://www.battlemetrics.com/rcon/ban-lists/accept-invite?code=${inviteData.id}`;
+
+  await exportBanList.save();
 }
 
 class ExportBanList extends Sequelize.Model {
@@ -140,12 +198,18 @@ class ExportBanList extends Sequelize.Model {
     return findVisibleBanLists();
   }
 
-  // Create the BattleMetrics ban list and its invite.
+  // Create the BattleMetrics ban list and its invite. That takes two requests, each with a time
+  // limit, so the log channel gets one line, once both are made, rather than one as it starts too.
+  // When either fails, the error is thrown with its stage, for the caller to say what failed and
+  // what it did about it, as the website does: 'battlemetrics' when BattleMetrics did not create the
+  // ban list, or may have without saying so, and the list does not record one; 'saving' when it
+  // created the ban list but the list could not be saved with it, so the database does not record
+  // it, though this.battlemetricsID does; or 'invite' when the list records its ban list but its
+  // invite could not be made, which saving the list makes again.
   async createBattlemetricsBanList() {
     // A list whose ban list was created but not its invite only needs the invite.
     if (this.battlemetricsID) return this.createBattlemetricsInvite();
 
-    Logger.verbose('ExportBanList', 1, 'Creating Battlemetrics ban list...');
     // Not made again after a timeout or a 5xx, as BattleMetrics may have created the list, and a
     // second list would never be deleted.
     const {
@@ -180,56 +244,35 @@ class ExportBanList extends Sequelize.Model {
           }
         }
       }
-    );
+    ).catch(failedAt('battlemetrics'));
 
     this.battlemetricsID = dataBanList.id;
 
-    await this.save();
+    await this.save().catch(failedAt('saving'));
 
-    await this.createBattlemetricsInvite();
+    await addBattlemetricsInvite(this).catch(failedAt('invite'));
+
+    Logger.verbose(
+      'ExportBanList',
+      1,
+      `Created BattleMetrics ban list ${this.battlemetricsID} for ${describeList(this)}, with its invite.`
+    );
   }
 
   // Create the invite other organisations accept to use the BattleMetrics ban list, unless the list
   // has one. Nothing else creates a missing invite, so this is also called when the list is saved.
+  // The log channel gets one line once it is made. An error is thrown with the stage 'invite', as
+  // createBattlemetricsBanList gives it.
   async createBattlemetricsInvite() {
     if (this.type !== 'battlemetrics' || !this.battlemetricsID || this.battlemetricsInvite) return;
 
-    Logger.verbose('ExportBanList', 1, ' Creating Battlemetrics ban list invite...');
-    // A second invite does no harm, as it is never shown and is deleted with the list, so the
-    // request is made again after a timeout or a 5xx.
-    const {
-      data: { data: inviteData }
-    } = await battlemetrics(
-      'post',
-      `ban-lists/${this.battlemetricsID}/relationships/invites`,
-      {},
-      {
-        data: {
-          type: 'banListInvite',
-          attributes: {
-            limit: null,
-            permManage: false,
-            permCreate: false,
-            permUpdate: false,
-            permDelete: false
-          },
-          relationships: {
-            organization: {
-              data: {
-                type: 'organization',
-                id: BATTLEMETRICS_ORGANIZATION
-              }
-            }
-          }
-        }
-      },
-      5,
-      { repeatable: true }
+    await addBattlemetricsInvite(this).catch(failedAt('invite'));
+
+    Logger.verbose(
+      'ExportBanList',
+      1,
+      `Created the invite to BattleMetrics ban list ${this.battlemetricsID} for ${describeList(this)}.`
     );
-
-    this.battlemetricsInvite = `https://www.battlemetrics.com/rcon/ban-lists/accept-invite?code=${inviteData.id}`;
-
-    await this.save();
   }
 
   // Delete the export ban list: its BattleMetrics ban list, for a BattleMetrics list that has one,
@@ -239,6 +282,10 @@ class ExportBanList extends Sequelize.Model {
   // ban list, or 'none' when there was none to delete. When it fails, the list is kept, so it can
   // be deleted again, and the error's stage says what failed: 'battlemetrics' while deleting the
   // BattleMetrics ban list, or 'database deletion' while deleting the row.
+  //
+  // The log channel gets the BattleMetrics side, as deleteBattlemetricsBanList says. A remote list
+  // has none, so it gets no line here. The caller posts who deleted the list and how it ended, or
+  // why it failed, as the website and the bot both do, so a failure is only thrown.
   async deleteExportBanList() {
     let stage = 'battlemetrics';
     try {
@@ -254,24 +301,28 @@ class ExportBanList extends Sequelize.Model {
   }
 
   // Delete the list's BattleMetrics ban list, and save the list without it. Gives 'deleted', 'gone'
-  // or 'none', as deleteExportBanList does.
+  // or 'none', as deleteExportBanList does. The log channel gets a line when it starts, as it takes
+  // a request for each of the ban list's invites and subscribers, within the BattleMetrics budget,
+  // so it can take minutes, and a line when the ban list is deleted or found to be gone. A list
+  // with no ban list makes no request, so it gets one line, saying so.
   async deleteBattlemetricsBanList() {
     const { battlemetricsID: id, battlemetricsInvite: invite } = this;
+    const list = describeList(this);
     if (!id) {
-      Logger.verbose('ExportBanList', 1, 'No Battlemetrics ban list to delete.');
+      Logger.verbose('ExportBanList', 1, `${list} has no BattleMetrics ban list to delete.`);
       return 'none';
     }
 
-    Logger.verbose('ExportBanList', 1, 'Deleting Battlemetrics ban list...');
+    Logger.verbose('ExportBanList', 1, `Deleting BattleMetrics ban list ${id} for ${list}...`);
     if (!(await checkOwnership(id))) {
       // Without this, a list whose ban list is gone could never be deleted, e.g. one whose
       // deletion lost BattleMetrics' answer to its last step.
+      await saveBattlemetricsBanList(this, null, null);
       Logger.verbose(
         'ExportBanList',
         1,
-        `BattleMetrics does not know ban list ${id} of export ban list ${this.id} (HTTP 404, Unknown ban list), so it is taken to be deleted already.`
+        `BattleMetrics does not know ban list ${id} for ${list} (HTTP 404, Unknown ban list), so it is taken to be deleted already.`
       );
-      await saveBattlemetricsBanList(this, null, null);
       return 'gone';
     }
 
@@ -292,12 +343,17 @@ class ExportBanList extends Sequelize.Model {
         Logger.verbose(
           'ExportBanList',
           1,
-          `Export ban list ${this.id} no longer records BattleMetrics ban list ${id}, which CBL's organisation may still own, as removing the organisation failed and the list could not be saved with it again. Remove the ban list on BattleMetrics by hand.`,
+          `${list} no longer records BattleMetrics ban list ${id}, which CBL's organisation may still own, as removing the organisation failed and the list could not be saved with it again. Remove the ban list on BattleMetrics by hand.`,
           saveError
         );
       }
       throw error;
     }
+    Logger.verbose(
+      'ExportBanList',
+      1,
+      `Deleted BattleMetrics ban list ${id} for ${list}, with its invites and subscribers.`
+    );
     return 'deleted';
   }
 }

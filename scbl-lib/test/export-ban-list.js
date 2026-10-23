@@ -2,8 +2,10 @@ import assert from 'assert';
 import { readFile } from 'fs/promises';
 import vm from 'vm';
 
-// Exercise how an export ban list creates its BattleMetrics ban list and invite, without a
-// database or network requests.
+import describeError from '../utils/describe-error.js';
+
+// Exercise how an export ban list creates its BattleMetrics ban list and invite, and what it posts
+// to the log channel, without a database or network requests.
 const calls = [];
 let reply;
 async function battlemetrics(method, endpoint, params, data, priority, options) {
@@ -12,6 +14,9 @@ async function battlemetrics(method, endpoint, params, data, priority, options) 
   return reply(endpoint);
 }
 
+// The errors the next saves fail with, in order, where null lets a save succeed.
+const saveFailures = [];
+
 // A stand-in for Sequelize's Model, whose save() records what was saved.
 class Model {
   static init() {}
@@ -19,10 +24,27 @@ class Model {
   async save() {
     const { battlemetricsID, battlemetricsInvite } = this;
     calls.push({ saved: { battlemetricsID, battlemetricsInvite } });
+    const failure = saveFailures.shift();
+    if (failure) throw failure;
   }
 }
 // Any data type, such as DataTypes.STRING or DataTypes.ENUM(...).
 const dataType = () => dataType;
+
+// The lines posted to the log channel, as the logger posts them: the line, then its errors, each
+// described in a line by describeError. Lines of level 2 and up are only printed, so they are left
+// out.
+const posted = [];
+const Logger = {
+  verbose(module, level, message, ...extras) {
+    if (level !== 1) return;
+    const errors = extras.filter((extra) => typeof extra?.message === 'string');
+    let text = `${message}`;
+    if (errors.length > 0)
+      text += `${/\s$/.test(text) ? '' : ' '}${errors.map(describeError).join(', ')}`;
+    posted.push(`[${module}][${level}] ${text}`);
+  }
+};
 
 const dependencies = {
   sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
@@ -37,7 +59,7 @@ const dependencies = {
     removeOwner: async () => {}
   },
   '../../export-list-limits.js': { checkRules: () => [], DEFAULT_SETTINGS: {} },
-  '../../utils/index.js': { Logger: { verbose() {} } },
+  '../../utils/index.js': { Logger },
   '../../config.js': { BATTLEMETRICS_ORGANIZATION: '42', EXPORT_LIST_LIMITS: {} }
 };
 const context = vm.createContext({});
@@ -59,21 +81,53 @@ await module.link((specifier) => {
 await module.evaluate();
 const ExportBanList = module.namespace.default;
 
+const OWNER = '76561198000000007';
 const exportBanList = (fields) =>
   Object.assign(new ExportBanList(), {
     id: 7,
     name: 'Test',
+    server: 'Server',
     type: 'battlemetrics',
+    owner: OWNER,
     battlemetricsID: null,
     battlemetricsInvite: null,
     ...fields
   });
 const inviteURL = (code) =>
   `https://www.battlemetrics.com/rcon/ban-lists/accept-invite?code=${code}`;
+const reset = () => {
+  calls.length = 0;
+  posted.length = 0;
+  saveFailures.length = 0;
+};
+// The list as the lines name it, with its owner by Steam ID, as nothing is looked up for a line.
+const LIST = `Server's List "Test" (ID: 7, BattleMetrics) of Steam user ${OWNER}`;
+
+// An error as the BattleMetrics client throws one. Its config stands for anything else an error
+// could hold, such as axios's request with the API key, which must never be posted.
+const API_KEY = 'secret-api-key';
+const apiError = (message, status, extra = {}) =>
+  Object.assign(new Error(message), {
+    name: 'ApiError',
+    status,
+    response: status ? { status, data: { errors: [{ title: 'Bad Gateway' }] } } : undefined,
+    config: { headers: { Authorization: `Bearer ${API_KEY}` } },
+    ...extra
+  });
+
+// No line ever gives a list's invite, as any organisation could use its ban list with it, nor the
+// BattleMetrics API key.
+function checkNoSecrets() {
+  for (const line of posted) {
+    assert.ok(!/code-|accept-invite/.test(line), `A posted line gives an invite: ${line}`);
+    assert.ok(!line.includes(API_KEY), `A posted line gives the API key: ${line}`);
+  }
+}
 
 // A new list gets a BattleMetrics ban list, and then an invite to it. The ban list's POST is not
 // marked as repeatable, as BattleMetrics may have created a ban list for one that timed out, but
-// the invite's is, as a second invite does no harm.
+// the invite's is, as a second invite does no harm. One line says which ban list was made for which
+// list, once both are made, and nothing about the invite but that it was made.
 reply = (endpoint) => ({ data: { data: { id: endpoint === 'ban-lists' ? 'list-1' : 'code-1' } } });
 let list = exportBanList();
 await list.createBattlemetricsBanList();
@@ -88,18 +142,30 @@ assert.deepStrictEqual(calls, [
   },
   { saved: { battlemetricsID: 'list-1', battlemetricsInvite: inviteURL('code-1') } }
 ]);
+assert.deepStrictEqual(posted, [
+  `[ExportBanList][1] Created BattleMetrics ban list list-1 for ${LIST}, with its invite.`
+]);
+checkNoSecrets();
+
+// A list loaded with its owner, as checkLimits loads it, names the owner by their Steam name too.
+reset();
+list = exportBanList({ SteamUser: { id: OWNER, name: 'Owner Name' } });
+await list.createBattlemetricsBanList();
+assert.deepStrictEqual(posted, [
+  `[ExportBanList][1] Created BattleMetrics ban list list-1 for Server's List "Test" (ID: 7, BattleMetrics) of Steam user "Owner Name" (ID: ${OWNER}), with its invite.`
+]);
 
 // A list whose invite could not be created keeps its ban list, and gets only the invite when it is
-// tried again.
-calls.length = 0;
+// tried again. Nothing is posted for the failure, which is thrown with its stage for the caller to
+// post, as the website does. The invite made later gets a line of its own.
+reset();
 reply = () => {
-  throw Object.assign(new Error('BattleMetrics POST failed after 3 attempts: HTTP 503'), {
-    response: { status: 503, data: {} }
-  });
+  throw apiError('BattleMetrics POST failed after 3 attempts: HTTP 503', 503);
 };
 list = exportBanList({ battlemetricsID: 'list-2' });
-await assert.rejects(list.createBattlemetricsBanList(), /HTTP 503/);
+await assert.rejects(list.createBattlemetricsBanList(), { message: /HTTP 503/, stage: 'invite' });
 assert.deepStrictEqual([list.battlemetricsID, list.battlemetricsInvite], ['list-2', null]);
+assert.deepStrictEqual(posted, []);
 reply = () => ({ data: { data: { id: 'code-2' } } });
 await list.createBattlemetricsBanList();
 assert.deepStrictEqual(
@@ -107,10 +173,42 @@ assert.deepStrictEqual(
   ['ban-lists/list-2/relationships/invites', 'ban-lists/list-2/relationships/invites', 'save']
 );
 assert.strictEqual(list.battlemetricsInvite, inviteURL('code-2'));
+assert.deepStrictEqual(posted, [
+  `[ExportBanList][1] Created the invite to BattleMetrics ban list list-2 for Server's List "Test" (ID: 7, BattleMetrics) of Steam user ${OWNER}.`
+]);
+checkNoSecrets();
 
-// Nothing is created for a list that has its invite, has no BattleMetrics ban list, or is a
-// remote list.
-calls.length = 0;
+// A failure is only thrown, marked with the step it was in, and nothing is posted: BattleMetrics
+// not creating the ban list ('battlemetrics', with nothing recorded), the list not being saved
+// with the ban list it made ('saving', with the ban list only on the list in memory), and the
+// invite of a new list not being made or saved ('invite', with the ban list recorded).
+const lockTimeout = () => new Error('Lock wait timeout exceeded; try restarting transaction');
+for (const [stage, failAt, recorded] of [
+  ['battlemetrics', 'ban-lists', null],
+  ['saving', 'first save', 'list-3'],
+  ['invite', 'ban-lists/list-3/relationships/invites', 'list-3'],
+  ['invite', 'second save', 'list-3']
+]) {
+  reset();
+  reply = (endpoint) => {
+    if (endpoint === failAt)
+      throw apiError(`BattleMetrics POST ${endpoint} failed: HTTP 502 (Bad Gateway)`, 502);
+    return { data: { data: { id: endpoint === 'ban-lists' ? 'list-3' : 'code-3' } } };
+  };
+  if (failAt === 'first save') saveFailures.push(lockTimeout());
+  if (failAt === 'second save') saveFailures.push(null, lockTimeout());
+  list = exportBanList();
+  await assert.rejects(list.createBattlemetricsBanList(), (error) => {
+    assert.strictEqual(error.stage, stage, failAt);
+    return true;
+  });
+  assert.strictEqual(list.battlemetricsID, recorded, failAt);
+  assert.deepStrictEqual(posted, [], failAt);
+}
+
+// Nothing is created or posted for a list that has its invite, has no BattleMetrics ban list, or
+// is a remote list.
+reset();
 for (const fields of [
   { battlemetricsID: 'list-3', battlemetricsInvite: inviteURL('code-3') },
   {},
@@ -118,7 +216,8 @@ for (const fields of [
 ])
   await exportBanList(fields).createBattlemetricsInvite();
 assert.strictEqual(calls.length, 0);
+assert.deepStrictEqual(posted, []);
 
 console.log(
-  'Export ban list checks passed: BattleMetrics ban lists, and invites made again when missing.'
+  'Export ban list checks passed: BattleMetrics ban lists, invites made again when missing, and the lines they post.'
 );

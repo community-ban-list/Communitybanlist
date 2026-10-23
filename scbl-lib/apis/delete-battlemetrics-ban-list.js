@@ -37,6 +37,12 @@ function isUnknownBanList(error) {
   );
 }
 
+// An invite's ID is its code, with which any organisation can use the ban list, so an error never
+// gives it, e.g. in the path of an invite's removal that failed: ban-lists/1/relationships/invites/
+// followed by the ID. The errors are shown to the list's owner, and the website and the Discord bot
+// post them to the log channel.
+const hideInviteCodes = (text) => text.replace(/(\/invites\/)[^\s/?#]+/gi, '$1[invite code]');
+
 // Say in an error which step failed and what BattleMetrics answered. A reason that ends in a full
 // stop loses it, as the message adds one.
 function failed(stage, error) {
@@ -47,7 +53,7 @@ function failed(stage, error) {
         .filter(Boolean)
         .join('; ')
     : '';
-  const reason = String(detail || error.message).replace(/\.$/, '');
+  const reason = hideInviteCodes(String(detail || error.message)).replace(/\.$/, '');
   error.message =
     `BattleMetrics deletion failed while ${stage}: ${reason}. ` +
     'The local list was retained; any invites or subscriptions already removed remain removed.';

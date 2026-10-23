@@ -131,6 +131,8 @@ const packages = {
     Op: { ne: Symbol('ne') }
   },
   'scbl-lib/utils': {
+    // The mutations post their changes to the log channel, which these checks make none of.
+    Logger: { verbose() {}, important() {} },
     calculateRiskRating(points) {
       calls.push({ model: 'utils', method: 'calculateRiskRating' });
       return points / 10;
