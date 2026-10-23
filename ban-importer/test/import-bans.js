@@ -4241,6 +4241,170 @@ assert.deepStrictEqual(readsOf(polled), [
   [97, 'full', 'periodic']
 ]);
 
+// A list given a new type or source while a poll saves the new bans it found, with its bans deleted
+// in the same transaction, as /banlist update does, has the bans the poll fetched removed once they
+// are saved, with their players queued for an update, as a read in full removes them. The change
+// is made here just before the poll writes, as when MySQL makes the poll's batch wait for the
+// bot's transaction and then saves it. Nothing else of the list is swept, and its row keeps the old
+// source's key and newest page, so the next run reads the new source in full, with none of the old
+// source's bans left to hold, or to wait for a confirming read.
+for (const change of [{ type: 'remote' }, { source: 'bm-138-new' }]) {
+  reset();
+  delete env.IMPORTER_HEAD_POLL;
+  const label = JSON.stringify(change);
+  battlemetricsList(138, [], paged(pairs('w', 0, 12)));
+  await pollRun();
+  const rowBefore = row(138);
+  const newOnTop = [
+    ['wn0', steamID(300)],
+    ['wn1', steamID(301)]
+  ];
+  serve(138, [...newOnTop, ...pairs('w', 0, 12)]);
+  for (const n of [0, 5, 300]) steamUsers.set(steamID(n), user(steamID(n)));
+  onWrite = (ids) => {
+    if (!ids.includes('138,wn0')) return;
+    for (const banID of storedIDs(138)) bans.delete(banID);
+    banLists.set(138, { ...banLists.get(138), ...change });
+  };
+  polled = await pollRun();
+  onWrite = null;
+  // The 2 new bans the poll saved after the change are removed, with the 3 others on its page,
+  // which the change deleted.
+  assert.deepStrictEqual(storedIDs(138), [], label);
+  assert.deepStrictEqual(written(), ['138,wn0', '138,wn1'], label);
+  assert.deepStrictEqual(removedIDs(), ['138,wn0', '138,wn1', '138,w0', '138,w1', '138,w2'], label);
+  assert.deepStrictEqual(
+    inTransaction(events.find(([type]) => type === 'remove')[2]),
+    ['begin', 'flags', 'remove', 'clear pending', 'commit'],
+    label
+  );
+  // The list is read again after the poll's bans are saved, and before any is removed.
+  assert.deepStrictEqual(
+    events
+      .filter(([type]) => ['read list', 'write', 'remove'].includes(type))
+      .map(([type]) => type),
+    ['read list', 'write', 'read list', 'remove'],
+    label
+  );
+  // The players of the bans fetched are queued, and no other: the player of an old ban below the
+  // newest page, deleted with the change, is not.
+  for (const n of [0, 300])
+    assert.strictEqual(steamUsers.get(steamID(n)).lastRefreshedInfo, null, `${label}: ${n}`);
+  assert.strictEqual(steamUsers.get(steamID(5)).lastRefreshedInfo, FRESH, label);
+  assert.deepStrictEqual(
+    polled.report.banLists,
+    [
+      {
+        id: 138,
+        fetched: 5,
+        new: 2,
+        updated: 0,
+        removed: 2,
+        held: 0,
+        read: 'head',
+        sourceChanged: true
+      }
+    ],
+    label
+  );
+  assert.deepStrictEqual(
+    warnings().map(({ message, important }) => [message, important]),
+    [
+      [
+        'Removed the bans fetched for ban list (ID: 138), as its type or source was changed while it was imported (5 bans fetched, 2 new, 0 updated, 2 removed). Its new source is imported on the next run.',
+        true
+      ]
+    ],
+    label
+  );
+  // The row is saved as the poll found the list, under its old source.
+  assert.deepStrictEqual(
+    [row(138).sourceKey, row(138).headUids, row(138).headTotal, row(138).state],
+    [rowBefore.sourceKey, rowBefore.headUids, rowBefore.headTotal, 'ok'],
+    label
+  );
+}
+// The next run reads the new source in full, as it is a new source, and has no bans of the old
+// one to remove, hold or wait for.
+battlemetricsLists.set('bm-138-new', paged(pairs('v', 0, 3)));
+polled = await pollRun();
+assert.deepStrictEqual(readsOf(polled), [[138, 'full', 'source']]);
+assert.deepStrictEqual(
+  [storedIDs(138), removedIDs(), pendingIDs(138)],
+  [pairs('v', 0, 3).map(([uid]) => `138,${uid}`), [], []]
+);
+assert.deepStrictEqual(
+  [row(138).sourceKey, Boolean(row(138).replacePending), row(138).state],
+  [sha256('battlemetrics', 'bm-138-new'), false, 'ok']
+);
+assert.strictEqual(
+  summary(),
+  'Got 0 deleted bans. Imported 1 ban list: 3 bans fetched, 3 new, 0 updated, 0 removed, 0 held, 0 lists failed.'
+);
+
+// A change saved after the poll's bans, and before the poll reads the list again, deleted them with
+// the list's other bans, so there is nothing left to remove, and the poll says so. A list removed
+// then is skipped as removed during the run, and no row is saved for it.
+for (const removedList of [false, true]) {
+  reset();
+  delete env.IMPORTER_HEAD_POLL;
+  battlemetricsList(139, [], paged(pairs('z', 0, 12)));
+  await pollRun();
+  serve(139, [['zn0', steamID(310)], ...pairs('z', 0, 12)]);
+  const findList = BanList.findByPk;
+  BanList.findByPk = async (id, options) => {
+    if (options?.attributes?.includes('source')) {
+      for (const banID of storedIDs(id)) bans.delete(banID);
+      if (removedList) banLists.delete(id);
+      else banLists.set(id, { ...banLists.get(id), source: 'bm-139-new' });
+    }
+    return findList(id, options);
+  };
+  const saves = syncSaves.length;
+  polled = await pollRun();
+  BanList.findByPk = findList;
+  assert.deepStrictEqual(storedIDs(139), [], `removed list: ${removedList}`);
+  assert.deepStrictEqual(written(), ['139,zn0'], `removed list: ${removedList}`);
+  if (removedList) {
+    assert.deepStrictEqual(
+      [polled.results[0].gone, removedIDs(), syncSaves.length],
+      [true, [], saves]
+    );
+    assert.strictEqual(
+      logged(2, /^Skipped ban list \(ID: 139\), as it was removed during the run\.$/).length,
+      1
+    );
+  } else {
+    assert.deepStrictEqual(
+      [polled.results[0].sourceChanged, polled.results[0].removed, removedIDs()],
+      [true, 0, ['139,zn0', '139,z0', '139,z1', '139,z2', '139,z3']]
+    );
+    assert.deepStrictEqual(
+      warnings().map(({ message }) => message),
+      [
+        'Removed the bans fetched for ban list (ID: 139), as its type or source was changed while it was imported (5 bans fetched, 1 new, 0 updated). Its new source is imported on the next run.'
+      ]
+    );
+  }
+}
+
+// Removing them needs the run lock, as removing any list's bans does: a run that has lost it stops
+// there, and removes nothing.
+reset();
+delete env.IMPORTER_HEAD_POLL;
+battlemetricsList(140, [], paged(pairs('y', 0, 12)));
+await pollRun();
+serve(140, [['yn0', steamID(320)], ...pairs('y', 0, 12)]);
+const lockless = await loadImporter();
+lockless.control.setRunLock({ isHeld: async () => false });
+onWrite = (ids) => {
+  if (ids.includes('140,yn0')) banLists.set(140, { ...banLists.get(140), source: 'bm-140-new' });
+};
+polled = await pollRun(undefined, lockless.BanImporter);
+onWrite = null;
+assert.strictEqual(polled.stopped?.reason, lockless.control.LOCK_LOST);
+assert.deepStrictEqual([written(), removedIDs()], [['140,yn0'], []]);
+
 // A run asked to stop while a poll saves the new bans it found ends once the batch under way is
 // saved, as for any list, and the list keeps its row as it was: its newest page and count are only
 // saved with all the bans on the poll's pages. So its next poll still finds the bans that were not
@@ -4411,5 +4575,5 @@ assert.deepStrictEqual(JSON.parse(JSON.stringify(stoppedImporter.report())), {
 assert.strictEqual(verboseLevelOneLines, 0, 'Lines for the log channel are logged as important');
 
 console.log(
-  'Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed or a held ban comes back, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, second attempts, retries, sync state, the access check, lost access, self-imports, lists removed before their missing bans are recorded, head polls that never remove, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming and periodic full reads counted from the start of the run, held counts of polled lists, the switches, stops, also during a poll, and the run summary.'
+  'Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed or a held ban comes back, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, second attempts, retries, sync state, the access check, lost access, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming and periodic full reads counted from the start of the run, held counts of polled lists, the switches, stops, also during a poll, and the run summary.'
 );

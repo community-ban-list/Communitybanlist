@@ -27,7 +27,7 @@ A ban list's `source` is either:
 
 The bot test fetches the source before saving it. It rejects sources that are already used by another ban list, and BattleMetrics sources that are one of CBL's own export ban lists, since importing one would feed exported players back in as new bans. Use `skip_check` to save a source without fetching it, e.g. a list that is empty for now; it skips only the test fetch, so the other checks still apply.
 
-Changes take effect on the next ban importer run. When a ban list is removed or given a new type or source, its bans are deleted straight away and the affected players are queued so the importer recalculates their reputation and export bans. A new type or source is refused while a ban importer run, or a cycle of the importer service, is under way, as it could save the old source's bans again; try again once it has finished. The importer service holds the run lock only during its cycles, so between them the change works.
+Changes take effect on the next ban importer run. When a ban list is removed or given a new type or source, its bans are deleted straight away and the affected players are queued so the importer recalculates their reputation and export bans. A new type or source is refused while a ban importer run, or a cycle of the importer service, is under way: the importer removes the old source's bans that it saves while the change is being made, but an older importer image, e.g. one a rollback runs, does not when it only polls the list's newest bans. Try again once it has finished. The importer service holds the run lock only during its cycles, so between them the change works.
 
 ### Export ban lists
 
