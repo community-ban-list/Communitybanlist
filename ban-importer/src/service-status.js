@@ -204,12 +204,12 @@ function describeLast(last) {
 
 // Draw the service's status message from its state:
 // - outcome: 'running', or how the service ended: 'stopped' or 'failed';
-// - startedAt: when it took the run lock; at: now, or when it ended;
+// - startedAt: when it took the service lock; at: now, or when it ended;
 // - gitSha: the commit it runs;
 // - cycleSeconds, maxCycleSeconds: how often cycles start, and their time limit;
 // - current: the cycle under way, as { cycle, startedAt, phase, progress }, where progress is the
-//   phase's latest progress, with waitingSince while it waits for the database, or null between
-//   cycles;
+//   phase's latest progress, with waitingSince while it waits for the database, or for the run
+//   lock, which waitingFor says ('database' or 'lock'), or null between cycles;
 // - last: the cycle that ended last, as { cycle, outcome, seconds, endedAt, reason, numbers }, the
 //   outcome as its record names it, or null before the first;
 // - nextAt: when the next cycle starts, between cycles;
@@ -237,7 +237,7 @@ export default function renderServiceStatus(state) {
     const cycle = `**Cycle ${formatCount(current.cycle ?? 0)}** · started ${discordTime(current.startedAt, 'R')}`;
     if (Number.isFinite(current.waitingSince))
       lines.push(
-        `${MARKS.waiting} ${cycle} · waiting for the database since ${discordTime(current.waitingSince, 'R')}`
+        `${MARKS.waiting} ${cycle} · waiting for ${current.waitingFor === 'lock' ? 'another run to end' : 'the database'} since ${discordTime(current.waitingSince, 'R')}`
       );
     else {
       const progress = describeProgress(current.progress);

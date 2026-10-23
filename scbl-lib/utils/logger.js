@@ -143,6 +143,8 @@ class LogMessage {
     this.posted = new Promise((resolve) => {
       this.resolvePosted = resolve;
     });
+    // Told once nothing of the message is waiting to be sent or being sent (see sent).
+    this.sentWaiters = [];
     // Without Discord logging, or once the message could not be posted, updates do nothing rather
     // than post new messages. A message that is finished when it is made is never posted.
     this.stopped = !logger.discordWebhook || finished;
@@ -228,6 +230,28 @@ class LogMessage {
     this.timer = null;
     // A message that was posted has already settled with its ID.
     this.resolvePosted(null);
+    this.settle();
+  }
+
+  // Settles once nothing of the message is waiting to be sent or being sent, e.g. once its final
+  // payload has been sent, or once it stops, and never fails. A message posted again by then, as
+  // Discord said it was deleted, has told onPosted its new ID. It waits for Discord, so whatever
+  // waits for it limits how long.
+  sent() {
+    if (this.isSent()) return Promise.resolve();
+    return new Promise((resolve) => this.sentWaiters.push(resolve));
+  }
+
+  isSent() {
+    return this.stopped || (!this.sending && this.waiting === null && this.unposted === null);
+  }
+
+  // Tell what waits for the message to be sent, once it has been.
+  settle() {
+    if (this.sentWaiters.length === 0 || !this.isSent()) return;
+    const waiters = this.sentWaiters;
+    this.sentWaiters = [];
+    for (const resolve of waiters) resolve();
   }
 
   // Send the latest payload, once the last one has been sent and 15 seconds have passed since.
@@ -351,6 +375,7 @@ class LogMessage {
     this.sending = false;
     this.sentAt = Date.now();
     this.sendLatest();
+    this.settle();
   }
 }
 
@@ -468,6 +493,7 @@ class Logger {
   // - repostIfDeleted: a message Discord says no longer exists, as someone deleted it, is posted
   //   again, rather than no longer edited;
   // - onPosted(id): told the ID of each message posted, e.g. to keep it for the next process.
+  // Its sent() settles once its latest payload has been sent, e.g. its final one.
   statusMessage(payload, { messageID = null, editInterval, repostIfDeleted, onPosted } = {}) {
     return new LogMessage(this, payload, {
       priority: STATUS_PRIORITY,

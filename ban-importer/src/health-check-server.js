@@ -15,9 +15,10 @@ const minutes = (ms) => {
 const isoTime = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : null);
 
 // Whether the importer service is healthy, from what it is doing, now:
-// - while it holds the run lock, as long as a cycle ended within window milliseconds, or, before
-//   its first cycle ends, it took the lock within window;
-// - while it waits for the database or the run lock, for its first 10 minutes of waiting;
+// - while it holds the service lock, as long as a cycle ended within window milliseconds, or,
+//   before its first cycle ends, it took the lock within window;
+// - while it waits for the database, or for another run to end, as another run holds the service
+//   lock or the run lock, for its first 10 minutes of waiting;
 // - not once it is stopping.
 // health is what loop.js keeps: { stopping, lockedAt, cycles, cycle, lastCycle, waitingFor,
 // waitingSince, window }, with times in milliseconds, where lastCycle is
@@ -39,7 +40,7 @@ export function checkHealth(health, now) {
   if (health.stopping) return unhealthy('the importer service is stopping');
 
   const waited = waitingFor ? now - waitingSince : null;
-  const waiting = waitingFor === 'database' ? 'the database' : 'the run lock';
+  const waiting = waitingFor === 'database' ? 'the database' : 'another run to end';
   if (status.holdsLock) {
     const since = lastCycle ? lastCycle.endedAt : lockedAt;
     const ago = minutes(now - since);
@@ -47,7 +48,7 @@ export function checkHealth(health, now) {
       return healthy(
         lastCycle
           ? `cycle ${lastCycle.cycle} ended ${ago} ago`
-          : `it took the run lock ${ago} ago, and its first cycle has not ended yet`
+          : `it took the service lock ${ago} ago, and its first cycle has not ended yet`
       );
     if (waitingFor && waited < WAIT_LIMIT)
       return healthy(`it has been waiting for ${waiting} for ${minutes(waited)}`);

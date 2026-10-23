@@ -114,7 +114,7 @@ const ended = {
 };
 assert.deepStrictEqual(reasonAt({}, 34.9), [
   true,
-  'it took the run lock 34 minutes ago, and its first cycle has not ended yet'
+  'it took the service lock 34 minutes ago, and its first cycle has not ended yet'
 ]);
 assert.deepStrictEqual(reasonAt({}, 35), [
   false,
@@ -155,11 +155,11 @@ assert.deepStrictEqual(reasonAt({ ...waiting, waitingSince: START + 70 * MINUTE 
 const standingBy = { lockedAt: null, waitingFor: 'lock', waitingSince: START };
 assert.deepStrictEqual(reasonAt(standingBy, 9.9), [
   true,
-  'it has been waiting for the run lock for 9 minutes'
+  'it has been waiting for another run to end for 9 minutes'
 ]);
 assert.deepStrictEqual(reasonAt(standingBy, 10), [
   false,
-  'it has been waiting for the run lock for 10 minutes, more than the 10 minutes allowed'
+  'it has been waiting for another run to end for 10 minutes, more than the 10 minutes allowed'
 ]);
 assert.deepStrictEqual(reasonAt({ ...standingBy, waitingFor: 'database' }, 1), [
   true,

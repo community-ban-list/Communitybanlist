@@ -1,5 +1,5 @@
 import { battlemetricsRequestCount } from 'scbl-lib/apis';
-import { connect, disconnect, takeRunLock } from 'scbl-lib/db';
+import { connect, disconnect, takeServiceLock } from 'scbl-lib/db';
 import { describeError, Logger } from 'scbl-lib/utils';
 
 import startHealthCheckServer, { checkHealth } from './health-check-server.js';
@@ -48,14 +48,17 @@ import renderServiceStatus, {
 import migrate from './schema/migrate.js';
 
 // The importer service: in loop mode (IMPORTER_MODE=loop), the importer runs as a long-running
-// service, in the Portainer stack, rather than once per start. It takes the run lock once and keeps
-// it, and runs a cycle every IMPORTER_CYCLE_SECONDS, from the start of one to the start of the
-// next, or at once after one that took longer. Each cycle runs the steps as a run in once mode
-// does (see run.js): the same steps and stop points, its own run record, saved as a run's is, and
-// its own JSON line, with the cycle's number. The service stops only when it is asked to, by
-// SIGTERM or SIGINT, or when it can no longer go on safely: when it loses the run lock, or when a
-// cycle does not stop within 60 seconds of its time limit. It then exits 1, for Docker to start it
-// again, as Docker never restarts a container that is only unhealthy.
+// service, in the Portainer stack, rather than once per start. It takes the service lock once and
+// keeps it, so no other importer runs while it does, and runs a cycle every
+// IMPORTER_CYCLE_SECONDS, from the start of one to the start of the next, or at once after one
+// that took longer. Each cycle holds the run lock while it goes, and frees it when it ends, so the
+// bot's commands that must not overlap a run work between cycles (see scbl-lib/db/run-lock.js).
+// Each cycle runs the steps as a run in once mode does (see run.js): the same steps and stop
+// points, its own run record, saved as a run's is, and its own JSON line, with the cycle's number.
+// The service stops only when it is asked to, by SIGTERM or SIGINT, or when it can no longer go on
+// safely: when it loses its locks, or when a cycle does not stop within 60 seconds of its time
+// limit. It then exits 1, for Docker to start it again, as Docker never restarts a container that
+// is only unhealthy.
 
 // How the importer runs (IMPORTER_MODE): once, the default, runs the steps once and exits, as the
 // script that starts the importer has it, and loop runs them as the importer service.
@@ -66,9 +69,9 @@ export const MODES = ['once', 'loop'];
 const DEFAULT_CYCLE_SECONDS = 10 * 60;
 const DEFAULT_MAX_CYCLE_SECONDS = 15 * 60;
 
-// While another run holds the run lock, e.g. one started by hand, or the database cannot be
-// reached to take it, the service tries again this often, and says so in the console at most this
-// often.
+// While another run holds the service lock or the run lock, e.g. one started by hand, or the
+// database cannot be reached to take the service lock, the service tries again this often, and says
+// so in the console at most this often.
 const LOCK_RETRY_DELAY = 15 * 1000;
 const STANDBY_LOG_INTERVAL = 5 * 60 * 1000;
 
@@ -81,7 +84,7 @@ const DATABASE_MAX_DELAY = 60 * 1000;
 const STATUS_EDIT_INTERVAL = 60 * 1000;
 
 // docker stop gives the service 60 seconds (stop_grace_period) before it kills it. Once the service
-// is asked to stop, its end, from saving the last cycle's record to releasing the lock, waits for
+// is asked to stop, its end, from saving the last cycle's record to releasing the locks, waits for
 // nothing beyond 55 seconds after it was asked, nor beyond END_TIMEOUT after the end began, as a
 // run's end does, so a cycle that reaches its safe point late leaves its end less time.
 const STOP_GRACE = 55 * 1000;
@@ -142,9 +145,11 @@ function memoryNow() {
 }
 
 // Run the importer's steps as the importer service, until it is asked to stop or can no longer go
-// on, and resolve with its exit code: 0 once it stopped as it was asked to, 1 once it lost the run
-// lock, a cycle did not stop within 60 seconds of its time limit, or it failed, and 3 when a second
-// signal ended it at once. Each step is { name, run, counts } (see RunState in run.js).
+// on, and resolve with its exit code: 0 once it stopped as it was asked to, 1 once it lost its
+// locks, a cycle did not stop within 60 seconds of its time limit, or it failed, and 3 when a
+// second signal ended it at once during a cycle. A second signal between cycles, or while the
+// service ends, exits with the code it was stopping with. Each step is { name, run, counts } (see
+// RunState in run.js).
 //
 // While it goes, it keeps a health server, for the Docker health check (see
 // health-check-server.js). It posts the alerts that runs post, in every mode, and, as
@@ -162,9 +167,10 @@ export default async function runLoop(steps) {
   const postsStatus = discord.mode !== 'changes';
   const gitSha = process.env.GIT_SHA || 'unknown';
 
-  // What the service is doing, for the health check: when it took the run lock, the cycle under
-  // way and the last one that ended, and what it is waiting for, if anything. A cycle that ended
-  // within two cycles and the time limit keeps it healthy.
+  // What the service is doing, for the health check: when it took the service lock, the cycle
+  // under way and the last one that ended, and what it is waiting for, if anything: the database,
+  // or the service lock or the run lock (lock). A cycle that ended within two cycles and the time
+  // limit keeps it healthy. The status message shows what the cycle under way waits for too.
   const health = {
     stopping: false,
     lockedAt: null,
@@ -177,6 +183,9 @@ export default async function runLoop(steps) {
   };
   const server = startHealthCheckServer(() => ({
     ...checkHealth(health, Date.now()),
+    // What the service posts besides its alerts, or off when it posts nothing at all, as without
+    // DISCORD_LOG_WEBHOOK, which docker inspect then shows.
+    discord: Logger.discordWebhook ? discord.mode : 'off',
     memory: memoryNow()
   }));
 
@@ -185,13 +194,12 @@ export default async function runLoop(steps) {
   let stopping = null;
   let exitCode = EXIT_CODES.FINISHED;
   let stopAt = null;
-  // The cycle under way, as a RunState, and when it started waiting for the database, while it is.
+  // The cycle under way, as a RunState.
   let current = null;
-  let waitingSince = null;
   // Whether a cycle has connected and applied the importer's migrations, which the first does.
   let prepared = false;
-  // When the service took the run lock, the totals since its last hourly summary, the last cycle
-  // that ended, and when the next starts, between cycles.
+  // When the service took the service lock, the totals since its last hourly summary, the last
+  // cycle that ended, and when the next starts, between cycles.
   let startedAt = null;
   let totals = newTotals(Date.now());
   let last = null;
@@ -200,12 +208,12 @@ export default async function runLoop(steps) {
   let statusMessage = null;
   let statusID = null;
   let summaryTimer = null;
-  // The end of the service, once it is ending, and by when the lock is released.
+  // The end of the service, once it is ending, and by when the locks are released.
   let finishing = null;
   let releaseBy = null;
 
-  // Report on the service: in the Discord log once it holds the lock, and before that only in the
-  // console.
+  // Report on the service: in the Discord log once it holds the service lock, and before that only
+  // in the console.
   const report = (message) => {
     if (lock) Logger.important('Core', message);
     else console.log(message);
@@ -223,7 +231,7 @@ export default async function runLoop(steps) {
 
   // How long the service's end may still wait for something, at most limit. Once it is stopping,
   // it ends by STOP_GRACE after it was asked, or END_TIMEOUT after it began to end, if that is
-  // sooner, keeping the last RELEASE_RESERVE for releasing the lock.
+  // sooner, keeping the last RELEASE_RESERVE for releasing the locks.
   const left = (limit) => {
     if (stopping === null) return limit;
     releaseBy ??= Math.min(Date.now() + END_TIMEOUT, stopAt + STOP_GRACE) - RELEASE_RESERVE;
@@ -251,7 +259,8 @@ export default async function runLoop(steps) {
             startedAt: record.startedAt,
             phase: record.phase,
             progress: current.progress[record.phase],
-            waitingSince
+            waitingFor: health.waitingFor,
+            waitingSince: health.waitingFor ? health.waitingSince : null
           },
           last,
           nextAt,
@@ -313,7 +322,9 @@ export default async function runLoop(steps) {
         messageID: statusID,
         editInterval: STATUS_EDIT_INTERVAL,
         repostIfDeleted: true,
-        // A message posted again once the service is ending is saved with how it ended.
+        // Each message posted, e.g. as the last one was deleted, is saved for the next process.
+        // Once the service is ending, its end saves the ID with how it ended, once the message's
+        // final edit has been sent (see endService).
         onPosted: (id) => {
           statusID = id;
           return health.stopping ? undefined : save();
@@ -333,9 +344,26 @@ export default async function runLoop(steps) {
     }
   };
 
+  // Save how the service ended in its row, ended being { startedAt, endedAt, outcome }, with the
+  // ID of the status message, waiting at most ms. It never fails the end.
+  const saveEnded = async (ended, messageId, ms) => {
+    try {
+      await withTimeout(
+        saveService({ ...ended, messageId }),
+        ms,
+        'Saving how the importer service ended'
+      );
+    } catch (err) {
+      console.warn(`Warning: could not save how the service ended: ${describeError(err)}`);
+    }
+  };
+
   // End the service, once: show how it ended in its status message, save that it ended as it
   // should, close the database connections, then send the log messages still waiting and release
-  // the lock, all in the time left (see left). Resolves with the exit code.
+  // the locks, all in the time left (see left). The status message's final edit may find it
+  // deleted, and post it again, so once that edit has been sent, the row is saved again with the
+  // new ID, for the next process to edit the message that says how this one ended. Resolves with
+  // the exit code.
   const endService = () => {
     finishing ??= (async () => {
       health.stopping = true;
@@ -345,20 +373,25 @@ export default async function runLoop(steps) {
       finishStatus();
       try {
         if (prepared) {
-          try {
-            await withTimeout(
-              saveService({
-                messageId: statusID,
-                startedAt,
-                endedAt: Date.now(),
-                outcome: exitCode === EXIT_CODES.FINISHED ? 'stopped' : 'failed'
-              }),
-              left(RECORD_TIMEOUT),
-              'Saving how the importer service ended'
-            );
-          } catch (err) {
-            console.warn(`Warning: could not save how the service ended: ${describeError(err)}`);
+          const ended = {
+            startedAt,
+            endedAt: Date.now(),
+            outcome: exitCode === EXIT_CODES.FINISHED ? 'stopped' : 'failed'
+          };
+          const saved = statusID;
+          await saveEnded(ended, saved, left(RECORD_TIMEOUT));
+          if (statusMessage) {
+            try {
+              await withTimeout(
+                statusMessage.sent(),
+                left(RECORD_TIMEOUT),
+                "Sending the status message's final edit"
+              );
+            } catch (err) {
+              console.warn(`Warning: ${describeError(err)}`);
+            }
           }
+          if (statusID !== saved) await saveEnded(ended, statusID, left(RECORD_TIMEOUT));
         }
         try {
           await withTimeout(
@@ -384,9 +417,9 @@ export default async function runLoop(steps) {
     return finishing;
   };
 
-  // Exit straight away, closing the lock's connection, which frees the lock. The JSON line of a
-  // cycle under way is printed, but there is no time to save it, and it exits 3. A service that is
-  // only ending, between cycles, exits with its own code.
+  // Exit straight away, closing the locks' connection, which frees them. The JSON line of a cycle
+  // under way is printed, but there is no time to save it, and it exits 3. A service that is only
+  // waiting between cycles, or ending, exits with the code it was stopping with.
   const exitNow = (why) => {
     console.error(`${why}, so the importer service is ending now.`);
     let code = exitCode;
@@ -399,7 +432,8 @@ export default async function runLoop(steps) {
   // A cycle that did not stop within 60 seconds of its time limit, e.g. as a step is stuck, ends the
   // service: the cycle's JSON line is printed, the failure posted and shown in the status message,
   // and the process exits 1, once the log messages are sent and the service's row says how it
-  // ended, or 5 seconds have passed.
+  // ended, or 5 seconds have passed. As at the service's end (see endService), a status message
+  // that its final edit posted again is saved in the row, in the time left.
   const exitStuck = async (cycle) => {
     const why = `Cycle ${cycle.record.cycle} did not stop within ${HARD_EXIT_DELAY / 1000}s of its time limit`;
     Logger.important(
@@ -412,15 +446,20 @@ export default async function runLoop(steps) {
     health.stopping = true;
     finishStatus();
     const by = Date.now() + HARD_EXIT_FLUSH;
+    const ended = { startedAt, endedAt: Date.now(), outcome: 'failed' };
+    const saved = statusID;
     await Promise.allSettled([
       flushLogs(by),
-      prepared &&
+      prepared && saveEnded(ended, saved, HARD_EXIT_FLUSH),
+      statusMessage &&
         withTimeout(
-          saveService({ messageId: statusID, startedAt, endedAt: Date.now(), outcome: 'failed' }),
+          statusMessage.sent(),
           HARD_EXIT_FLUSH,
-          'Saving how the importer service ended'
+          "Sending the status message's final edit"
         )
     ]);
+    if (prepared && statusID !== saved && Date.now() < by)
+      await saveEnded(ended, statusID, by - Date.now());
     lock?.destroy();
     process.exit(EXIT_CODES.FAILED);
   };
@@ -440,8 +479,8 @@ export default async function runLoop(steps) {
     stopService(`it received ${signal}`, EXIT_CODES.FINISHED);
   };
 
-  // A lost lock means another run may now hold it, so the service stops at its next safe point and
-  // exits 1, for Docker to start it again.
+  // Lost locks mean another run may now hold them, so the service stops at its next safe point and
+  // exits 1, for Docker to start it again. Both locks go with their connection.
   const onLost = (reason) => {
     report(
       `The importer service lost its run lock (${reason}), so it will stop at its next safe point and exit, for Docker to start it again.`
@@ -449,40 +488,45 @@ export default async function runLoop(steps) {
     stopService(LOCK_LOST, EXIT_CODES.FAILED);
   };
 
-  // Take the run lock, standing by while another run holds it, or the database cannot be reached
-  // to take it, and trying again every 15 seconds, for as long as it takes. While another run holds
-  // it, the service checks whether the importer is stale once a cadence, as a skipped start does.
-  // Resolves with the lock, or with null once the service is asked to stop.
-  const standBy = async () => {
+  // Take a lock, standing by while another run holds it, or the database cannot be reached to take
+  // it, and trying again every 15 seconds, for as long as it takes: the service lock as the service
+  // starts, and the run lock at the start of each cycle (see waitForRunLock). take() resolves with
+  // the lock, or with nothing while another run holds it, and fails while the database cannot be
+  // reached. describe(problem) says why it waits, which the console is told at most every 5
+  // minutes, and with post, the log channel the first time. The health check and the status
+  // message show what it waits for, and while another run holds the lock, the service checks once
+  // a cadence whether the importer is stale, as a skipped start does. Resolves with what take()
+  // gave, also when the service was asked to stop as it took the lock, or with null once the
+  // service is asked to stop.
+  const standBy = async (take, { describe, post = false }) => {
     let loggedAt = -Infinity;
     let checkedAt = -Infinity;
+    let waited = false;
     for (;;) {
       // A signal may have asked the service to stop while it waited.
       if (stopping !== null) return null;
       let taken = null;
       let problem = null;
       try {
-        taken = await takeRunLock({ onLost });
+        taken = await take();
       } catch (err) {
         problem = err;
       }
-      if (taken && stopping !== null) await taken.release();
-      if (stopping !== null) return null;
       if (taken) return taken;
+      if (stopping !== null) return null;
 
       const waitingFor = problem ? 'database' : 'lock';
       if (health.waitingFor !== waitingFor) {
         Object.assign(health, { waitingFor, waitingSince: Date.now() });
         loggedAt = -Infinity;
+        updateStatus();
       }
       if (Date.now() - loggedAt >= STANDBY_LOG_INTERVAL) {
         loggedAt = Date.now();
-        console.log(
-          problem
-            ? `The importer service could not take the run lock (${describeError(problem)}), so it tries again every ${LOCK_RETRY_DELAY / 1000}s.`
-            : `Another run holds the run lock, so the importer service stands by, trying again every ${LOCK_RETRY_DELAY / 1000}s.`
-        );
+        if (post && !waited) Logger.important('Core', describe(problem));
+        else console.log(describe(problem));
       }
+      waited = true;
       if (!problem && Date.now() - checkedAt >= cadenceSeconds * 1000) {
         checkedAt = Date.now();
         await checkStaleness({
@@ -494,6 +538,21 @@ export default async function runLoop(steps) {
       }
       await pause(LOCK_RETRY_DELAY);
     }
+  };
+
+  // Take the run lock for a cycle, numbered number, which the cycle holds while it works, so the
+  // bot refuses the changes that must not overlap a run until it ends. Another run may hold it,
+  // e.g. one that an importer from before the service lock started by hand, which took only the
+  // run lock, and the cycle then waits for it to end (see standBy). A cycle asked to stop
+  // meanwhile, or whose locks are lost, stops here.
+  const waitForRunLock = async (number) => {
+    await standBy(() => lock.beginCycle(), {
+      describe: () =>
+        `Another run holds the run lock, e.g. one started by hand with an importer from before the importer service, so cycle ${number} waits for it, trying again every ${LOCK_RETRY_DELAY / 1000}s.`,
+      post: true
+    });
+    stopIfRequested();
+    Object.assign(health, { waitingFor: null, waitingSince: null });
   };
 
   // End a cycle: print its JSON line, show it in the status message and post its embed if it is
@@ -539,7 +598,6 @@ export default async function runLoop(steps) {
         console.warn(`Warning: could not post the cycle's embed: ${describeError(err)}`);
       }
     current = null;
-    waitingSince = null;
     updateStatus();
 
     const databaseDown = await saveRunRecord(ended, left(RECORD_TIMEOUT));
@@ -552,10 +610,12 @@ export default async function runLoop(steps) {
       });
   };
 
-  // Run one cycle, numbered number, and end it (see endCycle). It waits for the database first, for
-  // as long as it takes. Its time limit starts once the database answers. The first cycle also
-  // connects and applies the importer's migrations, as a run does, and so does each cycle after
-  // it until one has. Never throws.
+  // Run one cycle, numbered number, and end it (see endCycle). It waits for the database first, and
+  // then for the run lock, each for as long as it takes, and holds the run lock until it has ended,
+  // when it frees it, unless the service is stopping, which frees both locks as it ends. Its time
+  // limit starts once it holds the run lock. The first cycle also connects and applies the
+  // importer's migrations, as a run does, and so does each cycle after it until one has. Never
+  // throws.
   const runCycle = async (number) => {
     // A cycle the last one was stopped for, e.g. by its time limit, does not stop this one, unless
     // the service is stopping.
@@ -580,15 +640,15 @@ export default async function runLoop(steps) {
           retries: Infinity,
           maxDelay: DATABASE_MAX_DELAY,
           onRetry: () => {
-            waitingSince ??= Date.now();
             if (health.waitingFor !== 'database')
-              Object.assign(health, { waitingFor: 'database', waitingSince });
+              Object.assign(health, { waitingFor: 'database', waitingSince: Date.now() });
             updateStatus();
           }
         })
       );
-      waitingSince = null;
       Object.assign(health, { waitingFor: null, waitingSince: null });
+      updateStatus();
+      await cycle.time('takeRunLock', () => waitForRunLock(number));
       updateStatus();
 
       // The time limit, which ends a cycle that is stuck as well as one that is slow. A cycle that
@@ -605,8 +665,8 @@ export default async function runLoop(steps) {
         );
       }, maxCycleSeconds * 1000);
 
-      // The lock goes with its connection, which says so when it closes, but it is checked too,
-      // as it is before every step that deletes or exports bans.
+      // The locks go with their connection, which says so when it closes, but they are checked
+      // too, as they are before every step that deletes or exports bans.
       if (!(await lock.isHeld())) stopService(LOCK_LOST, EXIT_CODES.FAILED);
       stopIfRequested();
 
@@ -665,6 +725,9 @@ export default async function runLoop(steps) {
       clearTimeout(hardExit);
     }
     await endCycle(cycle, code, reason, before);
+    // Between cycles, the service holds only the service lock. Freeing the run lock fails only with
+    // the locks' connection, which stops the service as a lost lock does.
+    if (stopping === null) await lock.endCycle();
   };
 
   // A service left waiting for something that can never happen, which index.js tells it, failed:
@@ -686,9 +749,19 @@ export default async function runLoop(steps) {
   });
 
   try {
-    lock = await standBy();
+    lock = await standBy(() => takeServiceLock({ onLost }), {
+      describe: (problem) =>
+        problem
+          ? `The importer service could not take the service lock (${describeError(problem)}), so it tries again every ${LOCK_RETRY_DELAY / 1000}s.`
+          : `Another run holds the service lock, so the importer service stands by, trying again every ${LOCK_RETRY_DELAY / 1000}s.`
+    });
+    // A signal may have asked the service to stop as it took the lock.
+    if (lock && stopping !== null) {
+      await lock.release();
+      lock = null;
+    }
     if (!lock) {
-      console.log(`The importer service stopped before it took the run lock, as ${stopping}.`);
+      console.log(`The importer service stopped before it took the service lock, as ${stopping}.`);
       return exitCode;
     }
     setRunLock(lock);
@@ -697,7 +770,11 @@ export default async function runLoop(steps) {
     Object.assign(health, { lockedAt: startedAt, waitingFor: null, waitingSince: null });
     if (discord.warning) Logger.important('Core', discord.warning);
     console.log(
-      `Started the CBL importer service (commit ${gitSha}): a cycle every ${cycleSeconds}s, time limit ${maxCycleSeconds}s, cadence ${cadenceSeconds}s, posting ${discord.mode} to Discord.`
+      `Started the CBL importer service (commit ${gitSha}): a cycle every ${cycleSeconds}s, time limit ${maxCycleSeconds}s, cadence ${cadenceSeconds}s, ${
+        Logger.discordWebhook
+          ? `posting ${discord.mode} to Discord`
+          : 'posting nothing to Discord, not even alerts, as Discord logging is off'
+      }.`
     );
 
     try {

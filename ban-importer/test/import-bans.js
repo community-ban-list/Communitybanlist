@@ -3974,6 +3974,46 @@ for (const [name, value, warning, reads] of [
   }
   assert.deepStrictEqual(levels, [1, 2, 2]);
 }
+// An import that fails before it imports any list, e.g. as the lists' rows cannot be read, reports
+// nothing, rather than what the same importer's last import did: in loop mode the importer service
+// imports with one importer every cycle, and a failed cycle's record would otherwise count the
+// last cycle's bans again.
+{
+  reset();
+  battlemetricsList(90, [], [pairs('r', 0, 3)]);
+  const cycles = new BanImporter();
+  await cycles.importBans();
+  const last = JSON.parse(JSON.stringify(cycles.report()));
+  assert.deepStrictEqual(
+    [last.lists, last.imported, last.new, last.banLists.length, last.requests.full],
+    [1, 1, 3, 1, 1]
+  );
+  const findAll = BanListSync.findAll;
+  BanListSync.findAll = async () => {
+    throw new Error("Table 'cbl.BanListSyncs' doesn't exist");
+  };
+  await assert.rejects(cycles.importBans(), /BanListSyncs/);
+  BanListSync.findAll = findAll;
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(cycles.report())), {
+    lists: 0,
+    imported: 0,
+    fetched: 0,
+    new: 0,
+    updated: 0,
+    removed: 0,
+    held: 0,
+    pending: 0,
+    moves: 0,
+    failedLists: 0,
+    selfImports: 0,
+    accessLost: 0,
+    headPolls: 0,
+    fullReads: 0,
+    accessCheck: 'unused',
+    requests: { head: 0, follow: 0, full: 0 },
+    banLists: []
+  });
+}
 
 // A held list stays held while it is only polled, as a poll does not check for removed bans, and
 // its line, posted when a read of all of it keeps its bans, is not posted for a poll. Here the list

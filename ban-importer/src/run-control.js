@@ -79,7 +79,7 @@ export function setRunLock(lock) {
 }
 
 // Called before deleting or exporting bans, which two runs must never do at once: ends the run
-// unless it still holds the run lock.
+// unless it still holds its locks.
 export async function checkRunLock() {
   if (runLock && (await runLock.isHeld())) return;
   requestStop(LOCK_LOST);

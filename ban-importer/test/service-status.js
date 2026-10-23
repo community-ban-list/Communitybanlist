@@ -264,7 +264,7 @@ for (const [since, due] of [
 ])
   assert.strictEqual(new Date(nextSummaryAt(Date.parse(since))).toISOString(), due, since);
 
-// The status message, while the service runs: when it took the run lock, in each viewer's own time
+// The status message, while the service runs: when it took the service lock, in each viewer's own time
 // and how long ago, its commit, how often cycles start and their time limit, the cycle under way
 // with its step and how far it has got, the last cycle, and the totals since the last summary.
 const totals = addCycle(
@@ -323,13 +323,22 @@ const running = {
     `**Since <t:${UNIX}:t>** · 1 cycle · bans 2 added, 0 updated, 0 removed, 0 expired · export bans 0 created, 0 deleted · 21 BattleMetrics requests · 0 Steam profiles updated · slowest 45s`
   ]);
 
-  // A cycle that waits for the database says since when, and one in a phase that is not a step, or
-  // without progress, says only which.
+  // A cycle that waits for the database, or for another run to end, as it holds the run lock, says
+  // since when, and one in a phase that is not a step, or without progress, says only which.
   assert.strictEqual(
     lines(
       render({ ...running, current: { ...running.current, waitingSince: START + 11 * MINUTE } })
     )[3],
     `⏳ **Cycle 2** · started <t:${UNIX + 600}:R> · waiting for the database since <t:${UNIX + 660}:R>`
+  );
+  assert.strictEqual(
+    lines(
+      render({
+        ...running,
+        current: { ...running.current, waitingFor: 'lock', waitingSince: START + 11 * MINUTE }
+      })
+    )[3],
+    `⏳ **Cycle 2** · started <t:${UNIX + 600}:R> · waiting for another run to end since <t:${UNIX + 660}:R>`
   );
   assert.strictEqual(
     lines(

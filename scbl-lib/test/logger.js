@@ -1440,6 +1440,58 @@ await goneAgain.idle();
 assert.deepStrictEqual(shown(goneAgain.discord.requests), [['edit', '446', null, ['Running']]]);
 assert.strictEqual(goneAgain.logger.discordWebhook, null);
 
+// A status message's sent() settles once its latest payload has been sent, e.g. its final one,
+// such as the importer service's as it stops, which then saves the message's ID. One whose final
+// edit finds it deleted, and posts it again, settles only once onPosted has been told the new ID.
+// It settles at once when nothing is waiting, and when the message stops, as Discord refused it.
+const stopping = await loadLogger();
+const endingIDs = ['910'];
+let endingEdits = 0;
+stopping.discord.reply = async ({ type, id }) => {
+  if (type === 'edit' && id === '447' && ++endingEdits > 1) throw unknownMessage;
+  return { id: type === 'send' ? endingIDs.shift() : id };
+};
+const endingPosted = [];
+const endingStatus = stopping.logger.statusMessage(
+  { embeds: [{ title: 'Running' }] },
+  {
+    messageID: '447',
+    editInterval: 60000,
+    repostIfDeleted: true,
+    onPosted: (id) => endingPosted.push(id)
+  }
+);
+assert.strictEqual(await endingStatus.posted, '447');
+await stopping.idle();
+let endingSent = false;
+await endingStatus.sent().then(() => (endingSent = true));
+assert.ok(endingSent);
+endingStatus.finish({ embeds: [{ title: 'Stopped' }] });
+endingSent = false;
+const waitedForEnd = endingStatus.sent().then(() => {
+  endingSent = true;
+  return [...endingPosted];
+});
+await pause();
+assert.deepStrictEqual(await waitedForEnd, ['910']);
+assert.deepStrictEqual(shown(stopping.discord.requests), [
+  ['edit', '447', null, ['Running']],
+  ['edit', '447', null, ['Stopped']],
+  ['send', undefined, null, ['Stopped']]
+]);
+const refusing = await loadLogger();
+refusing.discord.reply = async () => {
+  throw discordError('Discord answered HTTP 403: Missing Access (code 50001)', { status: 403 });
+};
+const refusedFinal = refusing.logger.statusMessage(
+  { embeds: [{ title: 'Running' }] },
+  { messageID: '448' }
+);
+refusedFinal.finish({ embeds: [{ title: 'Stopped' }] });
+await refusedFinal.sent();
+assert.ok(refusedFinal.stopped);
+assert.ok(endingSent);
+
 // A message posted once, such as an embed of a cycle of the importer service or its hourly
 // summary, is posted ahead of other messages, as a run's lines are, and tried again after a
 // network error. A refusal is only warned about. Without Discord logging, nothing is posted.
@@ -1488,5 +1540,5 @@ await pause();
 assert.deepStrictEqual(unhandled, []);
 
 console.log(
-  'Logger checks passed: Discord off, failed sends, retries, long messages, errors, stack traces, progress bars and their first minute, status messages and their posts made again, changing earlier messages, the queue limit, run lines and gone webhooks, status messages kept across processes and posted again once deleted, messages posted once, and the lines counted.'
+  'Logger checks passed: Discord off, failed sends, retries, long messages, errors, stack traces, progress bars and their first minute, status messages and their posts made again, changing earlier messages, the queue limit, run lines and gone webhooks, status messages kept across processes and posted again once deleted, waiting for their last sends, messages posted once, and the lines counted.'
 );
