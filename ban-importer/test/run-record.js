@@ -230,6 +230,41 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
   assert.ok(skipped.ended.reason.endsWith('x…'));
 }
 {
+  // A record that ends while a phase is still under way, as when the importer service ends a cycle
+  // at once, can keep that phase's time so far, but not once the phase has ended, and keeps its
+  // phases and counts as they were when it ended: the step that carries on changes neither, so the
+  // JSON line and the record saved after it are the same.
+  const { default: RunRecord, clock } = await loadRunRecord();
+  const record = new RunRecord();
+  await record.time('importBans', async () => {
+    clock.now += 2000;
+  });
+  clock.now += 500;
+  record.timePhaseSoFar();
+  assert.deepStrictEqual(plain(record.phases), { importBans: 2 });
+  clock.now -= 500;
+  const counts = { queued: 10, created: 7 };
+  let finish;
+  const step = record.time('exportExportBans', () => new Promise((resolve) => (finish = resolve)));
+  clock.now += 45000;
+  record.timePhaseSoFar();
+  record.count('exportExportBans', () => counts);
+  const ended = record.end('interrupted', 3, 'Ended there');
+  const line = JSON.stringify(ended);
+  // The step carries on, counts one more, ends and records its counts and time.
+  counts.created++;
+  clock.now += 1000;
+  finish();
+  await step;
+  record.count('exportExportBans', () => counts);
+  record.count('later', () => ({ more: 1 }));
+  assert.deepStrictEqual(plain(record.phases), { importBans: 2, exportExportBans: 46 });
+  assert.strictEqual(JSON.stringify(ended), line);
+  assert.deepStrictEqual(plain(ended.phases), { importBans: 2, exportExportBans: 45 });
+  assert.deepStrictEqual(plain(ended.counts), { exportExportBans: { queued: 10, created: 7 } });
+  assert.strictEqual(record.end('finished', 0), ended);
+}
+{
   // A reason is cut on a character boundary, never in the middle of an emoji, as MySQL rejects JSON
   // with half a surrogate pair, which would lose the whole record. A lone half already in a reason
   // is replaced.
@@ -792,5 +827,5 @@ for (const held of ['service', 'run']) {
 }
 
 console.log(
-  'Run record checks passed: what a record holds, reasons cut on a character boundary, saving it with the latest 100 summaries, what counts as a success, the staleness alert on the schedule, with its limit of one a cadence, the run status message to check, with the record of its run, and the importer service: its cycles, its row and its alert.'
+  'Run record checks passed: what a record holds, also when it ends while a phase is under way, reasons cut on a character boundary, saving it with the latest 100 summaries, what counts as a success, the staleness alert on the schedule, with its limit of one a cadence, the run status message to check, with the record of its run, and the importer service: its cycles, its row and its alert.'
 );

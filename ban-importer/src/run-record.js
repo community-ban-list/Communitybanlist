@@ -81,6 +81,16 @@ export function isMissingTable(err) {
   return (err?.original ?? err?.parent)?.errno === NO_SUCH_TABLE;
 }
 
+// A copy of a record's counts as they are now, as its JSON line and ImporterState keep them. Counts
+// that JSON cannot hold, which neither could keep, are only copied step by step.
+function copyCounts(counts) {
+  try {
+    return JSON.parse(JSON.stringify(counts));
+  } catch {
+    return { ...counts };
+  }
+}
+
 // A run's summary for recentRuns: its record without the lists in its counts, such as the import's
 // per-list counts, so the summaries of many runs stay small.
 function summarize({ event, counts, ...record }) {
@@ -125,6 +135,14 @@ export default class RunRecord {
     }
   }
 
+  // Keep how long the phase under way has taken so far as its time, for a record that ends while
+  // the phase is still under way, e.g. as the importer service ends a cycle at once. A phase that
+  // has ended keeps its own time.
+  timePhaseSoFar() {
+    if (this.phase !== null && !Object.hasOwn(this.phases, this.phase))
+      this.phases[this.phase] = seconds(Date.now() - this.phaseStartedAt);
+  }
+
   // Keep the counts a step gives, also when it failed or stopped part-way. Counts that cannot be
   // had only cost the record the step's counts, never the run.
   count(name, getCounts) {
@@ -139,7 +157,9 @@ export default class RunRecord {
   }
 
   // End the record with how the run ended, and return it as its JSON line and ImporterState show
-  // it. reason says why a run did not finish. A record is only ended once.
+  // it. reason says why a run did not finish. A record is only ended once. It keeps its phases and
+  // counts as they are now, so a step that is still running, e.g. once the importer service ended
+  // its cycle at once, changes neither the run's JSON line nor the record saved after it.
   end(outcome, exitCode, reason) {
     if (this.ended) return this.ended;
     const endedAt = Date.now();
@@ -157,8 +177,8 @@ export default class RunRecord {
     if (outcome !== 'finished' && outcome !== 'skipped' && this.phase)
       this.ended.phase = this.phase;
     if (this.migrations.length > 0) this.ended.migrations = this.migrations;
-    this.ended.phases = this.phases;
-    this.ended.counts = this.counts;
+    this.ended.phases = { ...this.phases };
+    this.ended.counts = copyCounts(this.counts);
     if (this.memory) this.ended.memory = this.memory;
     return this.ended;
   }

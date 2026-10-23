@@ -42,6 +42,9 @@ const QUERY_TIMEOUT = 30 * 1000;
 // connection is closed at once.
 const RELEASE_TIMEOUT = 5 * 1000;
 
+// MySQL's error number for a KILL of a connection that is not there, e.g. as it has closed since.
+const NO_SUCH_THREAD = 1094;
+
 // Connect with the settings the Sequelize pool read from DATABASE_URI, so the locks are taken on the
 // database the run works on. They hold the password, so they are never printed.
 function connectionOptions() {
@@ -188,6 +191,38 @@ class RunLock {
     } catch (err) {
       this.markLost(describeError(err));
     }
+  }
+
+  // Stop the statements this process may still have running on its other connections, such as the
+  // Sequelize pool's, before it frees the locks: MySQL carries on with a statement whose client has
+  // gone, e.g. one that waits for a row lock, which would then change the database while another
+  // importer holds the locks. KILL closes a connection on MySQL's side, ending its statement and
+  // rolling back what it had not committed, and MySQL lets a connection kill those of its own user,
+  // as all of the importer's are. ids are the connections' IDs, as mysql2 gives them (threadId).
+  // Resolves within ms milliseconds with the IDs it could not kill, and never fails. A connection
+  // that has closed since is gone already.
+  async killConnections(ids, ms = RELEASE_TIMEOUT) {
+    const missed = new Set(ids);
+    let timedOut = false;
+    const kill = async () => {
+      for (const id of ids) {
+        if (timedOut || this.lost || this.released) return;
+        if (!Number.isSafeInteger(id) || id <= 0) continue;
+        try {
+          await this.query(`KILL ${id}`);
+          missed.delete(id);
+        } catch (err) {
+          if (err?.errno === NO_SUCH_THREAD) missed.delete(id);
+        }
+      }
+    };
+    try {
+      await withTimeout(kill(), ms);
+    } catch {
+      // The time is up, so the connections not killed yet are left as they are.
+      timedOut = true;
+    }
+    return [...missed];
   }
 
   // Free the locks and close their connection. This never fails: if the locks cannot be freed,

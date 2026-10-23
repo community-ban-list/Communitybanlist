@@ -279,6 +279,19 @@ export class RunState {
     if (this.record.phase) this.progress[this.record.phase] = report;
   }
 
+  // Keep in the record what the phase under way has done so far, for a run that ends while the
+  // phase is still under way, as the importer service ends a cycle at once (see loop.js): how long
+  // it has taken, and, for a step, the counts it has given so far. A phase that has ended keeps
+  // its own.
+  keepPhaseSoFar() {
+    const { record } = this;
+    const { phase } = record;
+    if (phase === null || Object.hasOwn(record.phases, phase)) return;
+    record.timePhaseSoFar();
+    const step = this.steps.find(({ name }) => name === phase);
+    if (step?.counts) record.count(phase, step.counts);
+  }
+
   // Run the steps in order, keeping the counts each gives, also when it fails or stops part-way. A
   // run that is asked to stop does so between steps, as well as at the steps' own safe points.
   async runSteps(settings) {

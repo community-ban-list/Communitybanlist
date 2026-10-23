@@ -604,6 +604,82 @@ for (const [answers, act, reason] of [
   assert.strictEqual(await lock.isHeld(), false);
 }
 
+// killConnections() stops the statements the importer still has running on its other connections,
+// e.g. one waiting for a row lock, before it frees the locks: it sends KILL for each connection,
+// one at a time, on the locks' connection, and resolves with those it could not kill. One that is
+// gone already, which MySQL answers with ER_NO_SUCH_THREAD, needs no kill, and an ID that is not a
+// connection's is never sent. It gives up once the time it is given has passed, sending no more,
+// sends nothing once the locks are released or lost, and never fails or loses the locks.
+{
+  const runLock = await loadRunLock();
+  const errorNumbered = (message, errno) => Object.assign(new Error(message), { errno });
+  const connection = runLock.connectAnswering(
+    lockAnswers({
+      extra: (sql) => {
+        if (sql === 'KILL 43') throw errorNumbered('Unknown thread id: 43', 1094);
+        if (sql === 'KILL 44') throw errorNumbered('You are not owner of thread 44', 1095);
+        if (sql.startsWith('KILL ')) return [];
+        return [{ held: 1 }];
+      }
+    })
+  );
+  const lock = await runLock.takeServiceLock({ onLost: () => assert.fail('Not lost') });
+  const sent = connection.queries.length;
+  // The IDs it gives are copied, as arrays made in run-lock.js's context compare as other arrays.
+  assert.deepStrictEqual(
+    [...(await lock.killConnections([42, 43, 44, '45; DROP TABLE Bans', 0, 46], 2000))],
+    [44, '45; DROP TABLE Bans', 0]
+  );
+  assert.deepStrictEqual(lockQuery(connection).slice(sent), [
+    'KILL 42',
+    'KILL 43',
+    'KILL 44',
+    'KILL 46'
+  ]);
+  assert.ok(connection.queries.slice(sent).every(({ timeout }) => timeout > 0));
+  assert.strictEqual(await lock.isHeld(), true);
+
+  // MySQL does not answer the first KILL: it gives up after the 2 seconds given, and sends no more.
+  connection.answer = noAnswer;
+  let missed = null;
+  lock.killConnections([47, 48], 2000).then((ids) => {
+    missed = [...ids];
+  });
+  await settle();
+  runLock.advance(1999);
+  await settle();
+  assert.strictEqual(missed, null);
+  runLock.advance(1);
+  await settle();
+  assert.deepStrictEqual(missed, [47, 48]);
+  assert.deepStrictEqual(lockQuery(connection).slice(-1), ['KILL 47']);
+  // Nor once the first KILL's own wait is over, 30 seconds after it was sent.
+  runLock.advance(30 * 1000);
+  await settle();
+  assert.deepStrictEqual(lockQuery(connection).slice(-1), ['KILL 47']);
+  assert.strictEqual(lock.lost, false);
+
+  // Once the locks are released, e.g. closed at once, nothing is sent, and the first KILL's wait
+  // ends with its connection.
+  lock.destroy();
+  await settle();
+  const queries = connection.queries.length;
+  assert.deepStrictEqual([...(await lock.killConnections([49]))], [49]);
+  assert.strictEqual(connection.queries.length, queries);
+  assert.ok(!lockQuery(connection).includes('KILL 48'));
+  assert.strictEqual(lock.lost, false);
+  assert.deepStrictEqual(runLock.output, []);
+
+  // The same once the locks are lost.
+  const lostConnection = runLock.connectAnswering(lockAnswers());
+  const lost = await runLock.takeServiceLock({ onLost: () => {} });
+  lostConnection.emit('end');
+  assert.strictEqual(lost.lost, true);
+  const before = lostConnection.queries.length;
+  assert.deepStrictEqual([...(await lost.killConnections([50]))], [50]);
+  assert.strictEqual(lostConnection.queries.length, before);
+}
+
 // isRunLockHeld() asks MySQL, on the Sequelize pool rather than a connection of its own, whether a
 // connection holds the run lock under the name it is taken by: a run, or a cycle of the importer
 // service, but not the service between its cycles, which holds only the service lock. NULL, MySQL's
@@ -627,5 +703,5 @@ for (const [answers, act, reason] of [
 }
 
 console.log(
-  "Run lock checks passed: taking, keeping, losing and releasing a run's locks and the importer service's, with a short idle time, also when MySQL stops answering, which lock another run holds, the run lock taken and freed for each cycle, and asking whether a run holds it."
+  "Run lock checks passed: taking, keeping, losing and releasing a run's locks and the importer service's, with a short idle time, also when MySQL stops answering, which lock another run holds, the run lock taken and freed for each cycle, the importer's other connections killed before the locks are freed, and asking whether a run holds it."
 );
