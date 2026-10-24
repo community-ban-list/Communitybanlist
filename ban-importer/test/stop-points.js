@@ -989,13 +989,15 @@ function database(query, transaction = async (work) => work({})) {
 
 // The reputation check queues the players whose points do not match their bans in batches of 500,
 // each one statement, and stops between them. Asked to stop while it reads the players, it stops
-// before it writes anything. Either way it saves no row, so the next run checks again.
-for (const [stopOn, expected, queued] of [
-  ['queue', ['find', 'queue 500'], 500],
-  ['find', ['find'], 0]
+// before it writes anything, also when it has nobody to queue. Either way it saves no row, so the
+// next run checks again.
+for (const [stopOn, found, expected, queued] of [
+  ['queue', 700, ['find', 'queue 500'], 500],
+  ['find', 700, ['find'], 0],
+  ['find', 0, ['find'], 0]
 ]) {
   const events = [];
-  const mismatched = Array.from({ length: 700 }, (_, index) => ({
+  const mismatched = Array.from({ length: found }, (_, index) => ({
     id: steamID(index + 1),
     reputationPoints: 3,
     points: '0'
@@ -1033,7 +1035,7 @@ for (const [stopOn, expected, queued] of [
   assert.deepStrictEqual(events, expected, stopOn);
   assert.deepStrictEqual(
     { ...counts },
-    { ran: true, checked: 1000, mismatched: 700, queued },
+    { ran: true, checked: 1000, mismatched: found, queued },
     stopOn
   );
 }
