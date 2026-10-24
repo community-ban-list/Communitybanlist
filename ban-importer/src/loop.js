@@ -129,16 +129,17 @@ const STOP_GRACE = 55 * 1000;
 // STOP_GRACE less RELEASE_RESERVE. The next safe point can be minutes away: a BattleMetrics request
 // waits for the budget, for a minute once BattleMetrics says few of the key's requests are left,
 // for as long as it asks after a 429, up to 5 minutes, and for up to 3 attempts, each cut off after
-// 30 seconds, or for the import's reads of pages of bans, up to 5, cut off after 15, 15, 20, 30 and
-// 45 seconds, though once the cycle is asked to stop, the import's reads of pages make no more
-// attempts, and stop waiting within a second, so only an attempt already sent, of at most 45
+// 30 seconds, or for the import's reads of pages of bans, up to 5, cut off after 30, 15, 15, 20 and
+// 30 seconds, though once the cycle is asked to stop, the import's reads of pages make no more
+// attempts, and stop waiting within a second, so only an attempt already sent, of at most 30
 // seconds, holds them up. The cycle's step is not stopped, and goes on until the service exits: the
-// cycle's record keeps what the step had done when the cycle was ended, and what it does after is
-// in no record. A statement it still has running on the database, e.g. one that waits for a row
-// lock, is stopped before the locks are freed, as MySQL would otherwise carry it out, also once
-// another importer holds them (see stopStatements). A BattleMetrics request still waiting for its
-// answer is cut off, as by docker stop's kill: an export ban claimed for it stays claimed, and the
-// next run looks for its ban before it makes it again.
+// cycle's record keeps what the step had done when the cycle was ended, for the import with the
+// list it was importing then (see report in ban-importer.js), and what it does after is in no
+// record. A statement it still has running on the database, e.g. one that waits for a row lock, is
+// stopped before the locks are freed, as MySQL would otherwise carry it out, also once another
+// importer holds them (see stopStatements). A BattleMetrics request still waiting for its answer is
+// cut off, as by docker stop's kill: an export ban claimed for it stays claimed, and the next run
+// looks for its ban before it makes it again.
 const STOP_DEADLINE = 45 * 1000;
 
 // An end gives the locks' connection at most this long to stop the statements the service still

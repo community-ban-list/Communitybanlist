@@ -14,11 +14,11 @@
 //
 // Each attempt has the client's time limit, unless the caller gives its attempts others, which also
 // gives the request as many attempts as it gives limits (options.timeouts), and the waits between
-// them (options.retryDelays), e.g. more and shorter attempts, soon after each other, at a page that
-// the API at times does not answer at all. A caller can also have a request end before an attempt
-// is sent, e.g. as it is stopping (options.beforeAttempt), which the request then also checks at
-// least every second while it waits: for a pause, for its turn in the limiter's queue, or before
-// another attempt. None of them changes which failures are made again.
+// them (options.retryDelays), e.g. more attempts, the later ones shorter and soon after each other,
+// at a page that the API at times does not answer at all. A caller can also have a request end
+// before an attempt is sent, e.g. as it is stopping (options.beforeAttempt), which the request then
+// also checks at least every second while it waits: for a pause, for its turn in the limiter's
+// queue, or before another attempt. None of them changes which failures are made again.
 //
 // After a 429, or when the API says few requests are left, nothing is sent until the time it
 // gives in Retry-After, or for a minute.

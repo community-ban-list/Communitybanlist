@@ -164,8 +164,10 @@ function totals(results) {
 // A list's counts for the run record, with how long its import took in the run, in seconds, both
 // attempts together when it was tried again, how it was read, and why it was read in full, and what
 // went wrong or was unusual, when anything was: for a list that failed on one of its pages, the
-// page too.
+// page too. A list tried again also says how its first attempt ended (firstAttempt): how long it
+// took, and the error, the stage it failed at and, for a page, the page, as its own would be given.
 function listReport(result) {
+  const first = result.firstAttempt;
   const report = {
     id: result.id,
     fetched: result.fetched,
@@ -173,7 +175,7 @@ function listReport(result) {
     updated: result.updated,
     removed: result.removed,
     held: result.held,
-    seconds: seconds(result.ms ?? 0)
+    seconds: seconds((result.ms ?? 0) + (first?.ms ?? 0))
   };
   if (result.read) report.read = result.read;
   if (result.reason) report.reason = result.reason;
@@ -193,6 +195,10 @@ function listReport(result) {
   if (result.massRemoval) report.massRemoval = true;
   if (result.error) Object.assign(report, { error: result.error, stage: result.stage });
   if (result.page) report.page = result.page;
+  if (first) {
+    report.firstAttempt = { seconds: seconds(first.ms), error: first.error, stage: first.stage };
+    if (first.page) report.firstAttempt.page = first.page;
+  }
   return report;
 }
 
@@ -288,21 +294,24 @@ export default class BanImporter {
 
     // The number of ban lists the import started with, and a result for each list it imported, and
     // the result of the list it was importing when the run stopped, if it stopped part-way through
-    // one, which is not one of them (see importBanList).
+    // one, which is not one of them (see importBanList). While a list is imported, underWay is its
+    // attempt under way, which the report gives too, for a run that ends while it is, as the
+    // importer service ends a cycle at once (see inProgress).
     this.listCount = 0;
     this.results = [];
     this.stopped = null;
+    this.underWay = null;
 
     // What the run read at its start: each list's BanListSyncs row, by list, the bans of each list
     // that wait for a confirming read or are held for an admin (see readPendingSummary), when the
     // run planned its reads, and CBL's own export ban lists on BattleMetrics. The access check is
-    // read once, for the first BattleMetrics list, and its result is ok, failed, off or unused,
-    // when no BattleMetrics list needed it. The IDs of the BattleMetrics lists the run tried are
-    // kept, to tell how widespread a loss of access is, and the rows that wait to be saved until
-    // the first pass is over, by list (see importBanList). The run's settings say how often runs
-    // start (cadenceSeconds), or null when they do not, and each BattleMetrics list has its slot in
-    // IMPORTER_FULL_SCAN_MINUTES, from the lists' rows (see fullScanSlots), at which its next
-    // periodic full read is due once it is read in full.
+    // read once, for the first BattleMetrics list, and its result is ok, failed, off, unused, when
+    // no BattleMetrics list needed it, or running while it is read. The IDs of the BattleMetrics
+    // lists the run tried are kept, to tell how widespread a loss of access is, and the rows that
+    // wait to be saved until the first pass is over, by list (see importBanList). The run's
+    // settings say how often runs start (cadenceSeconds), or null when they do not, and each
+    // BattleMetrics list has its slot in IMPORTER_FULL_SCAN_MINUTES, from the lists' rows (see
+    // fullScanSlots), at which its next periodic full read is due once it is read in full.
     this.syncs = new Map();
     this.pending = new Map();
     this.plannedAt = this.clock();
@@ -313,7 +322,9 @@ export default class BanImporter {
     this.exportBanLists = [];
     this.visibleBanLists = null;
     this.accessCheckResult = this.accessCheck ? 'unused' : 'off';
-    // How long the access check took, in milliseconds, once it has been read.
+    // When the access check started, once it has, and how long it took, in milliseconds, once it
+    // has been read.
+    this.accessCheckStartedAt = null;
     this.accessCheckMs = null;
     this.triedBattlemetrics = new Set();
     this.pendingSyncs = new Map();
@@ -337,6 +348,8 @@ export default class BanImporter {
     this.listCount = 0;
     this.results = [];
     this.stopped = null;
+    this.underWay = null;
+    this.accessCheckStartedAt = null;
     this.accessCheckMs = null;
     for (const kind of Object.keys(this.requests)) this.requests[kind] = 0;
     this.accessCheckResult = this.accessCheck ? 'unused' : 'off';
@@ -484,17 +497,14 @@ export default class BanImporter {
           stopIfRequested();
           const index = results.indexOf(failed);
           try {
-            // The list's time in the run is that of both of its attempts.
-            results[index] = await this.importBanList(failed.id, 2);
-            results[index].ms += failed.ms;
+            // The second attempt takes the first one's place, and keeps how it ended, so the list's
+            // time in the run is that of both of its attempts (see listReport).
+            results[index] = await this.importBanList(failed.id, failed);
           } catch (err) {
             // A list whose second attempt is stopped part-way is left out of the summary, as one
             // stopped in the first pass is, since its own line says what the attempt saved. The
             // report gives it on its own, with the time of both of its attempts.
-            if (err instanceof RunStopped) {
-              results.splice(index, 1);
-              if (this.stopped?.id === failed.id) this.stopped.ms += failed.ms;
-            }
+            if (err instanceof RunStopped) results.splice(index, 1);
             throw err;
           }
           reportProgress(tried + 1, retries.length, 'ban lists tried again');
@@ -535,12 +545,16 @@ export default class BanImporter {
   // then the run knows whether it tries the list again, which saves the row instead, so a first
   // attempt the second one makes good is never counted or posted about. And many lists losing
   // access at once can then be posted about together.
-  async importBanList(id, attempt = 1) {
+  //
+  // first is the result of the first attempt at the list, for the second one, which keeps how it
+  // ended (firstAttempt, see listReport). Until the attempt has ended, and its row is saved,
+  // underWay says what it is doing, for the report (see inProgress).
+  async importBanList(id, first = null) {
+    const attempt = first ? 2 : 1;
     // How long the attempt took, in milliseconds (ms), once it has ended, without the time it
     // waited for the run's access check, which the first BattleMetrics list of the run waits for and
     // the report gives on its own (see readAccess), so that list does not look slow.
     const startedAt = this.clock();
-    let accessWait = 0;
     const result = {
       id,
       attempt,
@@ -554,8 +568,19 @@ export default class BanImporter {
       moves: 0,
       ms: 0
     };
+    if (first)
+      result.firstAttempt = {
+        ms: first.ms,
+        error: first.error,
+        stage: first.stage,
+        page: first.page
+      };
     // What the import of the list is doing, which a failure is reported as having failed at.
     const at = { stage: 'reading it' };
+    // The attempt under way: how long it has waited for the access check (accessWait), and since
+    // when while it waits (checkingSince).
+    const underWay = { result, at, startedAt, accessWait: 0, checkingSince: null };
+    this.underWay = underWay;
     let banList = null;
     try {
       // Read the list again, as it may have been changed or removed since the run started.
@@ -581,9 +606,10 @@ export default class BanImporter {
       if (banList.type === 'battlemetrics') this.triedBattlemetrics.add(id);
       result.lostBefore = this.hadLostAccess(banList);
       result.incompleteBefore = this.wasIncomplete(banList);
-      const checkStartedAt = this.clock();
+      underWay.checkingSince = this.clock();
       const visible = await this.checkAccess(banList);
-      accessWait = this.clock() - checkStartedAt;
+      underWay.accessWait = this.clock() - underWay.checkingSince;
+      underWay.checkingSince = null;
       if (visible === false) result.accessLost = NOT_VISIBLE;
       else if (visible === null && result.lostBefore) result.accessLost = UNCONFIRMED;
 
@@ -720,12 +746,15 @@ export default class BanImporter {
       result.stage = stage;
       // A list that failed, or was stopped, on one of its pages says which, and how many a read of
       // all of it takes, about, from BattleMetrics' count on its first page, or before that, from
-      // its row.
-      if (stage === 'fetching it' && Number.isInteger(err?.page))
+      // its row. Not from the row of a list whose old source's bans are being replaced, as its type
+      // or source was changed, whose counts are, or may still be, its old source's.
+      if (stage === 'fetching it' && Number.isInteger(err?.page)) {
+        const estimate = result.replace ? null : pagesOf(this.syncs.get(id));
         Object.assign(result, {
           page: err.page,
-          pages: Number.isInteger(err.pages) ? err.pages : pagesOf(this.syncs.get(id))
+          pages: Number.isInteger(err.pages) ? err.pages : estimate
         });
+      }
       if (err instanceof RunStopped) {
         result.stopped = true;
         throw err;
@@ -754,7 +783,7 @@ export default class BanImporter {
       return result;
     } finally {
       const now = this.clock();
-      result.ms = now - startedAt - accessWait;
+      result.ms = now - startedAt - underWay.accessWait;
       // A list stopped part-way is left out of the import's results, and the report gives it on its
       // own (see report).
       if (result.stopped) this.stopped = result;
@@ -766,8 +795,13 @@ export default class BanImporter {
       if (banList && !result.gone && !result.stopped && !this.dryRun) {
         if (attempt === 1 && (result.retry || result.accessLost))
           this.pendingSyncs.set(id, { banList, result, now: new Date(now) });
-        else this.postAlerts(await this.saveSync(banList, result, new Date(now)));
+        else {
+          // Until its row is saved, the report gives the attempt as under way, saving it.
+          at.stage = 'saving its sync state';
+          this.postAlerts(await this.saveSync(banList, result, new Date(now)));
+        }
       }
+      if (this.underWay === underWay) this.underWay = null;
     }
   }
 
@@ -977,9 +1011,12 @@ export default class BanImporter {
   }
 
   // Read the IDs of the BattleMetrics ban lists the CBL organisation can see, or null when they
-  // cannot be read, which the console is told of. How long that took is kept for the report.
+  // cannot be read, which the console is told of. How long that took is kept for the report, which
+  // gives the check as running until then, with how long it has taken so far.
   async readAccess() {
     const startedAt = this.clock();
+    this.accessCheckStartedAt = startedAt;
+    this.accessCheckResult = 'running';
     try {
       const visible = await readVisibleBanLists();
       this.accessCheckResult = 'ok';
@@ -1502,20 +1539,48 @@ export default class BanImporter {
   // reports the lists its summary line sums up, and, when it stopped part-way through a list, that
   // list's counts on their own (stopped), with where it stopped (stage, and page for a list
   // stopped on a page of its bans) and how long it had taken (seconds), both attempts together at
-  // a second attempt, which neither the totals nor banLists count. A dry run says so.
+  // a second attempt, which neither the totals nor banLists count. A dry run says so. The report
+  // can also be taken while the import is still under way, as the importer service takes it when
+  // it ends a cycle at once (see endCycleAtOnce in loop.js): it then gives the list being imported
+  // on its own too (inProgress), and an access check still being read as running, with how long it
+  // has taken so far.
   report() {
+    const now = this.underWay || this.accessCheckResult === 'running' ? this.clock() : null;
+    const accessCheckMs =
+      this.accessCheckMs ??
+      (this.accessCheckResult === 'running' ? now - this.accessCheckStartedAt : null);
     return {
       lists: this.listCount,
       imported: this.results.length,
       ...totals(this.results),
       accessCheck: this.accessCheckResult,
-      ...(this.accessCheckMs === null ? {} : { accessCheckSeconds: seconds(this.accessCheckMs) }),
+      ...(accessCheckMs === null ? {} : { accessCheckSeconds: seconds(accessCheckMs) }),
       requests: { ...this.requests },
       ...(this.dryRun ? { dryRun: true } : {}),
       banLists: this.results.map(listReport),
       ...(this.stopped
         ? { stopped: { ...listReport(this.stopped), stage: this.stopped.stage } }
-        : {})
+        : {}),
+      ...(this.underWay ? { inProgress: this.inProgress(now) } : {})
+    };
+  }
+
+  // The list being imported, at now, as the report gives it while the import is under way: its
+  // counts so far, as for a list in banLists, how long its attempt has taken so far, without the
+  // time it has waited for the access check, both attempts together at a second attempt (seconds),
+  // and what it is doing (stage): fetching it, with the page of its bans it is reading (page), if
+  // it is reading one, waiting for the access check, saving its bans, and so on, or, once its
+  // attempt has failed, where it failed, as for a list in banLists.
+  inProgress(now) {
+    const { result, at, startedAt, accessWait, checkingSince } = this.underWay;
+    const waited = accessWait + (checkingSince === null ? 0 : now - checkingSince);
+    const { reading } = this.fetcher;
+    const page =
+      at.stage === 'fetching it' && reading?.id === result.id ? reading.page : result.page;
+    const doing = checkingSince === null ? at.stage : 'waiting for the access check';
+    return {
+      ...listReport({ ...result, ms: now - startedAt - waited, page }),
+      stage: result.error ? result.stage : doing
     };
   }
 }
