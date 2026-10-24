@@ -210,8 +210,9 @@ const imported = (counts = {}, banLists = []) => ({
 }
 
 // The totals sum up the cycles that ended: how many, how many failed and were stopped, the bans
-// and export bans, the lists that failed, the BattleMetrics requests and Steam profiles, and the
-// slowest cycle. A dry run's bans were not written, so they are not counted.
+// and export bans, the players the reputation check queued, the lists that failed, the
+// BattleMetrics requests and Steam profiles, and the slowest cycle. A dry run's bans were not
+// written, so they are not counted.
 {
   const totals = newTotals(START);
   const add = (cycle) =>
@@ -223,17 +224,34 @@ const imported = (counts = {}, banLists = []) => ({
       counts: {
         importBans: imported({ new: 3, updated: 1, failedLists: 2 }),
         expireBans: { due: 2, expired: 2, players: 2 },
+        checkReputationPoints: { ran: true, checked: 145000, mismatched: 1500, queued: 1000 },
         updateSteamUserInfo: { updated: 250 },
         exportExportBans: { created: 4, deleted: 1 }
       }
     })
   );
   add(record({ cycle: 2, exitCode: 1, seconds: 12 }));
-  add(record({ cycle: 3, exitCode: 3, seconds: 900 }));
+  add(
+    record({
+      cycle: 3,
+      exitCode: 3,
+      seconds: 900,
+      counts: {
+        checkReputationPoints: { ran: true, checked: 144000, mismatched: 500, queued: 441 }
+      }
+    })
+  );
   add(record({ cycle: 4, counts: { importBans: imported({ new: 9, dryRun: true }) } }));
+  // A check that did not run queued nobody.
+  add(
+    record({
+      cycle: 5,
+      counts: { checkReputationPoints: { ran: false, dueAt: '2026-10-23T14:02:00.000Z' } }
+    })
+  );
   assert.deepStrictEqual(copy(totals), {
     since: START,
-    cycles: 4,
+    cycles: 5,
     failed: 1,
     stopped: 1,
     added: 3,
@@ -242,8 +260,9 @@ const imported = (counts = {}, banLists = []) => ({
     expired: 2,
     created: 4,
     deleted: 1,
+    reputationQueued: 1441,
     failedLists: 2,
-    battlemetricsRequests: 80,
+    battlemetricsRequests: 100,
     steamUpdated: 250,
     slowest: { cycle: 3, seconds: 900, startedAt: START + 20 * MINUTE }
   });
@@ -258,13 +277,20 @@ const imported = (counts = {}, banLists = []) => ({
   );
   assert.deepStrictEqual(lines(summary), [
     `<t:${UNIX}:f> to <t:${UNIX + 53 * 60}:t>`,
-    '**Cycles** 4 run · 1 failed · 1 stopped · 2 lists failed',
+    '**Cycles** 5 run · 1 failed · 1 stopped · 2 lists failed',
     '**Bans** 3 added · 1 updated · 0 removed · 2 expired',
     '**Export bans** 4 created · 1 deleted',
-    '**BattleMetrics** 80 requests',
+    '**Reputation check** 1,441 players queued',
+    '**BattleMetrics** 100 requests',
     '**Steam** 250 profiles updated',
     `**Slowest cycle** 15m 00s, cycle 3, started <t:${UNIX + 20 * 60}:t>`
   ]);
+  // One player is one player, and with none queued the line is left out (see the empty summary).
+  assert.ok(
+    lines(copy(renderHourlySummary({ ...totals, reputationQueued: 1 }, START))).includes(
+      '**Reputation check** 1 player queued'
+    )
+  );
   totals.failed = 0;
   assert.strictEqual(renderHourlySummary(totals, START).color, 0xe67e22);
   const empty = copy(renderHourlySummary(newTotals(START), START + 60 * MINUTE));
@@ -350,6 +376,22 @@ const running = {
     '',
     `**Since <t:${UNIX}:t>** · 1 cycle · bans 2 added, 0 updated, 0 removed, 0 expired · export bans 0 created, 0 deleted · 21 BattleMetrics requests · 0 Steam profiles updated · slowest 45s`
   ]);
+  // The totals name the players the reputation check queued, once it queued any.
+  const withQueued = addCycle(
+    copy(totals),
+    record({ cycle: 2, seconds: 30 }),
+    cycleNumbers(
+      record({
+        counts: {
+          checkReputationPoints: { ran: true, checked: 145000, mismatched: 441, queued: 441 }
+        }
+      })
+    )
+  );
+  assert.strictEqual(
+    lines(render({ ...running, totals: withQueued })).at(-1),
+    `**Since <t:${UNIX}:t>** · 2 cycles · bans 2 added, 0 updated, 0 removed, 0 expired · export bans 0 created, 0 deleted · 441 players queued by the reputation check · 21 BattleMetrics requests · 0 Steam profiles updated · slowest 45s`
+  );
 
   // A cycle that waits for the database, or for another run to end, as it holds the run lock, says
   // since when, and one in a phase that is not a step, or without progress, says only which.

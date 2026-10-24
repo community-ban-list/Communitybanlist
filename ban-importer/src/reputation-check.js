@@ -1,7 +1,7 @@
 import { sequelize } from 'scbl-lib/db';
 import { ImporterState } from 'scbl-lib/db/importer-models';
 import { QueryTypes } from 'scbl-lib/db/sequelize';
-import { Logger } from 'scbl-lib/utils';
+import { Logger, logText } from 'scbl-lib/utils';
 
 import { BATCH_SIZE, retryOperation, timeOf } from './apply-list.js';
 import { FIND_MISMATCHED } from './reputation-points.js';
@@ -28,6 +28,9 @@ import { checkRunLock, reportProgress, stopIfRequested } from './run-control.js'
 // The check runs right after the expiry step, which queues the players whose bans' expiry has
 // passed, and compares points by the time the check runs: only a ban whose expiry passes in the
 // moment between the two could be taken for a removed one.
+//
+// A run's check queues at most MAX_QUEUED players, so the recalculation after it stays short, and
+// leaves the others for the next runs, which check again until none are left (see MAX_QUEUED).
 
 // The ImporterState row that keeps when the run that last checked started, when it checked, and
 // what it found.
@@ -59,6 +62,17 @@ const COUNT_CHECKED =
 // is NULL. Their Steam profile is not refreshed for it, as it has nothing to do with their points.
 const QUEUE_RECALCULATION =
   'UPDATE SteamUsers SET lastRefreshedExport = NULL, lastRefreshedReputationPoints = NULL, lastRefreshedReputationRank = NULL WHERE id IN (?)';
+
+// A run's check queues at most this many players, the first by ID. The reputation step after it
+// recalculates the players queued in one statement, about 7 milliseconds a player at production
+// scale, which locks every SteamUsers row, and the bans it reads, until it ends: meanwhile the
+// website's player pages and sign-ins, which write to SteamUsers, and writes to the bans wait for
+// it, a wait longer than MySQL's lock wait timeout (innodb_lock_wait_timeout, 50 seconds by
+// default) fails, and the bot's /banlist remove can end in a deadlock. So a check that finds more,
+// e.g. the first after a deploy, or one after a large ban list was deleted by hand, queues them a
+// run at a time, at most about 8 seconds of recalculation each, and saves no row while any are
+// left, so the next run checks again and queues the next ones.
+export const MAX_QUEUED = 1000;
 
 // The log channel's line names this many of the players queued.
 const MAX_EXAMPLES = 5;
@@ -102,42 +116,48 @@ export function dueAt({ last, hours, cadenceSeconds, startedAt }) {
 }
 
 // The log channel's line about players the check queued, given as { id, reputationPoints, points },
-// with their stored points and those their bans give, in the order they were queued, of how many it
-// found (mismatched).
-function describeQueued(players, mismatched) {
+// with their stored points and those their bans give, in the order they were queued, and about
+// those it left for the next runs (left), as it stopped part-way (stopped) or queues at most
+// maxQueued a run. A player's ID is shown as written (logText), as players saved before SteamIDs
+// were checked can have other IDs, e.g. the address of a Steam profile named by its player.
+function describeQueued(players, { left = 0, stopped = false, maxQueued = MAX_QUEUED } = {}) {
   const examples = players.slice(0, MAX_EXAMPLES).map(({ id, reputationPoints, points }) => {
     const had =
       reputationPoints === null || reputationPoints === undefined
         ? 'no points'
         : plural(Number(reputationPoints), 'point');
-    return `${id} (${had}, ${formatCount(Number(points))} by their bans)`;
+    return `${logText(id)} (${had}, ${formatCount(Number(points))} by their bans)`;
   });
   const more =
     players.length > MAX_EXAMPLES ? ` and ${formatCount(players.length - MAX_EXAMPLES)} more` : '';
-  const left =
-    players.length < mismatched
-      ? ` The check stopped before it queued the other ${formatCount(mismatched - players.length)}, which the next run's check queues, as it is then due again.`
-      : '';
-  return `Queued ${plural(players.length, 'player')} for a recalculation, as their reputation points did not match their bans: ${examples.join(', ')}${more}. This means bans were removed, or changed, without queueing their players, e.g. as a ban list was deleted by hand rather than with /banlist remove.${left}`;
+  let rest = '';
+  if (left > 0 && stopped)
+    rest = ` The check stopped before it queued the other ${formatCount(left)}, which are left for the next runs, as the check is due again until none are left.`;
+  else if (left > 0)
+    rest = ` It queues at most ${plural(maxQueued, 'player')} a run, so the recalculation after it stays short: the other ${formatCount(left)} are left for the next runs, as the check is due again until none are left.`;
+  return `Queued ${plural(players.length, 'player')} for a recalculation, as their reputation points did not match their bans: ${examples.join(', ')}${more}. This means bans were removed, or changed, without queueing their players, e.g. as a ban list was deleted by hand rather than with /banlist remove.${rest}`;
 }
 
 // Check every player's reputation points against their bans, if the check is due, and queue those
-// whose points do not match for a recalculation, in batches of batchSize players by ID, each one
-// statement, run again while it fails in a way that could pass, such as a deadlock with the bot. It
-// counts in counts whether it ran (ran), and if not, why: it is off (off) or not due until a time
-// (dueAt, in UTC). Once it has found the players, it counts how many it compared (checked), how
-// many did not match (mismatched) and how many it has queued (queued), also when the run is asked
-// to stop, which it does before it writes and between batches. It checks that the run still holds
-// its locks before it writes. Once it has queued them all, it saves when the run started, for the
-// next run to tell when the check is due: a check that stopped part-way, or failed, is due again at
-// once. hours is the setting, cadenceSeconds how often runs start and startedAt when this one did.
+// whose points do not match for a recalculation, at most maxQueued of them, the first by ID, in
+// batches of batchSize players by ID, each one statement, run again while it fails in a way that
+// could pass, such as a deadlock with the bot. It counts in counts whether it ran (ran), and if
+// not, why: it is off (off) or not due until a time (dueAt, in UTC). Once it has found the players,
+// it counts how many it compared (checked), how many did not match (mismatched), how many it has
+// queued (queued) and how many of those that did not match it has not (left), also when the run is
+// asked to stop, which it does before it writes and between batches. It checks that the run still
+// holds its locks before it writes. Once it has queued them all, it saves when the run started, for
+// the next run to tell when the check is due: a check that left players for the next runs, as it
+// queued as many as it may, stopped part-way or failed, saves no row, so the next run checks
+// again. hours is the setting, cadenceSeconds how often runs start and startedAt when this one did.
 export async function checkReputationPoints(
   counts = {},
   {
     hours = process.env.IMPORTER_REPUTATION_CHECK_HOURS,
     cadenceSeconds = DEFAULT_CADENCE_SECONDS,
     startedAt = Date.now(),
-    batchSize = BATCH_SIZE
+    batchSize = BATCH_SIZE,
+    maxQueued = MAX_QUEUED
   } = {}
 ) {
   const startTime = Date.now();
@@ -190,31 +210,48 @@ export async function checkReputationPoints(
     ran: true,
     checked: Number(checked ?? 0),
     mismatched: mismatched.length,
-    queued: 0
+    queued: 0,
+    left: mismatched.length
   });
+  // The players this run queues, the first by ID: the next runs queue the others.
+  const players = mismatched.slice(0, Math.max(0, maxQueued));
 
   // Two runs must never write at once, so the check stops here if the run was asked to, or no
   // longer holds its locks.
   stopIfRequested();
   await checkRunLock();
 
+  let stopped = true;
   try {
-    for (let i = 0; i < mismatched.length; i += batchSize) {
-      reportProgress(i, mismatched.length, 'players');
+    for (let i = 0; i < players.length; i += batchSize) {
+      reportProgress(i, players.length, 'players');
       // A run that is asked to stop does so between batches.
       stopIfRequested();
-      const batch = mismatched.slice(i, i + batchSize).map(({ id }) => id);
+      const batch = players.slice(i, i + batchSize).map(({ id }) => id);
       await retryOperation(() => sequelize.query(QUEUE_RECALCULATION, { replacements: [batch] }));
       counts.queued += batch.length;
+      counts.left -= batch.length;
     }
-    reportProgress(mismatched.length, mismatched.length, 'players');
+    reportProgress(players.length, players.length, 'players');
+    stopped = false;
   } finally {
     if (counts.queued > 0)
       Logger.verbose(
         'Reputation',
         1,
-        describeQueued(mismatched.slice(0, counts.queued), mismatched.length)
+        describeQueued(players.slice(0, counts.queued), { left: counts.left, stopped, maxQueued })
       );
+  }
+
+  const took = () => `Took ${((Date.now() - startTime) / 1000).toFixed(2)}s`;
+  // Players are left for the next runs, so the next run checks again, as no row says this one did.
+  if (counts.left > 0) {
+    Logger.verbose(
+      'Reputation',
+      2,
+      `Checked the reputation points of ${plural(counts.checked, 'player')} against their bans, and queued ${formatCount(counts.queued)} of the ${formatCount(counts.mismatched)} whose points did not match for a recalculation, as many as it queues a run. The other ${formatCount(counts.left)} are left for the next runs. ${took()}`
+    );
+    return;
   }
 
   // The next check is due from when this run started.
@@ -237,6 +274,6 @@ export async function checkReputationPoints(
   Logger.verbose(
     'Reputation',
     2,
-    `Checked the reputation points of ${plural(counts.checked, 'player')} against their bans, ${found}. Took ${((Date.now() - startTime) / 1000).toFixed(2)}s`
+    `Checked the reputation points of ${plural(counts.checked, 'player')} against their bans, ${found}. ${took()}`
   );
 }

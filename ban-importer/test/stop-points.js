@@ -7,6 +7,7 @@ import isSameBattlemetricsID, {
   normaliseBattlemetricsID
 } from '../../scbl-lib/utils/battlemetrics-id.js';
 import describeError from '../../scbl-lib/utils/describe-error.js';
+import logText from '../../scbl-lib/utils/log-text.js';
 
 // Check where the importer's steps stop when the run is asked to, and that they check the run lock
 // before deleting or exporting bans, without a database or network requests.
@@ -1023,7 +1024,7 @@ for (const [stopOn, found, expected, queued] of [
         upsert: async () => events.push('save the row')
       }
     },
-    'scbl-lib/utils': { describeError, Logger }
+    'scbl-lib/utils': { describeError, Logger, logText }
   });
   check.control.setRunLock(heldLock);
   const counts = {};
@@ -1035,7 +1036,7 @@ for (const [stopOn, found, expected, queued] of [
   assert.deepStrictEqual(events, expected, stopOn);
   assert.deepStrictEqual(
     { ...counts },
-    { ran: true, checked: 1000, mismatched: found, queued },
+    { ran: true, checked: 1000, mismatched: found, queued, left: found - queued },
     stopOn
   );
 }
@@ -1068,7 +1069,7 @@ for (const [lock, mismatched, writes] of [
         upsert: async () => events.push('save the row')
       }
     },
-    'scbl-lib/utils': { describeError, Logger }
+    'scbl-lib/utils': { describeError, Logger, logText }
   });
   if (lock) check.control.setRunLock(lock);
   const outcome = await ended(

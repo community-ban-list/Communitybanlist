@@ -3,17 +3,18 @@ import { readFile } from 'fs/promises';
 import vm from 'vm';
 
 import describeError from '../../scbl-lib/utils/describe-error.js';
+import logText from '../../scbl-lib/utils/log-text.js';
 import { FIND_MISMATCHED } from '../src/reputation-points.js';
 
 // Check the reputation check without a database: when it is due, from the setting,
 // IMPORTER_REPUTATION_CHECK_HOURS, and the ImporterState row it keeps, that it queues exactly the
 // players whose stored reputation points are not what their bans give, in batches by ID, with their
-// retries, and what it counts and logs. The database is a stand-in that keeps players, bans and the
-// importer's state in memory and answers the statements the check sends as MySQL would, working
-// out each player's points by the rule in reputation-points.js, whose test checks the statements
-// themselves, and the production-scale run checks them on MySQL. Waits between attempts are skipped
-// but recorded. Where the check stops, and that it checks the run lock before it writes, is checked
-// in stop-points.js.
+// retries, at most 1,000 a run, and what it counts and logs. The database is a stand-in that keeps
+// players, bans and the importer's state in memory and answers the statements the check sends as
+// MySQL would, working out each player's points by the rule in reputation-points.js, whose test
+// checks the statements themselves, and the production-scale run checks them on MySQL. Waits
+// between attempts are skipped but recorded. Where the check stops, and that it checks the run lock
+// before it writes, is checked in stop-points.js.
 
 // Stand-ins for Sequelize's errors, with MySQL's error number, as Sequelize gives it.
 class DatabaseError extends Error {
@@ -142,6 +143,7 @@ const stubs = {
   },
   'scbl-lib/utils': {
     describeError,
+    logText,
     Logger: {
       verbose: (module, level, message) => logs.push({ module, level, message }),
       important: (module, message) => logs.push({ module, level: 1, message, important: true })
@@ -188,8 +190,15 @@ function moduleFor(specifier, referencingModule) {
 const check = await moduleFor('../src/reputation-check.js', { identifier: import.meta.url });
 await check.link(moduleFor);
 await check.evaluate();
-const { checkReputationPoints, DEFAULT_HOURS, dueAt, MAX_HOURS, readCheckHours, STATE_ROW } =
-  check.namespace;
+const {
+  checkReputationPoints,
+  DEFAULT_HOURS,
+  dueAt,
+  MAX_HOURS,
+  MAX_QUEUED,
+  readCheckHours,
+  STATE_ROW
+} = check.namespace;
 const control = (await moduleFor('../src/run-control.js', { identifier: import.meta.url }))
   .namespace;
 // The run holds its locks, which the check makes sure of before it writes.
@@ -219,10 +228,22 @@ function reset() {
 
 // Run the check as a run that started at startedAt, with the setting given, and resolve with its
 // counts, as the run record keeps them.
-async function run({ hours, startedAt = START, cadenceSeconds = 600, batchSize } = {}) {
+async function run({ hours, startedAt = START, cadenceSeconds = 600, batchSize, maxQueued } = {}) {
   const counts = {};
-  await checkReputationPoints(counts, { hours, startedAt, cadenceSeconds, batchSize });
+  await checkReputationPoints(counts, { hours, startedAt, cadenceSeconds, batchSize, maxQueued });
   return { ...counts };
+}
+// Recalculate the players queued, as the steps after the check do in the same run: their points are
+// what their bans give, and they are no longer queued.
+function recalculate() {
+  for (const [id, player] of players)
+    if (player.lastRefreshedReputationPoints === null)
+      Object.assign(player, {
+        reputationPoints: pointsByRule(id),
+        lastRefreshedReputationPoints: databaseNow,
+        lastRefreshedReputationRank: databaseNow,
+        lastRefreshedExport: databaseNow
+      });
 }
 const queued = () => statements.filter(([kind]) => kind === 'queue').map(([, ids]) => ids);
 const lines = (level) =>
@@ -285,7 +306,7 @@ const MISMATCHED = [steamID(1), steamID(3), steamID(6), steamID(8)];
   seed();
   const before = structuredClone(Object.fromEntries(players));
   const counts = await run();
-  assert.deepStrictEqual(counts, { ran: true, checked: 8, mismatched: 4, queued: 4 });
+  assert.deepStrictEqual(counts, { ran: true, checked: 8, mismatched: 4, queued: 4, left: 0 });
   assert.deepStrictEqual(statements, [
     ['read state', STATE_ROW],
     ['count'],
@@ -337,7 +358,7 @@ const MISMATCHED = [steamID(1), steamID(3), steamID(6), steamID(8)];
   bans.push({ banList: 1, steamUser: steamID(1), expires: null });
   players.set(steamID(2), player(0));
   const counts = await run();
-  assert.deepStrictEqual(counts, { ran: true, checked: 2, mismatched: 0, queued: 0 });
+  assert.deepStrictEqual(counts, { ran: true, checked: 2, mismatched: 0, queued: 0, left: 0 });
   assert.deepStrictEqual(statements, [
     ['read state', STATE_ROW],
     ['count'],
@@ -361,7 +382,7 @@ const MISMATCHED = [steamID(1), steamID(3), steamID(6), steamID(8)];
   reset();
   for (let n = 1; n <= 12; n++) players.set(steamID(n), player(n));
   const counts = await run({ batchSize: 5 });
-  assert.deepStrictEqual(counts, { ran: true, checked: 12, mismatched: 12, queued: 12 });
+  assert.deepStrictEqual(counts, { ran: true, checked: 12, mismatched: 12, queued: 12, left: 0 });
   const ids = Array.from({ length: 12 }, (_, index) => steamID(index + 1));
   assert.deepStrictEqual(queued(), [ids.slice(0, 5), ids.slice(5, 10), ids.slice(10)]);
   const [line] = lines(1);
@@ -374,7 +395,7 @@ const MISMATCHED = [steamID(1), steamID(3), steamID(6), steamID(8)];
   // By default, a batch is 500 players, as the import's are.
   reset();
   for (let n = 1; n <= 1201; n++) players.set(steamID(n), player(3));
-  await run();
+  await run({ maxQueued: Infinity });
   assert.deepStrictEqual(
     queued().map((batch) => batch.length),
     [500, 500, 201]
@@ -393,7 +414,8 @@ const MISMATCHED = [steamID(1), steamID(3), steamID(6), steamID(8)];
     ran: true,
     checked: 4,
     mismatched: 4,
-    queued: 4
+    queued: 4,
+    left: 0
   });
   assert.deepStrictEqual(queued(), [
     [steamID(1), steamID(2)],
@@ -412,14 +434,17 @@ const MISMATCHED = [steamID(1), steamID(3), steamID(6), steamID(8)];
     checkReputationPoints(counts, { startedAt: START, batchSize: 2 }),
     /error in your SQL syntax/
   );
-  assert.deepStrictEqual({ ...counts }, { ran: true, checked: 4, mismatched: 4, queued: 2 });
+  assert.deepStrictEqual(
+    { ...counts },
+    { ran: true, checked: 4, mismatched: 4, queued: 2, left: 2 }
+  );
   assert.ok(!state.has(STATE_ROW));
   assert.deepStrictEqual(
     lines(1).map(({ message }) => message.match(/^Queued \d+ players?|The check stopped.*$/g)),
     [
       [
         'Queued 2 players',
-        "The check stopped before it queued the other 2, which the next run's check queues, as it is then due again."
+        'The check stopped before it queued the other 2, which are left for the next runs, as the check is due again until none are left.'
       ]
     ]
   );
@@ -428,7 +453,8 @@ const MISMATCHED = [steamID(1), steamID(3), steamID(6), steamID(8)];
     ran: true,
     checked: 2,
     mismatched: 2,
-    queued: 2
+    queued: 2,
+    left: 0
   });
   assert.deepStrictEqual(queued().at(-1), [steamID(3), steamID(4)]);
 
@@ -442,6 +468,144 @@ const MISMATCHED = [steamID(1), steamID(3), steamID(6), steamID(8)];
   assert.deepStrictEqual({ ...failed }, {});
   assert.deepStrictEqual(queued(), []);
   assert.ok(!state.has(STATE_ROW));
+}
+
+// A run's check queues at most 1,000 players, the first by ID, so the recalculation after it, which
+// locks every player until it ends, stays short, e.g. after a large ban list was deleted by hand,
+// or on the first check after a deploy. It counts the others as left, says so in its line, and
+// saves no row, so the next run checks again, and queues the next ones, once the steps after the
+// check have recalculated the first. Once it has queued them all, it saves its row, and the next
+// run is not due it.
+{
+  reset();
+  for (let n = 1; n <= 8; n++) players.set(steamID(n), player(n + 10));
+  players.set(steamID(9), player(0));
+  const ids = Array.from({ length: 8 }, (_, index) => steamID(index + 1));
+  const counts = await run({ batchSize: 2, maxQueued: 3 });
+  assert.deepStrictEqual(counts, { ran: true, checked: 9, mismatched: 8, queued: 3, left: 5 });
+  assert.deepStrictEqual(queued(), [ids.slice(0, 2), ids.slice(2, 3)]);
+  assert.deepStrictEqual(
+    ids.map((id) => queuedFlags(id)[0]),
+    [null, null, null, ...Array(5).fill(START - 3 * DAY)]
+  );
+  assert.ok(!state.has(STATE_ROW));
+  assert.ok(!statements.some(([kind]) => kind === 'save state'));
+  assert.deepStrictEqual(
+    lines(1).map(({ message }) => message),
+    [
+      `Queued 3 players for a recalculation, as their reputation points did not match their bans: ${steamID(1)} (11 points, 0 by their bans), ${steamID(2)} (12 points, 0 by their bans), ${steamID(3)} (13 points, 0 by their bans). This means bans were removed, or changed, without queueing their players, e.g. as a ban list was deleted by hand rather than with /banlist remove. It queues at most 3 players a run, so the recalculation after it stays short: the other 5 are left for the next runs, as the check is due again until none are left.`
+    ]
+  );
+  assert.match(
+    lines(2).at(-1).message,
+    /^Checked the reputation points of 9 players against their bans, and queued 3 of the 8 whose points did not match for a recalculation, as many as it queues a run\. The other 5 are left for the next runs\. Took \d+\.\d\ds$/
+  );
+
+  // The next cycle checks again, and queues the next 3, as the first are recalculated, and the one
+  // after it the last 2, which saves the row.
+  recalculate();
+  logs.length = 0;
+  assert.deepStrictEqual(
+    await run({ startedAt: START + 10 * MINUTE, batchSize: 2, maxQueued: 3 }),
+    {
+      ran: true,
+      checked: 9,
+      mismatched: 5,
+      queued: 3,
+      left: 2
+    }
+  );
+  assert.deepStrictEqual(queued().at(-1), ids.slice(5, 6));
+  assert.ok(!state.has(STATE_ROW));
+  recalculate();
+  assert.deepStrictEqual(
+    await run({ startedAt: START + 20 * MINUTE, batchSize: 2, maxQueued: 3 }),
+    {
+      ran: true,
+      checked: 9,
+      mismatched: 2,
+      queued: 2,
+      left: 0
+    }
+  );
+  assert.deepStrictEqual(queued().at(-1), ids.slice(6));
+  assert.strictEqual(state.get(STATE_ROW).startedAt, new Date(START + 20 * MINUTE).toISOString());
+  assert.deepStrictEqual(
+    lines(1).map(({ message }) => message.match(/ It queues at most.*$/)?.[0] ?? null),
+    [
+      ' It queues at most 3 players a run, so the recalculation after it stays short: the other 2 are left for the next runs, as the check is due again until none are left.',
+      null
+    ]
+  );
+  recalculate();
+  assert.deepStrictEqual(await run({ startedAt: START + 30 * MINUTE, maxQueued: 3 }), {
+    ran: false,
+    dueAt: new Date(START + 20 * MINUTE + DAY - MINUTE).toISOString()
+  });
+  assert.ok(
+    [...players.keys()].every((id) => players.get(id).reputationPoints === pointsByRule(id))
+  );
+
+  // By default, a run queues at most 1,000, in batches of 500.
+  reset();
+  for (let n = 1; n <= 2501; n++) players.set(steamID(n), player(3));
+  assert.deepStrictEqual(await run(), {
+    ran: true,
+    checked: 2501,
+    mismatched: 2501,
+    queued: 1000,
+    left: 1501
+  });
+  assert.deepStrictEqual(
+    queued().map((batch) => batch.length),
+    [500, 500]
+  );
+  assert.strictEqual(MAX_QUEUED, 1000);
+  assert.match(
+    lines(1)[0].message,
+    / It queues at most 1,000 players a run, .* the other 1,501 are left /
+  );
+  assert.ok(!state.has(STATE_ROW));
+
+  // A run asked to stop part-way says so, rather than that it queued as many as it may.
+  reset();
+  for (let n = 1; n <= 8; n++) players.set(steamID(n), player(3));
+  failures.set('queue', [undefined, syntaxError()]);
+  const stopped = {};
+  await assert.rejects(
+    checkReputationPoints(stopped, { startedAt: START, batchSize: 2, maxQueued: 6 }),
+    /SQL syntax/
+  );
+  assert.deepStrictEqual(
+    { ...stopped },
+    { ran: true, checked: 8, mismatched: 8, queued: 2, left: 6 }
+  );
+  assert.match(
+    lines(1)[0].message,
+    / The check stopped before it queued the other 6, which are left for the next runs, as the check is due again until none are left\.$/
+  );
+}
+
+// The line shows each player's ID as written, on one line: players saved before SteamIDs were
+// checked can have other IDs, e.g. the address of a Steam profile named by its player, and an ID's
+// Markdown, or a line break in it, must not change the line.
+{
+  reset();
+  const vanity = 'https://steamcommunity.com/id/__cool_guy__/';
+  const odd = 'x*y*\n[Core][1] Fake line ||spoiler||';
+  players.set(vanity, player(3));
+  players.set(odd, player(6));
+  bans.push({ banList: 1, steamUser: odd, expires: null });
+  assert.deepStrictEqual(await run(), { ran: true, checked: 2, mismatched: 2, queued: 2, left: 0 });
+  assert.deepStrictEqual(queued(), [[vanity, odd]]);
+  const [{ message }] = lines(1);
+  assert.ok(!message.includes('\n'), message);
+  assert.ok(
+    message.startsWith(
+      'Queued 2 players for a recalculation, as their reputation points did not match their bans: https://steamcommunity.com/id/\\_\\_cool\\_guy\\_\\_/ (3 points, 0 by their bans), x\\*y\\* \\[Core\\]\\[1\\] Fake line \\|\\|spoiler\\|\\| (6 points, 3 by their bans). This means'
+    ),
+    message
+  );
 }
 
 // The check is due once every IMPORTER_REPUTATION_CHECK_HOURS, 24 by default, from the start of the
@@ -593,5 +757,5 @@ assert.strictEqual(
 );
 
 console.log(
-  'Reputation check checks passed: exactly the players whose points do not match their bans queued, in batches with their retries, its schedule from the row it keeps, IMPORTER_REPUTATION_CHECK_HOURS, and what it counts and posts.'
+  'Reputation check checks passed: exactly the players whose points do not match their bans queued, in batches with their retries, at most 1,000 a run with the others left for the next runs, its schedule from the row it keeps, IMPORTER_REPUTATION_CHECK_HOURS, and what it counts and posts, with IDs shown as written.'
 );

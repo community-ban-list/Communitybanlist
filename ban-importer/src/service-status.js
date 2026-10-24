@@ -116,6 +116,8 @@ export function newTotals(since) {
     expired: 0,
     created: 0,
     deleted: 0,
+    // The players the reputation check queued, as their points did not match their bans.
+    reputationQueued: 0,
     failedLists: 0,
     battlemetricsRequests: 0,
     steamUpdated: 0,
@@ -134,6 +136,7 @@ export function addCycle(totals, record, numbers) {
   if (!numbers.dryRun) fields.push('added', 'updated', 'removed');
   for (const field of fields) totals[field] += numbers[field];
   totals.steamUpdated += numbers.steamUpdated;
+  totals.reputationQueued += numbers.reputationQueued ?? 0;
   const seconds = isCount(record.seconds) ? record.seconds : 0;
   if (!totals.slowest || seconds > totals.slowest.seconds)
     totals.slowest = { cycle: record.cycle, seconds, startedAt: Date.parse(record.startedAt) };
@@ -175,7 +178,8 @@ function describeChanges(numbers) {
   return parts.length > 0 ? parts.join(' · ') : 'no changes';
 }
 
-// The totals in a line, as the status message shows them.
+// The totals in a line, as the status message shows them, with the players the reputation check
+// queued only when it queued any.
 function describeTotals(totals) {
   const failures = [
     totals.failed > 0 ? `${formatCount(totals.failed)} failed` : null,
@@ -185,9 +189,12 @@ function describeTotals(totals) {
     `${plural(totals.cycles, 'cycle')}${failures.length > 0 ? ` (${failures.join(', ')})` : ''}`,
     `bans ${formatCount(totals.added)} added, ${formatCount(totals.updated)} updated, ${formatCount(totals.removed)} removed, ${formatCount(totals.expired)} expired`,
     `export bans ${formatCount(totals.created)} created, ${formatCount(totals.deleted)} deleted`,
+    totals.reputationQueued > 0
+      ? `${plural(totals.reputationQueued, 'player')} queued by the reputation check`
+      : null,
     plural(totals.battlemetricsRequests, 'BattleMetrics request'),
     `${plural(totals.steamUpdated, 'Steam profile')} updated`
-  ];
+  ].filter(Boolean);
   if (totals.slowest) parts.push(`slowest ${formatDuration(totals.slowest.seconds)}`);
   return parts.join(' · ');
 }
@@ -288,7 +295,8 @@ export default function renderServiceStatus(state) {
   };
 }
 
-// Draw the hourly summary of the totals, which ran from totals.since to until.
+// Draw the hourly summary of the totals, which ran from totals.since to until, with the players the
+// reputation check queued only when it queued any.
 export function renderHourlySummary(totals, until) {
   const lines = [
     `${discordTime(totals.since, 'f')} to ${discordTime(until, 't')}`,
@@ -297,6 +305,9 @@ export function renderHourlySummary(totals, until) {
     }`,
     `**Bans** ${formatCount(totals.added)} added · ${formatCount(totals.updated)} updated · ${formatCount(totals.removed)} removed · ${formatCount(totals.expired)} expired`,
     `**Export bans** ${formatCount(totals.created)} created · ${formatCount(totals.deleted)} deleted`,
+    ...(totals.reputationQueued > 0
+      ? [`**Reputation check** ${plural(totals.reputationQueued, 'player')} queued`]
+      : []),
     `**BattleMetrics** ${plural(totals.battlemetricsRequests, 'request')}`,
     `**Steam** ${plural(totals.steamUpdated, 'profile')} updated`,
     totals.slowest
