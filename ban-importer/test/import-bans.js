@@ -56,7 +56,8 @@ const delays = [];
 // writes it, alone or with others.
 const writeErrors = new Map();
 // Called with the IDs of the bans each statement that writes bans writes, before it writes them,
-// and with a list's ID as its bans are counted for its sync state, after its import.
+// and with a list's ID as its bans are counted for its sync state, after its import. Each statement
+// waits for what they return, so a check can hold the import up there (see holdAt).
 let onWrite = null;
 let onCount = null;
 // Errors for the next statement that records missing bans, and the next that removes bans, to fail
@@ -69,6 +70,27 @@ let transactions = 0;
 let verboseLevelOneLines = 0;
 
 const tick = () => new Promise(setImmediate);
+// A place to hold the import up at, as a hook that returns hold() does where it is called, e.g. as
+// a request that BattleMetrics does not answer, until release() lets it go on. reached resolves
+// once the import is held there.
+function holdAt() {
+  let arrive;
+  let release;
+  const reached = new Promise((resolve) => {
+    arrive = resolve;
+  });
+  const released = new Promise((resolve) => {
+    release = resolve;
+  });
+  return {
+    reached,
+    release,
+    hold: () => {
+      arrive();
+      return released;
+    }
+  };
+}
 // A time as MySQL's DATETIME columns keep it, from what a statement gives: text in UTC.
 const dateOf = (value) =>
   value === null || value === undefined ? null : new Date(`${String(value).replace(' ', 'T')}Z`);
@@ -319,7 +341,7 @@ const sequelize = {
 
 const Ban = {
   async count({ where }) {
-    if (onCount) onCount(where.banList);
+    if (onCount) await onCount(where.banList);
     return [...bans.values()].filter((ban) => ban.banList === where.banList).length;
   }
 };
@@ -374,16 +396,22 @@ const BanList = {
 const battlemetricsLists = new Map();
 const battlemetricsTotals = new Map();
 const battlemetricsRequests = [];
-// Each request's parameters, as the importer sent them.
+// Each request's parameters, as the importer sent them. onBattlemetrics, if set, is called with
+// each request's parameters as it is made, e.g. to move a check's clock on, and the request waits
+// for what it returns, e.g. to hold the import up there (see holdAt).
 const battlemetricsParams = [];
+let onBattlemetrics = null;
 
 // BattleMetrics' list of the ban lists CBL can see, read a page at a time by
 // readBattlemetricsPages: the sources of all the BattleMetrics lists, unless visibleBanLists is set
-// to the IDs it gives instead, or to an error.
+// to the IDs it gives instead, or to an error. onBanListsRead, if set, is called as it is read, e.g.
+// to move a check's clock on, and the read waits for what it returns.
 let visibleBanLists = null;
 const banListReads = [];
+let onBanListsRead = null;
 async function readBattlemetricsPages(endpoint, params) {
   banListReads.push([endpoint, params]);
+  await onBanListsRead?.();
   const visible =
     visibleBanLists ??
     Array.from(battlemetricsLists.keys()).filter((source) =>
@@ -411,6 +439,7 @@ const countOf = (pages) =>
 async function battlemetrics(method, endpoint, params) {
   battlemetricsRequests.push(params['filter[banList]']);
   battlemetricsParams.push({ ...params });
+  await onBattlemetrics?.(params);
   const pages = battlemetricsLists.get(params['filter[banList]']);
   const index = Number(params['page[key]'] || 0);
   const page = typeof pages[index] === 'function' ? pages[index]() : pages[index];
@@ -588,6 +617,8 @@ function reset() {
     list.length = 0;
   onWrite = null;
   onCount = null;
+  onBattlemetrics = null;
+  onBanListsRead = null;
   pendingError = null;
   removeError = null;
   syncError = null;
@@ -667,6 +698,18 @@ const heldIDs = (list) =>
 const logged = (level, pattern) =>
   logs.filter((log) => log.level === level && pattern.test(log.message));
 const run = (options) => new BanImporter(options).importBans();
+// A copy of an importer's report, in this test's own objects, as the report is made in the
+// importer's context. Each list's seconds, which say how long its import took, depend on how fast
+// the check runs, so each is checked to be a time, and left out. The checks of the seconds give the
+// importer a clock of their own.
+function plainReport(importer) {
+  const report = JSON.parse(JSON.stringify(importer.report()));
+  for (const list of report.banLists) {
+    assert.ok(Number.isFinite(list.seconds) && list.seconds >= 0, JSON.stringify(list));
+    delete list.seconds;
+  }
+  return report;
+}
 // What the import wrote: the IDs of the bans written, the bans removed, and the players queued.
 const written = () => events.filter(([type]) => type === 'write').flatMap(([, ids]) => ids);
 const removedIDs = () => events.filter(([type]) => type === 'remove').flatMap(([, ids]) => ids);
@@ -716,7 +759,9 @@ function summary() {
 }
 
 // A list that fails part-way through keeps every stored ban, and none of its bans are saved, while
-// a complete list in the same run loses exactly the bans it no longer has.
+// a complete list in the same run loses exactly the bans it no longer has. Its line says which page
+// it failed on: here the second, which BattleMetrics' count of 2 bans on the list does not reach, so
+// it says no more.
 reset();
 battlemetricsList(1, pairs('a', 0, 5), [
   pairs('a', 0, 2),
@@ -733,7 +778,7 @@ assert.strictEqual(results[0].error, 'Error: Request failed with status code 500
 assert.strictEqual(
   logged(
     1,
-    /^Failed to import ban list \(ID: 1\) while fetching it, so none of its bans were removed\. Error: Request failed with status code 500$/
+    /^Failed to import ban list \(ID: 1\) while fetching page 2, so none of its bans were removed\. Error: Request failed with status code 500$/
   ).length,
   1
 );
@@ -744,7 +789,7 @@ assert.strictEqual(results[0].attempt, 2);
 assert.strictEqual(
   logged(
     1,
-    /^Failed to import ban list \(ID: 1\) again while fetching it, so none of its bans were removed\. Error: Request failed with status code 500$/
+    /^Failed to import ban list \(ID: 1\) again while fetching page 2, so none of its bans were removed\. Error: Request failed with status code 500$/
   ).length,
   1
 );
@@ -829,7 +874,12 @@ battlemetricsList(2, pairs('b', 0, 4), [
   pairs('b', 0, 2),
   [...pairs('b', 3, 4), ['b9', steamID(9)]]
 ]);
-const reporter = new BanImporter();
+// The importer here tells the time by a clock of its own, which each BattleMetrics request moves on
+// 1.5 seconds, and the access check 5 seconds, so each list's seconds are known: how long its import
+// took, both attempts together for a list tried again, without the wait between them, and without
+// the access check, which the first list waits for, and the report gives on its own.
+let reporterNow = Date.parse('2026-10-23T13:39:35.889Z');
+const reporter = new BanImporter({ clock: () => reporterNow });
 // Copied into this test's own objects, as the report is made in the importer's context.
 const report = () => JSON.parse(JSON.stringify(reporter.report()));
 assert.deepStrictEqual(report(), {
@@ -851,9 +901,17 @@ assert.deepStrictEqual(report(), {
   requests: { head: 0, follow: 0, full: 0 },
   banLists: []
 });
+onBattlemetrics = () => {
+  reporterNow += 1500;
+};
+onBanListsRead = () => {
+  reporterNow += 5000;
+};
 await reporter.importBans();
-// A list's state is given when it is not ok, and the access check was read. Both lists are new, so
-// they are read in full, and every request is one of a full read, the failed list's both times.
+// A list's state is given when it is not ok, and the access check was read, in 5 seconds. Both lists
+// are new, so they are read in full, and every request is one of a full read, the failed list's
+// both times. The failed list took 6 seconds, 3 for each attempt, and says which page it failed
+// on, and how its first attempt ended, which took 3 of them; the other took 3.
 assert.deepStrictEqual(report(), {
   lists: 2,
   imported: 2,
@@ -870,6 +928,7 @@ assert.deepStrictEqual(report(), {
   headPolls: 0,
   fullReads: 2,
   accessCheck: 'ok',
+  accessCheckSeconds: 5,
   requests: { head: 0, follow: 0, full: 6 },
   banLists: [
     {
@@ -879,12 +938,20 @@ assert.deepStrictEqual(report(), {
       updated: 0,
       removed: 0,
       held: 0,
+      seconds: 6,
       read: 'full',
       reason: 'new',
       state: 'failing',
       attempt: 2,
       error: 'Error: Request failed with status code 500',
-      stage: 'fetching it'
+      stage: 'fetching it',
+      page: 2,
+      firstAttempt: {
+        seconds: 3,
+        error: 'Error: Request failed with status code 500',
+        stage: 'fetching it',
+        page: 2
+      }
     },
     {
       id: 2,
@@ -893,12 +960,252 @@ assert.deepStrictEqual(report(), {
       updated: 0,
       removed: 1,
       held: 0,
+      seconds: 3,
       read: 'full',
       reason: 'new',
       stored: 4
     }
   ]
 });
+onBattlemetrics = null;
+onBanListsRead = null;
+
+// A list read at its second attempt says how its first one ended, also when the second read it, so
+// a page that fails at times, as some of BattleMetrics' pages do, shows in the run record by the
+// list's entry alone: here the first attempt fails on the list's second page, after 3 seconds, and
+// the second reads the list, in 3 more.
+reset();
+battlemetricsList(4, pairs('d', 0, 4), [pairs('d', 0, 2), failsOnce(pairs('d', 2, 4))]);
+battlemetricsList(5, [], [pairs('e', 0, 1)]);
+reporterNow = Date.parse('2026-10-23T13:39:35.889Z');
+const secondReader = new BanImporter({ clock: () => reporterNow });
+onBattlemetrics = () => {
+  reporterNow += 1500;
+};
+await secondReader.importBans();
+onBattlemetrics = null;
+assert.deepStrictEqual(JSON.parse(JSON.stringify(secondReader.report().banLists[0])), {
+  id: 4,
+  fetched: 4,
+  new: 0,
+  updated: 0,
+  removed: 0,
+  held: 0,
+  seconds: 6,
+  read: 'full',
+  reason: 'new',
+  stored: 4,
+  attempt: 2,
+  firstAttempt: {
+    seconds: 3,
+    error: 'Error: Request failed with status code 502',
+    stage: 'fetching it',
+    page: 2
+  }
+});
+
+// The report can also be taken while the import is still under way, as the importer service takes
+// it when it ends a cycle at once, e.g. 45 seconds after SIGTERM, while a step still waits for
+// something that does not come. It then gives the list being imported on its own (inProgress):
+// its counts so far, how long it has taken so far, and what it is doing, with the page it is
+// reading. The totals and banLists leave it out, as they do a list stopped part-way. Here
+// BattleMetrics does not answer list 2's second page, and the report is taken 27 seconds after it
+// was asked for; each request moves the clock on 1.5 seconds, and the access check 5. Once the page
+// is answered, the list is in banLists, and inProgress is gone.
+reset();
+battlemetricsList(1, pairs('a', 0, 2), [pairs('a', 0, 2)]);
+battlemetricsList(2, pairs('b', 0, 4), [pairs('b', 0, 2), pairs('b', 2, 4)]);
+let underWayNow = Date.parse('2026-10-23T18:00:00.000Z');
+let gate = holdAt();
+onBattlemetrics = (params) => {
+  underWayNow += 1500;
+  if (params['filter[banList]'] === 'bm-2' && params['page[key]'] === '1') return gate.hold();
+};
+onBanListsRead = () => {
+  underWayNow += 5000;
+};
+let underWay = new BanImporter({ clock: () => underWayNow });
+let importing = underWay.importBans();
+await gate.reached;
+underWayNow += 27 * 1000;
+assert.deepStrictEqual(JSON.parse(JSON.stringify(underWay.report())), {
+  lists: 2,
+  imported: 1,
+  fetched: 2,
+  new: 0,
+  updated: 0,
+  removed: 0,
+  held: 0,
+  pending: 0,
+  moves: 0,
+  failedLists: 0,
+  selfImports: 0,
+  accessLost: 0,
+  headPolls: 0,
+  fullReads: 1,
+  accessCheck: 'ok',
+  accessCheckSeconds: 5,
+  requests: { head: 0, follow: 0, full: 3 },
+  banLists: [
+    {
+      id: 1,
+      fetched: 2,
+      new: 0,
+      updated: 0,
+      removed: 0,
+      held: 0,
+      seconds: 1.5,
+      read: 'full',
+      reason: 'new',
+      stored: 2
+    }
+  ],
+  inProgress: {
+    id: 2,
+    fetched: 0,
+    new: 0,
+    updated: 0,
+    removed: 0,
+    held: 0,
+    seconds: 30,
+    read: 'full',
+    reason: 'new',
+    page: 2,
+    stage: 'fetching it'
+  }
+});
+gate.release();
+await importing;
+assert.deepStrictEqual(
+  plainReport(underWay).banLists.map(({ id }) => id),
+  [1, 2]
+);
+assert.ok(!('inProgress' in underWay.report()));
+
+// While the run's access check is being read, which the first BattleMetrics list waits for, it is
+// given as running, with how long it has taken so far, and the list as waiting for it, without
+// that time, as its seconds once it is read are without it too, and before it is planned how the
+// list is read. Here the check is held up for 40 seconds, as when it waits out a pause after
+// BattleMetrics answered 429, which nothing stops.
+reset();
+battlemetricsList(1, pairs('a', 0, 2), [pairs('a', 0, 2)]);
+underWayNow = Date.parse('2026-10-23T18:00:00.000Z');
+gate = holdAt();
+onBanListsRead = () => {
+  underWayNow += 40 * 1000;
+  return gate.hold();
+};
+underWay = new BanImporter({ clock: () => underWayNow });
+importing = underWay.importBans();
+await gate.reached;
+let partial = JSON.parse(JSON.stringify(underWay.report()));
+assert.deepStrictEqual(
+  [partial.imported, partial.accessCheck, partial.accessCheckSeconds, partial.banLists],
+  [0, 'running', 40, []]
+);
+assert.deepStrictEqual(partial.inProgress, {
+  id: 1,
+  fetched: 0,
+  new: 0,
+  updated: 0,
+  removed: 0,
+  held: 0,
+  seconds: 0,
+  stage: 'waiting for the access check'
+});
+gate.release();
+await importing;
+partial = JSON.parse(JSON.stringify(underWay.report()));
+assert.deepStrictEqual(
+  [
+    partial.accessCheck,
+    partial.accessCheckSeconds,
+    partial.banLists[0].seconds,
+    partial.inProgress
+  ],
+  ['ok', 40, 0, undefined]
+);
+
+// A list whose bans are being saved, e.g. as a batch waits for a row lock, is given with what it
+// has fetched so far, and so is one whose row is being saved, once its attempt is over. A second
+// attempt is given with the time of both attempts, and how its first one ended. Here list 2's first
+// attempt fails on its second page, and its second waits for that page for 10 seconds.
+reset();
+battlemetricsList(1, pairs('a', 0, 2), [pairs('a', 0, 2)]);
+battlemetricsList(2, pairs('b', 0, 2), [pairs('b', 0, 2), [...pairs('b', 2, 3)]]);
+underWayNow = Date.parse('2026-10-23T18:00:00.000Z');
+gate = holdAt();
+onWrite = (ids) => (ids.includes('2,b2') ? gate.hold() : undefined);
+onBattlemetrics = () => {
+  underWayNow += 1500;
+};
+underWay = new BanImporter({ clock: () => underWayNow });
+importing = underWay.importBans();
+await gate.reached;
+assert.deepStrictEqual(JSON.parse(JSON.stringify(underWay.report())).inProgress, {
+  id: 2,
+  fetched: 3,
+  new: 0,
+  updated: 0,
+  removed: 0,
+  held: 0,
+  seconds: 3,
+  read: 'full',
+  reason: 'new',
+  stored: 2,
+  stage: 'saving its bans'
+});
+gate.release();
+await importing;
+onWrite = null;
+gate = holdAt();
+onCount = (id) => (id === 2 ? gate.hold() : undefined);
+underWay = new BanImporter({ clock: () => underWayNow });
+importing = underWay.importBans();
+await gate.reached;
+partial = JSON.parse(JSON.stringify(underWay.report()));
+assert.deepStrictEqual(
+  [partial.imported, partial.inProgress.id, partial.inProgress.stage, partial.inProgress.fetched],
+  [1, 2, 'saving its sync state', 3]
+);
+gate.release();
+await importing;
+onCount = null;
+battlemetricsLists.set('bm-2', [pairs('b', 0, 2), failsOnce(pairs('b', 2, 3))]);
+let asks = 0;
+gate = holdAt();
+onBattlemetrics = (params) => {
+  underWayNow += 1500;
+  if (params['filter[banList]'] === 'bm-2' && params['page[key]'] === '1' && ++asks === 2)
+    return gate.hold();
+};
+underWay = new BanImporter({ clock: () => underWayNow });
+importing = underWay.importBans();
+await gate.reached;
+underWayNow += 10 * 1000;
+assert.deepStrictEqual(JSON.parse(JSON.stringify(underWay.report())).inProgress, {
+  id: 2,
+  fetched: 0,
+  new: 0,
+  updated: 0,
+  removed: 0,
+  held: 0,
+  seconds: 16,
+  read: 'full',
+  reason: 'every_run',
+  attempt: 2,
+  page: 2,
+  firstAttempt: {
+    seconds: 3,
+    error: 'Error: Request failed with status code 502',
+    stage: 'fetching it',
+    page: 2
+  },
+  stage: 'fetching it'
+});
+gate.release();
+await importing;
+onBattlemetrics = null;
 
 // Every write has finished before any of the list's bans are removed. The bans it had are read
 // before its bans are written, so what it lost is measured against the bans it had before the run.
@@ -1507,7 +1814,7 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(
   warnings().map((log) => log.message),
   [
-    'Failed to import ban list (ID: 17) while fetching it, so none of its bans were removed. Error: Request failed with status code 502',
+    'Failed to import ban list (ID: 17) while fetching page 2, so none of its bans were removed. Error: Request failed with status code 502',
     'Imported ban list (ID: 17) at the second attempt: 3 bans fetched, 1 new, 0 updated, 1 removed.'
   ]
 );
@@ -1600,7 +1907,10 @@ assert.deepStrictEqual(
   warnings().map((log) => Number(log.message.match(/ban list \(ID: (\d+)\)/)[1])),
   [23, 24]
 );
-assert.strictEqual(logged(1, /^Failed to import ban list \(ID: 23\) while fetching it/).length, 1);
+assert.strictEqual(
+  logged(1, /^Failed to import ban list \(ID: 23\) while fetching page 1, so none/).length,
+  1
+);
 assert.strictEqual(
   summary(),
   'Got 1 deleted ban. Imported 4 ban lists: 13 bans fetched, 2 new, 1 updated, 1 removed, 31 held, 1 list failed.'
@@ -1758,15 +2068,17 @@ assert.deepStrictEqual(
 );
 const imported = row(1);
 assert.ok(imported.lastAttemptAt >= started && imported.lastAttemptAt <= ended);
-// Its next full read is due 30 minutes after the run planned its reads, less up to a fifth of that
-// at random. Read with head polls off, its first page is not its newest, so it keeps no newest bans.
+// Its next full read is due 27 minutes after its run planned its reads, 30 less a tenth, as a run
+// that is not told how often runs start, as here, schedules it, as once mode's runs every 6 hours
+// do, so the next run reads it in full again, however late in this run it was read; a run with a
+// shorter cadence schedules it at the list's slot (see the checks of slots below). Read with head
+// polls off, its first page is not its newest, so it keeps no newest bans.
 const MINUTE = 60 * 1000;
-const dueIn = (saved, from, to, plannedAt) =>
-  saved.nextFullScanAt >= plannedAt + from * MINUTE &&
-  saved.nextFullScanAt <= plannedAt + to * MINUTE;
+const dueAfterPlan = (saved, plannedAt, minutes) =>
+  saved.nextFullScanAt === plannedAt + 0.9 * minutes * MINUTE;
 assert.ok(firstRun.plannedAt >= started && firstRun.plannedAt <= imported.lastAttemptAt);
 assert.ok(
-  dueIn(imported, 24, 30, firstRun.plannedAt),
+  dueAfterPlan(imported, firstRun.plannedAt, 30),
   `due ${imported.nextFullScanAt - firstRun.plannedAt}`
 );
 assert.deepStrictEqual(imported, {
@@ -1833,7 +2145,7 @@ assert.deepStrictEqual(savedFields(1), [[...IMPORT_FIELDS, ...Object.keys(FRESH_
 // Saving a row posts nothing.
 assert.deepStrictEqual(alerts(), []);
 assert.deepStrictEqual(
-  JSON.parse(JSON.stringify(firstRun.report())).banLists.map(({ id, state }) => [id, state]),
+  plainReport(firstRun).banLists.map(({ id, state }) => [id, state]),
   [
     [1, undefined],
     [2, 'failing'],
@@ -1939,7 +2251,7 @@ assert.strictEqual(logged(2, /is back to normal/).length, 0);
 assert.deepStrictEqual(
   warnings().map(({ message }) => message.split(',')[0]),
   [
-    'Failed to import ban list (ID: 40) while fetching it',
+    'Failed to import ban list (ID: 40) while fetching page 1 of about 1',
     'Imported ban list (ID: 40) at the second attempt: 2 bans fetched'
   ]
 );
@@ -2015,7 +2327,7 @@ assert.strictEqual(
   summary(),
   'Got 1 deleted ban. Imported 3 ban lists: 7 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed.'
 );
-let counts = JSON.parse(JSON.stringify(checked.report()));
+let counts = plainReport(checked);
 assert.deepStrictEqual(
   [counts.accessLost, counts.accessCheck, counts.banLists[0].state],
   [1, 'ok', 'access_lost']
@@ -2079,12 +2391,19 @@ assert.strictEqual(
 // swept, posted about again, or said to be back to normal, and its row keeps why it lost access.
 // Here the list is not among those BattleMetrics lists, then the check cannot be made, then it is
 // not among them again, as its first fetch fails, and at last it is. That failure, and so its
-// second attempt, are posted as for any list, as they are not about its access.
+// second attempt, are posted as for any list, as they are not about its access. The runs tell the
+// time by a clock of their own, which each request moves on a second, so the lists' last full reads
+// are known: in the last run, list 51 is read first, as list 50 was last read in full after it, at
+// its second attempt in the run before.
 reset();
 battlemetricsList(50, pairs('t', 0, 3), [pairs('t', 0, 1)]);
 battlemetricsList(51, [], [pairs('u', 0, 1)]);
 const UNLISTED_ERROR =
   'Its source is not among the BattleMetrics ban lists the CBL organisation can see, so its bans are not checked for removal.';
+let unlistedNow = Date.parse('2026-10-23T15:20:00.000Z');
+onBattlemetrics = () => {
+  unlistedNow += 1000;
+};
 for (const [run, visible] of [
   [1, ['bm-51']],
   [2, new Error('BattleMetrics GET ban-lists failed after 3 attempts: HTTP 503')],
@@ -2097,11 +2416,16 @@ for (const [run, visible] of [
   battlemetricsLists.set('bm-50', [
     run === 3 ? failsOnce(pairs('t', 0, 1), httpError(503)) : pairs('t', 0, 1)
   ]);
-  await new BanImporter().importBans();
+  await new BanImporter({ clock: () => unlistedNow }).importBans();
   const label = `run ${run}`;
   assert.deepStrictEqual(
     battlemetricsRequests,
-    run === 3 ? ['bm-50', 'bm-51', 'bm-50'] : ['bm-50', 'bm-51'],
+    {
+      1: ['bm-50', 'bm-51'],
+      2: ['bm-50', 'bm-51'],
+      3: ['bm-50', 'bm-51', 'bm-50'],
+      4: ['bm-51', 'bm-50']
+    }[run],
     label
   );
   assert.deepStrictEqual(
@@ -2255,7 +2579,7 @@ assert.strictEqual(
   logged(
     1,
     new RegExp(
-      `^Failed to import ban list \\(ID: 15\\) while fetching it, so none of its bans were removed\\. ${RegExp.escape(HIDDEN)}$`
+      `^Failed to import ban list \\(ID: 15\\) while fetching page 1 of about 44, so none of its bans were removed\\. ${RegExp.escape(HIDDEN)}$`
     )
   ).length,
   1
@@ -2308,7 +2632,8 @@ for (let run = 1; run <= 3; run++) {
     }[run],
     `run ${run}`
   );
-  const failure = /^Failed to import ban list \(ID: 18\) while fetching it, .*Unknown ban list\)$/;
+  const failure =
+    /^Failed to import ban list \(ID: 18\) while fetching page 1( of about 1)?, .*Unknown ban list\)$/;
   assert.deepStrictEqual(
     [logged(1, failure).length, logged(2, failure).length],
     run === 1 ? [1, 0] : [0, 1],
@@ -2570,7 +2895,7 @@ for (let run = 1; run <= 2; run++) {
     1,
     `run ${run}`
   );
-  counts = JSON.parse(JSON.stringify(checked.report()));
+  counts = plainReport(checked);
   assert.deepStrictEqual(
     [counts.selfImports, counts.banLists.map(({ state }) => state)],
     [3, ['self_import', 'self_import', 'self_import', undefined, undefined]],
@@ -3000,7 +3325,7 @@ for (const setting of ['1', '"1"']) {
     ],
     setting
   );
-  const counts = JSON.parse(JSON.stringify(dryRun.report()));
+  const counts = plainReport(dryRun);
   assert.deepStrictEqual(
     [counts.dryRun, counts.new, counts.updated, counts.removed, counts.held, counts.pending],
     [true, 1, 1, 5, 20, 15],
@@ -3096,7 +3421,7 @@ for (const setting of [undefined, '0', '"0"', " 'off' "]) {
   const writing = new BanImporter();
   await writing.importBans();
   assert.deepStrictEqual(
-    [writing.dryRun, storedIDs(98).length, JSON.parse(JSON.stringify(writing.report())).dryRun],
+    [writing.dryRun, storedIDs(98).length, plainReport(writing).dryRun],
     [false, 1, undefined],
     String(setting)
   );
@@ -3440,10 +3765,7 @@ assert.strictEqual(
   logged(2, /^Skipped ban list \(ID: 130\), as it was removed during the run\.$/).length,
   1
 );
-assert.deepStrictEqual(
-  [JSON.parse(JSON.stringify(removedMeanwhile.report())).failedLists, syncRows.has(130)],
-  [0, false]
-);
+assert.deepStrictEqual([plainReport(removedMeanwhile).failedLists, syncRows.has(130)], [0, false]);
 assert.match(summary(), /, 0 held, 0 lists failed\.$/);
 // The same error while the list is still there fails it, as any other failure would.
 reset();
@@ -3463,6 +3785,97 @@ assert.strictEqual(
   1
 );
 
+// A list that fails on one of its pages says which, and of about how many pages a read of all of
+// it takes, by BattleMetrics' count of its bans on its first page: here 950 bans, so about 10
+// pages, of which the third fails at both attempts, as in production a page of a large list timed
+// out at every attempt. Before its first page is read, the count at its last read, which its row
+// keeps, says how many: here 9,217 bans, so about 93 pages. The run record keeps the page too. A
+// list whose count is not known, or already passed, says only the page (see above), and a list that
+// failed otherwise, e.g. while its bans were saved, only what it was doing, as before.
+reset();
+battlemetricsList(160, pairs('w', 0, 8), [
+  pairs('w', 0, 2),
+  pairs('w', 2, 4),
+  httpError(504),
+  pairs('w', 4, 8)
+]);
+battlemetricsTotals.set('bm-160', 950);
+battlemetricsList(161, pairs('x', 0, 2), [httpError(504)]);
+syncRows.set(161, {
+  ...failedTwice(161, IMPORTED_AT),
+  state: 'ok',
+  consecutiveFailures: 0,
+  lastError: null,
+  lastFullScanAt: IMPORTED_AT,
+  headTotal: 9217
+});
+battlemetricsList(162, pairs('y', 0, 2), [pairs('y', 0, 2)]);
+const pageFailures = new BanImporter();
+await pageFailures.importBans();
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    'Failed to import ban list (ID: 160) while fetching page 3 of about 10, so none of its bans were removed. Error: Request failed with status code 504',
+    'Failed to import ban list (ID: 161) while fetching page 1 of about 93, so none of its bans were removed. Error: Request failed with status code 504',
+    'Failed to import ban list (ID: 160) again while fetching page 3 of about 10, so none of its bans were removed. Error: Request failed with status code 504',
+    'Failed to import ban list (ID: 161) again while fetching page 1 of about 93, so none of its bans were removed. Error: Request failed with status code 504'
+  ]
+);
+assert.deepStrictEqual(
+  plainReport(pageFailures).banLists.map(({ id, stage, page }) => [
+    id,
+    stage ?? null,
+    page ?? null
+  ]),
+  [
+    [160, 'fetching it', 3],
+    [162, null, null],
+    [161, 'fetching it', 1]
+  ]
+);
+// The rows keep the error alone, as before.
+assert.deepStrictEqual(
+  [row(160).lastError, row(161).lastError],
+  ['Error: Request failed with status code 504', 'Error: Request failed with status code 504']
+);
+// A list whose type or source was changed since its row was saved says only the page, until its
+// new source's first page gives BattleMetrics' count, as its row's counts are its old source's:
+// here 11,780 bans, which would make about 118 pages. So does a list whose old source's bans are
+// still being replaced, as the bans it has here are then still its old source's: here its row,
+// saved for its new source, whose first read failed, counts only the 9,217 bans it has.
+reset();
+battlemetricsList(163, pairs('z', 0, 2), [httpError(504)], 'bm-163-new');
+syncRows.set(163, {
+  ...failedTwice(163, IMPORTED_AT),
+  state: 'ok',
+  consecutiveFailures: 0,
+  lastError: null,
+  lastFullScanAt: IMPORTED_AT,
+  storedCount: 11780,
+  headTotal: 11780
+});
+battlemetricsList(164, pairs('q', 0, 2), [httpError(504)]);
+syncRows.set(164, {
+  ...failedTwice(164, IMPORTED_AT),
+  state: 'ok',
+  consecutiveFailures: 0,
+  lastError: null,
+  replacePending: true,
+  storedCount: 9217,
+  headTotal: null
+});
+battlemetricsList(165, pairs('r', 0, 2), [pairs('r', 0, 2)]);
+await run();
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    'Failed to import ban list (ID: 163) while fetching page 1, so none of its bans were removed. Error: Request failed with status code 504',
+    'Failed to import ban list (ID: 164) while fetching page 1, so none of its bans were removed. Error: Request failed with status code 504',
+    'Failed to import ban list (ID: 163) again while fetching page 1, so none of its bans were removed. Error: Request failed with status code 504',
+    'Failed to import ban list (ID: 164) again while fetching page 1, so none of its bans were removed. Error: Request failed with status code 504'
+  ]
+);
+
 // Head polls. From here the lists are read as runs read them by default: a list that is not due a
 // full read only has its newest bans read. A list's bans are served newest first, 5 to a page here,
 // from entries a check changes between runs, and BattleMetrics' pages move as bans are added or
@@ -3479,18 +3892,19 @@ const asked = () =>
 // One run, with what it logged, did and asked for alone, its report for the run record, and when it
 // planned its reads. A run that stops gives the error it stopped with (stopped) instead of its
 // results. An importer loaded on its own (Importer, see loadImporter) runs with its own run control.
-async function pollRun(options, Importer = BanImporter) {
+// settings are the run's, as the run gives its steps, e.g. how often runs start.
+async function pollRun(options, Importer = BanImporter, settings = {}) {
   for (const list of [logs, events, battlemetricsRequests, battlemetricsParams, delays])
     list.length = 0;
   const importer = new Importer(options);
-  const ran = await importer.importBans().catch((err) => {
+  const ran = await importer.importBans(settings).catch((err) => {
     if (err?.name !== 'RunStopped') throw err;
     return err;
   });
   return {
     results: Array.isArray(ran) ? ran : null,
     stopped: Array.isArray(ran) ? null : ran,
-    report: JSON.parse(JSON.stringify(importer.report())),
+    report: plainReport(importer),
     plannedAt: importer.plannedAt
   };
 }
@@ -3499,8 +3913,8 @@ const readsOf = (polled) =>
 
 // A new list is read in full, newest first, as a poll needs its newest page to start from. Its row
 // keeps the IDs of the bans on that page, all of them, with or without a SteamID, and
-// BattleMetrics' count, and the list is due its next full read 24 to 30 minutes after the run
-// planned its reads.
+// BattleMetrics' count, and the list is due its next full read 27 minutes after its run planned its
+// reads, as the run is not told how often runs start.
 reset();
 delete env.IMPORTER_HEAD_POLL;
 let newestFirst = [...pairs('h', 0, 4), noSteamID('hx'), ...pairs('h', 4, 22)];
@@ -3539,9 +3953,9 @@ assert.deepStrictEqual(
     22
   ]
 );
-assert.ok(dueIn(firstRead, 24, 30, polled.plannedAt));
+assert.ok(dueAfterPlan(firstRead, polled.plannedAt, 30));
 
-// The next run, within 24 minutes, is not due to read them in full, so it only polls them: one
+// The next run, within 30 minutes, is not due to read them in full, so it only polls them: one
 // request a list. Only the stored bans on list 90's newest page are read, and nothing is written.
 // List 91's newest page is all of it, so it is read as a list read in full, with all its stored
 // bans and its missing ones, which may remove any it lost.
@@ -3587,7 +4001,8 @@ assert.strictEqual(
   1
 );
 // A poll keeps when the list was last read in full, and when it is next due to be, and saves when
-// its newest page was read. List 91, read in full by its poll, is due again in 24 to 30 minutes.
+// its newest page was read. List 91, read in full by its poll, is due again 27 minutes after the run
+// planned its reads.
 assert.deepStrictEqual(
   [row(90).lastFullScanAt, row(90).nextFullScanAt, row(90).headTotal],
   [firstRead.lastFullScanAt, firstRead.nextFullScanAt, 23]
@@ -3595,7 +4010,7 @@ assert.deepStrictEqual(
 assert.ok(row(90).lastHeadPollAt >= firstRead.lastHeadPollAt);
 assert.strictEqual(row(90).lastHeadPollAt, row(90).lastAttemptAt);
 assert.strictEqual(row(91).lastFullScanAt, row(91).lastAttemptAt);
-assert.ok(dueIn(row(91), 24, 30, polled.plannedAt));
+assert.ok(dueAfterPlan(row(91), polled.plannedAt, 30));
 
 // A ban added on top of a list is saved by the next poll, and its player queued for an update, with
 // no other request.
@@ -3656,7 +4071,7 @@ assert.deepStrictEqual(
   [row(90).scanReason, row(90).lastFullScanAt, row(90).headTotal],
   ['periodic', row(90).lastAttemptAt, 23]
 );
-assert.ok(dueIn(row(90), 24, 30, polled.plannedAt));
+assert.ok(dueAfterPlan(row(90), polled.plannedAt, 30));
 assert.strictEqual(
   logged(
     2,
@@ -3815,7 +4230,7 @@ syncRows.get(92).lastFullScanAt = new Date(Date.now() - 6 * MINUTE);
 env.IMPORTER_FULL_SCAN_MINUTES = '5';
 polled = await pollRun();
 assert.deepStrictEqual(readsOf(polled), [[92, 'full', 'periodic']]);
-assert.ok(dueIn(row(92), 4, 5, polled.plannedAt));
+assert.ok(dueAfterPlan(row(92), polled.plannedAt, 5));
 delete env.IMPORTER_FULL_SCAN_MINUTES;
 
 // A poll that finds drift, when the list then cannot be read in full, leaves the list due a full
@@ -3851,7 +4266,7 @@ assert.deepStrictEqual(readsOf(polled), [
 ]);
 assert.deepStrictEqual(
   [row(93).state, row(93).scanReason, row(93).nextFullScanAt, row(93).headTotal],
-  ['failing', 'drift', polled.plannedAt, 15]
+  ['failing', 'drift', row(93).lastAttemptAt, 15]
 );
 assert.deepStrictEqual(JSON.parse(row(93).headUids), ['k0', 'k1', 'k2', 'k3', 'k4']);
 assert.deepStrictEqual(
@@ -3872,15 +4287,17 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(JSON.parse(row(93).headUids), ['kn1', 'k0', 'k1', 'k2', 'k3']);
 
 // IMPORTER_HEAD_POLL=0 reads every list in full on every run, in the order BattleMetrics gives its
-// bans, as before head polls, and their rows forget their newest pages. Turned on again, each list
-// is read in full once more, as it has no newest page to compare.
+// bans, as before head polls, and their rows forget their newest pages, the one read in full longest
+// ago first: list 94, which was only polled since, here a minute before list 93's last full read.
+// Turned on again, each list is read in full once more, as it has no newest page to compare.
 env.IMPORTER_HEAD_POLL = '0';
+syncRows.get(94).lastFullScanAt = new Date(row(93).lastFullScanAt - MINUTE);
 polled = await pollRun();
 assert.deepStrictEqual(readsOf(polled), [
-  [93, 'full', 'every_run'],
-  [94, 'full', 'every_run']
+  [94, 'full', 'every_run'],
+  [93, 'full', 'every_run']
 ]);
-assert.deepStrictEqual(battlemetricsParams[0], { 'filter[banList]': 'bm-93', 'page[size]': 100 });
+assert.deepStrictEqual(battlemetricsParams[0], { 'filter[banList]': 'bm-94', 'page[size]': 100 });
 assert.deepStrictEqual([row(93).headUids, row(94).headUids], [null, null]);
 assert.strictEqual(
   logged(
@@ -3983,7 +4400,7 @@ for (const [name, value, warning, reads] of [
   battlemetricsList(90, [], [pairs('r', 0, 3)]);
   const cycles = new BanImporter();
   await cycles.importBans();
-  const last = JSON.parse(JSON.stringify(cycles.report()));
+  const last = plainReport(cycles);
   assert.deepStrictEqual(
     [last.lists, last.imported, last.new, last.banLists.length, last.requests.full],
     [1, 1, 3, 1, 1]
@@ -3994,7 +4411,7 @@ for (const [name, value, warning, reads] of [
   };
   await assert.rejects(cycles.importBans(), /BanListSyncs/);
   BanListSync.findAll = findAll;
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(cycles.report())), {
+  assert.deepStrictEqual(plainReport(cycles), {
     lists: 0,
     imported: 0,
     fetched: 0,
@@ -4162,43 +4579,282 @@ assert.deepStrictEqual(polled.report.banLists, [
 ]);
 assert.deepStrictEqual([written(), removedIDs(), pendingIDs(134).length], [['134,yn1'], [], 10]);
 
-// A list's next periodic read is counted from when the run planned its reads, not from when the
-// list was read. So a list read late in a run, here 8 minutes after the run planned its reads, is
-// due by the run that starts 30 minutes after this one, 22 minutes after the list was read, as one
-// read at the start is, and the run 15 minutes after this one only polls it. Counted from when it
-// was read, it would be due 24 to 30 minutes after that, so the run after next would read it.
+// With runs less than IMPORTER_FULL_SCAN_MINUTES apart, as the importer service's cycles every 10
+// minutes, a list's next periodic read falls at its slot, wherever in its cycle it was read: a list
+// read 8 minutes into the cycle that started at its slot is due when its slot comes round again, so
+// the cycle 20 minutes after that one only polls it, and the cycle 30 minutes after it reads it in
+// full, as it would a list read at the cycle's start. The list is the only one, so its slot is the
+// middle of each 30 minutes, 15 minutes in. The runs here tell the time by a clock of their own.
 reset();
 delete env.IMPORTER_HEAD_POLL;
 battlemetricsList(135, [], paged(pairs('t', 0, 12)));
-const lateRun = new BanImporter();
+const SLOT_135 = Date.parse('2026-10-23T13:45:00.000Z');
+let lateNow = SLOT_135;
+const lateClock = { clock: () => lateNow };
+const everyTenMinutes = { cadenceSeconds: 600 };
+const lateRun = new BanImporter(lateClock);
 const newestPage = battlemetricsLists.get('bm-135')[0];
 battlemetricsLists.get('bm-135')[0] = Object.assign(
   () => {
-    lateRun.plannedAt -= 8 * MINUTE;
+    lateNow += 8 * MINUTE;
     return newestPage;
   },
   { entries: newestPage }
 );
-await lateRun.importBans();
+await lateRun.importBans(everyTenMinutes);
 serve(135, pairs('t', 0, 12));
+assert.deepStrictEqual(
+  [Object.fromEntries(lateRun.slots), lateRun.plannedAt, lateRun.cadenceSeconds],
+  [{ 135: 15 * MINUTE }, SLOT_135, 600]
+);
 const lateRead = row(135);
 assert.deepStrictEqual(
-  [lateRead.lastFullScanAt, lateRead.scanReason],
-  [lateRead.lastAttemptAt, 'periodic']
+  [lateRead.lastFullScanAt, lateRead.nextFullScanAt, lateRead.scanReason],
+  [SLOT_135 + 8 * MINUTE, SLOT_135 + 30 * MINUTE, 'periodic']
 );
-assert.ok(dueIn(lateRead, 24, 30, lateRun.plannedAt));
-assert.ok(lateRead.nextFullScanAt <= lateRead.lastFullScanAt + 22 * MINUTE);
-// The runs 15 and 30 minutes after this one, 7 and 22 minutes after the list was read.
-const sinceRead = (minutes) => {
-  for (const field of ['lastFullScanAt', 'nextFullScanAt'])
-    syncRows.get(135)[field] = new Date(lateRead[field] - minutes * MINUTE);
-};
-sinceRead(7);
-polled = await pollRun();
+lateNow = SLOT_135 + 20 * MINUTE;
+polled = await pollRun(lateClock, BanImporter, everyTenMinutes);
 assert.deepStrictEqual(readsOf(polled), [[135, 'head', null]]);
-sinceRead(22);
-polled = await pollRun();
+lateNow = SLOT_135 + 30 * MINUTE;
+polled = await pollRun(lateClock, BanImporter, everyTenMinutes);
 assert.deepStrictEqual(readsOf(polled), [[135, 'full', 'periodic']]);
+assert.strictEqual(row(135).nextFullScanAt, SLOT_135 + 60 * MINUTE);
+
+// Each BattleMetrics list the run reads has a slot, from the lists' rows as the run finds them: in
+// the order of their IDs, the lists share the 30 minutes by their pages, from BattleMetrics' count
+// of each list's bans at its last read, and a list without a row takes one page. A remote list,
+// whose file is asked about on every run, and a list that imports one of CBL's own export ban lists,
+// which is never read, have none. With the run's cadence of 10 minutes, a list read in full is next
+// due at its slot in the 30 minutes up to 35 minutes after its read. Here BattleMetrics counts
+// 4,200 and 1,800 bans on the lists, which it gives a few of, with the count check off.
+reset();
+delete env.IMPORTER_HEAD_POLL;
+env.IMPORTER_SCAN_COUNT_CHECK = '0';
+let slotNow = Date.parse('2026-10-23T14:02:00.000Z');
+const slotClock = { clock: () => slotNow };
+battlemetricsList(150, [], paged(pairs('u', 0, 12)));
+battlemetricsTotals.set('bm-150', 4200);
+battlemetricsList(151, [], paged(pairs('v', 0, 12)));
+battlemetricsTotals.set('bm-151', 1800);
+remoteList(152, [1], `${steamID(1)}:0 //Cheating`);
+battlemetricsList(153, [], paged(pairs('z', 0, 2)), 'c0ffee00-cb1e-4a00-b000-0000000000ff');
+exportBanLists.push({ id: 7, battlemetricsID: 'c0ffee00-cb1e-4a00-b000-0000000000ff' });
+const slotRun = async () => {
+  const importer = new BanImporter(slotClock);
+  await importer.importBans(everyTenMinutes);
+  return importer;
+};
+let slotted = await slotRun();
+// Neither list has a row yet, so they share the interval equally, and each new list is due at its
+// slot: list 150 7.5 minutes into each half hour, and list 151 22.5 minutes in.
+assert.deepStrictEqual(Object.fromEntries(slotted.slots), {
+  150: 7.5 * MINUTE,
+  151: 22.5 * MINUTE
+});
+assert.deepStrictEqual(
+  [row(150).nextFullScanAt, row(151).nextFullScanAt, row(150).headTotal, row(151).headTotal],
+  [Date.parse('2026-10-23T14:07:30.000Z'), Date.parse('2026-10-23T14:22:30.000Z'), 4200, 1800]
+);
+// The next cycle, 10 minutes later, gives them slots by their pages, 42 and 18, and reads list 150
+// in full, as its slot has come, and polls list 151. List 150 is then due at its new slot, the one
+// that comes at least 5 minutes after its read: 10.5 minutes into the half hour from 14:30.
+slotNow = Date.parse('2026-10-23T14:12:00.000Z');
+slotted = await slotRun();
+assert.deepStrictEqual(Object.fromEntries(slotted.slots), {
+  150: 10.5 * MINUTE,
+  151: 25.5 * MINUTE
+});
+assert.deepStrictEqual(
+  plainReport(slotted).banLists.map(({ id, read, reason }) => [id, read, reason ?? null]),
+  [
+    [151, 'head', null],
+    [153, undefined, null],
+    [150, 'full', 'periodic'],
+    [152, 'full', 'remote']
+  ]
+);
+assert.strictEqual(row(150).nextFullScanAt, Date.parse('2026-10-23T14:40:30.000Z'));
+// A list whose last full read is 35 minutes old, as long as a list may wait for its slot at this
+// cadence, is read in full whatever its row says, while one read 34 minutes ago is only polled.
+for (const [minutes, read] of [
+  [34, 'head'],
+  [35, 'full']
+]) {
+  Object.assign(syncRows.get(151), {
+    lastFullScanAt: new Date(slotNow - minutes * MINUTE),
+    nextFullScanAt: new Date(slotNow + 60 * MINUTE)
+  });
+  slotted = await slotRun();
+  assert.deepStrictEqual(
+    plainReport(slotted)
+      .banLists.filter(({ id }) => id === 151)
+      .map((list) => list.read),
+    [read],
+    String(minutes)
+  );
+}
+delete env.IMPORTER_SCAN_COUNT_CHECK;
+
+// Cycles of the importer service, run with the same importer, as the service runs them: a cycle
+// every 10 minutes, with a clock that each BattleMetrics request moves on 0.9 seconds and the
+// cycle's other steps 45 seconds. Six lists, of 942 to 9,217 bans by BattleMetrics' counts, are all
+// new, so the first cycle reads them all in full. Once an interval has passed after it, no cycle
+// reads more than half of their pages, rather than every list in every third cycle and none in
+// between, and once two have, each list is read in full once in each half hour, at its slot. No
+// list waits more than 1.5 intervals for its next full read.
+reset();
+delete env.IMPORTER_HEAD_POLL;
+env.IMPORTER_SCAN_COUNT_CHECK = '0';
+const SIZES = [9217, 7647, 3795, 2352, 1234, 942];
+const LISTS = SIZES.map((bans, index) => ({ id: 170 + index, bans, pages: Math.ceil(bans / 100) }));
+for (const { id, bans } of LISTS) {
+  battlemetricsList(id, [], paged(pairs(`c${id}x`, 0, 10)));
+  battlemetricsTotals.set(`bm-${id}`, bans);
+}
+const ALL_PAGES = LISTS.reduce((sum, { pages }) => sum + pages, 0);
+let cycleNow = Date.parse('2026-10-23T13:39:35.889Z');
+onBattlemetrics = () => {
+  cycleNow += 900;
+};
+const service = new BanImporter({ clock: () => cycleNow });
+const serviceCycles = [];
+for (let number = 1; number <= 18; number++) {
+  const start = cycleNow;
+  await service.importBans(everyTenMinutes);
+  const reads = plainReport(service).banLists.filter(({ read }) => read === 'full');
+  serviceCycles.push({
+    number,
+    start,
+    end: cycleNow + 45 * 1000,
+    reads: reads.map(({ id }) => id),
+    pages: reads.reduce((sum, { id }) => sum + LISTS.find((list) => list.id === id).pages, 0)
+  });
+  // Each list read in full is next due at its slot, as the cycle gave it.
+  for (const id of serviceCycles.at(-1).reads)
+    assert.strictEqual(
+      (((row(id).nextFullScanAt - service.slots.get(id)) % (30 * MINUTE)) + 30 * MINUTE) %
+        (30 * MINUTE),
+      0,
+      `cycle ${number}, list ${id}`
+    );
+  cycleNow = Math.max(start + 10 * MINUTE, cycleNow + 45 * 1000);
+}
+assert.deepStrictEqual(
+  [serviceCycles[0].reads.length, serviceCycles[0].pages],
+  [LISTS.length, ALL_PAGES]
+);
+const settledCycles = (intervals) =>
+  serviceCycles.filter(({ start }) => start >= serviceCycles[0].end + intervals * 30 * MINUTE);
+assert.ok(settledCycles(1).length >= 12);
+for (const cycle of settledCycles(1))
+  assert.ok(cycle.pages <= ALL_PAGES / 2, JSON.stringify(cycle));
+// Once two intervals have passed, the lists settle at their slots, which the counts of their bans
+// gave them in the second cycle, so each three cycles in a row read every list once.
+const steadyCycles = settledCycles(2);
+for (const [index, cycle] of steadyCycles.slice(0, -2).entries()) {
+  const interval = steadyCycles.slice(index, index + 3);
+  assert.deepStrictEqual(
+    interval.flatMap(({ reads }) => reads).sort((a, b) => a - b),
+    LISTS.map(({ id }) => id),
+    `the half hour from cycle ${cycle.number}`
+  );
+}
+for (const { id } of LISTS) {
+  const readIn = serviceCycles.filter(({ reads }) => reads.includes(id));
+  for (const [index, cycle] of readIn.slice(1).entries())
+    assert.ok(cycle.start - readIn[index].start <= 45 * MINUTE, `list ${id}`);
+}
+delete env.IMPORTER_SCAN_COUNT_CHECK;
+onBattlemetrics = null;
+
+// With runs an interval apart or more, as every 30 minutes with IMPORTER_FULL_SCAN_MINUTES=30, or
+// every hour with 60, whether the run is told a cadence of an hour or of 6 hours, a list's next
+// periodic read is counted from when its run planned its reads, less a tenth of the interval, not
+// from its read, so a list read well into a run is due by the next run, which reads it in full,
+// also when it plans its reads a few seconds sooner after its start than the run before. Counted
+// from its read, it would only be polled then, and read in full every other run. A run started by
+// hand two thirds of an interval after one only polls it.
+for (const [cadenceSeconds, minutes] of [
+  [1800, 30],
+  [3600, 60],
+  [21600, 60]
+]) {
+  reset();
+  delete env.IMPORTER_HEAD_POLL;
+  env.IMPORTER_FULL_SCAN_MINUTES = String(minutes);
+  const label = `cadence ${cadenceSeconds}, ${minutes} minutes`;
+  const interval = minutes * MINUTE;
+  battlemetricsList(180, [], paged(pairs('o', 0, 12)));
+  const START_180 = Date.parse('2026-10-23T13:00:02.000Z');
+  let onTimeNow = START_180;
+  const onTime = { clock: () => onTimeNow };
+  const settings = { cadenceSeconds };
+  const newest180 = battlemetricsLists.get('bm-180')[0];
+  battlemetricsLists.get('bm-180')[0] = Object.assign(
+    () => {
+      onTimeNow += 0.45 * interval;
+      return newest180;
+    },
+    { entries: newest180 }
+  );
+  await pollRun(onTime, BanImporter, settings);
+  serve(180, pairs('o', 0, 12));
+  assert.deepStrictEqual(
+    [row(180).lastFullScanAt, row(180).nextFullScanAt, row(180).scanReason],
+    [START_180 + 0.45 * interval, START_180 + 0.9 * interval, 'periodic'],
+    label
+  );
+  onTimeNow = START_180 + (2 / 3) * interval;
+  polled = await pollRun(onTime, BanImporter, settings);
+  assert.deepStrictEqual(readsOf(polled), [[180, 'head', null]], label);
+  onTimeNow = START_180 + interval - 2000;
+  polled = await pollRun(onTime, BanImporter, settings);
+  assert.deepStrictEqual(readsOf(polled), [[180, 'full', 'periodic']], label);
+}
+
+// In loop mode, the run's settings also say how often cycles start (cycleSeconds), which the import
+// plans its full reads by, whatever IMPORTER_CADENCE_SECONDS gives the cadence: a cadence of an hour
+// left over from the hourly script, with cycles every 10 minutes, still gives each list its slot.
+// Here the only list's slot is the middle of each 30 minutes, 15 minutes in, so the list read in
+// full at 13:46 is next due at 14:15, as it is with a cadence of 10 minutes, rather than 27 minutes
+// after the cycle planned its reads.
+reset();
+delete env.IMPORTER_HEAD_POLL;
+battlemetricsList(181, [], paged(pairs('q', 0, 12)));
+let loopNow = Date.parse('2026-10-23T13:46:00.000Z');
+const leftOver = new BanImporter({ clock: () => loopNow });
+await leftOver.importBans({ cadenceSeconds: 3600, cycleSeconds: 600 });
+assert.deepStrictEqual(
+  [leftOver.cadenceSeconds, Object.fromEntries(leftOver.slots), row(181).nextFullScanAt],
+  [600, { 181: 15 * MINUTE }, Date.parse('2026-10-23T14:15:00.000Z')]
+);
+loopNow = Date.parse('2026-10-23T13:46:00.000Z');
+syncRows.delete(181);
+await new BanImporter({ clock: () => loopNow }).importBans({ cadenceSeconds: 3600 });
+assert.strictEqual(row(181).nextFullScanAt, Date.parse('2026-10-23T14:13:00.000Z'));
+
+// The lists due a periodic full read are read the one read in full longest ago first, whatever
+// their IDs, so when a cycle stops at its time limit before it has read them all, the next starts
+// with the lists it left.
+reset();
+delete env.IMPORTER_HEAD_POLL;
+for (const id of [182, 183, 184]) battlemetricsList(id, [], paged(pairs(`w${id}-`, 0, 3)));
+await pollRun();
+for (const [id, minutes] of [
+  [182, 31],
+  [183, 50],
+  [184, 40]
+])
+  Object.assign(syncRows.get(id), {
+    lastFullScanAt: new Date(Date.now() - minutes * MINUTE),
+    nextFullScanAt: new Date(Date.now() - MINUTE)
+  });
+polled = await pollRun();
+assert.deepStrictEqual(readsOf(polled), [
+  [183, 'full', 'periodic'],
+  [184, 'full', 'periodic'],
+  [182, 'full', 'periodic']
+]);
 
 // A dry run polls as any run does, and writes nothing. A list a poll finds it must read in full is
 // counted by its read in full alone, so its new ban is counted, and logged, once.
@@ -4555,7 +5211,13 @@ pages136[1] = Object.assign(
   { entries: secondPage }
 );
 battlemetricsLists.set('bm-136', pages136);
-polled = await pollRun(undefined, stopping.BanImporter);
+// The run tells the time by a clock of its own, which each request moves on 1.5 seconds.
+let stopNow = Date.parse('2026-10-23T15:20:00.000Z');
+onBattlemetrics = () => {
+  stopNow += 1500;
+};
+polled = await pollRun({ clock: () => stopNow }, stopping.BanImporter);
+onBattlemetrics = null;
 assert.strictEqual(polled.stopped?.reason, 'it received SIGTERM');
 assert.deepStrictEqual(
   [asked(), writes(), polled.report.banLists],
@@ -4572,7 +5234,7 @@ assert.deepStrictEqual(row(136), beforeStop);
 assert.deepStrictEqual(
   warnings().map(({ message }) => message),
   [
-    'Stopped importing ban list (ID: 136) while saving its bans, as the run is stopping, so none of its bans were removed (10 bans fetched, 0 new, 0 updated).'
+    'Stopped importing ban list (ID: 136) while saving its bans, after 3s, as the run is stopping, so none of its bans were removed (10 bans fetched, 0 new, 0 updated).'
   ]
 );
 serve(136, [...newBans, ...oldBans]);
@@ -4620,6 +5282,125 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(storedIDs(137).length, 19);
 
+// A run asked to stop while a list is read in full, between two of its pages, or between two
+// attempts at one, as when the time limit comes while BattleMetrics is slow to answer it, stops the
+// list there. Its line says which page it was on, and of about how many by BattleMetrics' count,
+// and how long its import had taken, and the report, whose totals and banLists leave it out, gives
+// it on its own (stopped), with where it stopped, so the list that held up an interrupted cycle
+// shows in the cycle's JSON line. Here each request takes 20 seconds, and the list's third page
+// asks the run to stop, so its fourth is not read.
+reset();
+delete env.IMPORTER_HEAD_POLL;
+battlemetricsList(185, [], paged(pairs('s', 0, 20)));
+battlemetricsTotals.set('bm-185', 1200);
+const pages185 = battlemetricsLists.get('bm-185');
+const halting = await loadImporter();
+const third185 = pages185[2];
+pages185[2] = Object.assign(
+  () => {
+    halting.control.requestStop('it took longer than 900s');
+    return third185;
+  },
+  { entries: third185 }
+);
+let haltNow = Date.parse('2026-10-23T15:20:00.000Z');
+onBattlemetrics = () => {
+  haltNow += 20 * 1000;
+};
+polled = await pollRun({ clock: () => haltNow }, halting.BanImporter);
+assert.strictEqual(polled.stopped?.reason, 'it took longer than 900s');
+assert.deepStrictEqual(asked(), [
+  ['bm-185', 'newest'],
+  ['bm-185', '1'],
+  ['bm-185', '2']
+]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    'Stopped importing ban list (ID: 185) while fetching page 4 of about 12, after 60s, as the run is stopping, so none of its bans were removed.'
+  ]
+);
+assert.deepStrictEqual(
+  [polled.report.imported, polled.report.banLists, polled.report.stopped],
+  [
+    0,
+    [],
+    {
+      id: 185,
+      fetched: 0,
+      new: 0,
+      updated: 0,
+      removed: 0,
+      held: 0,
+      seconds: 60,
+      read: 'full',
+      reason: 'new',
+      page: 4,
+      stage: 'fetching it'
+    }
+  ]
+);
+// A list stopped at its second attempt is given with the time of both attempts, and how its first
+// one ended: here its first attempt fails on its second page, after 40 seconds, and its second is
+// stopped before its fourth page, after 60 more. The list that did not fail is the only one in
+// banLists, as in the totals.
+reset();
+delete env.IMPORTER_HEAD_POLL;
+battlemetricsList(186, [], paged(pairs('u', 0, 20)));
+battlemetricsTotals.set('bm-186', 1200);
+battlemetricsList(187, [], paged(pairs('v', 0, 3)));
+const pages186 = battlemetricsLists.get('bm-186');
+pages186[1] = failsOnce(pages186[1]);
+const retried = await loadImporter();
+const third186 = pages186[2];
+pages186[2] = Object.assign(
+  () => {
+    retried.control.requestStop('it took longer than 900s');
+    return third186;
+  },
+  { entries: third186 }
+);
+onBattlemetrics = () => {
+  haltNow += 20 * 1000;
+};
+polled = await pollRun({ clock: () => haltNow }, retried.BanImporter);
+onBattlemetrics = null;
+assert.strictEqual(polled.stopped?.reason, 'it took longer than 900s');
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    'Failed to import ban list (ID: 186) while fetching page 2 of about 12, so none of its bans were removed. Error: Request failed with status code 502',
+    'Stopped importing ban list (ID: 186) at the second attempt while fetching page 4 of about 12, after 60s, as the run is stopping, so none of its bans were removed.'
+  ]
+);
+assert.deepStrictEqual(
+  [polled.report.imported, polled.report.banLists.map(({ id }) => id), polled.report.stopped],
+  [
+    1,
+    [187],
+    {
+      id: 186,
+      fetched: 0,
+      new: 0,
+      updated: 0,
+      removed: 0,
+      held: 0,
+      seconds: 100,
+      read: 'full',
+      reason: 'new',
+      attempt: 2,
+      page: 4,
+      firstAttempt: {
+        seconds: 40,
+        error: 'Error: Request failed with status code 502',
+        stage: 'fetching it',
+        page: 2
+      },
+      stage: 'fetching it'
+    }
+  ]
+);
+
 // A run asked to stop while a list's bans are being written finishes the batch under way, with its
 // players' updates, and starts no other. None of the list's bans are removed, as the bans it did not
 // save would look removed, and no other list is imported. The summary counts the lists imported
@@ -4631,8 +5412,13 @@ battlemetricsList(31, pairs('t', 0, 2), [pairs('t', 0, 2)]);
 onWrite = (ids) => {
   if (ids.includes('30,s6')) control.requestStop('it received SIGTERM');
 };
-const stoppedImporter = new BanImporter({ batchSize: 2 });
+let stoppedNow = Date.parse('2026-10-23T15:20:00.000Z');
+onBattlemetrics = () => {
+  stoppedNow += 2000;
+};
+const stoppedImporter = new BanImporter({ batchSize: 2, clock: () => stoppedNow });
 const stopped = await stoppedImporter.importBans().catch((err) => err);
+onBattlemetrics = null;
 assert.strictEqual(stopped.name, 'RunStopped');
 assert.strictEqual(stopped.reason, 'it received SIGTERM');
 assert.deepStrictEqual(written(), ['30,s4', '30,s5', '30,s6', '30,s7']);
@@ -4655,7 +5441,7 @@ assert.deepStrictEqual(
   warnings().map(({ message, important }) => [message, important]),
   [
     [
-      'Stopped importing ban list (ID: 30) while saving its bans, as the run is stopping, so none of its bans were removed (8 bans fetched, 4 new, 0 updated).',
+      'Stopped importing ban list (ID: 30) while saving its bans, after 2s, as the run is stopping, so none of its bans were removed (8 bans fetched, 4 new, 0 updated).',
       true
     ]
   ]
@@ -4665,8 +5451,8 @@ assert.strictEqual(
   'Got 1 deleted ban. Imported 1 of 3 ban lists before the run stopped: 1 ban fetched, 0 new, 0 updated, 1 removed, 0 held, 0 lists failed.'
 );
 // Its report for the run record counts the same lists as its summary, and every request it made,
-// that of the list it stopped in the middle of too.
-assert.deepStrictEqual(JSON.parse(JSON.stringify(stoppedImporter.report())), {
+// that of the list it stopped in the middle of too, which it gives on its own, with what it saved.
+assert.deepStrictEqual(plainReport(stoppedImporter), {
   lists: 3,
   imported: 1,
   fetched: 1,
@@ -4682,6 +5468,7 @@ assert.deepStrictEqual(JSON.parse(JSON.stringify(stoppedImporter.report())), {
   headPolls: 0,
   fullReads: 1,
   accessCheck: 'ok',
+  accessCheckSeconds: 0,
   requests: { head: 0, follow: 0, full: 2 },
   banLists: [
     {
@@ -4695,11 +5482,24 @@ assert.deepStrictEqual(JSON.parse(JSON.stringify(stoppedImporter.report())), {
       reason: 'new',
       stored: 2
     }
-  ]
+  ],
+  stopped: {
+    id: 30,
+    fetched: 8,
+    new: 4,
+    updated: 0,
+    removed: 0,
+    held: 0,
+    seconds: 2,
+    read: 'full',
+    reason: 'new',
+    stored: 4,
+    stage: 'saving its bans'
+  }
 });
 
 assert.strictEqual(verboseLevelOneLines, 0, 'Lines for the log channel are logged as important');
 
 console.log(
-  'Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed or a held ban comes back, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, second attempts, retries, sync state, the access check, lost access, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, also as the run stops, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming and periodic full reads counted from the start of the run, held counts of polled lists, the switches, stops, also during a poll, and the run summary.'
+  "Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed or a held ban comes back, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, second attempts, retries, sync state, the access check, lost access, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, also as the run stops, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming reads, periodic full reads at each list's slot, by the lists' pages and the cycle, cycles whose full reads spread out after the first, held counts of polled lists, the switches, stops, also during a poll, and the list a stop came in, each list's seconds without the access check, the page a failed or stopped read was on, but no count of the old source's for a changed one, how a list's first attempt ended, the list under way and the access check while it is read, runs an interval apart, the loop's cycle, the oldest periodic reads first, and the run summary."
 );

@@ -129,8 +129,12 @@ const STOP_GRACE = 55 * 1000;
 // STOP_GRACE less RELEASE_RESERVE. The next safe point can be minutes away: a BattleMetrics request
 // waits for the budget, for a minute once BattleMetrics says few of the key's requests are left,
 // for as long as it asks after a 429, up to 5 minutes, and for up to 3 attempts, each cut off after
-// 30 seconds. The cycle's step is not stopped, and goes on until the service exits: the cycle's
-// record keeps what the step had done when the cycle was ended, and what it does after is in no
+// 30 seconds, or for the import's reads of pages of bans, up to 5, cut off after 30, 15, 15, 20 and
+// 30 seconds, though once the cycle is asked to stop, the import's reads of pages make no more
+// attempts, and stop waiting within a second, so only an attempt already sent, of at most 30
+// seconds, holds them up. The cycle's step is not stopped, and goes on until the service exits: the
+// cycle's record keeps what the step had done when the cycle was ended, for the import with the
+// list it was importing then (see report in ban-importer.js), and what it does after is in no
 // record. A statement it still has running on the database, e.g. one that waits for a row lock, is
 // stopped before the locks are freed, as MySQL would otherwise carry it out, also once another
 // importer holds them (see stopStatements). A BattleMetrics request still waiting for its answer is
@@ -241,7 +245,8 @@ export default async function runLoop(steps) {
   const cycleSeconds = readSeconds('IMPORTER_CYCLE_SECONDS', DEFAULT_CYCLE_SECONDS);
   const maxCycleSeconds = readSeconds('IMPORTER_MAX_CYCLE_SECONDS', DEFAULT_MAX_CYCLE_SECONDS);
   // Staleness and the Steam step's budget go by how often cycles start, unless
-  // IMPORTER_CADENCE_SECONDS says otherwise.
+  // IMPORTER_CADENCE_SECONDS says otherwise. The import's full reads always go by how often cycles
+  // start (see importBans in ban-importer.js).
   const cadenceSeconds = readSeconds('IMPORTER_CADENCE_SECONDS', cycleSeconds);
   const discord = readDiscordMode(process.env.IMPORTER_LOOP_DISCORD);
   const postsCycles = discord.mode !== 'status';
@@ -1260,7 +1265,9 @@ export default async function runLoop(steps) {
         if (!statusStarted) await startStatus();
       }
 
-      await cycle.runSteps({ cadenceSeconds });
+      // The steps are also told how often cycles really start, which the import plans its full
+      // reads by, whatever IMPORTER_CADENCE_SECONDS says.
+      await cycle.runSteps({ cadenceSeconds, cycleSeconds });
       code = EXIT_CODES.FINISHED;
       console.log(
         `Finished CBL update cycle ${number} in ${((Date.now() - record.startedAt) / 1000).toFixed(2)}s.`

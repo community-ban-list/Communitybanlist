@@ -53,14 +53,16 @@ function counted(name, work) {
 // players from whether their bans have expired. The reputation check, when it is due, comes right
 // after, so a ban that has just expired is not taken for a removed one, and queues the players
 // whose points do not match their bans for the steps that recalculate them in the same run. It
-// tells when it is due from when the run started and how often runs start, from which the Steam
-// step works out how many profiles to refresh.
+// tells when it is due from when the run started and how often runs start. The import works out
+// when each list's next full read is due, and the Steam step how many profiles to refresh, from how
+// often runs start: the import from how often cycles start in loop mode (cycleSeconds), as the
+// run's settings give it.
 const steps = [];
 const writes = !banImporter.dryRun;
 if (TASKS_TO_COMPLETE.IMPORT_BANS)
   steps.push({
     name: 'importBans',
-    run: () => banImporter.importBans(),
+    run: (settings) => banImporter.importBans(settings),
     counts: () => banImporter.report()
   });
 if (TASKS_TO_COMPLETE.EXPIRE_BANS && writes)

@@ -76,8 +76,9 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
           this.dryRun = dryRun;
         }
 
-        async importBans() {
+        async importBans(given) {
           calls.push('importBans');
+          if (given) options.push(['importBans', { ...given }]);
         }
 
         report() {
@@ -164,8 +165,9 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
 // The import reports its counts for the record, and the expiry step, the reputation check, the
 // Steam step, the export recalculation and the export push count what they do in an object they
 // are given, which the record keeps, also when the step fails part-way. Each run of a step counts
-// afresh. The Steam step is given how often runs start, which the run gives the steps, and the
-// reputation check that and when the run started.
+// afresh. The import and the Steam step are given how often runs start, which the run gives the
+// steps, and in loop mode the import also how often cycles start, which it plans its full reads by.
+// The reputation check is given how often runs start and when the run started.
 {
   const index = await loadIndex();
   const START = Date.parse('2026-10-23T12:00:00.000Z');
@@ -204,7 +206,15 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
   for (const step of steps) await step.run({ cadenceSeconds: 3600, startedAt: START });
   assert.deepStrictEqual(index.calls, names);
   assert.deepStrictEqual(index.options, [
+    ['importBans', { cadenceSeconds: 3600, startedAt: START }],
     ['checkReputationPoints', { cadenceSeconds: 3600, startedAt: START }],
+    ['updateSteamUserInfo', { cadenceSeconds: 3600 }]
+  ]);
+  index.options.length = 0;
+  for (const step of [steps[0], steps[3]])
+    await step.run({ cadenceSeconds: 3600, cycleSeconds: 600 });
+  assert.deepStrictEqual(index.options, [
+    ['importBans', { cadenceSeconds: 3600, cycleSeconds: 600 }],
     ['updateSteamUserInfo', { cadenceSeconds: 3600 }]
   ]);
   assert.deepStrictEqual(counted(), [

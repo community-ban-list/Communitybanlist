@@ -23,6 +23,27 @@ const MAX_LAST_MODIFIED_LENGTH = 64;
 const BATTLEMETRICS_BANS = new URL('https://api.battlemetrics.com/bans');
 const BATTLEMETRICS_PAGE_SIZE = 100;
 
+// BattleMetrics answers a page of bans in about half a second as a rule, but at times not at all:
+// in production, a few pages of large lists got no answer, not even its headers, at about half of
+// the attempts at them, while an attempt at them that was answered was answered within a second, as
+// one a few seconds later often was. In its rare slow spells it answers pages slowly instead, the
+// slowest seen in 29 seconds. So each page has up to 5 attempts, cut off after 30, 15, 15, 20 and
+// 30 seconds, about 1, 2, 2 and 4 seconds apart, each wait up to a quarter longer at random. The
+// first has the BattleMetrics client's own 30 seconds, so a slow answer, as in a slow spell, is
+// still taken at the first attempt, rather than cut off for a later attempt to wait for again. A
+// page that gets no answer by then is asked for again soon after, by shorter attempts, as one that
+// hangs gets no answer at all, and one that is answered is answered within a second; the last two
+// are longer, for a slow spell. A page that is never answered fails its list, as before, after at
+// most about 121 seconds, 110 of attempts and up to 11 of waits, or longer while the budget, a
+// pause or Retry-After holds it up. Once the run is asked to stop, a page's request makes no more
+// attempts, and stops waiting, for the budget, a pause or another attempt, within a second (see
+// readNextPage), so only an attempt already sent holds the run up, for at most 30 seconds, as
+// before: well within the 60 seconds a run has to stop after its time limit before it is ended at
+// once, which in once mode also has to leave the run the time to end, to save its record and send
+// its log messages.
+const BATTLEMETRICS_PAGE_TIMEOUTS = [30 * 1000, 15 * 1000, 15 * 1000, 20 * 1000, 30 * 1000];
+const BATTLEMETRICS_PAGE_RETRY_DELAYS = [1000, 2000, 2000, 4000];
+
 // A BattleMetrics list is read for at most this many pages, in case its links never end. The
 // largest lists need about 120. With the count check on for the list, it is read for at most as
 // many pages as BattleMetrics' count of its bans needs, and BATTLEMETRICS_EXTRA_PAGES more, as bans
@@ -120,6 +141,19 @@ function countOf(value) {
   return Number.isInteger(value) && value >= 0 ? value : null;
 }
 
+// Mark an error from reading a page of a BattleMetrics list with which page it was (page), and how
+// many pages a read of all of the list takes, about, by BattleMetrics' count of its bans on its
+// first page (pages), or null before that count is known, so the list's failure can say where it
+// failed, e.g. on page 37 of about 93.
+function atPage(err, page, count) {
+  if (err && typeof err === 'object')
+    Object.assign(err, {
+      page,
+      pages: count === null ? null : Math.max(1, Math.ceil(count / BATTLEMETRICS_PAGE_SIZE))
+    });
+  return err;
+}
+
 // A response header to keep, if it fits its column and is plain text, or null.
 function keptHeader(response, name, maxLength) {
   const value = response?.headers?.[name];
@@ -135,7 +169,10 @@ export default class BanFetcher {
   // read's first page is then the list's newest page. Without it, lists are read in BattleMetrics'
   // own order, as before head polls. The BattleMetrics requests the fetcher makes are counted in
   // requests, by what they were for: a list's newest page (head), the pages a head poll follows
-  // after it (follow), and the other pages of a read of all of a list (full).
+  // after it (follow), and the other pages of a read of all of a list (full). While a page of a
+  // BattleMetrics list is read, reading says which, as { id, page }, the list's ID and the page's
+  // number, the first 1, for the import's report of a list it is still reading, e.g. as the
+  // importer service ends a cycle at once, and otherwise it is null.
   constructor({
     countCheck = true,
     countCheckSkip = new Set(),
@@ -146,6 +183,7 @@ export default class BanFetcher {
     this.countCheckSkip = countCheckSkip;
     this.newestFirst = newestFirst;
     this.requests = requests;
+    this.reading = null;
   }
 
   // Fetch all of a ban list, or throw if any part of it cannot be fetched, so the bans that could
@@ -396,17 +434,43 @@ export default class BanFetcher {
   //   and of those that have expired, or null for any it did not give;
   // - next: the parameters of the page after it, or null on the list's last page.
   // Throws if the page cannot be fetched, after the BattleMetrics client's own retries, is not a
-  // page of bans, or links to a page the read has been to, or elsewhere. A list with no bans on its
-  // first page that still counts some throws as hidden bans. A run that is asked to stop throws
-  // RunStopped before the request.
+  // page of bans, or links to a page the read has been to, or elsewhere, with the error marked with
+  // the page's number (see atPage). A list with no bans on its first page that still counts some
+  // throws as hidden bans. A run that is asked to stop throws RunStopped before the request, and
+  // before any later attempt at it, marked with the page's number too, so a list stopped part-way
+  // can say where it was. Until the page is read, or fails, reading says which it is.
   async readBattlemetricsPage(read, kind) {
+    const page = read.pages.length + 1;
     // A run that is asked to stop does so between pages, as the largest lists take over a minute to
     // read.
-    stopIfRequested();
-    const { banList, counts } = read;
+    try {
+      stopIfRequested();
+    } catch (err) {
+      throw atPage(err, page, read.counts.first);
+    }
     if (!read.next) throw new Error('The BattleMetrics list has no more pages to read.');
     if (read.pages.length >= read.maxPages)
       throw new Error(`BattleMetrics gave more than ${read.maxPages} pages of bans for the list.`);
+
+    this.reading = { id: read.banList.id, page };
+    try {
+      return await this.readNextPage(read, kind);
+    } catch (err) {
+      throw atPage(err, page, read.counts.first);
+    } finally {
+      this.reading = null;
+    }
+  }
+
+  // Read the next page of a read, once readBattlemetricsPage has checked that it may. Its attempts
+  // have BATTLEMETRICS_PAGE_TIMEOUTS, one for each, and BATTLEMETRICS_PAGE_RETRY_DELAYS between
+  // them, and a run that is asked to stop meanwhile makes no more of them: the BattleMetrics client
+  // calls stopIfRequested before each attempt, just before it is sent, and at least every second
+  // while the request waits, for its turn in the client's queue, a pause, Retry-After or another
+  // attempt, and the request ends with the RunStopped it throws. So only an attempt already sent
+  // can still hold the run up, by at most 30 seconds.
+  async readNextPage(read, kind) {
+    const { banList, counts } = read;
 
     // Get the ban page's data.
     Logger.verbose(
@@ -415,7 +479,11 @@ export default class BanFetcher {
       `Fetching Battlemetrics ban list data for ban list (ID: ${banList.id})...`
     );
     this.requests[kind] = (this.requests[kind] ?? 0) + 1;
-    const { data } = await battlemetrics('get', 'bans', read.next);
+    const { data } = await battlemetrics('get', 'bans', read.next, undefined, 5, {
+      timeouts: BATTLEMETRICS_PAGE_TIMEOUTS,
+      retryDelays: BATTLEMETRICS_PAGE_RETRY_DELAYS,
+      beforeAttempt: stopIfRequested
+    });
     if (!data || !Array.isArray(data.data) || !data.links)
       throw new Error('BattleMetrics returned an invalid page of bans.');
 
