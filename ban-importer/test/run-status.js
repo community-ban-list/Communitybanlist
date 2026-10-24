@@ -798,6 +798,211 @@ for (const state of [
     assert.strictEqual(markEnded(other, ended('finished')), null);
 }
 
+// The reputation check, which comes after the expired bans, is shown only when it ran: with the
+// players it checked, and how many of them did not match their bans and were queued, or that all
+// matched, and when it queued as many as it may a run, or stopped part-way, how many of those it
+// had queued and left for later runs. When it did not run, as it was not due or is off, it is left
+// out, and the embed is as it would be without it, unless the run ended in it. While it is still to
+// run, or under way, it is shown as any step is, and a run that ended in it shows it with what it
+// got done.
+{
+  const steps = [...STEPS.slice(0, 2), 'checkReputationPoints', ...STEPS.slice(2)];
+  const withCheck = (outcome, counts, extra = {}) =>
+    ended(outcome, {
+      steps,
+      completed: steps,
+      phases: { ...PHASES, checkReputationPoints: 0.52 },
+      counts: counts ? { ...COUNTS, checkReputationPoints: counts } : COUNTS,
+      ...extra
+    });
+  const without = lines(render(ended('finished')));
+  const shown = (counts) => {
+    const description = lines(render(withCheck('finished', counts)));
+    const at = description.indexOf('✅ **Reputation check** · 0.5s');
+    assert.strictEqual(description[at - 2], '✅ **Expired bans** · 0.1s');
+    assert.strictEqual(description[at + 2], '✅ **Steam profiles** · 14s');
+    // Apart from the check's lines, the embed is as it is without the check.
+    assert.deepStrictEqual([...description.slice(0, at), ...description.slice(at + 2)], without);
+    return description[at + 1];
+  };
+  assert.strictEqual(
+    shown({ ran: true, checked: 145094, mismatched: 0, queued: 0 }),
+    '> 145,094 players checked, all matched their bans'
+  );
+  assert.strictEqual(
+    shown({ ran: true, checked: 145094, mismatched: 3, queued: 3 }),
+    '> 145,094 players checked, 3 did not match their bans and were queued'
+  );
+  assert.strictEqual(
+    shown({ ran: true, checked: 1, mismatched: 1, queued: 1 }),
+    '> 1 player checked, 1 did not match their bans and was queued'
+  );
+  assert.strictEqual(
+    shown({ ran: true, checked: 145094, mismatched: 1200, queued: 500, left: 700 }),
+    '> 145,094 players checked, 1,200 did not match their bans, of which 500 were queued, 700 left for later runs'
+  );
+  assert.strictEqual(
+    shown({ ran: true, checked: 145094, mismatched: 1200, queued: 1, left: 1199 }),
+    '> 145,094 players checked, 1,200 did not match their bans, of which 1 was queued, 1,199 left for later runs'
+  );
+  assert.strictEqual(
+    shown({ ran: true, checked: 145094, mismatched: 19335, queued: 1000, left: 18335 }),
+    '> 145,094 players checked, 19,335 did not match their bans, of which 1,000 were queued, 18,335 left for later runs'
+  );
+
+  // Not run, as it was not due or is off: left out, also from a run that was still going.
+  for (const counts of [
+    { ran: false, dueAt: '2026-10-17T14:46:41.062Z' },
+    { ran: false, off: true }
+  ]) {
+    assert.deepStrictEqual(lines(render(withCheck('finished', counts))), without);
+    const going = running('updateSteamUserInfo');
+    Object.assign(going, {
+      steps,
+      completed: [...going.completed, 'checkReputationPoints'],
+      phases: { ...going.phases, checkReputationPoints: 0.01 },
+      counts: { ...going.counts, checkReputationPoints: counts }
+    });
+    assert.deepStrictEqual(lines(render(going)), lines(render(running('updateSteamUserInfo'))));
+  }
+
+  // Still to run, and under way, with how far its queueing has got.
+  const before = running('expireBans');
+  before.steps = steps;
+  assert.deepStrictEqual(lines(render(before)).slice(5, 9), [
+    '🔄 **Expired bans** · 9.0s',
+    BARS.expireBans,
+    '▫️ Reputation check',
+    '▫️ Steam profiles'
+  ]);
+  const under = running('expireBans');
+  Object.assign(under, {
+    steps,
+    phase: 'checkReputationPoints',
+    completed: [...under.completed, 'expireBans'],
+    phases: { ...under.phases, expireBans: PHASES.expireBans },
+    counts: { ...under.counts, expireBans: COUNTS.expireBans },
+    progress: { checkReputationPoints: { done: 500, total: 1200, unit: 'players' } }
+  });
+  assert.deepStrictEqual(lines(render(under)).slice(5, 10), [
+    '✅ **Expired bans** · 0.1s',
+    DETAILS.expireBans,
+    '🔄 **Reputation check** · 9.0s',
+    '> ``[████████            ]`` 500 / 1,200 players',
+    '▫️ Steam profiles'
+  ]);
+
+  // A run stopped in it shows what it got done, and one that failed before it counted anything,
+  // e.g. as it could not read the database, shows it without counts.
+  const stopped = lines(
+    render(
+      withCheck(
+        'stopped',
+        { ran: true, checked: 145094, mismatched: 1200, queued: 500 },
+        {
+          phase: 'checkReputationPoints',
+          completed: steps.slice(0, 2),
+          reason: 'Stopped, as it received SIGTERM'
+        }
+      )
+    )
+  );
+  assert.deepStrictEqual(stopped.slice(8, 12), [
+    '⏹️ **Reputation check** · 0.5s',
+    '> 145,094 players checked, 1,200 did not match their bans, of which 500 were queued, 700 left for later runs',
+    '▫️ Steam profiles · not run',
+    '▫️ Orphaned players · not run'
+  ]);
+  const failed = lines(
+    render(
+      withCheck(
+        'failed',
+        {},
+        {
+          phase: 'checkReputationPoints',
+          completed: steps.slice(0, 2),
+          progress: {},
+          reason: 'SequelizeConnectionRefusedError: connect ECONNREFUSED'
+        }
+      )
+    )
+  );
+  assert.deepStrictEqual(failed.slice(8, 10), [
+    '❌ **Reputation check** · 0.5s',
+    '▫️ Steam profiles · not run'
+  ]);
+
+  // A run asked to stop while a check that was not due, or is off, read its setting or its row,
+  // stops right after it, so it ends in it: the header names it as the phase the run ended in, so
+  // it is shown, with why it did not run, rather than left out. So it is when the next run draws
+  // the run from its saved record, which does not say whether that phase finished.
+  const DUE = '2026-10-17T14:46:41.062Z';
+  for (const [counts, details] of [
+    [{ ran: false, dueAt: DUE }, `> not due until <t:${Math.floor(Date.parse(DUE) / 1000)}:f>`],
+    [{ ran: false, off: true }, '> off, as `IMPORTER_REPUTATION_CHECK_HOURS` is 0']
+  ]) {
+    for (const [outcome, completed, mark] of [
+      ['stopped', steps.slice(0, 3), '✅'],
+      ['stopped', steps.slice(0, 2), '⏹️'],
+      ['lockLost', steps.slice(0, 3), '✅'],
+      ['failed', steps.slice(0, 3), '✅']
+    ]) {
+      const description = lines(
+        render(
+          withCheck(outcome, counts, {
+            phase: 'checkReputationPoints',
+            completed,
+            reason: 'Stopped, as it received SIGTERM'
+          })
+        )
+      );
+      assert.strictEqual(description[1], '**Phase** Reputation check', outcome);
+      assert.deepStrictEqual(
+        description.slice(6, 11),
+        [
+          '✅ **Expired bans** · 0.1s',
+          DETAILS.expireBans,
+          `${mark} **Reputation check** · 0.5s`,
+          details,
+          '▫️ Steam profiles · not run'
+        ],
+        `${outcome}, ${JSON.stringify(counts)}`
+      );
+    }
+    // A run that ended in a later step, or finished, leaves it out.
+    const later = lines(
+      render(
+        withCheck('stopped', counts, {
+          phase: 'updateSteamUserInfo',
+          completed: steps.slice(0, 3),
+          reason: 'Stopped, as it received SIGTERM'
+        })
+      )
+    );
+    assert.strictEqual(later[1], '**Phase** Steam profiles');
+    assert.deepStrictEqual(later.slice(6, 9), [
+      '✅ **Expired bans** · 0.1s',
+      DETAILS.expireBans,
+      '⏹️ **Steam profiles** · 14s'
+    ]);
+    assert.deepStrictEqual(lines(render(withCheck('finished', counts))), without);
+  }
+  // A due time that cannot be read is not shown.
+  const unreadable = lines(
+    render(
+      withCheck(
+        'stopped',
+        { ran: false, dueAt: 'soon' },
+        { phase: 'checkReputationPoints', completed: steps.slice(0, 3), reason: 'Stopped' }
+      )
+    )
+  );
+  assert.deepStrictEqual(unreadable.slice(8, 10), [
+    '✅ **Reputation check** · 0.5s',
+    '▫️ Steam profiles · not run'
+  ]);
+}
+
 // A cycle of the importer service, which posts its embed once it has ended, is named as one in its
 // title, with its number, and is otherwise drawn as a run is. A cycle number that is not one is
 // left out.

@@ -11,6 +11,7 @@ import {
 import { HOST } from 'scbl-lib/config';
 
 import { retryOperation } from './apply-list.js';
+import { RECALCULATE_POINTS } from './reputation-points.js';
 import { checkRunLock, reportProgress, stopIfRequested } from './run-control.js';
 
 const DISCORD_ALERT_CAP = 50;
@@ -72,83 +73,13 @@ export default class Core {
     );
   }
 
+  // The statement is built from the rule in reputation-points.js, as the reputation check is, so
+  // the check always finds the players whose points this would change.
   static async updateReputationPoints() {
     Logger.verbose('Core', 2, 'Updating reputation points of outdated Steam users...');
     const profileStartTime = Date.now();
     const affectedRows = await retryOperation(() =>
-      sequelize.query(
-        `
-        UPDATE SteamUsers SU
-        LEFT JOIN (
-          SELECT
-            PPBL.steamUser,
-            SUM(PPBL.points) AS "points"
-          FROM (
-            SELECT 
-              B.steamUser,
-              IF(
-                SUM(
-                  IF(
-                    B.expires IS NULL OR B.expires >= NOW(),
-                    1,
-                    0
-                  )
-                ) > 0,
-                3,
-                0
-              ) +
-              SUM(
-                IF(
-                  B.expires IS NULL OR B.expires >= NOW(),
-                  0,
-                  1
-                )
-              ) AS "points"
-            FROM Bans B
-            GROUP BY B.banList, B.steamUser
-          ) PPBL
-          GROUP BY PPBL.steamUser
-        ) PPBLC ON SU.id = PPBLC.steamUser
-        LEFT JOIN (
-          SELECT
-            PPBL.steamUser,
-            SUM(PPBL.points) AS "points"
-          FROM (
-            SELECT 
-              B.steamUser,
-              IF(
-                SUM(
-                  IF(
-                    B.expires IS NULL OR B.expires >= NOW() - INTERVAL 1 MONTH,
-                    1,
-                    0
-                  )
-                ) > 0,
-                3,
-                0
-              ) +
-              SUM(
-                IF(
-                  B.expires IS NULL OR B.expires >= NOW() - INTERVAL 1 MONTH,
-                  0,
-                  1
-                )
-              ) AS "points"
-            FROM Bans B
-            WHERE B.created < NOW() - INTERVAL 1 MONTH
-            GROUP BY B.banList, B.steamUser
-          ) PPBL
-          GROUP BY PPBL.steamUser
-        ) PPBLMB ON SU.id = PPBLMB.steamUser
-        SET
-          SU.reputationPoints = IFNULL(PPBLC.points, 0),
-          SU.reputationPointsMonthBefore = IFNULL(PPBLMB.points, 0),
-          SU.reputationPointsMonthChange = IFNULL(PPBLC.points, 0) - IFNULL(PPBLMB.points, 0),
-          SU.lastRefreshedReputationPoints = NOW()
-        WHERE SU.lastRefreshedReputationPoints IS NULL
-      `,
-        { type: sequelize.QueryTypes.BULKUPDATE }
-      )
+      sequelize.query(RECALCULATE_POINTS, { type: sequelize.QueryTypes.BULKUPDATE })
     );
     Logger.verbose(
       'Core',

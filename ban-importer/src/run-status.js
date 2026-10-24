@@ -33,6 +33,7 @@ const LABELS = {
   migrate: 'Migrations',
   importBans: 'Import',
   expireBans: 'Expired bans',
+  checkReputationPoints: 'Reputation check',
   updateSteamUserInfo: 'Steam profiles',
   clearOrphanedUsers: 'Orphaned players',
   updateReputationPoints: 'Reputation points',
@@ -191,6 +192,25 @@ const DETAILS = {
       expired < due ? `${formatCount(expired)} of ${plural(due, 'ban')}` : plural(due, 'ban');
     return `${bans} marked expired, ${plural(players, 'player')} queued`;
   },
+  // The players whose reputation points the check compared with their bans, and those whose points
+  // did not match, which it queued for a recalculation, or, when it queued as many as it may a run
+  // or stopped part-way, how many of them it queued and left for later runs. A check that did not
+  // run, which is shown only when the run ended in it (see phaseLines), says why.
+  checkReputationPoints: ({ ran, off, dueAt, checked, mismatched, queued }) => {
+    if (ran === false) {
+      if (off === true) return 'off, as `IMPORTER_REPUTATION_CHECK_HOURS` is 0';
+      const due = typeof dueAt === 'string' ? Date.parse(dueAt) : NaN;
+      return Number.isFinite(due) ? `not due until ${discordTime(due, 'f')}` : null;
+    }
+    if (![checked, mismatched, queued].every(isCount)) return null;
+    const players = `${plural(checked, 'player')} checked`;
+    if (mismatched === 0) return `${players}, all matched their bans`;
+    const found = `${formatCount(mismatched)} did not match their bans`;
+    const were = (count) => (count === 1 ? 'was' : 'were');
+    return queued < mismatched
+      ? `${players}, ${found}, of which ${formatCount(queued)} ${were(queued)} queued, ${formatCount(mismatched - queued)} left for later runs`
+      : `${players}, ${found} and ${were(mismatched)} queued`;
+  },
   // Of the profiles due, how many were updated, and how many Steam did not have, were skipped as
   // their IDs are not SteamIDs, could not be saved, or are left for later runs, when there were any.
   updateSteamUserInfo: ({ due, updated, missing, skipped, unsaved, left }) => {
@@ -239,9 +259,15 @@ function line(name, kind, mark, text, details) {
   return { name, kind, text: details ? `${mark} ${text}\n> ${details}` : `${mark} ${text}` };
 }
 
+// Whether a step that finished did not run after all, as its counts say, e.g. the reputation check
+// when it was not due or is off, so it has nothing to show.
+const skipped = (counts) => counts?.ran === false;
+
 // The lines of the phases: the steps in order, each finished, under way, the one the run ended in,
 // or not run yet, and before them a phase that is not a step, such as the migrations, while it is
-// under way or when the run ended in it.
+// under way or when the run ended in it. A step that finished without running is left out, unless
+// a run that did not finish ended in it, e.g. one stopped right after it, as the header names it as
+// the phase the run ended in.
 function phaseLines(state) {
   const { outcome, steps, phases, phase, completed, progress, counts } = state;
   const running = outcome === 'running';
@@ -267,10 +293,13 @@ function phaseLines(state) {
     );
   };
   const isCurrent = (name) => name === phase && !completed.includes(name);
+  // The phase a run that did not finish ended in, which its header names.
+  const endedIn = (name) => !running && outcome !== 'finished' && name === phase;
 
   const lines = [];
   if (phase && !steps.includes(phase) && isCurrent(phase)) lines.push(current(phase));
   for (const name of steps) {
+    if (completed.includes(name) && skipped(counts[name]) && !endedIn(name)) continue;
     if (completed.includes(name)) {
       const details =
         describeCounts(name, counts[name], progress[name]) ?? describeProgress(progress[name]);

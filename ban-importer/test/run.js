@@ -1288,8 +1288,9 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
 }
 
 // The time limit is 5 hours unless set, and the cadence 6 hours, which each step is given, as the
-// Steam step works out its budget from it, and an invalid setting is replaced with its default,
-// with a warning.
+// Steam step works out its budget from it, with when the run started, from which the reputation
+// check tells whether it is due, and an invalid setting is replaced with its default, with a
+// warning.
 for (const [value, seconds, warning] of [
   [undefined, null, false],
   ['', null, false],
@@ -1320,10 +1321,16 @@ for (const [value, seconds, warning] of [
     if (name === 'IMPORTER_MAX_RUN_SECONDS') {
       assert.strictEqual(timeLimit, expected * 1000, `Time limit for ${JSON.stringify(value)}`);
       assert.ok(start.includes(`time limit ${expected}s,`));
-      assert.deepStrictEqual(given, [{ cadenceSeconds: 21600 }, { cadenceSeconds: 21600 }]);
+      assert.deepStrictEqual(given, [
+        { cadenceSeconds: 21600, startedAt: START },
+        { cadenceSeconds: 21600, startedAt: START }
+      ]);
     } else {
       assert.ok(start.includes(`cadence ${expected}s)`), `Cadence for ${JSON.stringify(value)}`);
-      assert.deepStrictEqual(given, [{ cadenceSeconds: expected }, { cadenceSeconds: expected }]);
+      assert.deepStrictEqual(given, [
+        { cadenceSeconds: expected, startedAt: START },
+        { cadenceSeconds: expected, startedAt: START }
+      ]);
     }
     assert.strictEqual(
       importer.output.some((line) => line.startsWith(`Warning: ${name} must be a whole number`)),
