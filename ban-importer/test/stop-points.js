@@ -7,6 +7,7 @@ import isSameBattlemetricsID, {
   normaliseBattlemetricsID
 } from '../../scbl-lib/utils/battlemetrics-id.js';
 import describeError from '../../scbl-lib/utils/describe-error.js';
+import logText from '../../scbl-lib/utils/log-text.js';
 
 // Check where the importer's steps stop when the run is asked to, and that they check the run lock
 // before deleting or exporting bans, without a database or network requests.
@@ -1037,6 +1038,101 @@ function database(query, transaction = async (work) => work({})) {
   assert.deepStrictEqual(events, ['begin', 'mark 500', 'queue 500', 'commit']);
 }
 
+// The reputation check queues the players whose points do not match their bans in batches of 500,
+// each one statement, and stops between them. Asked to stop while it reads the players, it stops
+// before it writes anything, also when it has nobody to queue. Either way it saves no row, so the
+// next run checks again.
+for (const [stopOn, found, expected, queued] of [
+  ['queue', 700, ['find', 'queue 500'], 500],
+  ['find', 700, ['find'], 0],
+  ['find', 0, ['find'], 0]
+]) {
+  const events = [];
+  const mismatched = Array.from({ length: found }, (_, index) => ({
+    id: steamID(index + 1),
+    reputationPoints: 3,
+    points: '0'
+  }));
+  const check = await load('../src/reputation-check.js', {
+    ...database(async (sql, { replacements } = {}) => {
+      if (sql.startsWith('SELECT COUNT(*)')) return [{ checked: 1000 }];
+      if (sql.trim().startsWith('SELECT SU.id')) {
+        events.push('find');
+        if (stopOn === 'find') check.control.requestStop('it received SIGTERM');
+        return mismatched;
+      }
+      if (sql.startsWith('UPDATE SteamUsers')) {
+        events.push(`queue ${replacements[0].length}`);
+        if (stopOn === 'queue') check.control.requestStop('it received SIGTERM');
+        return [{ affectedRows: 0 }, { affectedRows: 0 }];
+      }
+      throw new Error(`Unexpected statement: ${sql}`);
+    }),
+    'scbl-lib/db/importer-models': {
+      ImporterState: {
+        findByPk: async () => null,
+        upsert: async () => events.push('save the row')
+      }
+    },
+    'scbl-lib/utils': { describeError, Logger, logText }
+  });
+  check.control.setRunLock(heldLock);
+  const counts = {};
+  const error = await ended(
+    check.namespace.checkReputationPoints(counts, { startedAt: Date.now() }),
+    'the reputation check'
+  );
+  assert.strictEqual(error.name, 'RunStopped', stopOn);
+  assert.deepStrictEqual(events, expected, stopOn);
+  assert.deepStrictEqual(
+    { ...counts },
+    { ran: true, checked: 1000, mismatched: found, queued, left: found - queued },
+    stopOn
+  );
+}
+
+// It writes only while the run holds the run lock, also when it has nobody to queue and would only
+// save its row: not once it has lost the lock, nor if it never took it.
+for (const [lock, mismatched, writes] of [
+  [heldLock, 2, ['queue 2', 'save the row']],
+  [heldLock, 0, ['save the row']],
+  [lostLock, 2, []],
+  [lostLock, 0, []],
+  [null, 2, []]
+]) {
+  const events = [];
+  const check = await load('../src/reputation-check.js', {
+    ...database(async (sql, { replacements } = {}) => {
+      if (sql.startsWith('SELECT COUNT(*)')) return [{ checked: 5 }];
+      if (sql.trim().startsWith('SELECT SU.id'))
+        return Array.from({ length: mismatched }, (_, index) => ({
+          id: steamID(index + 1),
+          reputationPoints: 3,
+          points: '6'
+        }));
+      if (sql.startsWith('UPDATE SteamUsers')) events.push(`queue ${replacements[0].length}`);
+      return [{ affectedRows: 0 }, { affectedRows: 0 }];
+    }),
+    'scbl-lib/db/importer-models': {
+      ImporterState: {
+        findByPk: async () => null,
+        upsert: async () => events.push('save the row')
+      }
+    },
+    'scbl-lib/utils': { describeError, Logger, logText }
+  });
+  if (lock) check.control.setRunLock(lock);
+  const outcome = await ended(
+    check.namespace.checkReputationPoints({}, { startedAt: Date.now() }),
+    'the reputation check'
+  );
+  assert.deepStrictEqual(events, writes);
+  if (writes.length === 0) {
+    assert.strictEqual(outcome.name, 'RunStopped');
+    assert.strictEqual(outcome.reason, check.control.LOCK_LOST);
+  } else assert.strictEqual(outcome, undefined);
+}
+
 // Updating export bans stops between batches of players, after a batch's last statement. The first
 // player's export bans make the batch write each kind of change.
 {
@@ -1115,5 +1211,5 @@ function database(query, transaction = async (work) => work({})) {
 }
 
 console.log(
-  'Importer safe point checks passed: ban lists, pages and their later attempts, saves, the sweep, export bans and the batched steps.'
+  'Importer safe point checks passed: ban lists, pages and their later attempts, saves, the sweep, export bans, the reputation check and the batched steps.'
 );

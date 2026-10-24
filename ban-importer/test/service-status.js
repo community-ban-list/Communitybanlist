@@ -95,9 +95,9 @@ const imported = (counts = {}, banLists = []) => ({
 });
 
 // What a cycle did, from its counts: the bans it added, updated, removed and marked expired, the
-// export bans it created and deleted, the lists that failed, the bans held by the lists it read in
-// full, and the Steam profiles it updated. Counts a step did not give, or that are not counts, are
-// none.
+// export bans it created and deleted, the players the reputation check queued, the lists that
+// failed, the bans held by the lists it read in full, and the Steam profiles it updated. Counts a
+// step did not give, or that are not counts, are none.
 {
   const numbers = copy(
     cycleNumbers(
@@ -109,6 +109,7 @@ const imported = (counts = {}, banLists = []) => ({
             { id: 3, read: 'head', stored: 80, held: 2, pending: 2 }
           ]),
           expireBans: { due: 4, expired: 4, players: 3 },
+          checkReputationPoints: { ran: true, checked: 145000, mismatched: 6, queued: 6 },
           updateSteamUserInfo: { due: 300, updated: 250 },
           exportExportBans: { queued: 7, created: 5, deleted: 2, failed: 0 }
         }
@@ -125,6 +126,7 @@ const imported = (counts = {}, banLists = []) => ({
     expired: 4,
     created: 5,
     deleted: 2,
+    reputationQueued: 6,
     failedLists: 1,
     held: 17,
     steamUpdated: 250,
@@ -132,7 +134,16 @@ const imported = (counts = {}, banLists = []) => ({
     dryRun: false
   });
   assert.deepStrictEqual(
-    copy(cycleNumbers(record({ counts: { importBans: { new: -1, updated: 'x', dryRun: true } } }))),
+    copy(
+      cycleNumbers(
+        record({
+          counts: {
+            importBans: { new: -1, updated: 'x', dryRun: true },
+            checkReputationPoints: { ran: false, dueAt: '2026-10-23T14:02:00.000Z' }
+          }
+        })
+      )
+    ),
     {
       added: 0,
       updated: 0,
@@ -140,6 +151,7 @@ const imported = (counts = {}, banLists = []) => ({
       expired: 0,
       created: 0,
       deleted: 0,
+      reputationQueued: 0,
       failedLists: 0,
       held: 0,
       steamUpdated: 0,
@@ -152,12 +164,15 @@ const imported = (counts = {}, banLists = []) => ({
 
 // A cycle is worth an embed of its own when it changed something or had a problem: it failed or
 // was stopped, a list failed, a list read in full held bans, or it logged a line for the log
-// channel. A quiet cycle, which only polled and found nothing, is not, nor is one that refreshed
-// Steam profiles, recalculated every player or only counted SteamID moves.
+// channel. Its reputation check queueing players whose points did not match their bans is a
+// change. A quiet cycle, which only polled and found nothing, is not, nor is one that refreshed
+// Steam profiles, recalculated every player, only counted SteamID moves, or checked every player's
+// reputation points and found them all matching.
 {
   const quiet = record({
     counts: {
       importBans: imported({ moves: 3 }, [{ id: 2, read: 'head', held: 40 }]),
+      checkReputationPoints: { ran: true, checked: 145000, mismatched: 0, queued: 0 },
       updateSteamUserInfo: { due: 300, updated: 300 },
       updateExportBans: { players: 145000 }
     }
@@ -165,6 +180,15 @@ const imported = (counts = {}, banLists = []) => ({
   assert.strictEqual(isNoteworthy(quiet, cycleNumbers(quiet)), false);
   assert.strictEqual(isNoteworthy(quiet, cycleNumbers(quiet), { lines: 0 }), false);
   assert.strictEqual(isNoteworthy(quiet, cycleNumbers(quiet), { lines: 1 }), true);
+  const notDue = record({
+    counts: { checkReputationPoints: { ran: false, dueAt: '2026-10-23T14:02:00.000Z' } }
+  });
+  assert.strictEqual(isNoteworthy(notDue, cycleNumbers(notDue)), false);
+  // Numbers from before the reputation check, without its count, are judged as before.
+  const { reputationQueued, ...before } = copy(cycleNumbers(quiet));
+  assert.strictEqual(reputationQueued, 0);
+  assert.strictEqual(isNoteworthy(quiet, before), false);
+  assert.strictEqual(isNoteworthy(quiet, { ...before, added: 1 }), true);
   for (const exitCode of [1, 3])
     assert.strictEqual(isNoteworthy(record({ exitCode }), cycleNumbers(record())), true);
   for (const counts of [
@@ -175,7 +199,10 @@ const imported = (counts = {}, banLists = []) => ({
     { importBans: imported({}, [{ id: 1, read: 'full', stored: 10, held: 1, pending: 1 }]) },
     { expireBans: { due: 1, expired: 1, players: 1 } },
     { exportExportBans: { queued: 1, created: 1, deleted: 0 } },
-    { exportExportBans: { queued: 1, created: 0, deleted: 1 } }
+    { exportExportBans: { queued: 1, created: 0, deleted: 1 } },
+    { checkReputationPoints: { ran: true, checked: 145000, mismatched: 2, queued: 2 } },
+    // One that stopped part-way still queued some.
+    { checkReputationPoints: { ran: true, checked: 145000, mismatched: 900, queued: 500 } }
   ]) {
     const cycle = record({ counts });
     assert.strictEqual(isNoteworthy(cycle, cycleNumbers(cycle)), true, JSON.stringify(counts));
@@ -183,8 +210,9 @@ const imported = (counts = {}, banLists = []) => ({
 }
 
 // The totals sum up the cycles that ended: how many, how many failed and were stopped, the bans
-// and export bans, the lists that failed, the BattleMetrics requests and Steam profiles, and the
-// slowest cycle. A dry run's bans were not written, so they are not counted.
+// and export bans, the players the reputation check queued, the lists that failed, the
+// BattleMetrics requests and Steam profiles, and the slowest cycle. A dry run's bans were not
+// written, so they are not counted.
 {
   const totals = newTotals(START);
   const add = (cycle) =>
@@ -196,17 +224,34 @@ const imported = (counts = {}, banLists = []) => ({
       counts: {
         importBans: imported({ new: 3, updated: 1, failedLists: 2 }),
         expireBans: { due: 2, expired: 2, players: 2 },
+        checkReputationPoints: { ran: true, checked: 145000, mismatched: 1500, queued: 1000 },
         updateSteamUserInfo: { updated: 250 },
         exportExportBans: { created: 4, deleted: 1 }
       }
     })
   );
   add(record({ cycle: 2, exitCode: 1, seconds: 12 }));
-  add(record({ cycle: 3, exitCode: 3, seconds: 900 }));
+  add(
+    record({
+      cycle: 3,
+      exitCode: 3,
+      seconds: 900,
+      counts: {
+        checkReputationPoints: { ran: true, checked: 144000, mismatched: 500, queued: 441 }
+      }
+    })
+  );
   add(record({ cycle: 4, counts: { importBans: imported({ new: 9, dryRun: true }) } }));
+  // A check that did not run queued nobody.
+  add(
+    record({
+      cycle: 5,
+      counts: { checkReputationPoints: { ran: false, dueAt: '2026-10-23T14:02:00.000Z' } }
+    })
+  );
   assert.deepStrictEqual(copy(totals), {
     since: START,
-    cycles: 4,
+    cycles: 5,
     failed: 1,
     stopped: 1,
     added: 3,
@@ -215,8 +260,9 @@ const imported = (counts = {}, banLists = []) => ({
     expired: 2,
     created: 4,
     deleted: 1,
+    reputationQueued: 1441,
     failedLists: 2,
-    battlemetricsRequests: 80,
+    battlemetricsRequests: 100,
     steamUpdated: 250,
     slowest: { cycle: 3, seconds: 900, startedAt: START + 20 * MINUTE }
   });
@@ -231,13 +277,20 @@ const imported = (counts = {}, banLists = []) => ({
   );
   assert.deepStrictEqual(lines(summary), [
     `<t:${UNIX}:f> to <t:${UNIX + 53 * 60}:t>`,
-    '**Cycles** 4 run · 1 failed · 1 stopped · 2 lists failed',
+    '**Cycles** 5 run · 1 failed · 1 stopped · 2 lists failed',
     '**Bans** 3 added · 1 updated · 0 removed · 2 expired',
     '**Export bans** 4 created · 1 deleted',
-    '**BattleMetrics** 80 requests',
+    '**Reputation check** 1,441 players queued',
+    '**BattleMetrics** 100 requests',
     '**Steam** 250 profiles updated',
     `**Slowest cycle** 15m 00s, cycle 3, started <t:${UNIX + 20 * 60}:t>`
   ]);
+  // One player is one player, and with none queued the line is left out (see the empty summary).
+  assert.ok(
+    lines(copy(renderHourlySummary({ ...totals, reputationQueued: 1 }, START))).includes(
+      '**Reputation check** 1 player queued'
+    )
+  );
   totals.failed = 0;
   assert.strictEqual(renderHourlySummary(totals, START).color, 0xe67e22);
   const empty = copy(renderHourlySummary(newTotals(START), START + 60 * MINUTE));
@@ -284,6 +337,7 @@ const last = {
       counts: {
         importBans: imported({ new: 2, removed: 1 }),
         expireBans: { expired: 3 },
+        checkReputationPoints: { ran: true, checked: 145000, mismatched: 3, queued: 3 },
         exportExportBans: { created: 4, deleted: 0 }
       }
     })
@@ -318,10 +372,26 @@ const running = {
     '',
     `🔄 **Cycle 2** · started <t:${UNIX + 600}:R> · **Import** 7 / 20 ban lists`,
     `✅ **Cycle 1** finished in **45s**, <t:${UNIX + 45}:R>`,
-    '> 2 bans added, 1 removed, 3 expired · 4 export bans created',
+    '> 2 bans added, 1 removed, 3 expired · 4 export bans created · 3 players queued by the reputation check',
     '',
     `**Since <t:${UNIX}:t>** · 1 cycle · bans 2 added, 0 updated, 0 removed, 0 expired · export bans 0 created, 0 deleted · 21 BattleMetrics requests · 0 Steam profiles updated · slowest 45s`
   ]);
+  // The totals name the players the reputation check queued, once it queued any.
+  const withQueued = addCycle(
+    copy(totals),
+    record({ cycle: 2, seconds: 30 }),
+    cycleNumbers(
+      record({
+        counts: {
+          checkReputationPoints: { ran: true, checked: 145000, mismatched: 441, queued: 441 }
+        }
+      })
+    )
+  );
+  assert.strictEqual(
+    lines(render({ ...running, totals: withQueued })).at(-1),
+    `**Since <t:${UNIX}:t>** · 2 cycles · bans 2 added, 0 updated, 0 removed, 0 expired · export bans 0 created, 0 deleted · 441 players queued by the reputation check · 21 BattleMetrics requests · 0 Steam profiles updated · slowest 45s`
+  );
 
   // A cycle that waits for the database, or for another run to end, as it holds the run lock, says
   // since when, and one in a phase that is not a step, or without progress, says only which.
@@ -371,6 +441,14 @@ const running = {
     `❌ **Cycle 1** failed after **45s**, <t:${UNIX + 45}:R>: Error: connect ECONNREFUSED (address)`,
     '> no changes'
   ]);
+  // A cycle whose only change was a player its reputation check queued says so.
+  const queuedOnly = record({
+    counts: { checkReputationPoints: { ran: true, checked: 145000, mismatched: 1, queued: 1 } }
+  });
+  assert.strictEqual(
+    lines(render({ ...between, last: { ...last, numbers: cycleNumbers(queuedOnly) } }))[5],
+    '> 1 player queued by the reputation check'
+  );
   assert.ok(!JSON.stringify(failed).includes('secret-token'));
   assert.match(
     lines(

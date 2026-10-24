@@ -280,8 +280,9 @@ export async function checkStaleness(options, ms = RECORD_TIMEOUT) {
 // One run of the importer's steps, or in loop mode one cycle of the importer service: its record,
 // which phases finished, and how far each step got, as the steps report it. Each step is
 // { name, run, counts }: run(settings) does the step's work, given the run's settings that steps
-// use, { cadenceSeconds }, and counts(), if given, returns the counts the run record keeps for it.
-// onChange, when set, is told whenever a phase starts or ends.
+// use, { cadenceSeconds, startedAt }, which is when the run started, in milliseconds, and counts(),
+// if given, returns the counts the run record keeps for it. onChange, when set, is told whenever a
+// phase starts or ends.
 export class RunState {
   constructor(steps) {
     this.steps = steps;
@@ -324,13 +325,15 @@ export class RunState {
   }
 
   // Run the steps in order, keeping the counts each gives, also when it fails or stops part-way. A
-  // run that is asked to stop does so between steps, as well as at the steps' own safe points.
+  // run that is asked to stop does so between steps, as well as at the steps' own safe points. Each
+  // step is given the settings, with when the run started (startedAt).
   async runSteps(settings) {
+    const given = { ...settings, startedAt: this.record.startedAt };
     for (const step of this.steps) {
       stopIfRequested();
       await this.time(step.name, async () => {
         try {
-          await step.run(settings);
+          await step.run(given);
         } finally {
           if (step.counts) this.record.count(step.name, step.counts);
         }

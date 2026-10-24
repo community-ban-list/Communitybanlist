@@ -59,6 +59,8 @@ const DESCRIPTION_LENGTH = 3500;
 //   updates its ban, so it is counted there; one that is only counted changed nothing;
 // - expired: the bans marked expired;
 // - created, deleted: the export bans pushed;
+// - reputationQueued: the players the reputation check queued, as their reputation points did not
+//   match their bans;
 // - failedLists: the ban lists whose import failed;
 // - held: the bans kept that lists read in full in the cycle no longer have, which wait for a
 //   confirming read or for an admin, but not those a list that was only polled still keeps;
@@ -78,6 +80,7 @@ export function cycleNumbers(record, { battlemetricsRequests = 0 } = {}) {
     expired: count(counts.expireBans?.expired),
     created: count(counts.exportExportBans?.created),
     deleted: count(counts.exportExportBans?.deleted),
+    reputationQueued: count(counts.checkReputationPoints?.queued),
     failedLists: count(imports.failedLists),
     held: banLists
       .filter((list) => list && list.stored !== undefined)
@@ -89,13 +92,15 @@ export function cycleNumbers(record, { battlemetricsRequests = 0 } = {}) {
 }
 
 // Whether a cycle is worth an embed of its own: it changed something (bans added, updated, removed
-// or expired, or export bans created or deleted) or had a problem (it failed or was stopped, a list
-// failed, a list read in full held bans, or it posted a line to the log channel, such as a warning
-// or an alert). lines is how many lines it logged for the log channel. A quiet cycle is not.
+// or expired, export bans created or deleted, or players queued by the reputation check) or had a
+// problem (it failed or was stopped, a list failed, a list read in full held bans, or it posted a
+// line to the log channel, such as a warning or an alert). lines is how many lines it logged for
+// the log channel. A quiet cycle is not.
 export function isNoteworthy(record, numbers, { lines = 0 } = {}) {
   if (record?.exitCode !== 0) return true;
-  const { added, updated, removed, expired, created, deleted, failedLists, held } = numbers;
-  return added + updated + removed + expired + created + deleted + failedLists + held + lines > 0;
+  const { added, updated, removed, expired, created, deleted, reputationQueued = 0 } = numbers;
+  const changes = added + updated + removed + expired + created + deleted + reputationQueued;
+  return changes + numbers.failedLists + numbers.held + lines > 0;
 }
 
 // The service's totals from since on, which the status message shows and the hourly summary posts.
@@ -111,6 +116,8 @@ export function newTotals(since) {
     expired: 0,
     created: 0,
     deleted: 0,
+    // The players the reputation check queued, as their points did not match their bans.
+    reputationQueued: 0,
     failedLists: 0,
     battlemetricsRequests: 0,
     steamUpdated: 0,
@@ -129,14 +136,15 @@ export function addCycle(totals, record, numbers) {
   if (!numbers.dryRun) fields.push('added', 'updated', 'removed');
   for (const field of fields) totals[field] += numbers[field];
   totals.steamUpdated += numbers.steamUpdated;
+  totals.reputationQueued += numbers.reputationQueued ?? 0;
   const seconds = isCount(record.seconds) ? record.seconds : 0;
   if (!totals.slowest || seconds > totals.slowest.seconds)
     totals.slowest = { cycle: record.cycle, seconds, startedAt: Date.parse(record.startedAt) };
   return totals;
 }
 
-// What a cycle changed, in a line, e.g. "3 bans added, 2 expired · 4 export bans created", or that
-// it changed nothing.
+// What a cycle changed, in a line, e.g. "3 bans added, 2 expired · 4 export bans created · 2
+// players queued by the reputation check", or that it changed nothing.
 function describeChanges(numbers) {
   const bans = [
     [numbers.added, 'added'],
@@ -163,12 +171,15 @@ function describeChanges(numbers) {
         .map(([value, what]) => `, ${formatCount(value)} ${what}`)
         .join('')}`
     );
+  if (numbers.reputationQueued > 0)
+    parts.push(`${plural(numbers.reputationQueued, 'player')} queued by the reputation check`);
   if (numbers.failedLists > 0) parts.push(`${plural(numbers.failedLists, 'list')} failed`);
   if (numbers.held > 0) parts.push(`${plural(numbers.held, 'ban')} held`);
   return parts.length > 0 ? parts.join(' · ') : 'no changes';
 }
 
-// The totals in a line, as the status message shows them.
+// The totals in a line, as the status message shows them, with the players the reputation check
+// queued only when it queued any.
 function describeTotals(totals) {
   const failures = [
     totals.failed > 0 ? `${formatCount(totals.failed)} failed` : null,
@@ -178,9 +189,12 @@ function describeTotals(totals) {
     `${plural(totals.cycles, 'cycle')}${failures.length > 0 ? ` (${failures.join(', ')})` : ''}`,
     `bans ${formatCount(totals.added)} added, ${formatCount(totals.updated)} updated, ${formatCount(totals.removed)} removed, ${formatCount(totals.expired)} expired`,
     `export bans ${formatCount(totals.created)} created, ${formatCount(totals.deleted)} deleted`,
+    totals.reputationQueued > 0
+      ? `${plural(totals.reputationQueued, 'player')} queued by the reputation check`
+      : null,
     plural(totals.battlemetricsRequests, 'BattleMetrics request'),
     `${plural(totals.steamUpdated, 'Steam profile')} updated`
-  ];
+  ].filter(Boolean);
   if (totals.slowest) parts.push(`slowest ${formatDuration(totals.slowest.seconds)}`);
   return parts.join(' · ');
 }
@@ -281,7 +295,8 @@ export default function renderServiceStatus(state) {
   };
 }
 
-// Draw the hourly summary of the totals, which ran from totals.since to until.
+// Draw the hourly summary of the totals, which ran from totals.since to until, with the players the
+// reputation check queued only when it queued any.
 export function renderHourlySummary(totals, until) {
   const lines = [
     `${discordTime(totals.since, 'f')} to ${discordTime(until, 't')}`,
@@ -290,6 +305,9 @@ export function renderHourlySummary(totals, until) {
     }`,
     `**Bans** ${formatCount(totals.added)} added · ${formatCount(totals.updated)} updated · ${formatCount(totals.removed)} removed · ${formatCount(totals.expired)} expired`,
     `**Export bans** ${formatCount(totals.created)} created · ${formatCount(totals.deleted)} deleted`,
+    ...(totals.reputationQueued > 0
+      ? [`**Reputation check** ${plural(totals.reputationQueued, 'player')} queued`]
+      : []),
     `**BattleMetrics** ${plural(totals.battlemetricsRequests, 'request')}`,
     `**Steam** ${plural(totals.steamUpdated, 'profile')} updated`,
     totals.slowest

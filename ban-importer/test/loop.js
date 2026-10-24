@@ -727,6 +727,7 @@ const importCounts = (counts = {}) => ({
 // migrations. SIGTERM between cycles ends the service at once, with exit code 0: it shows that it
 // stopped in its status message, closes the database connections, sends its log messages and
 // releases the locks. Its signal handlers, timers and health server are gone once it has ended.
+// Each step is also given when its cycle started.
 {
   const service = await loadLoop({
     env: { GIT_SHA: 'abc1234', IMPORTER_CYCLE_SECONDS: '600' }
@@ -752,9 +753,9 @@ const importCounts = (counts = {}) => ({
     [3, 3, false]
   );
   assert.deepStrictEqual(given, [
-    { cadenceSeconds: 600, cycleSeconds: 600 },
-    { cadenceSeconds: 600, cycleSeconds: 600 },
-    { cadenceSeconds: 600, cycleSeconds: 600 }
+    { cadenceSeconds: 600, cycleSeconds: 600, startedAt: START },
+    { cadenceSeconds: 600, cycleSeconds: 600, startedAt: START + 600 * SECOND },
+    { cadenceSeconds: 600, cycleSeconds: 600, startedAt: START + 1200 * SECOND }
   ]);
   const records = service.records();
   assert.deepStrictEqual(

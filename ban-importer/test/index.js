@@ -68,6 +68,7 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
       }
     },
     './src/expiry.js': { expireBans: step('expireBans') },
+    './src/reputation-check.js': { checkReputationPoints: step('checkReputationPoints') },
     './src/steam-profiles.js': { updateSteamUserInfo: step('updateSteamUserInfo') },
     './src/ban-importer.js': {
       default: class {
@@ -160,16 +161,20 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
 
 // The run is given every step, in order, each named after what it runs, as the run record names
 // them. Bans whose expiry has passed are marked expired after the import and before the steps that
-// recalculate players. The import reports its counts for the record, and the expiry step, the Steam
-// step, the export recalculation and the export push count what they do in an object they are
-// given, which the record keeps, also when the step fails part-way. Each run of a step counts
+// recalculate players, and the reputation check comes right after them, before those steps too.
+// The import reports its counts for the record, and the expiry step, the reputation check, the
+// Steam step, the export recalculation and the export push count what they do in an object they
+// are given, which the record keeps, also when the step fails part-way. Each run of a step counts
 // afresh. The import and the Steam step are given how often runs start, which the run gives the
 // steps, and in loop mode the import also how often cycles start, which it plans its full reads by.
+// The reputation check is given how often runs start and when the run started.
 {
   const index = await loadIndex();
+  const START = Date.parse('2026-10-23T12:00:00.000Z');
   const names = [
     'importBans',
     'expireBans',
+    'checkReputationPoints',
     'updateSteamUserInfo',
     'clearOrphanedUsers',
     'updateReputationPoints',
@@ -192,19 +197,21 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
       .map((step) => [step.name, step.counts()]),
     [
       ['expireBans', undefined],
+      ['checkReputationPoints', undefined],
       ['updateSteamUserInfo', undefined],
       ['updateExportBans', undefined],
       ['exportExportBans', undefined]
     ]
   );
-  for (const step of steps) await step.run({ cadenceSeconds: 3600 });
+  for (const step of steps) await step.run({ cadenceSeconds: 3600, startedAt: START });
   assert.deepStrictEqual(index.calls, names);
   assert.deepStrictEqual(index.options, [
-    ['importBans', { cadenceSeconds: 3600 }],
+    ['importBans', { cadenceSeconds: 3600, startedAt: START }],
+    ['checkReputationPoints', { cadenceSeconds: 3600, startedAt: START }],
     ['updateSteamUserInfo', { cadenceSeconds: 3600 }]
   ]);
   index.options.length = 0;
-  for (const step of [steps[0], steps[2]])
+  for (const step of [steps[0], steps[3]])
     await step.run({ cadenceSeconds: 3600, cycleSeconds: 600 });
   assert.deepStrictEqual(index.options, [
     ['importBans', { cadenceSeconds: 3600, cycleSeconds: 600 }],
@@ -213,11 +220,12 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
   assert.deepStrictEqual(counted(), [
     ['importBans', { lists: 2 }],
     ['expireBans', { step: 'expireBans' }],
+    ['checkReputationPoints', { step: 'checkReputationPoints' }],
     ['updateSteamUserInfo', { step: 'updateSteamUserInfo' }],
     ['updateExportBans', { step: 'updateExportBans' }],
     ['exportExportBans', { step: 'exportExportBans' }]
   ]);
-  for (const step of [steps[1], steps[2]]) {
+  for (const step of [steps[1], steps[2], steps[3]]) {
     const first = step.counts();
     await step.run();
     assert.notStrictEqual(step.counts(), first);
@@ -322,7 +330,7 @@ for (const [value, runner] of [
 ]) {
   const index = await loadIndex({ env: value === undefined ? {} : { IMPORTER_MODE: value } });
   assert.deepStrictEqual([index.started, index.modes], [[runner], [value]], `${value}`);
-  assert.strictEqual(Array.from(index.steps()).length, 8);
+  assert.strictEqual(Array.from(index.steps()).length, 9);
   index.result.resolve(runner === 'loop' ? 0 : 75);
   await settle();
   assert.deepStrictEqual(index.process.exits, [runner === 'loop' ? 0 : 75]);

@@ -7,6 +7,7 @@ import BanImporter from './src/ban-importer.js';
 import ExportBanManager from './src/export-ban-manager.js';
 import { expireBans } from './src/expiry.js';
 import runLoop, { readMode } from './src/loop.js';
+import { checkReputationPoints } from './src/reputation-check.js';
 import run, { EXIT_CODES, leftWaiting } from './src/run.js';
 import { updateSteamUserInfo } from './src/steam-profiles.js';
 
@@ -15,6 +16,7 @@ Error.stackTraceLimit = 255;
 const TASKS_TO_COMPLETE = {
   IMPORT_BANS: true,
   EXPIRE_BANS: true,
+  CHECK_REPUTATION_POINTS: true,
   UPDATE_STEAM_USER_INFO: true, // TODO: This is causing random hangs; Try ading more debug code until we can find out what causes it.
   UPDATE_REPUTATION_POINTS: true,
   UPDATE_REPUTATION_RANK: true,
@@ -48,9 +50,13 @@ function counted(name, work) {
 // gives. A run that is asked to stop does so between them. A dry run (IMPORTER_DRY_RUN) only
 // imports, writing nothing, as every other step writes. Bans whose expiry has passed are marked
 // expired after the import, which marks those it fetches, and before the steps that recalculate
-// players from whether their bans have expired. The import works out when each list's next full
-// read is due, and the Steam step how many profiles to refresh, from how often runs start: the
-// import from how often cycles start in loop mode (cycleSeconds), as the run's settings give it.
+// players from whether their bans have expired. The reputation check, when it is due, comes right
+// after, so a ban that has just expired is not taken for a removed one, and queues the players
+// whose points do not match their bans for the steps that recalculate them in the same run. It
+// tells when it is due from when the run started and how often runs start. The import works out
+// when each list's next full read is due, and the Steam step how many profiles to refresh, from how
+// often runs start: the import from how often cycles start in loop mode (cycleSeconds), as the
+// run's settings give it.
 const steps = [];
 const writes = !banImporter.dryRun;
 if (TASKS_TO_COMPLETE.IMPORT_BANS)
@@ -61,6 +67,12 @@ if (TASKS_TO_COMPLETE.IMPORT_BANS)
   });
 if (TASKS_TO_COMPLETE.EXPIRE_BANS && writes)
   steps.push(counted('expireBans', (counts) => expireBans(counts)));
+if (TASKS_TO_COMPLETE.CHECK_REPUTATION_POINTS && writes)
+  steps.push(
+    counted('checkReputationPoints', (counts, { cadenceSeconds, startedAt } = {}) =>
+      checkReputationPoints(counts, { cadenceSeconds, startedAt })
+    )
+  );
 if (TASKS_TO_COMPLETE.UPDATE_STEAM_USER_INFO && writes)
   steps.push(
     counted('updateSteamUserInfo', (counts, { cadenceSeconds } = {}) =>
