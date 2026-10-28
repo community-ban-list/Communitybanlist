@@ -150,7 +150,9 @@ export async function loadApp({ files = FILES, env = {}, stubs = {} } = {}) {
     throw err;
   }
   const { port } = server.address();
-  const agent = new http.Agent({ keepAlive: true });
+  // Each request has its own connection, so one the app answers before reading all of its body,
+  // such as one said to be too large, cannot hold up the next.
+  const agent = new http.Agent({ keepAlive: false });
 
   // Send a request with its path exactly as given, where fetch would first resolve any ../ in it.
   function request(requestPath, { method = 'GET', headers = {}, body } = {}) {
