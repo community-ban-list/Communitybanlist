@@ -1,12 +1,12 @@
 name: Pull request checks
 
-# Lint, test and build every pull request to master, so a change that breaks them shows on the pull
-# request before it is merged, not on master after. Pull requests from forks run code nobody has
+# Lint, test and build every pull request, so a change that breaks them shows on the pull request
+# before it is merged, not after. It runs for a pull request into any branch that has this file,
+# such as master or another pull request's branch. Pull requests from forks run code nobody has
 # reviewed yet, so the jobs run on GitHub's own runners rather than the self-hosted one, and the
 # trigger is pull_request, which gives a fork's run no secrets and a read-only token.
 on:
   pull_request:
-    branches: [master]
 
 # A new push to a pull request cancels the checks still running for its earlier commit. The image
 # workflows use another group, so these checks never wait for a deployment.
@@ -62,6 +62,8 @@ jobs:
       - name: Build the client
         run: yarn build-web-server
 
+      # A test still running after 2 minutes is stopped and fails, so even several that hang are
+      # listed as failed within the job's time limit.
       - name: Run the tests of every workspace
         run: node scripts/run-tests.mjs
 
