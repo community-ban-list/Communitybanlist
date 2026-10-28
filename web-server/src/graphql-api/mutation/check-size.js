@@ -99,10 +99,17 @@ let unfinished = 0;
 
 // The counts' own pool of database connections, which holds one. A count that asks for it waits at
 // most CONNECTION_WAIT, and then no longer waits, so it cannot take the connection later.
+// If the connection stops answering altogether, e.g. after a network fault that leaves it open with
+// no answer ever coming, the changes that need their list's players counted are refused until the
+// operating system gives up on the connection, which can take many minutes. That is accepted: a
+// new connection in its place could put a second count on the database while the first still
+// runs. The rest of the web server keeps its own connections meanwhile, and other changes are
+// still saved.
 const countPool = createPool({ max: 1, min: 0, acquire: CONNECTION_WAIT });
 
 // Close the counts' connection, as the web server stops. It waits for the database to answer a
-// count still running on it.
+// count still running on it, which may never come (see above), so the stop gives it a time limit
+// of its own, apart from the other database connections'.
 export function closeCountPool() {
   return countPool.close();
 }
