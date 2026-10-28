@@ -28,11 +28,12 @@ export default {
         ...pageArgs(filter, PAGE_SIZE.list)
       });
     },
-    // The player is returned as soon as they are read, with this view's time as lastViewed. That
-    // they were viewed is saved later, in the background.
+    // The player is returned as soon as they are read. A view of a player with reputation points,
+    // whom Recently Viewed Players can list, is answered with its own time as lastViewed, and saved
+    // later, in the background.
     steamUser: async (parent, filter) => {
       const user = await SteamUser.findByPk(filter.id);
-      if (user) user.lastViewed = recordView(user.id);
+      if (user?.reputationPoints > 0) user.lastViewed = recordView(user.id);
       return user;
     },
     loggedInSteamUser: async (parent, filter, context) => {

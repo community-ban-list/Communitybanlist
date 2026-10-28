@@ -42,12 +42,14 @@ class FakeDate extends Date {
 const logged = [];
 const fakeConsole = { error: (...args) => logged.push(args) };
 
-// A stand-in for the players table. Every Steam ID that starts with 7656 is a player. Each row
+// A stand-in for the players table. Every Steam ID that starts with 7656 is a player, with
+// reputation points, except the player without any below. Each row
 // records any save made on it, which never finishes, as when the row is locked. A transaction runs
 // its callback with the transaction below. query records how it was called, and locks and returns
 // the rows asked for, except those the checks have locked. update records how it was called and
 // answers with the next of the answers the checks give it. Its database quotes values, and Dates as
 // ISO strings, and keeps SQL it is given as it is.
+const NO_POINTS = '76561198000000099';
 const TRANSACTION = { transaction: 'the save' };
 const saves = [];
 const queries = [];
@@ -59,6 +61,7 @@ const SteamUser = {
     if (!id.startsWith('7656')) return null;
     return {
       id,
+      reputationPoints: id === NO_POINTS ? 0 : 1,
       save() {
         saves.push(id);
         return new Promise(() => {});
@@ -228,8 +231,13 @@ assert.ok(VIEW_SAVE_INTERVAL >= 1000 && VIEW_SAVE_INTERVAL <= 60 * 1000);
 assert.ok(MAX_WAITING_VIEWS >= 1000 && MAX_WAITING_VIEWS <= 10000);
 assert.ok(SAVE_TIME_LIMIT > VIEW_SAVE_INTERVAL && SAVE_TIME_LIMIT <= 5 * 60 * 1000);
 
-// A lookup of no player answers null and records no view.
+// A lookup of no player answers null and records no view. Nor does a lookup of a player without
+// reputation points, who is not listed under Recently Viewed Players: it answers with the player
+// as they are stored, and the next save leaves them out.
 assert.strictEqual(await view('not-a-player'), null);
+const withoutPoints = await view(NO_POINTS);
+assert.strictEqual(withoutPoints.id, NO_POINTS);
+assert.strictEqual(withoutPoints.lastViewed, undefined, 'A player without points is not recorded.');
 
 // Ten views of two players, a second apart, wait for one save, which saves both in one statement.
 // Each is saved as viewed at the time of their last view, so the player viewed last is listed

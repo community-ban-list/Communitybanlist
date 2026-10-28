@@ -19,8 +19,9 @@ export default gql`
     lastRefreshedReputationRank: Date
 
     """
-    When the player was last looked up. A lookup answers with its own time, and saves it in the
-    background, usually within 30 seconds, so lists ordered by it show the view after that.
+    When the player was last looked up, while they had reputation points. Such a lookup answers with
+    its own time, and saves it in the background, usually within 30 seconds, so lists ordered by it
+    show the view after that.
     """
     lastViewed: Date
 
