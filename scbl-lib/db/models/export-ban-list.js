@@ -1,5 +1,6 @@
 import Sequelize from 'sequelize';
 
+import openConnection from '../open-connection.js';
 import sequelize from '../sequelize.js';
 import { countMembers } from '../export-membership.js';
 
@@ -32,6 +33,33 @@ const TYPE_NAMES = { battlemetrics: 'BattleMetrics', remote: 'remote' };
 
 // A whole number as the messages write it, with commas: 20,000.
 const formatNumber = (value) => value.toLocaleString('en-US');
+
+// MySQL's error number for a deadlock, after which it has rolled back the whole transaction.
+const DEADLOCK = 1213;
+
+// The name of a list's deletion lock, in SQL, from the list's ID, given as a replacement, and the
+// database's name, as MySQL's lock names are shared by the whole server. MySQL takes names of up to
+// 64 characters, so a long database name is cut short.
+const DELETION_LOCK = "LEFT(CONCAT('cbl-export-ban-list-deletion:', ?, ':', DATABASE()), 64)";
+
+// How long to wait for the deletion lock's connection to close before closing it at once.
+const CLOSE_TIMEOUT = 5 * 1000;
+
+// Close the deletion lock's connection, which frees the lock: telling MySQL first, or at once if
+// that takes too long.
+async function closeConnection(connection) {
+  let timer;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error('Timed out')), CLOSE_TIMEOUT);
+  });
+  try {
+    await Promise.race([connection.end(), timeout]);
+  } catch {
+    connection.destroy();
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // The list a line in the log channel is about, as the importer names lists (ban-importer's
 // core.js), with its type and owner: the owner's Steam ID, and their Steam name when the list was
@@ -279,6 +307,88 @@ class ExportBanList extends Sequelize.Model {
   // can check first that the key sees CBL's ban lists. See findVisibleBanLists.
   static findVisibleBattlemetricsBanLists() {
     return findVisibleBanLists();
+  }
+
+  // The website and the Discord bot change export ban lists from separate processes, so changes
+  // that must not interleave wait for each other in the database:
+  // - A change to a list or its configs on the website, and the bot's transfer of the list to
+  //   another user, each lock the list's row while they check it and write it, in one short
+  //   transaction. A change on the website is only written while its user still owns the list, so
+  //   the old owner's change in progress when the list is given away is refused.
+  // - Creating a list, and giving one to a user, first lock that user's lists (lockListsOf), so the
+  //   count of their lists cannot change before the new list or new owner is written.
+  // - A deletion on the website holds the list's deletion lock while it works, which can take
+  //   minutes on BattleMetrics (whileDeleting), and a transfer leaves a list being deleted as it is
+  //   (isBeingDeleted).
+  // The transactions are short: nothing in them waits for BattleMetrics, Discord or a count of
+  // players. They can wait for a statement of the ban importer's export step, which reads every
+  // list, for as long as the statement runs.
+
+  // Run work(transaction) in a transaction, and once more if MySQL ends it in a deadlock, which
+  // rolls the whole transaction back. A transfer locks the new owner's lists before the list it
+  // gives them, while the ban importer's export step reads every list in ID order, so the two can
+  // wait for each other. And a list created for a user with none while the bot gives them one
+  // locks the same gap between other users' lists as the transfer. MySQL then rolls one of them
+  // back, and the other goes ahead. Each work reads again what it checks, so running it again is
+  // safe.
+  static async inTransaction(work) {
+    try {
+      return await sequelize.transaction(work);
+    } catch (error) {
+      if ((error?.original ?? error?.parent)?.errno !== DEADLOCK) throw error;
+      return sequelize.transaction(work);
+    }
+  }
+
+  // Lock a user's export ban lists in the transaction, and give how many they have. Everything that
+  // gives a user a list, creating one on the website or a transfer by the bot, does this before it
+  // counts their lists, so a list given to them meanwhile waits for the transaction to end, and the
+  // count holds until the new list or new owner is written.
+  static async lockListsOf(owner, { transaction }) {
+    const lists = await ExportBanList.findAll({
+      attributes: ['id'],
+      where: { owner },
+      lock: true,
+      transaction
+    });
+    return lists.length;
+  }
+
+  // Run deletion() while holding the list's deletion lock, and give what it gives. A transfer
+  // leaves a list whose deletion lock is held as it is (isBeingDeleted), so a list cannot be given
+  // to another user while it is being deleted, e.g. while its BattleMetrics ban list is deleted,
+  // which can take minutes. The lock is MySQL's, on a connection of its own, outside the Sequelize
+  // pool, for the whole deletion, and MySQL frees it once the connection closes, so a deletion that
+  // fails, or a web server that stops part-way, never leaves it held. Throws without running
+  // deletion() when another deletion of the list holds the lock.
+  static async whileDeleting(id, deletion) {
+    let connection;
+    try {
+      connection = await openConnection();
+    } catch (error) {
+      // Shown as the database being unavailable, as mysql2's message can name its address.
+      throw new Sequelize.ConnectionError(error);
+    }
+    try {
+      const [[{ taken }]] = await connection.query(
+        `SELECT GET_LOCK(${DELETION_LOCK}, 0) AS taken`,
+        [id]
+      );
+      if (Number(taken) !== 1) throw new Error('This export ban list is already being deleted.');
+      return await deletion();
+    } finally {
+      await closeConnection(connection);
+    }
+  }
+
+  // Whether a deletion of the list holds its deletion lock (see whileDeleting).
+  static async isBeingDeleted(id, { transaction } = {}) {
+    const { holder } = await sequelize.query(`SELECT IS_USED_LOCK(${DELETION_LOCK}) AS holder`, {
+      replacements: [id],
+      plain: true,
+      transaction
+    });
+    return holder !== null;
   }
 
   // The name the list's BattleMetrics ban list is given, by which an admin can find it among CBL's

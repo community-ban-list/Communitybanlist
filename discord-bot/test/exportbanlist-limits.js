@@ -96,6 +96,8 @@ async function battlemetrics() {
 const modelStubs = {
   sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
   '../sequelize.js': { default: { models } },
+  // A deletion on the website holds a lock on a connection of its own, which the bot never needs.
+  '../open-connection.js': { default: () => assert.fail('A connection was opened.') },
   '../export-membership.js': { countMembers },
   '../../apis/index.js': { battlemetrics },
   '../../utils/index.js': { Logger: { verbose() {}, important() {} } },

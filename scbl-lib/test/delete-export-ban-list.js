@@ -140,6 +140,9 @@ const dataType = () => dataType;
 const stubs = {
   sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
   '../sequelize.js': { default: {} },
+  // The website holds a deletion lock while it deletes a list (whileDeleting), which
+  // export-ban-list-locks.js checks. deleteExportBanList itself never opens a connection.
+  '../open-connection.js': { default: () => assert.fail('A connection was opened.') },
   // Only checking lists against the limits counts their players, which a deletion never does.
   '../export-membership.js': { countMembers: () => assert.fail('No players are counted here.') },
   '../../apis/index.js': { battlemetrics },

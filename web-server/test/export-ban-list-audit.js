@@ -228,6 +228,12 @@ class Model {
     return row ? Object.assign(new this(), row) : null;
   }
 
+  static async findAll({ where }) {
+    return rows.ExportBanList.filter((list) => matches(list, where)).map((row) =>
+      Object.assign(new this(), row)
+    );
+  }
+
   async save() {
     failure('ExportBanList.save');
     const row = rows.ExportBanList.find(({ id }) => id === this.id);
@@ -319,12 +325,21 @@ const LIMITS = exportListLimits.readLimits({
   EXPORT_REMOTE_MAX_PLAYERS: '0'
 }).limits;
 
-// The real ExportBanList, with the real BattleMetrics deletion steps and page reader.
+// The real ExportBanList, with the real BattleMetrics deletion steps and page reader. Its
+// transactions only run their work, and the deletion lock's connection takes every lock it asks
+// for (export-ban-list-locks.js in scbl-lib checks these).
 const { default: ExportBanList } = await load(
   '../../scbl-lib/db/models/export-ban-list.js',
   {
     sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
-    '../sequelize.js': { default: { models: {} } },
+    '../sequelize.js': { default: { models: {}, transaction: (work) => work({}) } },
+    '../open-connection.js': {
+      default: async () => ({
+        query: async () => [[{ taken: 1 }]],
+        end: async () => {},
+        destroy() {}
+      })
+    },
     // Only the bot's check of stored lists against the limits counts their players this way.
     '../export-membership.js': {
       countMembers: () => assert.fail('No players are counted here.')
@@ -336,7 +351,7 @@ const { default: ExportBanList } = await load(
     '../../utils/index.js': { Logger },
     '../../config.js': { BATTLEMETRICS_ORGANIZATION: ORGANISATION, EXPORT_LIST_LIMITS: LIMITS }
   },
-  vm.createContext({ URL })
+  vm.createContext({ URL, setTimeout, clearTimeout })
 );
 models.ExportBanList = ExportBanList;
 

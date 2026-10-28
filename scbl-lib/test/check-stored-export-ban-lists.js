@@ -194,6 +194,8 @@ async function battlemetrics(method, endpoint, params) {
 const stubs = {
   sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
   '../sequelize.js': { default: { models } },
+  // Deleting a list holds a lock on a connection of its own, which these checks never need.
+  '../open-connection.js': { default: () => assert.fail('A connection was opened.') },
   '../export-membership.js': { countMembers },
   '../../apis/index.js': { battlemetrics },
   '../../utils/index.js': { Logger: { verbose() {} } },
