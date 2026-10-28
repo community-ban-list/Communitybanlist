@@ -161,14 +161,13 @@ const parsed = await post(JSON.stringify({ query: '{ hello }', padding: 'x'.repe
 assert.strictEqual(parsed.status, 200);
 assert.strictEqual(received?.query, '{ hello }');
 
-// A request far larger than the client's is refused. The parser answers any body it cannot read
-// with 422 and logs it, as it does today, so quiet that one expected line to keep this check's
-// output clean.
+// A request far larger than the client's is refused as too large. The parser logs a line for each
+// body it cannot read, so quiet that one expected line to keep this check's output clean.
 const log = console.log;
 console.log = () => {};
 const large = await post(JSON.stringify({ padding: 'x'.repeat(150 * 1024) }));
 console.log = log;
-assert.strictEqual(large.status, 422);
+assert.strictEqual(large.status, 413);
 
 // A body sent as-is is read however "identity" is written, and one that is not sent as-is is
 // refused before it is read.
