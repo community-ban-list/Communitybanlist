@@ -135,6 +135,7 @@ const packages = {
     // The mutations post their changes to the log channel, which these checks make none of.
     Logger: { verbose() {}, important() {} },
     logText,
+    describeError: String,
     calculateRiskRating(points) {
       calls.push({ model: 'utils', method: 'calculateRiskRating' });
       return points / 10;
@@ -181,13 +182,15 @@ async function load(path, globals) {
 
 // Load the API as it runs in development, where Apollo Sandbox's introspection query is allowed.
 // Apollo Server reads NODE_ENV when it is built. The API also has Node's console and Buffer, so
-// that code that logs errors or reads page cursors runs as it does in the server.
+// that code that logs errors or reads page cursors runs as it does in the server. Player views are
+// saved later, on a timer these checks never run (record-views.js checks them).
 const { NODE_ENV } = process.env;
 process.env.NODE_ENV = 'development';
 await load('../src/graphql-api/index.js', {
   process: { env: { NODE_ENV: 'development' } },
   console,
-  Buffer
+  Buffer,
+  setTimeout: () => ({ unref() {} })
 });
 if (NODE_ENV === undefined) delete process.env.NODE_ENV;
 else process.env.NODE_ENV = NODE_ENV;

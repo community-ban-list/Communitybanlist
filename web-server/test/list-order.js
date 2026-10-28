@@ -46,7 +46,7 @@ const stubs = {
   graphql: { default: graphql },
   'scbl-lib/db/models': { Ban, BanList: {}, ExportBanList: {}, Organisation: {}, SteamUser },
   'scbl-lib/db/sequelize': { Op },
-  'scbl-lib/utils': { calculateRiskRating() {} }
+  'scbl-lib/utils': { calculateRiskRating() {}, describeError: String }
 };
 
 const { Query } = await load('../src/graphql-api/query/resolver.js', stubs);

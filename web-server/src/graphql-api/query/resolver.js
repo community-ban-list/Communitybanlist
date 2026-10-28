@@ -2,6 +2,7 @@ import { Ban, BanList, Organisation, SteamUser } from 'scbl-lib/db/models';
 
 import { listOrder } from '../core/list-order.js';
 import { PAGE_SIZE, pageArgs } from '../core/page-size.js';
+import recordView from './record-view.js';
 
 export default {
   Query: {
@@ -27,14 +28,11 @@ export default {
         ...pageArgs(filter, PAGE_SIZE.list)
       });
     },
+    // The player is returned as soon as they are read, with this view's time as lastViewed. That
+    // they were viewed is saved later, in the background.
     steamUser: async (parent, filter) => {
       const user = await SteamUser.findByPk(filter.id);
-
-      if (user) {
-        user.lastViewed = Date.now();
-        await user.save();
-      }
-
+      if (user) user.lastViewed = recordView(user.id);
       return user;
     },
     loggedInSteamUser: async (parent, filter, context) => {
