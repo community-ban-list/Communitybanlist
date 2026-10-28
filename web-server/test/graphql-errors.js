@@ -617,22 +617,19 @@ await checkShown(
 resetModels();
 
 // A list whose BattleMetrics ban list could not be deleted, with the errors scbl-lib's deletion
-// gives, which are shown to the list's owner: one its own checks give, as BattleMetrics says
-// another organisation owns the ban list, and one the BattleMetrics client gives, as BattleMetrics
-// refuses to list the ban list's invites.
+// gives, which are shown to the list's owner: those its own checks give, as BattleMetrics says
+// another organisation owns the ban list, or gives an answer that does not say who owns it, and one
+// the BattleMetrics client gives, as BattleMetrics refuses to list the ban list's invites.
 const listingRefused = await battlemetricsError('get', 'ban-lists/7/relationships/invites', {
   status: 403,
   data: { errors: [{ title: 'Forbidden', detail: 'You may not manage this ban list.' }] }
 });
 assert.strictEqual(listingRefused.name, 'ApiError');
+let ownershipAnswer = { data: { data: { relationships: { owner: { data: { id: '200' } } } } } };
 const deletion = await load(
   '../../scbl-lib/apis/delete-battlemetrics-ban-list.js',
   {
-    './battlemetrics.js': {
-      default: async () => ({
-        data: { data: { relationships: { owner: { data: { id: '200' } } } } }
-      })
-    },
+    './battlemetrics.js': { default: async () => ownershipAnswer },
     './read-battlemetrics-pages.js': {
       default: async () => {
         throw listingRefused;
@@ -644,9 +641,15 @@ const deletion = await load(
 );
 const notOwned = await deletion.checkOwnership('7').then(assert.fail, (error) => error);
 assert.match(notOwned.message, /^BattleMetrics deletion failed while checking ownership: /);
+ownershipAnswer = { data: {} };
+const unreadable = await deletion.checkOwnership('7').then(assert.fail, (error) => error);
+assert.strictEqual(
+  unreadable.message,
+  'BattleMetrics deletion failed while checking ownership: Invalid BattleMetrics ownership response. The local list was retained; any invites or subscriptions already removed remain removed.'
+);
 const notListed = await deletion.removeInvitesAndSubscribers('7').then(assert.fail, (e) => e);
 assert.match(notListed.message, /^BattleMetrics deletion failed while listing invites: /);
-for (const error of [notOwned, notListed]) {
+for (const error of [notOwned, unreadable, notListed]) {
   const list = storedList('battlemetrics-owner', {
     type: 'battlemetrics',
     battlemetricsID: '7',
