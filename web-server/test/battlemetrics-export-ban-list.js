@@ -35,6 +35,8 @@ function battlemetricsBanListName() {
 }
 // The list createExportBanList creates, and the one updateExportBanList finds.
 let created;
+// The transaction in progress, if any.
+let openTransaction = null;
 const found = {
   id: 11,
   name: 'Old name',
@@ -75,11 +77,26 @@ const dependencies = {
     Organisation: {},
     ExportBanList: {
       count: async () => 0,
-      // A list is never created in a transaction, which its BattleMetrics ban list's save would
-      // wait on.
+      async inTransaction(work) {
+        openTransaction = {};
+        try {
+          return await work(openTransaction);
+        } finally {
+          openTransaction = null;
+        }
+      },
+      lockListsOf: async () => 0,
+      // A list is created in a transaction of its own, which has ended before its BattleMetrics
+      // ban list is made, as making it saves the list, which would wait on the uncommitted row.
       create: async (fields, options) => {
-        assert.strictEqual(options, undefined);
-        return Object.assign(created, fields);
+        assert.ok(openTransaction && options.transaction === openTransaction);
+        const list = Object.assign(created, fields);
+        const make = list.createBattlemetricsBanList;
+        list.createBattlemetricsBanList = function () {
+          assert.strictEqual(openTransaction, null, "The list's transaction has ended.");
+          return make.call(this);
+        };
+        return list;
       },
       findOne: async () => found
     }

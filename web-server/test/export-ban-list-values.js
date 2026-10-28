@@ -121,8 +121,8 @@ function database() {
       queries.push(`${name}.count`);
       return rows[name].filter((row) => matches(row, where)).length;
     },
-    async findOne({ where, include }) {
-      queries.push(`${name}.findOne`);
+    async findOne({ where, include, lock }) {
+      queries.push(`${name}.findOne${lock ? ' locked' : ''}`);
       if ('$ExportBanList.owner$' in where)
         assert.ok(include && include.includes(models.ExportBanList), 'The list is included.');
       const row = rows[name].find((row) => matches(row, where));
@@ -149,6 +149,16 @@ function database() {
     ExportBanListConfig: model('ExportBanListConfig'),
     Organisation: model('Organisation')
   };
+  // Changes are saved in transactions, with the rows they check locked, which these stand-ins only
+  // record, as each list here has one user.
+  Object.assign(models.ExportBanList, {
+    inTransaction: (work) => work({}),
+    async lockListsOf(owner) {
+      queries.push('ExportBanList.lockListsOf');
+      return rows.ExportBanList.filter((row) => row.owner === owner).length;
+    },
+    whileDeleting: (id, deletion) => deletion()
+  });
   return { rows, queries, writes, battlemetrics, models };
 }
 
@@ -429,22 +439,35 @@ const save = async (list, values, user = 'owner') => {
 const lookedUp = () => queries.splice(0);
 
 // It can be saved as it is, renamed and given another webhook, and none of these looks up its
-// configs or needs the list generating again.
+// configs or needs the list generating again. Each save looks the list up again with its row
+// locked, as it is saved, to check the user still owns it.
 lookedUp();
 await save(older, {});
-assert.deepStrictEqual(lookedUp(), ['ExportBanList.findOne']);
+assert.deepStrictEqual(lookedUp(), ['ExportBanList.findOne', 'ExportBanList.findOne locked']);
 await save(older, { name: 'Renamed' });
 await save(older, { server: 'Another server', discordWebhook: webhook(11) });
-assert.deepStrictEqual(lookedUp(), ['ExportBanList.findOne', 'ExportBanList.findOne']);
+assert.deepStrictEqual(lookedUp(), [
+  'ExportBanList.findOne',
+  'ExportBanList.findOne locked',
+  'ExportBanList.findOne',
+  'ExportBanList.findOne locked'
+]);
 assert.deepStrictEqual(tested.slice(-1), [webhook(11)]);
 assert.deepStrictEqual(
   [older.name, older.server, older.discordWebhook, older.generated],
   ['Renamed', 'Another server', webhook(11), true]
 );
 // Changes that can only make it smaller are saved, though it is still outside the rules: a higher
-// threshold, and lower default points.
+// threshold, and lower default points. A change to the settings is checked with the list's
+// configs, which are read again with its row locked, as it is saved, to check they have not
+// changed since.
 await save(older, { threshold: 4 });
-assert.deepStrictEqual(lookedUp(), ['ExportBanList.findOne', 'ExportBanListConfig.findAll']);
+assert.deepStrictEqual(lookedUp(), [
+  'ExportBanList.findOne',
+  'ExportBanListConfig.findAll',
+  'ExportBanList.findOne locked',
+  'ExportBanListConfig.findAll'
+]);
 assert.deepStrictEqual([older.threshold, older.generated], [4, false]);
 await save(older, { defaultActivePoints: 2 });
 // A change that could make it bigger must bring the whole list within the rules, configs included,
