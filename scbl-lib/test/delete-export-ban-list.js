@@ -140,6 +140,8 @@ const dataType = () => dataType;
 const stubs = {
   sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
   '../sequelize.js': { default: {} },
+  // Only checking lists against the limits counts their players, which a deletion never does.
+  '../export-membership.js': { countMembers: () => assert.fail('No players are counted here.') },
   '../../apis/index.js': { battlemetrics },
   '../../utils/index.js': {
     Logger: {

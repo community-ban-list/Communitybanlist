@@ -104,11 +104,12 @@ function reset() {
 }
 
 // Add a list to the database. Reading its Discord webhook, the only way to tell its owner anything,
-// is recorded.
+// is recorded. recount is what checkLimits gives for a list whose export bans are over its type's
+// cap: the players its settings and configs give now, or null for a list not counted again.
 function addList(
   id,
   type,
-  { battlemetricsID = null, players = 0, problems = [RULE], ...more } = {}
+  { battlemetricsID = null, players = 0, recount = null, problems = [RULE], ...more } = {}
 ) {
   const exportBanList = {
     id,
@@ -146,6 +147,7 @@ function addList(
   rows.set(id, {
     exportBanList,
     players,
+    recount,
     problems: problems.map((message) => ({ rule: 'never-enough', field: 'threshold', message })),
     checked: true
   });
@@ -685,6 +687,30 @@ assert.strictEqual(
   'Removed export ban list **List 20** (#20) and its BattleMetrics ban list.'
 );
 
+// A list whose export bans are over its type's cap was counted again by its settings now
+// (checkLimits' recount), and both numbers are shown, so a list whose export bans are out of date,
+// as its owner has made it smaller since the importer last updated them, can be told apart.
+reset();
+addList(27, 'battlemetrics', {
+  battlemetricsID: 'bm-27',
+  players: 28337,
+  recount: 1554,
+  problems: []
+});
+visible = new Set(['bm-27']);
+answer = 'cancel';
+await run('remove', { id: 27 });
+shown = prompt();
+assert.deepStrictEqual(fieldsOf(shown.embed), [
+  ['ID', '27'],
+  ['Type', 'BattleMetrics'],
+  ['Players', '28,337 by its export bans, 1,554 by its settings now'],
+  ['Owner', '**Owner 27** (`76561198000000027`)'],
+  ['BattleMetrics ID', "`bm-27`, which CBL's BattleMetrics key can see."],
+  ["Today's limits", 'Within them.']
+]);
+assert.deepStrictEqual(deleted(), []);
+
 console.log('Removing one export ban list: checks passed.');
 
 // Removing every list outside today's limits previews each, with its type, owner, players and why,
@@ -1001,6 +1027,52 @@ assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n').slice(0, 
   '**List 81** (#81): not removed, as it no longer exists'
 ]);
 
+// A list whose export bans are over its type's cap was counted again by its settings now
+// (checkLimits' recount), and the preview and the log give both numbers. Lists over the cap by
+// their export bans but not by their settings now are within the limits, as their owners have made
+// them smaller since the importer last updated their export bans, and the reply names them, so the
+// admin knows why they are not removed.
+const CAP_REASON =
+  'It has 41,000 players by its export bans and 40,500 by its settings now, both more than the 40,000 a remote export ban list can have.';
+reset();
+addList(88, 'remote', { players: 41000, recount: 40500, problems: [CAP_REASON] });
+addList(89, 'battlemetrics', {
+  battlemetricsID: 'bm-89',
+  players: 28337,
+  recount: 1554,
+  problems: []
+});
+addList(97, 'remote', { players: 45000, recount: 40000, problems: [] });
+await run('remove_outside_limits');
+shown = prompt();
+assert.strictEqual(
+  contentOf(shown.reply),
+  `**1 export ban list is outside today's limits.** Remove it? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told. 2 are within the cap by their settings now, though their export bans are over it until the importer updates them: #89 (28,337 players by its export bans, 1,554 by its settings now), #97 (45,000 players by its export bans, 40,000 by its settings now).\n${LIMITS_TEXT}`
+);
+assert.strictEqual(
+  shown.embed.description,
+  `**List 88** (#88) · Remote · owner **Owner 88** (\`76561198000000088\`) · 41,000 players by its export bans, 40,500 by its settings now\n↳ ${discord.escapeMarkdown(CAP_REASON)}`
+);
+assert.deepStrictEqual(deleted(), [88]);
+assert.strictEqual(
+  audits[1],
+  `[important] admin (1) removed export ban list "List 88" (ID: 88, Remote) of Steam user "Owner 88" (ID: 76561198000000088), outside today's limits with 41,000 players by its export bans, 40,500 by its settings now: there was nothing to delete on BattleMetrics.`
+);
+
+// When no list is outside the limits, such a list is named too.
+reset();
+addList(89, 'battlemetrics', {
+  battlemetricsID: 'bm-89',
+  players: 28337,
+  recount: 1554,
+  problems: []
+});
+await run('remove_outside_limits');
+assert.deepStrictEqual(replies, [
+  `No export ban list is outside today's limits, so nothing was changed. 1 is within the cap by its settings now, though its export bans are over it until the importer updates them: #89 (28,337 players by its export bans, 1,554 by its settings now).\n${LIMITS_TEXT}`
+]);
+assert.deepStrictEqual(calls, [['check', 'all']]);
+
 // The summary says how many lists ended each way, and the log has each BattleMetrics list's ban
 // list as it was before the list was removed.
 reset();
@@ -1037,6 +1109,8 @@ assert.match(
 reset();
 const long = 'A reason that is long. '.repeat(40);
 for (let id = 100; id < 130; id++) addList(id, 'remote', { problems: [long] });
+// One counted again by its settings now, as its export bans are over the cap.
+Object.assign(rows.get(128), { players: 41000, recount: 40500 });
 answer = 'cancel';
 await run('remove_outside_limits');
 shown = prompt();
@@ -1054,6 +1128,11 @@ assert.ok(text.includes(`\n${LIMITS_TEXT}\n`));
 assert.ok(
   text.includes(
     `\n#129 Remote list "List 129"\n  Owner: Owner 129 (Steam ID 765611980000000129)\n  Players: 0\n  Settings: threshold 5, 5 points for an active ban and 1 for an expired ban, max ban age 0 days (0 for any), 0 configs\n  Outside the limits: ${long}\n  To be removed.`
+  )
+);
+assert.ok(
+  text.includes(
+    '\n#128 Remote list "List 128"\n  Owner: Owner 128 (Steam ID 765611980000000128)\n  Players: 41,000 by its export bans, 40,500 by its settings now\n'
   )
 );
 // Each reason is cut short in the embed, and in full in the file.

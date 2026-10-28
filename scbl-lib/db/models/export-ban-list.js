@@ -1,6 +1,7 @@
 import Sequelize from 'sequelize';
 
 import sequelize from '../sequelize.js';
+import { countMembers } from '../export-membership.js';
 
 import { battlemetrics } from '../../apis/index.js';
 import {
@@ -44,22 +45,36 @@ function describeList(exportBanList) {
   return `${logText(server)}'s List "${logText(name)}" (ID: ${id}, ${TYPE_NAMES[type] ?? type}) of ${steamUser}`;
 }
 
+// A stored list's settings, as the rules and countMembers take them.
+const settingsOf = (exportBanList) =>
+  Object.fromEntries(SETTINGS.map((name) => [name, exportBanList[name]]));
+
+// The most players a list of this type can have under the limits, or 0 for no limit, as for a type
+// the limits do not cover.
+const maxPlayersOf = (type, limits) =>
+  (Object.hasOwn(TYPE_NAMES, type) && limits?.[type]?.maxPlayers) || 0;
+
 // The problems of a stored list under today's limits, or null when its type has none to check it
 // against: those of its settings and configs under its type's points rules, for the whole list, as
-// checkRules gives them, and one when it has more players than its type's cap (0 for none).
-function limitProblems(exportBanList, configs, players, limits) {
+// checkRules gives them, and one when it has more players than its type's cap (0 for none), both by
+// its export bans (players) and by its settings now (recount, see checkLimits).
+function limitProblems(exportBanList, configs, { players, recount }, limits) {
   const { type } = exportBanList;
   if (!Object.hasOwn(TYPE_NAMES, type) || !limits?.[type]) return null;
 
-  const settings = Object.fromEntries(SETTINGS.map((name) => [name, exportBanList[name]]));
-  const problems = [...checkRules(type, { settings, configs }, limits)];
-  const { maxPlayers } = limits[type];
-  if (maxPlayers > 0 && players > maxPlayers)
+  const problems = [...checkRules(type, { settings: settingsOf(exportBanList), configs }, limits)];
+  const maxPlayers = maxPlayersOf(type, limits);
+  if (maxPlayers > 0 && players > maxPlayers && recount > maxPlayers) {
+    const counts =
+      recount === players
+        ? `${formatNumber(players)} players,`
+        : `${formatNumber(players)} players by its export bans and ${formatNumber(recount)} by its settings now, both`;
     problems.push({
       rule: 'max-players',
       field: 'players',
-      message: `It has ${formatNumber(players)} players, more than the ${formatNumber(maxPlayers)} a ${TYPE_NAMES[type]} export ban list can have.`
+      message: `It has ${counts} more than the ${formatNumber(maxPlayers)} a ${TYPE_NAMES[type]} export ban list can have.`
     });
+  }
   return problems;
 }
 
@@ -132,7 +147,7 @@ class ExportBanList extends Sequelize.Model {
   // checks changes to lists against (export-list-limits.js, with the EXPORT_* settings in
   // EXPORT_LIST_LIMITS), e.g. for the Discord bot to remove the lists outside them. Checks every
   // list, or those with the given IDs, and gives the limits and the lists, in ID order, each as
-  // { exportBanList, configs, players, problems, checked }, with the list's owner as
+  // { exportBanList, configs, players, recount, problems, checked }, with the list's owner as
   // exportBanList.SteamUser.
   //
   // A list is outside the limits when it has problems: those of its stored settings and configs
@@ -140,8 +155,10 @@ class ExportBanList extends Sequelize.Model {
   // more players than its type's cap. Its configs are loaded as the website loads them to check a
   // change, with their ban lists' and organisations' names for the messages. players counts its
   // export bans waiting to be added or already added (TO_BE_CREATED or CREATED), which
-  // /export/:id serves. A list of a type the limits do not cover is not checked, and has no
-  // problems.
+  // /export/:id serves. A list with more of them than its type's cap is counted again by its
+  // settings and configs now, and recount is that count, or null for a list not counted again. It
+  // is only over the cap when both are. A list of a type the limits do not cover is not checked,
+  // and has no problems.
   static async checkLimits({ ids, limits = EXPORT_LIST_LIMITS } = {}) {
     if (ids !== undefined && ids.length === 0) return { limits, lists: [] };
     const { BanList, ExportBan, ExportBanListConfig, Organisation, SteamUser } = sequelize.models;
@@ -178,16 +195,36 @@ class ExportBanList extends Sequelize.Model {
       counts.map(({ exportBanList, count }) => [exportBanList, Number(count)])
     );
 
+    // Only the importer brings a list's export bans into line with its settings and configs. So a
+    // list its owner has just made smaller on the website, e.g. by raising its threshold, which
+    // the website saves without counting its players, keeps its old export bans until then. A list
+    // with more of them than its type's cap is therefore counted again, as the website counts the
+    // players a list would hold (countMembers), with its settings and configs as they are now. Only
+    // those lists are counted, one at a time, as each count reads every ban. A count that fails
+    // fails the check, as whether the list is over the cap is then not known.
+    const recounts = new Map();
+    for (const exportBanList of exportBanLists) {
+      const maxPlayers = maxPlayersOf(exportBanList.type, limits);
+      if (maxPlayers === 0 || (players.get(exportBanList.id) ?? 0) <= maxPlayers) continue;
+      recounts.set(
+        exportBanList.id,
+        await countMembers(settingsOf(exportBanList), configs.get(exportBanList.id))
+      );
+    }
+
     return {
       limits,
       lists: exportBanLists.map((exportBanList) => {
         const listConfigs = configs.get(exportBanList.id);
-        const listPlayers = players.get(exportBanList.id) ?? 0;
+        const listPlayers = {
+          players: players.get(exportBanList.id) ?? 0,
+          recount: recounts.get(exportBanList.id) ?? null
+        };
         const problems = limitProblems(exportBanList, listConfigs, listPlayers, limits);
         return {
           exportBanList,
           configs: listConfigs,
-          players: listPlayers,
+          ...listPlayers,
           problems: problems ?? [],
           checked: problems !== null
         };

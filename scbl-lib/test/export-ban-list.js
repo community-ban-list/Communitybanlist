@@ -55,7 +55,8 @@ const dependencies = {
   '../sequelize.js': { default: {} },
   '../../apis/index.js': { battlemetrics },
   // Deleting lists is checked in delete-export-ban-list.js, and checking stored lists against the
-  // limits in check-stored-export-ban-lists.js.
+  // limits, which counts the players of those over a cap, in check-stored-export-ban-lists.js.
+  '../export-membership.js': { countMembers: () => assert.fail('No players are counted here.') },
   '../../apis/delete-battlemetrics-ban-list.js': {
     checkOwnership: async () => true,
     findVisibleBanLists: async () => new Set(),

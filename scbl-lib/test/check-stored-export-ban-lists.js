@@ -7,8 +7,9 @@ import { checkRules, readLimits } from '../export-list-limits.js';
 // Check stored export ban lists against today's limits with ExportBanList's checkLimits, as the
 // Discord bot does before it removes the lists outside them, and list the BattleMetrics ban lists
 // the API key can see with findVisibleBattlemetricsBanLists. The limits module and the BattleMetrics
-// listing are the real ones; the database and BattleMetrics are stand-ins. The model runs in a
-// context of its own, so what it gives is copied before it is compared.
+// listing are the real ones; the database, its count of the players a list's settings give
+// (countMembers) and BattleMetrics are stand-ins. The model runs in a context of its own, so what
+// it gives is copied before it is compared.
 
 const OWNER = '42';
 const { limits: DEFAULT_LIMITS } = readLimits({});
@@ -60,7 +61,12 @@ const lists = [
   list(9, 'battlemetrics', 9, 3, 1, { battlemetricsID: null }),
   // Exactly as many players as a BattleMetrics list, and then a remote list, can have.
   list(10, 'battlemetrics', 9, 3, 1),
-  list(11, 'remote', 9, 3, 1)
+  list(11, 'remote', 9, 3, 1),
+  // Made smaller by its owner, whose threshold of 7 the importer has not applied to its export
+  // bans yet, which are those of its old threshold of 5.
+  list(12, 'battlemetrics', 7, 5, 1),
+  // More export bans than a remote list can have, but by its settings now exactly as many.
+  list(13, 'remote', 10, 3, 1)
 ];
 const configs = [
   { id: 1, exportBanList: 5, banList: 7, activePoints: 5, expiredPoints: 1 },
@@ -69,7 +75,9 @@ const configs = [
   { id: 4, exportBanList: 6, banList: 9, activePoints: 2, expiredPoints: 2 },
   { id: 5, exportBanList: 6, banList: 9, activePoints: 2, expiredPoints: 2 },
   // A config whose ban list is gone.
-  { id: 6, exportBanList: 2, banList: 99, activePoints: 1, expiredPoints: 0 }
+  { id: 6, exportBanList: 2, banList: 99, activePoints: 1, expiredPoints: 0 },
+  // One whose expired points are the list's default.
+  { id: 7, exportBanList: 12, banList: 7, activePoints: 2, expiredPoints: null }
 ];
 const exportBans = [
   [1, 'CREATED', 967],
@@ -81,8 +89,32 @@ const exportBans = [
   [10, 'CREATED', 19000],
   [10, 'TO_BE_CREATED', 1000],
   [10, 'TO_BE_DELETED', 50],
-  [11, 'CREATED', 40000]
+  [11, 'CREATED', 40000],
+  [12, 'CREATED', 28000],
+  [12, 'TO_BE_CREATED', 337],
+  [13, 'CREATED', 45000]
 ];
+
+// The players the database counts for a list's settings and configs as they are now, as the website
+// counts them (countMembers), by the list's threshold: an error fails the count. Each count is
+// recorded among the queries.
+const membersByThreshold = new Map([
+  // List 3, whose export bans are up to date.
+  [5, 28337],
+  // List 12 after its owner's change.
+  [7, 1554],
+  // List 4, which has gained players since the importer last updated it.
+  [9, 40500],
+  // List 13.
+  [10, 40000]
+]);
+async function countMembers(settings, listConfigs) {
+  queries.push(['countMembers', structuredClone({ settings, configs: listConfigs })]);
+  const players = membersByThreshold.get(settings.threshold);
+  assert.ok(players !== undefined, `Unexpected count for threshold ${settings.threshold}`);
+  if (players instanceof Error) throw players;
+  return players;
+}
 
 // A stand-in for Sequelize's Model, whose findAll gives the matching rows as instances, with the
 // owner's Steam user included as Sequelize includes it.
@@ -154,6 +186,7 @@ async function battlemetrics(method, endpoint, params) {
 const stubs = {
   sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
   '../sequelize.js': { default: { models } },
+  '../export-membership.js': { countMembers },
   '../../apis/index.js': { battlemetrics },
   '../../utils/index.js': { Logger: { verbose() {} } },
   '../../config.js': { BATTLEMETRICS_ORGANIZATION: OWNER, EXPORT_LIST_LIMITS: DEFAULT_LIMITS },
@@ -212,11 +245,12 @@ const ruleProblems = (id, type, limits = DEFAULT_LIMITS) =>
 const capProblem = (message) => ({ rule: 'max-players', field: 'players', message });
 // What checkLimits gives for each list, copied.
 const summary = (result) =>
-  [...result.lists].map(({ exportBanList, configs, players, problems, checked }) => ({
+  [...result.lists].map(({ exportBanList, configs, players, recount, problems, checked }) => ({
     id: exportBanList.id,
     owner: exportBanList.SteamUser && { ...exportBanList.SteamUser },
     configs: [...configs].map((config) => ({ ...config })),
     players,
+    recount,
     problems: [...problems].map((problem) => ({ ...problem })),
     checked
   }));
@@ -224,18 +258,24 @@ const outside = (result) =>
   [...result.lists]
     .filter((check) => check.problems.length > 0)
     .map((check) => check.exportBanList.id);
+// The count of the players a list's settings and configs give now, as the queries record it.
+const recounted = (id) => ['countMembers', { settings: settingsOf(id), configs: configsOf(id) }];
 
 // Every list is checked, in ID order, with its owner, its configs, its players and its problems
 // under the default limits: the points rules' problems as checkRules gives them for the whole
-// list, and one for more players than its type's cap. A list of a type the limits do not cover is
-// not checked.
+// list, and one for more players than its type's cap. A list with more players than its type's cap
+// is counted again by its settings and configs now, as its export bans may be from before its
+// owner's last change, and it is only over the cap when that count is too. A list of a type the
+// limits do not cover is not checked.
 let result = await ExportBanList.checkLimits();
 assert.strictEqual(result.limits, DEFAULT_LIMITS);
 const expected = {
   1: { players: 967, problems: [] },
   2: { players: 0, problems: ruleProblems(2, 'remote') },
+  // When the two counts are the same, the message gives one.
   3: {
     players: 28337,
+    recount: 28337,
     problems: [
       ...ruleProblems(3, 'battlemetrics'),
       capProblem(
@@ -245,8 +285,11 @@ const expected = {
   },
   4: {
     players: 40001,
+    recount: 40500,
     problems: [
-      capProblem('It has 40,001 players, more than the 40,000 a remote export ban list can have.')
+      capProblem(
+        'It has 40,001 players by its export bans and 40,500 by its settings now, both more than the 40,000 a remote export ban list can have.'
+      )
     ]
   },
   5: { players: 0, problems: ruleProblems(5, 'battlemetrics') },
@@ -256,7 +299,10 @@ const expected = {
   9: { players: 0, problems: [] },
   // A list may have as many players as its type's cap, but no more.
   10: { players: 20000, problems: [] },
-  11: { players: 40000, problems: [] }
+  11: { players: 40000, problems: [] },
+  // Over the cap by its export bans, but not by its settings now.
+  12: { players: 28337, recount: 1554, problems: [] },
+  13: { players: 45000, recount: 40000, problems: [] }
 };
 assert.deepStrictEqual(
   summary(result),
@@ -265,6 +311,7 @@ assert.deepStrictEqual(
     owner: row.id === 9 ? null : { id: row.owner, name: `Owner of ${row.id}` },
     configs: configsOf(row.id),
     players: expected[row.id].players,
+    recount: expected[row.id].recount ?? null,
     problems: expected[row.id].problems,
     checked: expected[row.id].checked ?? true
   }))
@@ -286,7 +333,8 @@ assert.strictEqual(
 
 // One query of each: the lists with their owners' Steam IDs and names, the lists' configs with the
 // ban lists and organisations that name them, and the lists' players: their export bans waiting to
-// be added or already added, which /export/:id serves.
+// be added or already added, which /export/:id serves. Then only the lists over their type's cap
+// are counted again, one at a time, in ID order, each with its settings and configs as stored.
 const allIDs = lists.map((row) => row.id);
 assert.deepStrictEqual(queries, [
   [
@@ -307,7 +355,11 @@ assert.deepStrictEqual(queries, [
       where: { exportBanList: allIDs, status: ['TO_BE_CREATED', 'CREATED'] },
       group: ['exportBanList']
     }
-  ]
+  ],
+  recounted(3),
+  recounted(4),
+  recounted(12),
+  recounted(13)
 ]);
 
 // Lists can be checked by ID, and only those are read. IDs of no list give no lists, and no IDs
@@ -320,16 +372,18 @@ assert.deepStrictEqual(summary(result), [
     owner: { id: lists[2].owner, name: 'Owner of 3' },
     configs: [],
     players: 28337,
+    recount: 28337,
     problems: expected[3].problems,
     checked: true
   }
 ]);
 assert.deepStrictEqual(
-  queries.map(([model, options]) => [model, options.where]),
+  queries.map(([model, options]) => [model, options.where ?? options.settings]),
   [
     ['ExportBanList', { id: [3] }],
     ['ExportBanListConfig', { exportBanList: [3] }],
-    ['ExportBan', { exportBanList: [3], status: ['TO_BE_CREATED', 'CREATED'] }]
+    ['ExportBan', { exportBanList: [3], status: ['TO_BE_CREATED', 'CREATED'] }],
+    ['countMembers', settingsOf(3)]
   ]
 );
 
@@ -346,17 +400,54 @@ assert.strictEqual(result.limits, DEFAULT_LIMITS);
 assert.strictEqual(result.lists.length, 0);
 assert.deepStrictEqual(queries, []);
 
-// Other limits can be given. Without caps no list is over one, and when only one ban must never be
-// enough for a remote list, one active ban plus one expired ban may be.
+// Other limits can be given. Without caps no list is over one, so none is counted again, and when
+// only one ban must never be enough for a remote list, one active ban plus one expired ban may be.
 const { limits: otherLimits } = readLimits({
   EXPORT_BM_MAX_PLAYERS: '0',
   EXPORT_REMOTE_MAX_PLAYERS: '0',
   EXPORT_REMOTE_NEVER_ENOUGH: 'one-ban'
 });
+queries.length = 0;
 result = await ExportBanList.checkLimits({ limits: otherLimits });
 assert.strictEqual(result.limits, otherLimits);
 assert.deepStrictEqual(outside(result), [3, 5, 6, 7]);
 assert.deepStrictEqual(summary(result)[2].problems, ruleProblems(3, 'battlemetrics', otherLimits));
+assert.ok(result.lists.every((check) => check.recount === null));
+assert.ok(!queries.some(([model]) => model === 'countMembers'));
+
+// An owner who makes their list smaller on the website, e.g. by raising its threshold, which the
+// website saves without counting, brings it within the cap at once, though its export bans stay as
+// they were until the importer updates them. List 12 had a threshold of 5, which let one active ban
+// plus one expired ban put a player on it, and as many players as its export bans still hold.
+lists[11].threshold = 5;
+result = await ExportBanList.checkLimits({ ids: [12] });
+assert.deepStrictEqual(summary(result)[0].problems, [
+  ...ruleProblems(12, 'battlemetrics'),
+  capProblem(
+    'It has 28,337 players, more than the 20,000 a BattleMetrics export ban list can have.'
+  )
+]);
+// Its owner raises the threshold to 7, and its export bans stay the same.
+lists[11].threshold = 7;
+queries.length = 0;
+result = await ExportBanList.checkLimits({ ids: [12] });
+assert.deepStrictEqual(
+  summary(result).map(({ players, recount, problems }) => ({ players, recount, problems })),
+  [{ players: 28337, recount: 1554, problems: [] }]
+);
+assert.deepStrictEqual(queries.at(-1), recounted(12));
+
+// A count that fails fails the check, as whether the list is over the cap is not known then, so
+// it is never taken to be over the cap by its export bans alone.
+membersByThreshold.set(7, new Error('Query execution was interrupted'));
+await assert.rejects(ExportBanList.checkLimits({ ids: [12] }), {
+  message: 'Query execution was interrupted'
+});
+await assert.rejects(ExportBanList.checkLimits(), { message: 'Query execution was interrupted' });
+// A list within its cap is not counted, so it is checked as before.
+result = await ExportBanList.checkLimits({ ids: [1] });
+assert.deepStrictEqual(summary(result)[0].problems, []);
+membersByThreshold.set(7, 1554);
 
 // The BattleMetrics ban lists the API key can see are read from BattleMetrics' list of ban lists,
 // every page of it, 100 at a time.
@@ -391,5 +482,5 @@ await assert.rejects(
 );
 
 console.log(
-  'Stored export ban list checks passed: problems under the limits, players, configs with names, and the ban lists BattleMetrics shows.'
+  'Stored export ban list checks passed: problems under the limits, players, lists over the cap counted again by their settings now, configs with names, and the ban lists BattleMetrics shows.'
 );

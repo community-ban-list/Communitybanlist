@@ -236,6 +236,16 @@ function failureReason(error) {
     : message;
 }
 
+// For a list counted again by its settings and configs now, as its export bans are over its type's
+// cap (checkLimits' recount), what follows the number of its players, so both are shown: " by its
+// export bans, 1,554 by its settings now". The two differ when the list has changed since the
+// importer last updated its export bans, e.g. as its owner raised its threshold. Nothing for a list
+// not counted again.
+const describeRecount = ({ recount }) =>
+  recount == null
+    ? ''
+    : ` by its export bans, ${recount.toLocaleString('en-US')} by its settings now`;
+
 // Why the list is outside today's limits, in the website's words, or that it was not checked.
 function describeProblems({ problems, checked }) {
   if (!checked) return 'Not checked, as the limits do not cover its type.';
@@ -266,11 +276,16 @@ function describeBattlemetricsBanList(exportBanList, access) {
 }
 
 // An embed for the list, with its ID, type and players.
-function listDetailsEmbed({ exportBanList, players }) {
+function listDetailsEmbed(check) {
+  const { exportBanList, players } = check;
   return listEmbed(truncate(exportBanList.name || 'Unnamed', 256), null).addFields(
     { name: 'ID', value: String(exportBanList.id), inline: true },
     { name: 'Type', value: formatBanListType(exportBanList.type), inline: true },
-    { name: 'Players', value: players.toLocaleString('en-US'), inline: true }
+    {
+      name: 'Players',
+      value: `${players.toLocaleString('en-US')}${describeRecount(check)}`,
+      inline: true
+    }
   );
 }
 
@@ -425,7 +440,7 @@ function previewLine({ check, left }) {
   const type = formatBanListType(exportBanList.type);
   const reason = escapeMarkdown(truncate(describeProblems(check), REASON_LENGTH));
   const leftText = left ? ` **Left:** ${escapeMarkdown(left)}.` : '';
-  return `${formatName(exportBanList)} · ${type} · owner ${formatOwner(exportBanList)} · ${plural(players, 'player')}\n↳ ${reason}${leftText}`;
+  return `${formatName(exportBanList)} · ${type} · owner ${formatOwner(exportBanList)} · ${plural(players, 'player')}${describeRecount(check)}\n↳ ${reason}${leftText}`;
 }
 
 function previewFileEntry({ check, left }) {
@@ -437,7 +452,7 @@ function previewFileEntry({ check, left }) {
   const lines = [
     `#${exportBanList.id} ${formatBanListType(exportBanList.type)} list "${exportBanList.name}"`,
     `  Owner: ${owner}`,
-    `  Players: ${players.toLocaleString('en-US')}`,
+    `  Players: ${players.toLocaleString('en-US')}${describeRecount(check)}`,
     `  Settings: threshold ${exportBanList.threshold}, ${exportBanList.defaultActivePoints} points for an active ban and ${exportBanList.defaultExpiredPoints} for an expired ban, max ban age ${exportBanList.maxBanAge} days (0 for any), ${plural(configs.length, 'config')}`
   ];
   if (exportBanList.type === 'battlemetrics')
@@ -445,6 +460,21 @@ function previewFileEntry({ check, left }) {
   lines.push(`  Outside the limits: ${describeProblems(check)}`);
   lines.push(left ? `  Left as it is: ${left}.` : '  To be removed.');
   return lines.join('\n');
+}
+
+// The lists whose export bans are over their type's cap but whose settings now give no more players
+// than it, so they are within the limits: they have shrunk since the importer last updated their
+// export bans, e.g. as their owners raised their thresholds. The reply names them, so the admin
+// knows why they are not removed.
+function describeUpdating(lists) {
+  const updating = lists.filter((check) => check.recount != null && check.problems.length === 0);
+  if (updating.length === 0) return '';
+  const one = updating.length === 1;
+  const each = updating.map(
+    (check) =>
+      `#${check.exportBanList.id} (${plural(check.players, 'player')}${describeRecount(check)})`
+  );
+  return ` ${one ? '1 is' : `${updating.length} are`} within the cap by ${one ? 'its' : 'their'} settings now, though ${one ? 'its' : 'their'} export bans are over it until the importer updates them: ${each.join(', ')}.`;
 }
 
 // What happened to a list in the removal.
@@ -474,7 +504,7 @@ async function removeOne(check, access) {
   const left = leftReason(current.exportBanList, access);
   if (left) return { check: current, status: 'skipped', reason: left };
 
-  const description = `${describeExportBanList(current.exportBanList)}, outside today's limits with ${plural(current.players, 'player')}`;
+  const description = `${describeExportBanList(current.exportBanList)}, outside today's limits with ${plural(current.players, 'player')}${describeRecount(current)}`;
   try {
     // ExportBanList's lines are important, as the removal's own are, so they reach the log channel
     // in order with them, never after the summary.
@@ -551,10 +581,11 @@ async function removeAllOutsideLimits(interaction) {
     unchecked.length > 0
       ? ` ${was(unchecked.length)} not checked, as the limits do not cover ${unchecked.length === 1 ? 'its type' : 'their types'}: ${unchecked.map((check) => `#${check.exportBanList.id}`).join(', ')}.`
       : '';
+  const updatingNote = describeUpdating(lists);
   if (outside.length === 0) {
     await interaction.editReply(
       truncate(
-        `No export ban list is outside today's limits, so nothing was changed.${uncheckedNote}\n${describeLimits(limits)}`,
+        `No export ban list is outside today's limits, so nothing was changed.${uncheckedNote}${updatingNote}\n${describeLimits(limits)}`,
         MESSAGE_LENGTH
       )
     );
@@ -591,7 +622,7 @@ async function removeAllOutsideLimits(interaction) {
   if (removable.length === 0) {
     await interaction.editReply({
       content: truncate(
-        `${found} None can be removed now, so nothing was changed.${uncheckedNote}\n${notes}`,
+        `${found} None can be removed now, so nothing was changed.${uncheckedNote}${updatingNote}\n${notes}`,
         MESSAGE_LENGTH
       ),
       ...preview
@@ -604,7 +635,7 @@ async function removeAllOutsideLimits(interaction) {
   const confirmed = await confirm(
     interaction,
     truncate(
-      `${found} Remove ${which}? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.${uncheckedNote}\n${notes}`,
+      `${found} Remove ${which}? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.${uncheckedNote}${updatingNote}\n${notes}`,
       MESSAGE_LENGTH
     ),
     `Remove ${plural(removable.length, 'export ban list')}`,
