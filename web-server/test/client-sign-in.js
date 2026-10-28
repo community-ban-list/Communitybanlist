@@ -1,5 +1,6 @@
 import assert from 'assert';
 import { readFile } from 'fs/promises';
+import { inspect } from 'util';
 import vm from 'vm';
 
 import { ApolloLink } from '@apollo/client';
@@ -29,10 +30,22 @@ const record =
   (level) =>
   (...values) =>
     consoleOutput.push({ level, values });
-// The requests the client sends to the web server outside GraphQL, and the answer it gets.
-const httpClient = { requests: [], answer: undefined };
+// Warnings and errors may report problems, but nothing else reaches the console, and nothing
+// written there holds one of these sign-in tokens.
+function assertConsoleHoldsNo(tokens) {
+  const banned = consoleOutput.filter(({ level }) => !['warn', 'error'].includes(level));
+  assert.deepStrictEqual(banned, []);
+  for (const { values } of consoleOutput) {
+    const written = inspect(values, { depth: null });
+    for (const token of tokens) assert.ok(!written.includes(token), written);
+  }
+}
+// The requests the client sends to the web server outside GraphQL, and the answer it gets, or the
+// error the request fails with.
+const httpClient = { requests: [], answer: undefined, failure: undefined };
 httpClient.get = async (uri) => {
   httpClient.requests.push(uri);
+  if (httpClient.failure) throw httpClient.failure;
   return httpClient.answer;
 };
 const context = vm.createContext({
@@ -179,12 +192,12 @@ for (const token of [expired, oldToken(31 * DAY), ...unreadable]) {
 assert.strictEqual(restore(), false);
 
 // Signing in with Steam fetches a token from the web server, and choosing to be remembered stores
-// it. Sign-in details stay out of the browser's console, so neither writes anything there.
+// it. Sign-in details stay out of the browser's console.
 storage.clear();
 Auth.flush();
 const signInQuery = '?openid.mode=id_res&openid.claimed_id=x';
 httpClient.answer = { status: 200, data: { token: fresh } };
-await Auth.attemptAuth(signInQuery);
+assert.strictEqual(await Auth.attemptAuth(signInQuery), true);
 assert.deepStrictEqual(httpClient.requests, ['/auth/steam/return' + signInQuery]);
 assert.strictEqual(Auth.isLoggedIn, true);
 assert.strictEqual(Auth.jwtToken, fresh);
@@ -192,7 +205,31 @@ assert.deepStrictEqual({ ...Auth.claim }, user);
 Auth.saveToken = true;
 Auth.storeToken();
 assert.strictEqual(storage.get('JWT'), fresh);
-assert.deepStrictEqual(consoleOutput, []);
+assertConsoleHoldsNo([fresh]);
+
+// A sign-in the web server refuses, e.g. as Steam's answer was already used, or that does not
+// return a readable token, leaves the user signed out. It returns false rather than an error, which
+// the browser would write to the console with the request and its headers.
+const refused = Object.assign(new Error('Request failed with status code 401'), {
+  config: { url: '/auth/steam/return' + signInQuery, headers: { Authorization: 'JWT null' } },
+  response: { status: 401, data: 'Unauthorized' }
+});
+const failedSignIns = [
+  { failure: refused },
+  { answer: { status: 200, data: { token: 'not a token' } } },
+  { answer: { status: 200, data: {} } }
+];
+for (const { failure, answer } of failedSignIns) {
+  storage.clear();
+  Object.assign(httpClient, { failure, answer });
+  assert.strictEqual(await Auth.attemptAuth(signInQuery), false);
+  assert.strictEqual(Auth.isLoggedIn, false);
+  assert.strictEqual(Auth.jwtToken, null);
+  assert.strictEqual(Auth.claim, null);
+  assert.strictEqual(storage.has('JWT'), false);
+}
+httpClient.failure = undefined;
+assertConsoleHoldsNo([fresh]);
 
 // When the web server says it no longer accepts the token, the client forgets it and reports that
 // the user was signed in, so the page reloads as signed out.
@@ -283,8 +320,8 @@ assert.strictEqual(events[1], 'reload');
 assert.deepStrictEqual(await send(change, refusedChange), heldBack(null));
 assert.strictEqual(events.length, 2);
 
-// Nothing the client did here wrote to the console.
-assert.deepStrictEqual(consoleOutput, []);
+// Nothing else the client did here wrote a sign-in token to the console either.
+assertConsoleHoldsNo([fresh, newer]);
 
 console.log(
   'Client sign-in checks passed: signing in, reading, restoring and forgetting tokens, and expiry mid-session.'

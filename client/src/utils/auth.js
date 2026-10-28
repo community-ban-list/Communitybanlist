@@ -55,14 +55,25 @@ class Auth {
     return true;
   }
 
+  // Sign in with the answer Steam sent back, and return whether it worked. A failed sign-in, e.g.
+  // as the answer has already been used, returns false rather than an error: an error nothing
+  // handles is written to the browser's console with the request, its headers and the reply.
   async attemptAuth(queryString) {
     this.flush();
 
-    const response = await httpClient.get('/auth/steam/return' + queryString);
+    let token, claim;
+    try {
+      const response = await httpClient.get('/auth/steam/return' + queryString);
+      token = response.data.token;
+      claim = jwtDecode(token).user;
+    } catch {
+      return false;
+    }
 
     this.isLoggedIn = true;
-    this.jwtToken = response.data.token;
-    this.claim = jwtDecode(response.data.token).user;
+    this.jwtToken = token;
+    this.claim = claim;
+    return true;
   }
 
   // The web server answered a request as signed out, as it no longer accepts the sign-in token,
