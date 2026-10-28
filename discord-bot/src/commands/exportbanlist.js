@@ -102,9 +102,9 @@ const REVIEW_TIMEOUT = 5 * 60 * 1000;
 
 // The most export ban lists a user can have, as the website allows (hasRoomForList in
 // web-server/src/graphql-api/mutation/resolver.js). A transfer checks it again just before it is
-// made, and the bot makes one transfer at a time, so transfers cannot take a user past it. Only a
-// list the new owner creates on the website at that same moment still can, as the website and the
-// bot do not wait for each other.
+// made, with the new owner's lists locked, as the website locks them to create a list, so neither
+// transfers nor a list the new owner creates on the website at the same moment can take a user
+// past it.
 const MAX_LISTS_PER_USER = 4;
 
 // A SteamID64, as the website takes one from a Steam sign-in.
@@ -898,27 +898,37 @@ function transferEmbed(check, newOwner, listCount) {
 
 // Give the list to the new owner, as the admin confirmed it, if that can still be done: the list
 // and the new owner's lists are read again first, as the list may have been deleted or given to
-// someone else meanwhile, and the new owner may have made lists of their own. Gives null once the
-// list is theirs, or why it was left as it is.
-async function transferIfUnchanged(exportBanList, newOwner) {
+// someone else meanwhile, or its deletion may have started, and the new owner may have made lists
+// of their own. Gives null once the list is theirs, or why it was left as it is.
+//
+// The website changes lists from its own process, so the transfer is one short transaction that
+// locks what it reads, in the order the website does (see ExportBanList.inTransaction): the new
+// owner's lists first, so a list they create on the website meanwhile waits for the transfer, or
+// the transfer for it, and is counted, and then the list itself, so a change its owner is saving on
+// the website lands before the transfer or not at all. A list whose deletion on the website has
+// started is left as it is, as the deletion goes on.
+function transferIfUnchanged(exportBanList, newOwner) {
   const name = formatName(exportBanList);
   const to = formatSteamUser(newOwner.id, newOwner.name);
-  const current = await ExportBanList.findByPk(exportBanList.id);
-  if (!current) return `Export ban list ${name} no longer exists`;
-  if (current.owner === newOwner.id) return `Export ban list ${name} already belongs to ${to}`;
-  if (current.owner !== exportBanList.owner)
-    return `Export ban list ${name} now belongs to \`${current.owner}\`, not ${formatOwner(exportBanList)} as shown`;
-  const listCount = await ExportBanList.count({ where: { owner: newOwner.id } });
-  if (listCount >= MAX_LISTS_PER_USER)
-    return `${to} now has ${plural(listCount, 'export ban list')}, and the website lets a user have at most ${MAX_LISTS_PER_USER}`;
+  return ExportBanList.inTransaction(async (transaction) => {
+    const listCount = await ExportBanList.lockListsOf(newOwner.id, { transaction });
+    const current = await ExportBanList.findByPk(exportBanList.id, { lock: true, transaction });
+    if (!current) return `Export ban list ${name} no longer exists`;
+    if (current.owner === newOwner.id) return `Export ban list ${name} already belongs to ${to}`;
+    if (current.owner !== exportBanList.owner)
+      return `Export ban list ${name} now belongs to \`${current.owner}\`, not ${formatOwner(exportBanList)} as shown`;
+    if (await ExportBanList.isBeingDeleted(exportBanList.id, { transaction }))
+      return `Export ban list ${name} is being deleted by its owner`;
+    if (listCount >= MAX_LISTS_PER_USER)
+      return `${to} now has ${plural(listCount, 'export ban list')}, and the website lets a user have at most ${MAX_LISTS_PER_USER}`;
 
-  // Only the owner is written, and only while the list still has the owner shown, so a list
-  // changed in the moment since it was read again is left as it is.
-  const [updated] = await ExportBanList.update(
-    { owner: newOwner.id },
-    { where: { id: exportBanList.id, owner: exportBanList.owner } }
-  );
-  return updated === 0 ? `Export ban list ${name} changed as it was being transferred` : null;
+    // Only the owner is written, and only while the list still has the owner shown.
+    const [updated] = await ExportBanList.update(
+      { owner: newOwner.id },
+      { where: { id: exportBanList.id, owner: exportBanList.owner }, transaction }
+    );
+    return updated === 0 ? `Export ban list ${name} changed as it was being transferred` : null;
+  });
 }
 
 // The last transfer, which the next waits for. The bot makes one transfer at a time, from reading
@@ -945,7 +955,8 @@ function afterLastTransfer(makeTransfer) {
 // Like the website's own changes, the update can wait for rows a run has locked, such as the new
 // owner's Steam user while the run recalculates every player's reputation, which can take most of
 // a minute after a big import, and transfers confirmed meanwhile wait for it in turn. If MySQL
-// gives up waiting, nothing is changed.
+// gives up waiting, nothing is changed. It also waits for a change being saved on the website to
+// the list or the new owner's lists, which takes a moment (see transferIfUnchanged).
 async function transfer(interaction) {
   const id = interaction.options.getInteger('id', true);
   const owner = parseSteamID(interaction.options.getString('owner', true));
