@@ -10,12 +10,12 @@ import { fileURLToPath } from 'url';
 // yarn.lock does not list, so scripts/check-lockfile.mjs checks yarn.lock before each install. This
 // test is in scbl-lib/test because every image build runs scbl-lib's tests, as the pull request
 // checks do. It checks the repository's own yarn.lock, runs the script on made-up repositories in a
-// temporary folder, and reads the Dockerfiles that are here.
+// temporary folder, and checks made-up Dockerfiles and the Dockerfiles that are here.
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const script = join(repository, 'scripts', 'check-lockfile.mjs');
 
-function check(folder) {
-  const result = spawnSync(process.execPath, [script], {
+function check(folder, args = []) {
+  const result = spawnSync(process.execPath, [script, ...args], {
     cwd: folder,
     encoding: 'utf8',
     timeout: 60000
@@ -79,8 +79,9 @@ const files = {
 
 const folder = mkdtempSync(join(tmpdir(), 'check-lockfile-'));
 
-// Checks the made-up repository with some of its files changed, or left out where they are null.
-function checkWith(changes = {}, from = '.') {
+// Checks the made-up repository with some of its files changed, or left out where they are null,
+// from its root or another folder, with the arguments given.
+function checkWith(changes = {}, { from = '.', args = [] } = {}) {
   rmSync(folder, { recursive: true, force: true });
   for (const [file, content] of Object.entries({ ...files, ...changes })) {
     if (content === null) continue;
@@ -90,19 +91,27 @@ function checkWith(changes = {}, from = '.') {
       typeof content === 'string' ? content : JSON.stringify(content, null, 2)
     );
   }
-  return check(join(folder, from));
+  return check(join(folder, from), args);
 }
 
 // Fails, with a line that says why.
-function refuses(changes, why, from) {
-  const result = checkWith(changes, from);
+function refuses(changes, why, options) {
+  const result = checkWith(changes, options);
   assert.strictEqual(result.status, 1, result.output);
   assert.ok(result.output.includes(why), `Expected "${why}" in:\n${result.output}`);
+}
+
+// Passes, having checked every workspace.
+function passes(changes, options) {
+  const result = checkWith(changes, options);
+  assert.strictEqual(result.status, 0, result.output);
+  assert.match(result.output, /package versions they need, and nothing else,/);
 }
 
 const withApp = (dependencies) => ({
   'app/package.json': { ...files['app/package.json'], dependencies }
 });
+const withRoot = (changes) => ({ 'package.json': { ...files['package.json'], ...changes } });
 const replacing = (text, replacement) => ({ 'yarn.lock': lockfile.replace(text, replacement) });
 const imageOnly = { 'other/package.json': null };
 
@@ -112,11 +121,48 @@ try {
   assert.strictEqual(result.status, 0, result.output);
   assert.match(result.output, /lists the 4 package versions they need, and nothing else,/);
 
-  // An image without one of the workspaces passes too: yarn.lock may list that one's packages.
+  // An image without one of the workspaces passes too: yarn.lock may list that one's packages, and
+  // the output says which workspace was not checked.
   result = checkWith(imageOnly);
   assert.strictEqual(result.status, 0, result.output);
   assert.match(result.output, /the 3 package\.json files here: it lists the 3 package versions/);
+  assert.match(result.output, /The packages of other, which are not here, are not checked\./);
   assert.doesNotMatch(result.output, /nothing else/);
+
+  // --all-workspaces, which the pull request checks pass, fails it when a workspace is missing.
+  passes({}, { args: ['--all-workspaces'] });
+  refuses(
+    imageOnly,
+    'Found no package.json in other, which package.json lists as workspaces. With ' +
+      '--all-workspaces, every workspace must be here.',
+    { args: ['--all-workspaces'] }
+  );
+  refuses({}, "Unknown option '--all-workspace'", { args: ['--all-workspace'] });
+
+  // Yarn also takes the workspaces as the packages of an object, which are checked the same way.
+  passes(withRoot({ workspaces: { packages: ['lib', 'app', './other'] } }));
+  refuses(
+    {
+      ...withRoot({ workspaces: { packages: ['lib', 'app', 'other'] } }),
+      ...withApp({ lib: '1.0.0', b: '^2.0.0', e: '^5.0.0' })
+    },
+    'app/package.json asks for e ^5.0.0, which yarn.lock does not list.'
+  );
+  // A workspace given as a wildcard, or outside the repository, fails it rather than being left
+  // out, as do workspaces in a form Yarn does not take.
+  refuses(
+    withRoot({ workspaces: ['lib', 'ap*', 'other'] }),
+    'package.json lists the workspaces as "ap*", which this check cannot follow. List each ' +
+      'workspace by its folder in the repository, without wildcards,'
+  );
+  refuses(
+    withRoot({ workspaces: { packages: ['lib', 'app', '{other}', '../other'] } }),
+    'package.json lists the workspaces as "{other}", "../other", which'
+  );
+  refuses(
+    withRoot({ workspaces: { packages: 'lib' } }),
+    'package.json lists the workspaces as "lib", which'
+  );
 
   // A workspace that asks for a package, or a range, that yarn.lock does not list fails it, as does
   // the root. So does a workspace in an image that has only some of them.
@@ -128,7 +174,7 @@ try {
     'lib/package.json asks for @scope/a ^1.2.0, which yarn.lock does not list.'
   );
   refuses(
-    { 'package.json': { ...files['package.json'], devDependencies: { f: '^6.0.0' } } },
+    withRoot({ devDependencies: { f: '^6.0.0' } }),
     'package.json asks for f ^6.0.0, which yarn.lock does not list.'
   );
 
@@ -139,6 +185,37 @@ try {
   refuses(
     replacing(/"c-native@[\s\S]*?(?=\nd@)/, ''),
     'b@^2.0.0 needs c-native >=3.0.0 <4, which yarn.lock does not list.'
+  );
+
+  // Yarn installs the version a resolution in the root package.json asks for, whatever yarn.lock
+  // lists, and writes that version under the resolution's own range. A resolution passes when every
+  // entry for the package is that version, including through **/, and the resolution's own range
+  // counts as needed.
+  passes(withRoot({ resolutions: { '**/b': '^2.0.0' } }));
+  const resolved = replacing('b@^2.0.0:', 'b@2.0.1, b@^2.0.0:');
+  passes({ ...resolved, ...withRoot({ resolutions: { b: '2.0.1' } }) });
+  // It fails when yarn.lock does not list the resolution, as before yarn install has been run.
+  refuses(
+    withRoot({ resolutions: { b: '2.0.0' } }),
+    "package.json's resolutions ask for b 2.0.0, which yarn.lock does not list."
+  );
+  // Or when another entry for the package is another version.
+  const older = [
+    lockfile,
+    'b@2.0.0:',
+    '  version "2.0.0"',
+    `  resolved "${registry}/b/-/b-2.0.0.tgz#5555"`,
+    `  integrity ${checksum('e')}`,
+    ''
+  ].join('\n');
+  refuses(
+    { 'yarn.lock': older, ...withRoot({ resolutions: { b: '2.0.0' } }) },
+    "yarn.lock lists b@^2.0.0 at 2.0.1, but package.json's resolutions make Yarn install b 2.0.0."
+  );
+  // A resolution under one parent only cannot be compared with yarn.lock, so it fails.
+  refuses(
+    { ...resolved, ...withRoot({ resolutions: { 'app/b': '2.0.1' } }) },
+    `package.json's resolutions name app/b. Name only the package, as in "ms" or "**/ms",`
   );
 
   // With every workspace here, a package that nothing needs any more fails it. Without one, that
@@ -185,6 +262,41 @@ try {
     'no sha512 checksum for @scope/a@^1.0.0.'
   ]);
 
+  // Each entry fetches the tarball of its own package and version, from the registry: not another
+  // package's, another version's, or one at another path.
+  refuses(
+    replacing(`${registry}/b/-/b-2.0.1.tgz`, `${registry}/left-pad/-/left-pad-1.3.0.tgz`),
+    `yarn.lock fetches b@^2.0.0 from ${registry}/left-pad/-/left-pad-1.3.0.tgz#2222, which is ` +
+      'not b 2.0.1.'
+  );
+  refuses(replacing('b-2.0.1.tgz', 'b-2.0.0.tgz'), 'which is not b 2.0.1.');
+  refuses(
+    replacing('/b/-/b-2.0.1.tgz', '/b/-/../../c-native/-/b-2.0.1.tgz'),
+    'which is not b 2.0.1.'
+  );
+  refuses(replacing('@scope/a/-/a-1.2.0', 'a/-/a-1.2.0'), 'which is not @scope/a 1.2.0.');
+  // An alias installs the package after npm:, so it fetches that one's tarball.
+  const alias = {
+    'other/package.json': {
+      ...files['other/package.json'],
+      dependencies: { d: '^4.0.0', 'd-alias': 'npm:d@^4.1.0' }
+    }
+  };
+  const aliased = (tarball) =>
+    [
+      lockfile,
+      '"d-alias@npm:d@^4.1.0":',
+      '  version "4.1.0"',
+      `  resolved "${registry}/${tarball}#4444"`,
+      `  integrity ${checksum('d')}`,
+      ''
+    ].join('\n');
+  passes({ ...alias, 'yarn.lock': aliased('d/-/d-4.1.0.tgz') });
+  refuses(
+    { ...alias, 'yarn.lock': aliased('d-alias/-/d-alias-4.1.0.tgz') },
+    'yarn.lock fetches d-alias@npm:d@^4.1.0 from'
+  );
+
   // A yarn.lock that is not in Yarn's format, as after a merge conflict, fails it.
   refuses(
     replacing('b@^2.0.0:', '<<<<<<< HEAD\nb@^2.0.0:'),
@@ -195,10 +307,125 @@ try {
   refuses(
     { 'docs/notes.txt': 'Notes' },
     'Found no package.json. Run this from the repository root.',
-    'docs'
+    { from: 'docs' }
   );
 } finally {
   rmSync(folder, { recursive: true, force: true });
+}
+
+// A RUN's commands in JSON form, as one line, or as they are when they are not JSON.
+function shellForm(commands) {
+  try {
+    return JSON.parse(commands).join(' ');
+  } catch {
+    return commands;
+  }
+}
+
+// What is wrong with a Dockerfile: a stage that starts from neither a base image pinned by digest
+// nor an earlier stage, a command that installs packages other than yarn install --frozen-lockfile
+// after the yarn.lock check, or no install at all.
+function dockerfileProblems(text) {
+  const problems = [];
+  const stages = [];
+  let installs = 0;
+  // The instructions, with their continued lines joined and the comments left out.
+  const instructions = text
+    .replace(/\\\r?\n/g, ' ')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('#'));
+  for (const instruction of instructions) {
+    const from = instruction.match(/^FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?/i);
+    if (from) {
+      if (!stages.includes(from[1]) && !/@sha256:[0-9a-f]{64}$/.test(from[1]))
+        problems.push(`It builds from ${from[1]}, which is not pinned by digest.`);
+      if (from[2]) stages.push(from[2]);
+      continue;
+    }
+    // The shell commands of a RUN, in its shell or JSON form, or of a line of a RUN's
+    // here-document, each after the operator that joins it to the one before. An install only
+    // counts as checked when the check and every command between them are joined by &&.
+    const commands = instruction.replace(/^RUN\s+(?:--\S+\s+)*/i, '');
+    const parts = (commands.startsWith('[') ? shellForm(commands) : commands).split(
+      /(&&|\|\||[;|&])/
+    );
+    let checked = false;
+    for (let index = 0; index < parts.length; index += 2) {
+      if (parts[index - 1] !== '&&') checked = false;
+      const words = parts[index].trim().split(/\s+/);
+      while (/^\w+=/.test(words[0])) words.shift();
+      const [program = '', ...args] = words;
+      const tool = program.split('/').pop();
+      if (tool === 'node' && args[0] === 'scripts/check-lockfile.mjs') checked = true;
+      // yarn on its own or with only options installs, as do its install and add commands, and
+      // npm's.
+      const installsPackages =
+        (tool === 'yarn' &&
+          (args.every((arg) => arg.startsWith('-')) ||
+            args.some((arg) => ['install', 'add'].includes(arg)))) ||
+        (tool === 'npm' && args.some((arg) => ['install', 'i', 'ci', 'add'].includes(arg)));
+      if (!installsPackages) continue;
+      installs++;
+      const frozen =
+        tool === 'yarn' && args.includes('install') && args.includes('--frozen-lockfile');
+      if (!frozen || !checked)
+        problems.push(
+          `It installs packages with "${parts[index].trim()}", not with ` +
+            'node scripts/check-lockfile.mjs && yarn install --frozen-lockfile.'
+        );
+    }
+  }
+  if (installs === 0) problems.push('It installs no packages.');
+  return problems;
+}
+
+// A made-up Dockerfile, built the way the images are, passes, and each of these changes fails it.
+const digest = (letter) => `@sha256:${letter.repeat(64)}`;
+const dockerfile = `FROM dhi.io/node:26-dev${digest('a')} AS build
+WORKDIR /opt/workdir/
+COPY package.json yarn.lock ./
+# Install from yarn.lock.
+RUN node scripts/check-lockfile.mjs && \\
+    yarn install --production --frozen-lockfile && \\
+    yarn build-web-server
+RUN node scripts/run-tests.mjs
+FROM dhi.io/node:26${digest('b')}
+COPY --from=build /opt/workdir /opt/workdir
+CMD [ "node", "web-server/index.js" ]
+`;
+assert.deepStrictEqual(dockerfileProblems(dockerfile), []);
+const install = 'node scripts/check-lockfile.mjs && yarn install --frozen-lockfile';
+for (const [changed, problem] of [
+  [dockerfile.replace(digest('a'), ''), 'It builds from dhi.io/node:26-dev, which is not'],
+  [dockerfile.replace(digest('b'), ''), 'It builds from dhi.io/node:26, which is not'],
+  [dockerfile.replace(' --frozen-lockfile', ''), 'with "yarn install --production", not with'],
+  [
+    dockerfile.replace('mjs && \\', 'mjs; \\'),
+    'with "yarn install --production --frozen-lockfile"'
+  ],
+  [
+    dockerfile.replace('mjs && \\', 'mjs || \\'),
+    'with "yarn install --production --frozen-lockfile"'
+  ],
+  [
+    dockerfile.replace('node scripts/check-lockfile.mjs && ', ''),
+    'with "yarn install --production'
+  ],
+  [`${dockerfile}RUN yarn --production\n`, `with "yarn --production", not with ${install}.`],
+  [`${dockerfile}RUN yarn\n`, 'It installs packages with "yarn", not with'],
+  [`${dockerfile}RUN cd client && yarn add left-pad\n`, 'with "yarn add left-pad", not with'],
+  [`${dockerfile}RUN npm install left-pad\n`, 'with "npm install left-pad", not with'],
+  [`${dockerfile}RUN --mount=type=cache,target=/cache npm ci\n`, 'with "npm ci", not with'],
+  [`${dockerfile}RUN ["yarn", "install"]\n`, 'with "yarn install", not with'],
+  [`${dockerfile}RUN <<EOF\nyarn install --frozen-lockfile\nEOF\n`, 'with "yarn install --frozen'],
+  [dockerfile.replace(/RUN node scripts\/check[\s\S]*?server\n/, ''), 'It installs no packages.']
+]) {
+  const problems = dockerfileProblems(changed);
+  assert.ok(
+    problems.some((line) => line.includes(problem)),
+    `Expected "${problem}" in:\n${problems.join('\n')}\nfor:\n${changed}`
+  );
 }
 
 // Each image's build stage checks yarn.lock before it installs, and installs with
@@ -210,40 +437,12 @@ const dockerfiles = ['web-server', 'ban-importer', 'discord-bot']
   .filter((name) => existsSync(join(repository, name)));
 assert.ok(dockerfiles.length > 0, 'Found no Dockerfile');
 for (const name of dockerfiles) {
-  // The instructions, with their continued lines joined and the comments left out.
-  const instructions = readFileSync(join(repository, name), 'utf8')
-    .replace(/\\\r?\n/g, ' ')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line !== '' && !line.startsWith('#'));
-  const stages = [];
-  let installs = 0;
-  for (const instruction of instructions) {
-    const from = instruction.match(/^FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?/i);
-    if (from) {
-      assert.ok(
-        stages.includes(from[1]) || /@sha256:[0-9a-f]{64}$/.test(from[1]),
-        `${name} builds from ${from[1]}, which is not pinned by digest`
-      );
-      if (from[2]) stages.push(from[2]);
-    }
-    if (!/^RUN\s/i.test(instruction) || !/\byarn install\b/.test(instruction)) continue;
-    installs++;
-    assert.match(
-      instruction,
-      /\byarn install\b[^&;|]*--frozen-lockfile/,
-      `${name} runs yarn install without --frozen-lockfile`
-    );
-    assert.match(
-      instruction,
-      /node scripts\/check-lockfile\.mjs &&[^;|]*\byarn install\b/,
-      `${name} runs yarn install without first checking yarn.lock`
-    );
-  }
-  assert.ok(installs > 0, `${name} runs no yarn install`);
+  const problems = dockerfileProblems(readFileSync(join(repository, name), 'utf8'));
+  assert.deepStrictEqual(problems, [], `${name}:\n${problems.join('\n')}`);
 }
 
 console.log(
-  "yarn.lock checks passed: the repository's yarn.lock, missing and unused packages, sources, " +
-    `checksums, and ${dockerfiles.join(', ')}.`
+  "yarn.lock checks passed: the repository's yarn.lock, missing and unused packages, " +
+    'resolutions, workspaces, sources, checksums, made-up Dockerfiles, and ' +
+    `${dockerfiles.join(', ')}.`
 );
