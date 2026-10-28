@@ -1,8 +1,12 @@
 import assert from 'assert';
 import { existsSync, readFileSync } from 'fs';
-import { readdir, readFile } from 'fs/promises';
-import { isBuiltin } from 'module';
-import vm from 'vm';
+import { readFile } from 'fs/promises';
+
+import {
+  misnamedDependencyBlocks,
+  packagesLoadedBy,
+  sourceFiles
+} from '../../scbl-lib/test/helpers/declared-dependencies.js';
 
 // web-server/package.json must declare every package the web server's code imports, in
 // dependencies, and every other package its tests import, in devDependencies. A package that only
@@ -10,61 +14,25 @@ import vm from 'vm';
 // declaring it. A declared package that nothing uses is installed for nothing.
 
 const root = new URL('../', import.meta.url);
-const manifest = JSON.parse(await readFile(new URL('package.json', root), 'utf8'));
+const readManifest = async (url) => JSON.parse(await readFile(url, 'utf8'));
+const manifest = await readManifest(new URL('package.json', root));
+const client = await readManifest(new URL('../client/package.json', root));
+const scblLib = await readManifest(new URL('../scbl-lib/package.json', root));
 const dependencies = Object.keys(manifest.dependencies);
 const devDependencies = Object.keys(manifest.devDependencies ?? {});
 
-// npm and Yarn ignore a block with any other name, such as dev-dependencies, so a package listed
-// there would never be installed.
-for (const key of Object.keys(manifest))
-  assert.ok(
-    ['name', 'version', 'type', 'dependencies', 'devDependencies'].includes(key),
-    `web-server/package.json has a block named ${key}, which npm and Yarn may not read`
-  );
+// npm and Yarn ignore a list of packages under any other name, such as dev-dependencies, so the
+// packages in it would never be installed.
+for (const key of misnamedDependencyBlocks(manifest))
+  assert.fail(`web-server/package.json lists packages under ${key}, which npm and Yarn ignore`);
 
-async function jsFiles(dir) {
-  const files = [];
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
-    if (entry.name === 'node_modules') continue;
-    const url = new URL(entry.name + (entry.isDirectory() ? '/' : ''), dir);
-    if (entry.isDirectory()) files.push(...(await jsFiles(url)));
-    else if (entry.name.endsWith('.js')) files.push(url);
-  }
-  return files;
-}
-
-// The package an import names: '@scope/name' or 'name', without the path inside it.
-const packageOf = (specifier) =>
-  specifier
-    .split('/')
-    .slice(0, specifier.startsWith('@') ? 2 : 1)
-    .join('/');
-
-// Each package the files import, with the first file that imports it. The files are parsed, not
-// run, so this lists exactly the packages their import and export statements name.
-async function importsOf(files) {
-  const imported = new Map();
-  for (const file of files) {
-    const name = file.pathname.slice(root.pathname.length);
-    const module = new vm.SourceTextModule(await readFile(file, 'utf8'), { identifier: name });
-    for (const { specifier } of module.moduleRequests) {
-      if (specifier.startsWith('.') || isBuiltin(specifier)) continue;
-      if (!imported.has(packageOf(specifier))) imported.set(packageOf(specifier), name);
-    }
-  }
-  return imported;
-}
-
-const codeFiles = [
-  new URL('index.js', root),
-  new URL('healthcheck.js', root),
-  ...(await jsFiles(new URL('src/', root)))
-];
-const testFiles = await jsFiles(new URL('test/', root));
+// The code is every file but the tests; the tests are every file in test/.
+const codeFiles = await sourceFiles(root, ['test']);
+const testFiles = await sourceFiles(new URL('test/', root));
 assert.ok(codeFiles.length > 20, `Found only ${codeFiles.length} of the web server's files`);
 assert.ok(testFiles.length > 20, `Found only ${testFiles.length} of the web server's tests`);
-const codeImports = await importsOf(codeFiles);
-const testImports = await importsOf(testFiles);
+const codeImports = await packagesLoadedBy(codeFiles, root);
+const testImports = await packagesLoadedBy(testFiles, root);
 
 // The image installs only dependencies, so the code's packages must be there.
 for (const [name, file] of codeImports)
@@ -73,12 +41,29 @@ for (const [name, file] of codeImports)
     `web-server/${file} imports ${name}, which web-server/package.json does not declare in dependencies`
   );
 
+// Packages some tests load as another package installs them, to check the same copy the web
+// server runs with. Declaring them here would not make it that copy. A test that loads a package
+// with a require made from scbl-lib's files, as the list tests load the models' Sequelize, needs
+// no entry, since scbl-lib's own test checks its manifest. A package may stay on this list while
+// no test loads it, so the tests that load it can change on their own.
+const installedBy = {
+  // The web server's code loads these through scbl-lib, and the tests stand in for or check that
+  // code: the BattleMetrics and Steam clients' axios and the logger's Bottleneck.
+  axios: 'scbl-lib',
+  bottleneck: 'scbl-lib',
+  // The OpenID library that passport-steam loads, whose requests the sign-in tests replace.
+  openid: 'passport-steam'
+};
+for (const [name, owner] of Object.entries(installedBy))
+  if (owner === 'scbl-lib')
+    assert.ok(scblLib.dependencies[name], `scbl-lib/package.json no longer declares ${name}`);
+
 // The web server builds and serves the client, so its tests also check the client's code, which
 // they load with the client's own packages. Those are devDependencies here: the image installs
 // them because the client declares them.
 for (const [name, file] of testImports)
   assert.ok(
-    dependencies.includes(name) || devDependencies.includes(name),
+    dependencies.includes(name) || devDependencies.includes(name) || name in installedBy,
     `web-server/${file} imports ${name}, which web-server/package.json does not declare`
   );
 for (const name of devDependencies)
@@ -87,15 +72,41 @@ for (const name of devDependencies)
     `web-server/package.json declares ${name}, which no test imports`
   );
 
+// The tests pass the client's packages into the client's code, so they must be the client's own
+// copy. With the client's exact range, Yarn installs one copy for both; with another, it can
+// install a second copy for the web server, and the tests would check the client with a version
+// it does not use. A test-only package the client does not use can have any range.
+const rangeMismatches = (web, ofClient) =>
+  Object.entries(web.devDependencies ?? {})
+    .filter(
+      ([name, range]) =>
+        name in (ofClient.dependencies ?? {}) && ofClient.dependencies[name] !== range
+    )
+    .map(([name]) => name);
+assert.deepStrictEqual(
+  rangeMismatches(
+    { devDependencies: { rxjs: '^6.6.0', yup: '^1.7.1', other: '^1.0.0' } },
+    { dependencies: { rxjs: '^7.8.2', yup: '^1.7.1' } }
+  ),
+  ['rxjs'],
+  'A devDependency the client asks for with another range is found'
+);
+for (const name of rangeMismatches(manifest, client))
+  assert.fail(
+    `web-server/package.json asks for ${name} ${manifest.devDependencies[name]}, but the client ` +
+      `asks for ${client.dependencies[name]}. Keep the two the same.`
+  );
+
 // A dependency the code does not import must be the peer of one it does, as helmet is for
-// koa-helmet. Peers are read from the installed packages, wherever Yarn put them.
+// koa-helmet. Peers are read from the installed packages, wherever Yarn put them. A package that
+// is not installed here has none to read; loading the code shows that it is missing.
 function peersOf(name) {
   for (const dir of ['node_modules/', '../node_modules/']) {
     const file = new URL(`${dir}${name}/package.json`, root);
     if (existsSync(file))
       return Object.keys(JSON.parse(readFileSync(file, 'utf8')).peerDependencies ?? {});
   }
-  assert.fail(`${name}, which web-server/package.json declares, is not installed`);
+  return [];
 }
 const peers = new Set([...codeImports.keys()].flatMap(peersOf));
 for (const name of dependencies)
