@@ -151,17 +151,20 @@ function qualifyingPlayers(settings, configs, timeLimit) {
 // - configs are the list's configs as stored, duplicates and NULLs included, with a change applied:
 //   plus a new config, or minus a deleted one. A new list has none.
 // - timeLimit is how long MySQL may take, in milliseconds.
-// The count is one statement outside any transaction, so it reads a consistent snapshot and takes
-// no locks: in the importer's SERIALIZABLE transaction it would lock every ban it reads. Errors,
-// such as MySQL's ER_QUERY_TIMEOUT when the time limit is reached, are passed on as Sequelize
-// gives them.
-export async function countMembers(settings, configs, { timeLimit = 3000 } = {}) {
+// - transaction, if given, is a REPEATABLE READ transaction to count in, on the connection it
+//   holds, whichever pool that is from, so counts in it all read the same snapshot of the bans.
+// The count is one statement, outside any transaction unless one is given, so it reads a
+// consistent snapshot and takes no locks: in the importer's SERIALIZABLE transaction it would lock
+// every ban it reads. Errors, such as MySQL's ER_QUERY_TIMEOUT when the time limit is reached, are
+// passed on as Sequelize gives them.
+export async function countMembers(settings, configs, { timeLimit = 3000, transaction } = {}) {
   const { hints, sql, replacements } = qualifyingPlayers(settings, configs, timeLimit);
   const [{ players }] = await sequelize.query(
     `SELECT ${hints} COUNT(*) AS players FROM (${sql}) Q`,
     {
       type: QueryTypes.SELECT,
-      replacements
+      replacements,
+      ...(transaction && { transaction })
     }
   );
   return Number(players);

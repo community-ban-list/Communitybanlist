@@ -8,9 +8,9 @@ import logText from '../../scbl-lib/utils/log-text.js';
 import Validators from '../../scbl-lib/validators.js';
 
 // Checks for the limit on the players an export ban list can have (mutation/check-size.js). Part 1
-// loads check-size.js on its own, with stand-ins for the counts and a clock the checks set. Part 2
-// makes changes through mutation/index.js to the real resolvers, with stand-ins for the database,
-// the counts, Discord and BattleMetrics.
+// loads check-size.js on its own, with stand-ins for the counts and their pool of connections, and
+// a clock the checks set. Part 2 makes changes through mutation/index.js to the real resolvers,
+// with stand-ins for the database, the counts, Discord and BattleMetrics.
 
 // Load a module in a context. The imports in `stubs` get those exports, and other relative imports
 // load the real files.
@@ -39,33 +39,138 @@ async function load(path, stubs, context) {
 
 // Stand-ins for the counts in scbl-lib/db/export-membership.js. Each count is recorded, as
 // { settings, configs, options } for a list and { bans, options } for the players with that many
-// bans, copied out of the module's context to compare them. It is answered at once by `answer`,
-// when that is set, with what it returns or throws, and otherwise waits until the checks finish it,
-// so they can see which counts run at once.
+// bans, copied out of the module's context to compare them, with the transaction it is in, if any,
+// in `transactions`. It is answered at once by `answer`, when that is set, with what it returns or
+// throws, and otherwise waits until the checks finish it, so they can see which counts run at once.
+// - A count in no transaction runs on one of the connections every request shares, and while the
+//   checks hold them all (`sharedBusy`), it waits for one before it starts.
+// - Each count reads the bans as they were at `version`, which the checks raise to save bans: as
+//   it starts, or, in a transaction, as the transaction's first count started, as MySQL's
+//   REPEATABLE READ does. `answer` is given that version after the call.
+// How many counts have started on the database, and the most that ran at once, are kept too.
 function countStandIns() {
   const calls = [];
+  const transactions = [];
   const waiting = [];
+  const forShared = [];
+  const snapshots = new Map();
+  let running = 0;
   const counts = {
     calls,
+    transactions,
     waiting,
     answer: undefined,
+    version: 0,
+    sharedBusy: false,
+    started: 0,
+    mostAtOnce: 0,
     // Finish the count that has waited longest, with a number or an error.
     finish(result) {
       const { resolve, reject } = waiting.shift();
       if (result instanceof Error) reject(result);
       else resolve(result);
+    },
+    // Free the shared connections, so the counts waiting for one start.
+    freeShared() {
+      counts.sharedBusy = false;
+      for (const start of forShared.splice(0)) start();
     }
   };
-  const count = (call) => {
+  const count = async (call, transaction) => {
     calls.push(JSON.parse(JSON.stringify(call)));
-    if (counts.answer) return Promise.resolve().then(() => counts.answer(call));
-    return new Promise((resolve, reject) => waiting.push({ resolve, reject }));
+    transactions.push(transaction);
+    if (!transaction && counts.sharedBusy) await new Promise((resolve) => forShared.push(resolve));
+    if (transaction && !snapshots.has(transaction)) snapshots.set(transaction, counts.version);
+    const version = transaction ? snapshots.get(transaction) : counts.version;
+    counts.started += 1;
+    running += 1;
+    counts.mostAtOnce = Math.max(counts.mostAtOnce, running);
+    try {
+      if (counts.answer) return await Promise.resolve().then(() => counts.answer(call, version));
+      return await new Promise((resolve, reject) => waiting.push({ resolve, reject }));
+    } finally {
+      running -= 1;
+    }
   };
   counts.exports = {
-    countMembers: (settings, configs, options) => count({ settings, configs, options }),
-    countPlayersWithBans: (bans, options) => count({ bans, options })
+    countMembers: (settings, configs, { transaction, ...options }) =>
+      count({ settings, configs, options }, transaction),
+    countPlayersWithBans: (bans, { transaction, ...options }) =>
+      count({ bans, options }, transaction)
   };
   return counts;
+}
+
+// A stand-in for the pool of connections check-size.js makes for its counts with createPool
+// (scbl-lib/db/sequelize.js), which records the settings it is made with in `made`. Its one
+// connection is free unless a transaction holds it. A transaction waits for it, for at most the
+// pool's acquire setting on the pool's own timers, which only go off when the checks set them off,
+// and then gives its callback a transaction that names it and its isolation level. It commits once
+// the callback resolves, or rolls back once it rejects, and then frees the connection. Each of
+// these steps is recorded in `events`.
+function poolStandIn() {
+  const timers = fakeTimers();
+  const pool = { made: [], events: [], timers };
+  const waiting = [];
+  let held = false;
+  let transactions = 0;
+  const free = () => {
+    const next = waiting.shift();
+    if (!next) held = false;
+    else {
+      timers.globals.clearTimeout(next.timer);
+      next.take();
+    }
+  };
+  const database = {
+    async transaction({ isolationLevel }, callback) {
+      const id = (transactions += 1);
+      if (!held) held = true;
+      else
+        await new Promise((resolve, reject) => {
+          const waiter = { take: resolve };
+          waiter.timer = timers.globals.setTimeout(() => {
+            waiting.splice(waiting.indexOf(waiter), 1);
+            pool.events.push(`${id}: no connection`);
+            reject(
+              Object.assign(new Error('Operation timeout'), {
+                name: 'SequelizeConnectionAcquireTimeoutError'
+              })
+            );
+          }, pool.made[0].acquire);
+          waiting.push(waiter);
+        });
+      pool.events.push(`${id}: begin ${isolationLevel}`);
+      try {
+        const result = await callback({ id, isolationLevel });
+        pool.events.push(`${id}: commit`);
+        return result;
+      } catch (error) {
+        pool.events.push(`${id}: rollback`);
+        throw error;
+      } finally {
+        free();
+      }
+    },
+    async close() {
+      pool.events.push('close');
+    }
+  };
+  pool.exports = {
+    createPool(settings) {
+      pool.made.push({ ...settings });
+      return database;
+    },
+    Transaction: {
+      ISOLATION_LEVELS: {
+        READ_UNCOMMITTED: 'READ UNCOMMITTED',
+        READ_COMMITTED: 'READ COMMITTED',
+        REPEATABLE_READ: 'REPEATABLE READ',
+        SERIALIZABLE: 'SERIALIZABLE'
+      }
+    }
+  };
+  return pool;
 }
 
 // Timers for a module's context that only go off when the checks set them off, so a count can go
@@ -161,17 +266,19 @@ const now = () => time;
 // Load check-size.js with the limits these environment variables set. `check` makes a change by a
 // user as resolver.js gives it to checkSize, from the list before (null for a new list) and after
 // it, with what checkChange gives for it. The list's ID is 7, and the user has room for another.
-// The module's timers only go off when the checks set them off.
+// The module's timers, and the counts' pool's, only go off when the checks set them off.
 async function sizeChecks(env) {
   const limits = exportListLimits.readLimits(env).limits;
   const counts = countStandIns();
   const timers = fakeTimers();
+  const pool = poolStandIn();
   const logged = [];
   const { default: checkSize, ...constants } = await load(
     '../src/graphql-api/mutation/check-size.js',
     {
       'scbl-lib/config': { EXPORT_LIST_LIMITS: limits },
       'scbl-lib/db/export-membership': counts.exports,
+      'scbl-lib/db/sequelize': pool.exports,
       'scbl-lib/export-list-limits': exportListLimits
     },
     vm.createContext({
@@ -196,7 +303,7 @@ async function sizeChecks(env) {
         now
       )
     );
-  return { check, constants, counts, logged, timers };
+  return { check, constants, counts, logged, pool, timers };
 }
 
 const { constants } = await sizeChecks({});
@@ -206,7 +313,8 @@ const {
   COUNTS_PERIOD,
   COUNTS_WAITING,
   TIME_LIMIT,
-  ANSWER_LIMIT
+  ANSWER_LIMIT,
+  CONNECTION_WAIT
 } = constants;
 // The checks below work out their times and counts from these, so they can be tuned within these
 // bounds without changing the checks.
@@ -220,8 +328,10 @@ const counting = { timeLimit: TIME_LIMIT };
 const twoBans = { bans: 2, options: counting };
 const rateLimit = (wait) =>
   `Saving this change needs a count of the players it would list, and each user can run ${COUNTS_PER_USER} counts every ${COUNTS_PERIOD / SECOND} seconds. Please try again in ${wait}.`;
-// What is logged of a count the database did not answer in time.
+// What is logged of a count the database did not answer in time, and of one that could not get the
+// counts' connection in time.
 const NO_ANSWER = `Error: The database did not answer the count within ${ANSWER_LIMIT / SECOND} seconds.`;
+const NO_CONNECTION = `Error: The count could not get a database connection within ${CONNECTION_WAIT / SECOND} seconds.`;
 
 // With the default limits, one active ban plus one expired ban is never enough to put a player on
 // a list, so a list within the rules holds only players with two or more bans. Those players are
@@ -566,13 +676,17 @@ const NO_ANSWER = `Error: The database did not answer the count within ${ANSWER_
   assert.deepStrictEqual(mixed.logged, []);
 }
 
-// A count the database does not answer within ANSWER_LIMIT, as on a connection that has stopped
-// answering, is given up on as a count that failed. The changes waiting for it go on, and the next
-// count takes its turn.
+// A count the database does not answer within ANSWER_LIMIT of its start, as on a connection that
+// has stopped answering, is given up on as a count that failed, and the changes waiting for it go
+// on. It holds the counts' connection until the database answers it, so the next count waits for
+// the connection, for at most CONNECTION_WAIT, and is given up on if it is not free by then. A
+// count given up on never starts a count later, and a late answer is not used.
 {
   // Remote lists keep their rules, so their changes use the count of the players with two or more
   // bans. BattleMetrics lists have theirs turned off, so their changes are counted one by one.
-  const { check, counts, logged, timers } = await sizeChecks({ EXPORT_BM_NEVER_ENOUGH: 'none' });
+  const { check, counts, logged, pool, timers } = await sizeChecks({
+    EXPORT_BM_NEVER_ENOUGH: 'none'
+  });
   time = 0;
   const growing = [listOf(), listOf({ threshold: 6 })];
   const remote = [check('a', 'remote', null, listOf()), check('b', 'remote', ...growing)];
@@ -582,14 +696,26 @@ const NO_ANSWER = `Error: The database did not answer the count within ${ANSWER_
   assert.deepStrictEqual(timers.waits(), [ANSWER_LIMIT]);
 
   // With no count of the players with two or more bans, the remote changes are allowed, as when
-  // the count fails, and the BattleMetrics list's count runs.
+  // the count fails. That count still holds the connection, so the BattleMetrics list's count
+  // waits for it, in the pool too.
   timers.fire();
   assert.deepStrictEqual(await Promise.all(remote), ['allowed', 'allowed']);
+  await settle();
+  assert.strictEqual(counts.calls.length, 1);
+  assert.deepStrictEqual(
+    [timers.waits(), pool.timers.waits()],
+    [[CONNECTION_WAIT], [CONNECTION_WAIT]]
+  );
+
+  // The database answers the count it was given up on, too late: its answer is not used, though
+  // it would put the players with two or more bans over the limit on remote lists, which would
+  // then be counted one by one. Its transaction ends, and the BattleMetrics list's count runs.
+  counts.finish(45120);
   await settle();
   assert.deepStrictEqual(counts.calls.slice(1), [
     { settings: settingsOf(ANY_BAN), configs: [], options: counting }
   ]);
-  assert.deepStrictEqual(timers.waits(), [ANSWER_LIMIT]);
+  assert.deepStrictEqual([timers.waits(), pool.timers.waits()], [[ANSWER_LIMIT], []]);
   // A list's count with no answer refuses its change with the plain message.
   timers.fire();
   assert.strictEqual(await battlemetrics, COULD_NOT_COUNT);
@@ -598,18 +724,44 @@ const NO_ANSWER = `Error: The database did not answer the count within ${ANSWER_
     `Export ban list sizes: could not count the players for a new BattleMetrics export ban list, so the change was refused: ${NO_ANSWER}`
   ]);
 
-  // Answers that come late are not used. These would put the players with two or more bans over
-  // the limit on remote lists, which would then be counted one by one.
-  counts.finish(45120);
+  // Until the database answers that count, the next cannot get the connection, and is given up on
+  // after CONNECTION_WAIT, as its wait in the pool ends. It never runs.
+  const noConnection = check('d', 'battlemetrics', null, listOf(ANY_BAN));
+  await settle();
+  timers.fire();
+  assert.strictEqual(await noConnection, COULD_NOT_COUNT);
+  pool.timers.fire();
+  // One given up on just before its wait in the pool ends gets the connection if it frees up in
+  // between, here as the database answers the count before, too late. It then starts no count.
+  const late = check('e', 'battlemetrics', null, listOf(ANY_BAN));
+  await settle();
+  timers.fire();
+  assert.strictEqual(await late, COULD_NOT_COUNT);
   counts.finish(25692);
   await settle();
-  assert.strictEqual(await check('a', 'remote', null, listOf()), 'allowed');
   assert.strictEqual(counts.calls.length, 2);
-  assert.strictEqual(logged.length, 2);
+  assert.deepStrictEqual(pool.events, [
+    '1: begin REPEATABLE READ',
+    '1: commit',
+    '2: begin REPEATABLE READ',
+    '3: no connection',
+    '2: commit',
+    '4: begin REPEATABLE READ',
+    '4: rollback'
+  ]);
+  assert.deepStrictEqual(
+    logged.slice(2),
+    Array(2).fill(
+      `Export ban list sizes: could not count the players for a new BattleMetrics export ban list, so the change was refused: ${NO_CONNECTION}`
+    )
+  );
+  // Nor are the late answers used.
+  assert.strictEqual(await check('a', 'remote', null, listOf()), 'allowed');
+  assert.deepStrictEqual([counts.calls.length, logged.length], [2, 4]);
 
   // When a list would be over its limit, its count as it is now is given up on in the same way.
   // An answered count's timer is cleared.
-  const overLimit = check('d', 'battlemetrics', ...growing);
+  const overLimit = check('f', 'battlemetrics', ...growing);
   await settle();
   counts.finish(25692);
   await settle();
@@ -619,7 +771,101 @@ const NO_ANSWER = `Error: The database did not answer the count within ${ANSWER_
   assert.strictEqual(await overLimit, COULD_NOT_COUNT);
   counts.finish(7943);
   await settle();
-  assert.deepStrictEqual([timers.waits(), counts.waiting.length], [[], 0]);
+  // A list whose count as it would be is given up on is not counted as it is, even when the
+  // database answers that count later, over the limit.
+  const givenUp = check('g', 'battlemetrics', ...growing);
+  await settle();
+  timers.fire();
+  assert.strictEqual(await givenUp, COULD_NOT_COUNT);
+  counts.finish(25692);
+  await settle();
+  assert.strictEqual(counts.calls.length, 5);
+  assert.deepStrictEqual(pool.events.slice(7), [
+    '5: begin REPEATABLE READ',
+    '5: commit',
+    '6: begin REPEATABLE READ',
+    '6: rollback'
+  ]);
+  assert.deepStrictEqual(
+    [timers.waits(), pool.timers.waits(), counts.waiting.length, counts.mostAtOnce],
+    [[], [], 0, 1]
+  );
+}
+
+// A list is counted as it would be and as it is in one REPEATABLE READ transaction on the counts'
+// connection, so both counts read the bans as they were when the first one started. Bans saved
+// between the two, as the importer, or the bot's /banlist remove, can save them at any time, then
+// cannot make a change that makes the list bigger look like one that does not, nor the other way
+// round.
+{
+  const { check, counts, pool } = await sizeChecks(NONE);
+  time = 0;
+  const stored = listOf({ threshold: 9 });
+  const changed = listOf({ threshold: 6 });
+  // The players the list holds with each threshold, at each version of the bans, and the bans
+  // saved as the first count is answered. Here the importer saves bans that put 2,500 more players
+  // on it either way.
+  const answers = (versions) => (call, version) => {
+    counts.version = 1;
+    return versions[version][call.settings.threshold];
+  };
+  counts.answer = answers([
+    { 9: 19000, 6: 21000 },
+    { 9: 21500, 6: 23500 }
+  ]);
+  assert.strictEqual(
+    await check('a', 'battlemetrics', stored, changed),
+    `These changes would put 21,000 players on this export ban list, up from 19,000. ${BATTLEMETRICS_LIMIT} ${SETTINGS_INSTEAD} ${REMOTE_INSTEAD}`
+  );
+  // Here a /banlist remove takes 500 players off it either way, so the change still leaves the list
+  // no bigger.
+  counts.version = 0;
+  counts.answer = answers([
+    { 9: 21000, 6: 21000 },
+    { 9: 20500, 6: 20500 }
+  ]);
+  assert.strictEqual(await check('b', 'battlemetrics', stored, changed), 'allowed');
+  assert.deepStrictEqual(
+    counts.transactions.map((transaction) => transaction?.id),
+    [1, 1, 2, 2]
+  );
+  assert.deepStrictEqual(pool.events, [
+    '1: begin REPEATABLE READ',
+    '1: commit',
+    '2: begin REPEATABLE READ',
+    '2: commit'
+  ]);
+}
+
+// The counts have a pool of their own, of one connection, which a count waits for for at most
+// CONNECTION_WAIT, after which the pool stops its wait too. So they never wait for, or take up, the
+// connections every request shares: while those are all busy, changes are still counted, one at a
+// time, and no count runs once those are free again. The web server closes the pool as it stops.
+{
+  const { check, constants, counts, pool, timers } = await sizeChecks(NONE);
+  assert.deepStrictEqual(pool.made, [{ max: 1, min: 0, acquire: CONNECTION_WAIT }]);
+  time = 0;
+  counts.sharedBusy = true;
+  counts.answer = () => 100;
+  const changes = ['a', 'b', 'c'].map((user) =>
+    check(user, 'battlemetrics', null, listOf(ANY_BAN))
+  );
+  // Counts that wait for anything the checks control are given up on.
+  for (let i = 0; i < changes.length; i++) {
+    await settle();
+    timers.fire();
+  }
+  assert.deepStrictEqual(await Promise.all(changes), Array(3).fill('allowed'));
+  counts.freeShared();
+  await settle();
+  assert.deepStrictEqual([counts.started, counts.mostAtOnce], [3, 1]);
+  assert.deepStrictEqual(
+    counts.transactions.map((transaction) => transaction?.id),
+    [1, 2, 3]
+  );
+
+  await constants.closeCountPool();
+  assert.strictEqual(pool.events.at(-1), 'close');
 }
 
 // Lists of a type with no limit, or changes that can only make a list smaller, are not counted.
@@ -771,6 +1017,7 @@ async function mutations(env) {
       'scbl-lib/config': { EXPORT_LIST_LIMITS: exportListLimits.readLimits(env).limits },
       'scbl-lib/db/export-membership': counts.exports,
       'scbl-lib/db/models': db.models,
+      'scbl-lib/db/sequelize': poolStandIn().exports,
       'scbl-lib/export-list-limits': exportListLimits,
       'scbl-lib/utils': {
         // The lines the resolvers post are checked in export-ban-list-audit.js.
@@ -1137,5 +1384,5 @@ const scoringOf = ({ threshold, defaultActivePoints, defaultExpiredPoints, maxBa
 }
 
 console.log(
-  'Export ban list size checks passed: the players with two or more bans, counts of lists, their limits, the messages and the log.'
+  'Export ban list size checks passed: the players with two or more bans, counts of lists in one snapshot on their own connection, their limits, the messages and the log.'
 );

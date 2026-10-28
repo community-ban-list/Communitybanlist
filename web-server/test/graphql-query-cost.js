@@ -149,7 +149,14 @@ const packages = {
   'scbl-lib/db/sequelize': {
     DATABASE_UNAVAILABLE_MESSAGE: 'The database is unavailable.',
     isDatabaseUnavailable: () => false,
-    Op: { ne: Symbol('ne') }
+    Op: { ne: Symbol('ne') },
+    // The pool the counts run on, which is never used with no limit.
+    createPool: () => ({
+      async transaction() {
+        throw new Error('Players were counted with no limit on lists.');
+      }
+    }),
+    Transaction: { ISOLATION_LEVELS: { REPEATABLE_READ: 'REPEATABLE READ' } }
   },
   'scbl-lib/utils': {
     // The mutations post their changes to the log channel, which these checks make none of.

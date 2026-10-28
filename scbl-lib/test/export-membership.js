@@ -261,6 +261,20 @@ await countMembers(settings, configs, { timeLimit: 2 ** 32 - 1 });
 assert.strictEqual(queries.length, 1);
 assert.ok(tidy(queries[0].sql).includes('MAX_EXECUTION_TIME(4294967295) */ COUNT(*) AS players'));
 
+// A count given a transaction runs in it, on the connection it holds, such as one from the web
+// server's pool for counts, so the counts in it read one snapshot. The count of the players with
+// two or more bans passes it on too. The statement is the same.
+queries.length = 0;
+answer = () => [{ players: 7 }];
+const snapshot = { id: 'one snapshot' };
+assert.strictEqual(await countMembers(settings, configs, { transaction: snapshot }), 7);
+assert.strictEqual(await countPlayersWithBans(2, { timeLimit: 3000, transaction: snapshot }), 7);
+for (const { options } of queries) {
+  assert.deepStrictEqual(Object.keys(options), ['type', 'replacements', 'transaction']);
+  assert.strictEqual(options.transaction, snapshot);
+}
+assert.strictEqual(queries[0].sql, count.sql);
+
 // The database's errors are passed on as they are, e.g. MySQL's when the time limit is reached.
 const timeout = Object.assign(new Error('Query execution was interrupted'), {
   name: 'SequelizeDatabaseError',
