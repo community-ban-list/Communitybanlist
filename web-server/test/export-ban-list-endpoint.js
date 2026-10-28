@@ -15,7 +15,9 @@ const rows = [
   { steamUser: '76561198000000003', exportBanList: 7, status: 'TO_BE_CREATED' },
   { steamUser: '76561198000000004', exportBanList: 7, status: null },
   { steamUser: '76561198000000005', exportBanList: 8, status: 'CREATED' },
-  { steamUser: '76561198000000006', exportBanList: 7, status: 'CREATED' }
+  { steamUser: '76561198000000006', exportBanList: 7, status: 'CREATED' },
+  { steamUser: ' <b>76561198000000007</b>', exportBanList: 9, status: 'CREATED' },
+  { steamUser: '76561198000000008', exportBanList: 9, status: 'CREATED' }
 ];
 const queries = [];
 const ExportBan = {
@@ -89,6 +91,17 @@ for (const id of ['07', '7.txt', '7.0', '+7', ' 7', '\n7', '0.7e1', '.7e1']) {
   assert.strictEqual(response.body, body, `List for ${JSON.stringify(id)}`);
   assert.deepStrictEqual(queries.splice(0), [query(7)], `Query for ${JSON.stringify(id)}`);
 }
+
+// A list is always served as plain text, whatever its first line holds. Koa would otherwise guess
+// the type from the body, and take one that starts with '<' for HTML.
+const markup = ' <b>76561198000000007</b>:0\n76561198000000008:0';
+assert.deepStrictEqual(await get('/export/9'), {
+  status: 200,
+  type: 'text/plain; charset=utf-8',
+  length: Buffer.byteLength(markup),
+  body: markup
+});
+assert.deepStrictEqual(queries.splice(0), [query(9)]);
 
 // A list that does not exist gets an empty list, such as list 10, which /export/1e1 names.
 const empty = { status: 200, type: 'text/plain; charset=utf-8', length: 0, body: '' };
