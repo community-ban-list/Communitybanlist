@@ -15,10 +15,15 @@ WORKDIR /opt/workdir/
 COPY scbl-lib ./scbl-lib
 COPY client ./client
 COPY web-server ./web-server
-COPY package.json .
+COPY package.json yarn.lock ./
+COPY scripts/check-lockfile.mjs ./scripts/
 
-# Install dependencies and build client
-RUN yarn install --production && \
+# Install the package versions yarn.lock lists, so every build of a commit installs the same
+# packages, then build the client. --frozen-lockfile stops Yarn changing yarn.lock, but Yarn still
+# installs a package that a workspace asks for and yarn.lock does not list, so the script first
+# checks that yarn.lock lists them all.
+RUN node scripts/check-lockfile.mjs && \
+    yarn install --production --frozen-lockfile && \
     yarn build-web-server
 
 # Run the tests, so an image that fails them is never built or pushed.

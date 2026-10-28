@@ -33,8 +33,11 @@ jobs:
         with:
           node-version: 26
 
+      # Install the package versions yarn.lock lists, as the images do. Yarn's --frozen-lockfile
+      # still installs a package that a workspace asks for and yarn.lock does not list, so the
+      # script first checks that yarn.lock lists them all, and nothing else.
       - name: Install dependencies
-        run: yarn install
+        run: node scripts/check-lockfile.mjs && yarn install --frozen-lockfile
 
       # Unlike yarn lint, this only reports what ESLint and Prettier would change.
       - name: Check the code with ESLint and Prettier
@@ -55,8 +58,9 @@ jobs:
         with:
           node-version: 26
 
+      # Install the package versions yarn.lock lists, as in the Lint job.
       - name: Install dependencies
-        run: yarn install
+        run: node scripts/check-lockfile.mjs && yarn install --frozen-lockfile
 
       # The client is built before the tests run, as in the web server image.
       - name: Build the client

@@ -15,10 +15,15 @@ WORKDIR /opt/workdir/
 # Keep these commands in this order to ensure dependencies are installed correctly.
 COPY scbl-lib ./scbl-lib
 COPY discord-bot ./discord-bot
-COPY package.json .
+COPY package.json yarn.lock ./
+COPY scripts/check-lockfile.mjs ./scripts/
 
-# Install dependencies
-RUN yarn install --production
+# Install the package versions yarn.lock lists, so every build of a commit installs the same
+# packages. --frozen-lockfile stops Yarn changing yarn.lock, but Yarn still installs a package that
+# a workspace asks for and yarn.lock does not list, so the script first checks that yarn.lock lists
+# them all.
+RUN node scripts/check-lockfile.mjs && \
+    yarn install --production --frozen-lockfile
 
 # Run the tests, so an image that fails them is never built or pushed.
 COPY scripts/run-tests.mjs ./scripts/
