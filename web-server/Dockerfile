@@ -1,10 +1,13 @@
 # Use multi-stage builds to reduce the final image size
 # Both stages use Docker Hardened Images, which need a `docker login dhi.io` to pull.
 
+# When the image's SBOM is generated, also scan the build context. It is declared before the first
+# FROM, so it applies to the final image's SBOM.
+ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
+
 # Stage 1: Build
 # The dev variant includes the shell and Yarn needed to install dependencies and build the client.
 FROM dhi.io/node:26-dev AS build
-ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
 
 WORKDIR /opt/workdir/
 
