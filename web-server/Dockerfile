@@ -7,7 +7,9 @@ ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
 
 # Stage 1: Build
 # The dev variant includes the shell and Yarn needed to install dependencies and build the client.
-FROM dhi.io/node:26-dev AS build
+# Both stages' base images are pinned by digest, so every build of a commit starts from the same
+# images. Dependabot proposes newer digests, such as security fixes, as pull requests.
+FROM dhi.io/node:26-dev@sha256:c8939885965365c675a024d062bcb761bda4b47e95ce0323aa998ac9bc312fd6 AS build
 
 WORKDIR /opt/workdir/
 
@@ -32,7 +34,7 @@ RUN node scripts/run-tests.mjs scbl-lib web-server
 
 # Stage 2: Runtime
 # The runtime variant has no shell or package manager and runs as the non-root node user.
-FROM dhi.io/node:26
+FROM dhi.io/node:26@sha256:dc87c509f7279f734d04036f696bf9aad1b8d66f34750f32c30c5b85e033187f
 
 WORKDIR /opt/workdir/
 

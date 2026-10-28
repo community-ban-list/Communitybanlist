@@ -202,8 +202,9 @@ try {
 }
 
 // Each image's build stage checks yarn.lock before it installs, and installs with
-// --frozen-lockfile, so Yarn installs only what yarn.lock lists. An image build has only its own
-// Dockerfile here; the pull request checks have all three.
+// --frozen-lockfile, so Yarn installs only what yarn.lock lists. Each stage starts from a base
+// image pinned by digest, which Dependabot proposes updates to, or from an earlier stage. An image
+// build has only its own Dockerfile here; the pull request checks have all three.
 const dockerfiles = ['web-server', 'ban-importer', 'discord-bot']
   .map((service) => `${service}/Dockerfile`)
   .filter((name) => existsSync(join(repository, name)));
@@ -215,8 +216,17 @@ for (const name of dockerfiles) {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line !== '' && !line.startsWith('#'));
+  const stages = [];
   let installs = 0;
   for (const instruction of instructions) {
+    const from = instruction.match(/^FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?/i);
+    if (from) {
+      assert.ok(
+        stages.includes(from[1]) || /@sha256:[0-9a-f]{64}$/.test(from[1]),
+        `${name} builds from ${from[1]}, which is not pinned by digest`
+      );
+      if (from[2]) stages.push(from[2]);
+    }
     if (!/^RUN\s/i.test(instruction) || !/\byarn install\b/.test(instruction)) continue;
     installs++;
     assert.match(
