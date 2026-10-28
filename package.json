@@ -15,6 +15,7 @@
   "scripts": {
     "prepare": "husky || true",
     "lint": "eslint --fix . && prettier --write \"./**/*.{js,jsx,mjs}\"",
+    "lint:check": "eslint . && prettier --check \"./**/*.{js,jsx,mjs}\"",
     "prettier": "prettier --write \"./**/*.{js,jsx,mjs}\"",
     "start-ban-importer": "node ban-importer/index.js",
     "start-discord-bot": "node discord-bot/index.js",

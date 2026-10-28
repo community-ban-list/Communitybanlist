@@ -1,0 +1,129 @@
+name: Pull request checks
+
+# Lint, test and build every pull request, so a change that breaks them shows on the pull request
+# before it is merged, not after. It runs for a pull request into any branch that has this file,
+# such as master or another pull request's branch. Pull requests from forks run code nobody has
+# reviewed yet, so the jobs run on GitHub's own runners rather than the self-hosted one, and the
+# trigger is pull_request, which gives a fork's run no secrets and a read-only token.
+on:
+  pull_request:
+
+# A new push to a pull request cancels the checks still running for its earlier commit. The image
+# workflows use another group, so these checks never wait for a deployment.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+
+      - name: Install dependencies
+        run: yarn install
+
+      # Unlike yarn lint, this only reports what ESLint and Prettier would change.
+      - name: Check the code with ESLint and Prettier
+        run: yarn lint:check
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+
+      - name: Install dependencies
+        run: yarn install
+
+      # The client is built before the tests run, as in the web server image.
+      - name: Build the client
+        run: yarn build-web-server
+
+      # A test still running after 2 minutes is stopped and fails, so even several that hang are
+      # listed as failed within the job's time limit.
+      - name: Run the tests of every workspace
+        run: node scripts/run-tests.mjs
+
+  # Each image's build stage installs its dependencies and runs its tests. The base images come from
+  # dhi.io, which needs a login, and a fork's pull request gets no secrets, so only pull requests
+  # from branches of this repository build them. It is one job rather than a matrix: a skipped
+  # matrix job reports nothing under its per-image names, so a required check on one of them would
+  # wait forever on a fork's pull request, while a skipped job counts as passed.
+  image-build:
+    name: Image build
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A read-only token that can only pull, kept apart from the Docker Hub token that pushes.
+      - name: Check the Docker Hardened Images pull secrets
+        env:
+          DHI_PULL_USERNAME: ${{ secrets.DHI_PULL_USERNAME }}
+          DHI_PULL_TOKEN: ${{ secrets.DHI_PULL_TOKEN }}
+        run: |
+          if [ -z "$DHI_PULL_USERNAME" ] || [ -z "$DHI_PULL_TOKEN" ]; then
+            echo "::error::Set the DHI_PULL_USERNAME and DHI_PULL_TOKEN secrets to a Docker Hub user and a read-only access token that can pull dhi.io images."
+            exit 1
+          fi
+
+      - name: Login to Docker Hardened Images
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DHI_PULL_USERNAME }}
+          password: ${{ secrets.DHI_PULL_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build and test the web server image's build stage
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: web-server/Dockerfile
+          target: build
+          push: false
+
+      - name: Build and test the ban importer image's build stage
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ban-importer/Dockerfile
+          target: build
+          push: false
+
+      - name: Build and test the Discord bot image's build stage
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: discord-bot/Dockerfile
+          target: build
+          push: false
