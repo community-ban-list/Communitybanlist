@@ -42,7 +42,7 @@ const dependencies = {
   },
   'scbl-lib/db/sequelize': { Op: { in: 'in' } },
   'scbl-lib/utils': {
-    createDiscordWebhookMessage: (webhook) => {
+    createDiscordWebhookMessage: () => {
       const message = {
         setTitle(title) {
           this.title = title;
@@ -53,7 +53,7 @@ const dependencies = {
           return { embeds: [this.title] };
         }
       };
-      return [webhook, message];
+      return message;
     },
     DELETED_WEBHOOK_CODES: [10015, 50027],
     isDiscordWebhookUrl: () => true,

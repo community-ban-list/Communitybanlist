@@ -40,7 +40,6 @@
     "prettier": "^3.9.9"
   },
   "dependencies": {
-    "react-step-wizard": "^5.3.5",
-    "simple-discord-webhooks": "^2.1.0"
+    "react-step-wizard": "^5.3.5"
   }
 }
