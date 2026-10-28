@@ -142,33 +142,26 @@ jobs:
           sbom: generator=docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
 
     # The Portainer webhook redeploys the web server and the Discord bot, so it runs after all the
-    # images are pushed. Otherwise the bot is redeployed before its new image exists.
+    # images are pushed. Otherwise the bot is redeployed before its new image exists. If the webhook
+    # call fails, the run fails too, so a redeploy that did not happen never shows as a success.
     - name: Redeploy the web server and Discord bot
       if: success()
-      continue-on-error: true
       env:
         # The Portainer webhook URL that redeploys the web server and the Discord bot.
         WEBHOOK_URL: ${{ secrets.WEB_SERVER_LAUNCH }}
       run: |
+        # The URL carries the webhook's token, so it is only ever sent over HTTPS to a server whose
+        # certificate verifies. --disable, which must be curl's first option, stops a .curlrc on the
+        # runner from turning that check off. If Portainer's certificate stops verifying, e.g.
+        # because it has expired, renew it, then redeploy from Portainer or re-run the newest master
+        # run. Re-running an older run would push its older images as latest.
         case "$WEBHOOK_URL" in
-          http://*|https://*) ;;
-          *) echo "::error::The WEB_SERVER_LAUNCH secret must be the Portainer webhook URL."; exit 1 ;;
+          https://*) ;;
+          *) echo "::error::The WEB_SERVER_LAUNCH secret must be the Portainer webhook's https:// URL."; exit 1 ;;
         esac
 
-        trigger() {
-          curl --fail --silent --show-error --max-time 60 --request POST "$@" "$WEBHOOK_URL"
+        curl --disable --fail --silent --show-error --max-time 60 --proto =https --request POST "$WEBHOOK_URL" || {
+          status=$?
+          echo "::error title=Redeploy failed::The Portainer webhook call failed (curl exit code $status), so the web server and Discord bot may not have been redeployed. Redeploy them from Portainer, or re-run the newest master run."
+          exit "$status"
         }
-
-        status=0
-        trigger || status=$?
-
-        # Portainer's certificate can fail verification from the runner, e.g. when it has expired.
-        # Still trigger the deployment then, by retrying without checking the certificate.
-        case "$status" in
-          0) ;;
-          35|51|58|60|77|83|90|91)
-            echo "::warning title=Portainer certificate::The deployment webhook failed certificate verification (curl exit code $status), so it was retried without checking the certificate."
-            trigger --insecure
-            ;;
-          *) exit "$status" ;;
-        esac
