@@ -13,6 +13,7 @@ import { send } from '@koa/send';
 import bodyParser from './body-parser.js';
 import { passport, routes as routesAuth } from './auth/index.js';
 import clientConfig from './client-config.js';
+import { inProduction, nodeEnvProblem } from './production.js';
 import GraphQL from './graphql-api/index.js';
 import ExportBanLists from './export-ban-lists.js';
 
@@ -20,7 +21,9 @@ import { DISCORD_INVITE, EXPORT_LIST_LIMIT_PROBLEMS, INTAKE_FORM } from 'scbl-li
 import { sequelize } from 'scbl-lib/db';
 import { DATABASE_UNAVAILABLE_MESSAGE, isDatabaseUnavailable } from 'scbl-lib/db/sequelize';
 
-const inProduction = process.env.NODE_ENV;
+// The site is served only when NODE_ENV is exactly production (production.js), so a value the web
+// server does not expect, such as prod, is warned about.
+if (nodeEnvProblem) console.warn(`Warning: ${nodeEnvProblem}`);
 
 const app = new Koa();
 const router = new Router();
