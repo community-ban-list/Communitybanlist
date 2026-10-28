@@ -6,18 +6,25 @@ import { setShuttingDown } from './shutting-down.js';
 
 // The web server stops on SIGTERM, which docker stop sends, or SIGINT, e.g. Ctrl+C. It takes no new
 // connections, its health check fails, and it answers the requests under way, for up to 8 seconds,
-// closing each connection once its answer is sent. Then it stops Apollo Server, writes the newest
-// message it posted to the log channel to the database and closes the database connections, as
-// the importer service does as it stops, and sends the lines still waiting for the log channel. It
-// exits 0, or 1 when requests were still being answered after 8 seconds and were cut off, and
-// always within 9 seconds of the signal, before docker stop, which waits 10 seconds by default,
-// kills it. A signal that comes before the server is listening ends it at once.
+// closing each connection once its answer is sent. Then it stops Apollo Server, sends the lines
+// waiting for the log channel, e.g. one about a change a request just made, writes the newest
+// message it posted there to the database and closes the database connections, as the importer
+// service does as it stops, and sends any lines still waiting. It exits 0, or 1 when requests were
+// still being answered after 8 seconds and were cut off, and always within 9 seconds of the signal,
+// before docker stop, which waits 10 seconds by default, kills it. A signal that comes before the
+// server is listening ends it at once.
 
-// How long the requests under way have to be answered, how long writing the newest message may
-// take, so a database that does not answer cannot take the time the steps after it need, and how
-// long after the signal the web server exits at the latest. Held on an object so the tests can
-// shorten them.
-export const stopTimes = { answering: 8 * 1000, recording: 2 * 1000, exiting: 9 * 1000 };
+// How long the requests under way have to be answered, how long the lines waiting for the log
+// channel may take to be sent before the newest message is written, and how long writing it may
+// take, so a log channel or a database that does not answer cannot take the time the steps after
+// it need, and how long after the signal the web server exits at the latest. Held on an object so
+// the tests can shorten them.
+export const stopTimes = {
+  answering: 8 * 1000,
+  lines: 2 * 1000,
+  recording: 2 * 1000,
+  exiting: 9 * 1000
+};
 
 // While lines wait for the log channel, how often to check whether they have been sent.
 const LOG_CHECK_INTERVAL = 100;
@@ -105,13 +112,17 @@ export default function stopOnSignals() {
       );
 
     await step('stop the GraphQL API', stopGraphQL, left());
-    // Lines posted from now on, as the stop sends them, are not written to the database, which is
-    // closing.
+    // The lines waiting are sent before the newest message is written, so it is the newest the web
+    // server posted, as the importer service does (see recordNewest in ban-importer/src/loop.js):
+    // they get half of the time left, and at most stopTimes.lines.
+    await sendLogLines(Date.now() + Math.min(left() / 2, stopTimes.lines));
     await step(
       'record the newest message in the Discord log in the database',
       flushLogMessages,
       Math.min(stopTimes.recording, left())
     );
+    // Lines posted from now on, as the stop sends them, are not written to the database, which is
+    // closing.
     stopRecordingLogMessages();
     await step('close the database connections', disconnect, left());
     await sendLogLines(deadline);

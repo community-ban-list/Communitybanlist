@@ -14,7 +14,8 @@ const Bottleneck = createRequire(import.meta.url)('bottleneck');
 // index.js, with the real logger and the real recorder (scbl-lib/db/log-channel.js), and
 // stand-ins for Discord, the database, Koa and the sign-in checks, and check that it starts
 // recording as it starts, and that a database that is missing the importer's table, is down, or
-// never answers, never stops or holds up its lines to the log channel.
+// never answers, never stops or holds up its lines to the log channel. It also checks how long the
+// server that index.js starts keeps connections open.
 
 const unhandled = [];
 process.on('unhandledRejection', (reason) => unhandled.push(reason));
@@ -136,9 +137,10 @@ async function loadWebServer() {
       default: {
         // As Node's, it returns the server, and calls back once that is listening.
         listen: (port, callback) => {
-          listening.push(port);
+          const httpServer = { address: () => ({ port }) };
+          listening.push(httpServer);
           setImmediate(callback);
-          return { address: () => ({ port }) };
+          return httpServer;
         }
       }
     },
@@ -152,6 +154,7 @@ async function loadWebServer() {
     db,
     sent,
     output,
+    httpServer: listening[0],
     writes: () => db.queries.filter(({ sql }) => sql.startsWith('INSERT'))
   };
 }
@@ -224,8 +227,17 @@ for (const [name, answer, said] of [
   );
 }
 
+// The web server keeps idle connections open for 65 seconds, rather than Node's default of about 6,
+// longer than a proxy in front of it keeps its own, and gives a new connection as long to send its
+// request.
+{
+  const web = await loadWebServer();
+  assert.strictEqual(web.httpServer.keepAliveTimeout, 65 * 1000);
+  assert.strictEqual(web.httpServer.headersTimeout, 66 * 1000);
+}
+
 assert.deepStrictEqual(unhandled, []);
 
 console.log(
-  'Web server log channel checks passed: the newest message it posts recorded from its start, and its lines never stopped or held up by a database without the table, down or not answering.'
+  'Web server log channel checks passed: the newest message it posts recorded from its start, its lines never stopped or held up by a database without the table, down or not answering, and its connections kept open long enough.'
 );

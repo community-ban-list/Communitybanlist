@@ -47,9 +47,12 @@ const shutdown = stopOnSignals();
 
 connect()
   .then(() => {
-    const httpServer = server.listen(PORT, () =>
-      console.log(`Server started on port ${httpServer.address().port}`)
-    );
+    // Say which port it really listens on, e.g. with PORT 0, or, for a PORT that is not a number,
+    // the path of the socket it listens on.
+    const httpServer = server.listen(PORT, () => {
+      const address = httpServer.address();
+      console.log(`Server started on port ${typeof address === 'string' ? address : address.port}`);
+    });
     httpServer.keepAliveTimeout = KEEP_ALIVE_TIMEOUT;
     httpServer.headersTimeout = HEADERS_TIMEOUT;
     shutdown.setServer(httpServer);

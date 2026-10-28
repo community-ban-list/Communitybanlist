@@ -1,9 +1,11 @@
 import assert from 'assert';
 import { spawn } from 'child_process';
 import { EventEmitter } from 'events';
-import { readFile } from 'fs/promises';
+import { mkdtemp, readFile, rm } from 'fs/promises';
 import http from 'http';
 import net from 'net';
+import os from 'os';
+import path from 'path';
 import { fileURLToPath } from 'url';
 import { format } from 'util';
 import vm from 'vm';
@@ -12,9 +14,10 @@ import describeError from '../../scbl-lib/utils/describe-error.js';
 
 // The web server stops cleanly on SIGTERM, which docker stop sends, and on SIGINT: it takes no new
 // connections, fails its health check, answers the requests under way and closes their
-// connections, then stops Apollo Server, writes the newest message it posted to the log channel to
-// the database, closes the database connections, sends the lines waiting for the log channel, and
-// exits 0, all in time. Its idle connections stay open for longer than a proxy keeps its own.
+// connections, then stops Apollo Server, sends the lines waiting for the log channel, writes the
+// newest message it posted there to the database, closes the database connections, sends any lines
+// still waiting, and exits 0, all in time. Its idle connections stay open for longer than a proxy
+// keeps its own.
 
 async function until(condition, what, ms = 5000) {
   const deadline = Date.now() + ms;
@@ -73,16 +76,29 @@ function responsesOf({ received }) {
 // database, the log channel and the process, which the checks send the signals to. Each stand-in
 // notes what the stop does to it in events, and the process when it exits, and with which code.
 // recordNewest and closeDatabase are how long writing the newest message and closing the database
-// take, and logQueue how many lines wait for the log channel. The flag the health check reads is
-// the real one.
-async function loadStop({
-  recordNewest = async () => {},
-  closeDatabase = async () => {},
-  logQueue = () => 0
-} = {}) {
+// take. logLine(id, ms) logs a line for the log channel, which is posted ms later, or never without
+// ms. As with the real recorder (see scbl-lib/db/log-channel.js), writing the newest message writes
+// the newest line posted since the last write, while the stop still records them, and written
+// holds the lines it wrote. The flag the health check reads is the real one.
+async function loadStop({ recordNewest = async () => {}, closeDatabase = async () => {} } = {}) {
   const events = [];
   const output = [];
   const exits = [];
+  const written = [];
+  // How many lines wait to be posted, the newest line posted and not written yet, and whether the
+  // lines posted are still recorded.
+  let waitingLines = 0;
+  let newest = null;
+  let recording = true;
+  const logLine = (id, ms) => {
+    waitingLines++;
+    if (ms === undefined) return;
+    setTimeout(() => {
+      waitingLines--;
+      events.push(`post ${id}`);
+      if (recording) newest = id;
+    }, ms);
+  };
   const fakeProcess = new EventEmitter();
   fakeProcess.exit = (code) => {
     events.push(`exit ${code}`);
@@ -102,9 +118,14 @@ async function loadStop({
     'scbl-lib/db': {
       flushLogMessages: async () => {
         events.push('record the newest message');
+        if (newest !== null) written.push(newest);
+        newest = null;
         await recordNewest();
       },
-      stopRecordingLogMessages: () => events.push('stop recording'),
+      stopRecordingLogMessages: () => {
+        events.push('stop recording');
+        recording = false;
+      },
       disconnect: async () => {
         events.push('close the database');
         await closeDatabase();
@@ -114,7 +135,7 @@ async function loadStop({
       describeError,
       Logger: {
         flush: () => events.push('send the log lines'),
-        getLogQueue: () => ({ RECEIVED: 0, QUEUED: logQueue(), RUNNING: 0, EXECUTING: 0 })
+        getLogQueue: () => ({ RECEIVED: 0, QUEUED: waitingLines, RUNNING: 0, EXECUTING: 0 })
       }
     },
     './graphql-api/index.js': { stopGraphQL: async () => events.push('stop GraphQL') }
@@ -154,7 +175,9 @@ async function loadStop({
     stopTimes: shutdown.namespace.stopTimes,
     isShuttingDown: flag.namespace.isShuttingDown,
     process: fakeProcess,
+    logLine,
     events,
+    written,
     output,
     exits
   };
@@ -175,9 +198,11 @@ async function startServer(shutdown) {
   return { port: server.address().port, waiting };
 }
 
-// The steps after the requests are answered, in order.
+// The steps after the requests are answered, in order: the lines waiting for the log channel are
+// sent before the newest message is written, and any still waiting once the database is closed.
 const STEPS = [
   'stop GraphQL',
+  'send the log lines',
   'record the newest message',
   'stop recording',
   'close the database',
@@ -186,12 +211,13 @@ const STEPS = [
 
 // On SIGTERM, the server takes no new connections, its health check fails, and an idle connection
 // is closed at once. A request under way is answered, saying its connection will close, which it
-// then does. Only then does Apollo Server stop, the newest message get written, the database close
-// and the log lines waiting get sent, in that order, and the process exits 0, once the lines are
-// sent. A later SIGINT changes nothing.
+// then does. Only then does Apollo Server stop. The line the request logged, e.g. about a change it
+// made, is posted before the newest message is written, so that is the line written, and then the
+// database closes. A line not posted in the time the lines get is not written, but the process
+// exits 0 only once it is posted too. A later SIGINT changes nothing.
 {
-  let linesSentAt = Infinity;
-  const stop = await loadStop({ logQueue: () => (Date.now() < linesSentAt ? 1 : 0) });
+  const stop = await loadStop();
+  stop.stopTimes.lines = 600;
   const shutdown = stop.stopOnSignals();
   const { port, waiting } = await startServer(shutdown);
 
@@ -210,7 +236,8 @@ const STEPS = [
   await assert.rejects(connectTo(port), { code: 'ECONNREFUSED' });
   assert.deepStrictEqual(stop.events, [], 'nothing else stops before the request is answered');
 
-  linesSentAt = Date.now() + 300;
+  stop.logLine('1001', 200);
+  stop.logLine('1002', 1200);
   waiting.get('/slow').end('slow');
   await until(() => busy.closed, 'the answered connection to close');
   const [answer] = responsesOf(busy);
@@ -218,8 +245,18 @@ const STEPS = [
   assert.strictEqual(answer.headers.connection, 'close');
 
   await until(() => stop.exits.length === 1, 'the exit');
-  assert.deepStrictEqual(stop.events, [...STEPS, 'exit 0']);
-  assert.ok(stop.exits[0].at >= linesSentAt, 'it exits once the log lines are sent');
+  assert.deepStrictEqual(stop.events, [
+    'stop GraphQL',
+    'send the log lines',
+    'post 1001',
+    'record the newest message',
+    'stop recording',
+    'close the database',
+    'send the log lines',
+    'post 1002',
+    'exit 0'
+  ]);
+  assert.deepStrictEqual(stop.written, ['1001']);
   stop.process.emit('SIGINT', 'SIGINT');
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.deepStrictEqual(stop.output, [
@@ -252,14 +289,15 @@ const STEPS = [
   ]);
 }
 
-// A database that never answers, and log lines that are never sent, cannot keep the process from
-// exiting in time: each step is given up when its time is up, with a warning.
+// A database that never answers, and a log line that is never sent, cannot keep the process from
+// exiting in time: each step is given up when its time is up, those of the database with a warning.
 {
   const never = () => new Promise(() => {});
-  const stop = await loadStop({ recordNewest: never, closeDatabase: never, logQueue: () => 1 });
-  Object.assign(stop.stopTimes, { answering: 200, recording: 200, exiting: 800 });
+  const stop = await loadStop({ recordNewest: never, closeDatabase: never });
+  Object.assign(stop.stopTimes, { answering: 200, lines: 200, recording: 200, exiting: 800 });
   const shutdown = stop.stopOnSignals();
   await startServer(shutdown);
+  stop.logLine('1001');
 
   const signalledAt = Date.now();
   stop.process.emit('SIGTERM', 'SIGTERM');
@@ -321,10 +359,8 @@ const STEPS = [
   assert.ok(stop.exits[0].at - endedAt < 3000, 'it exits once the responses end');
 }
 
-// The web server itself, started as its image starts it, with a database it cannot reach, which it
-// starts without: on SIGTERM, and again on SIGINT, it answers a GraphQL request whose body is still
-// being sent as the signal comes, and its health check fails, for a request whose headers are, and
-// it exits 0. It tells clients it keeps idle connections open for 65 seconds.
+// The web server itself, as its image starts it, with a database it cannot reach, which it starts
+// without.
 const env = {
   ...process.env,
   DATABASE_URI: 'mysql://test:test@127.0.0.1:1/test',
@@ -336,26 +372,46 @@ const env = {
 delete env.NODE_ENV;
 delete env.DISCORD_LOG_WEBHOOK;
 const index = fileURLToPath(new URL('../index.js', import.meta.url));
-for (const signal of ['SIGTERM', 'SIGINT']) {
-  const server = spawn(process.execPath, [index], { env, stdio: ['ignore', 'pipe', 'pipe'] });
-  let output = '';
+
+// Start the web server, with settings added to its environment. Resolves once it says it has
+// started, or has exited, with the process in server, all it prints in output, which grows as it
+// prints, and exited, which resolves once it exits.
+async function startWebServer(settings = {}) {
+  const server = spawn(process.execPath, [index], {
+    env: { ...env, ...settings },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  const web = { server, output: '' };
   server.stdout.setEncoding('utf8').on('data', (chunk) => {
-    output += chunk;
+    web.output += chunk;
   });
   server.stderr.setEncoding('utf8').on('data', (chunk) => {
-    output += chunk;
+    web.output += chunk;
   });
-  const exited = new Promise((resolve) =>
-    server.on('exit', (code, exitSignal) => resolve({ code, signal: exitSignal, at: Date.now() }))
+  web.exited = new Promise((resolve) =>
+    server.on('exit', (code, signal) => resolve({ code, signal, at: Date.now() }))
   );
   try {
     await until(
-      () => /Server started on port \d+/.test(output) || server.exitCode !== null,
+      () => /Server started on port .*\n/.test(web.output) || server.exitCode !== null,
       'the web server to start',
       30000
     );
-    const port = Number(output.match(/Server started on port (\d+)/)?.[1]);
-    assert.ok(port > 0, `The web server should say which port it listens on:\n${output}`);
+  } catch (err) {
+    server.kill('SIGKILL');
+    throw err;
+  }
+  return web;
+}
+
+// On SIGTERM, and again on SIGINT, the web server answers a GraphQL request whose body is still
+// being sent as the signal comes, and its health check fails, for a request whose headers are, and
+// it exits 0. It tells clients it keeps idle connections open for 65 seconds.
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  const web = await startWebServer();
+  try {
+    const port = Number(web.output.match(/Server started on port (\d+)\n/)?.[1]);
+    assert.ok(port > 0, `The web server should say which port it listens on:\n${web.output}`);
 
     const idle = await connectTo(port);
     idle.socket.write(request('/health-check'));
@@ -372,8 +428,11 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
     await new Promise((resolve) => setTimeout(resolve, 200));
 
     const signalledAt = Date.now();
-    server.kill(signal);
-    await until(() => output.includes(`Received ${signal}`), `the web server to receive ${signal}`);
+    web.server.kill(signal);
+    await until(
+      () => web.output.includes(`Received ${signal}`),
+      `the web server to receive ${signal}`
+    );
     await until(() => idle.closed, 'the idle connection to close');
     await assert.rejects(connectTo(port), { code: 'ECONNREFUSED' });
 
@@ -389,19 +448,43 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
     assert.strictEqual(check.body, 'The web server is stopping.');
     assert.strictEqual(check.headers.connection, 'close');
 
-    const exit = await exited;
+    const exit = await web.exited;
     assert.deepStrictEqual(
       { code: exit.code, signal: exit.signal },
       { code: 0, signal: null },
-      `The web server should exit 0 after ${signal}:\n${output}`
+      `The web server should exit 0 after ${signal}:\n${web.output}`
     );
     assert.ok(exit.at - signalledAt < 5000, `it took ${exit.at - signalledAt}ms to stop`);
-    assert.match(output, new RegExp(`The web server stopped, as it received ${signal}\\.`));
+    assert.match(web.output, new RegExp(`The web server stopped, as it received ${signal}\\.`));
   } finally {
-    server.kill('SIGKILL');
+    web.server.kill('SIGKILL');
+  }
+}
+
+// A PORT that is not a number is the path of a socket to listen on, which the web server names as
+// it starts, and it stops on SIGTERM there too.
+{
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cbl-web-server-'));
+  const socket = path.join(directory, 'web.sock');
+  const web = await startWebServer({ PORT: socket });
+  try {
+    assert.ok(
+      web.output.includes(`Server started on port ${socket}\n`),
+      `The web server should say which socket it listens on:\n${web.output}`
+    );
+    web.server.kill('SIGTERM');
+    const exit = await web.exited;
+    assert.deepStrictEqual(
+      { code: exit.code, signal: exit.signal },
+      { code: 0, signal: null },
+      `The web server should exit 0 after SIGTERM:\n${web.output}`
+    );
+  } finally {
+    web.server.kill('SIGKILL');
+    await rm(directory, { recursive: true, force: true });
   }
 }
 
 console.log(
-  'Shutdown checks passed: requests under way answered and connections closed, the steps after them in order and in time, a signal before listening, and the web server on SIGTERM and SIGINT.'
+  'Shutdown checks passed: requests under way answered and connections closed, the steps after them in order and in time, the log lines sent before the newest is recorded, a signal before listening, and the web server on SIGTERM and SIGINT, on a port and on a socket.'
 );
