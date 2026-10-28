@@ -134,14 +134,17 @@ async function loadWebServer() {
     'scbl-lib/utils': { describeError, stackTrace },
     './src/app.js': {
       default: {
+        // As Node's, it returns the server, and calls back once that is listening.
         listen: (port, callback) => {
           listening.push(port);
-          callback?.();
+          setImmediate(callback);
+          return { address: () => ({ port }) };
         }
       }
     },
     './src/auth/openid-request-timeout.js': { default: () => {} },
-    './src/jwt-secret.js': { default: () => null }
+    './src/jwt-secret.js': { default: () => null },
+    './src/shutdown.js': { default: () => ({ setServer() {} }) }
   });
   await until(() => listening.length === 1, 'the web server to listen');
   return {
