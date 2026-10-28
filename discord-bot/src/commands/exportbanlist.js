@@ -82,6 +82,12 @@ const DESCRIPTION_LENGTH = 4096;
 // The longest reason a message shows for one list. The attached files have them in full.
 const REASON_LENGTH = 300;
 
+// The most lists a reply names that are within the cap by their settings now, though their export
+// bans are over it (see describeUpdating), so a long list of them leaves room for the rest of the
+// reply. When there are more, an attached file with this name names them all.
+const UPDATING_NAMED = 5;
+const UPDATING_FILE = 'export-ban-lists-awaiting-the-importer.txt';
+
 // How long the admin has to read the preview of the lists outside the limits, which can be long
 // and partly in an attached file, before confirming. Each list is read and checked again just
 // before it is removed, so a list changed meanwhile is not removed as the preview showed it.
@@ -239,18 +245,26 @@ function failureReason(error) {
 // For a list counted again by its settings and configs now, as its export bans are over its type's
 // cap (checkLimits' recount), what follows the number of its players, so both are shown: " by its
 // export bans, 1,554 by its settings now". The two differ when the list has changed since the
-// importer last updated its export bans, e.g. as its owner raised its threshold. Nothing for a list
-// not counted again.
-const describeRecount = ({ recount }) =>
-  recount == null
+// importer last updated its export bans, e.g. as its owner raised its threshold. For a list whose
+// count failed, which only a command that just shows the list gets (recountError), it says so.
+// Nothing for a list not counted again.
+function describeRecount({ recount, recountError }) {
+  if (recountError) return ' by its export bans; they could not be counted by its settings now';
+  return recount == null
     ? ''
     : ` by its export bans, ${recount.toLocaleString('en-US')} by its settings now`;
+}
 
-// Why the list is outside today's limits, in the website's words, or that it was not checked.
-function describeProblems({ problems, checked }) {
+// Why the list is outside today's limits, in the website's words, or that it was not checked. For
+// a list whose count by its settings now failed, whether it is over the cap is not known.
+function describeProblems({ problems, checked, recountError }) {
   if (!checked) return 'Not checked, as the limits do not cover its type.';
-  if (problems.length === 0) return 'Within them.';
-  return problems.map((problem) => problem.message).join(' ');
+  const unknown = recountError
+    ? ` Whether it is within its type's cap is not known: its export bans are over it, and its players could not be counted by its settings now (${recountError.message}).`
+    : '';
+  if (problems.length === 0)
+    return recountError ? `Within the points rules.${unknown}` : 'Within them.';
+  return `${problems.map((problem) => problem.message).join(' ')}${unknown}`;
 }
 
 // The limits the lists were checked against, so the admin can see that they are the website's.
@@ -327,9 +341,11 @@ function entriesMessage(title, entries, fileName, fileText) {
 async function remove(interaction) {
   const id = interaction.options.getInteger('id', true);
 
+  // The list's limits are only shown, as it can be removed either way, so one over its type's cap
+  // whose players could not be counted by its settings now is shown saying so.
   const {
     lists: [check]
-  } = await ExportBanList.checkLimits({ ids: [id] });
+  } = await ExportBanList.checkLimits({ ids: [id], keepRecountErrors: true });
   if (!check) throw new UserError(`There is no export ban list with ID ${id}.`);
   const { exportBanList, players } = check;
   const name = formatName(exportBanList);
@@ -465,16 +481,32 @@ function previewFileEntry({ check, left }) {
 // The lists whose export bans are over their type's cap but whose settings now give no more players
 // than it, so they are within the limits: they have shrunk since the importer last updated their
 // export bans, e.g. as their owners raised their thresholds. The reply names them, so the admin
-// knows why they are not removed.
-function describeUpdating(lists) {
+// knows why they are not removed, in a line of its own at the end, so that however many there are,
+// the limits used are never cut off: at most UPDATING_NAMED of them, and when there are more, an
+// attached file names them all. Gives the line, if any, and the files to attach.
+function describeUpdating(lists, checkedAt) {
   const updating = lists.filter((check) => check.recount != null && check.problems.length === 0);
-  if (updating.length === 0) return '';
+  if (updating.length === 0) return { note: '', files: [] };
+  const playersOf = (check) => `${plural(check.players, 'player')}${describeRecount(check)}`;
+  const named = updating
+    .slice(0, UPDATING_NAMED)
+    .map((check) => `#${check.exportBanList.id} (${playersOf(check)})`);
+  const more = updating.length - named.length;
+  if (more > 0)
+    named.push(`${more.toLocaleString('en-US')} more, all in the attached ${UPDATING_FILE}`);
   const one = updating.length === 1;
-  const each = updating.map(
-    (check) =>
-      `#${check.exportBanList.id} (${plural(check.players, 'player')}${describeRecount(check)})`
-  );
-  return ` ${one ? '1 is' : `${updating.length} are`} within the cap by ${one ? 'its' : 'their'} settings now, though ${one ? 'its' : 'their'} export bans are over it until the importer updates them: ${each.join(', ')}.`;
+  const note = `\n${plural(updating.length, 'export ban list')} ${one ? 'is' : 'are'} within the cap by ${one ? 'its' : 'their'} settings now, though ${one ? 'its' : 'their'} export bans are over it until the importer updates them: ${joinList(named)}.`;
+  if (more === 0) return { note, files: [] };
+
+  const text = [
+    `Export ban lists within the cap by their settings now, though their export bans are over it until the importer updates them, checked ${checkedAt}: ${updating.length}`,
+    ...updating.map(
+      (check) =>
+        `#${check.exportBanList.id} ${formatBanListType(check.exportBanList.type)} list "${check.exportBanList.name}": ${playersOf(check)}`
+    )
+  ].join('\n');
+  const file = new AttachmentBuilder(Buffer.from(text, 'utf8'), { name: UPDATING_FILE });
+  return { note, files: [file] };
 }
 
 // What happened to a list in the removal.
@@ -496,7 +528,8 @@ async function removeOne(check, access) {
       lists: [current]
     } = await ExportBanList.checkLimits({ ids: [check.exportBanList.id] }));
   } catch (error) {
-    return { check, status: 'failed', reason: `It could not be read again: ${error.message}` };
+    // Reading it or counting its players by its settings now failed, so it is left.
+    return { check, status: 'failed', reason: `It could not be checked again: ${error.message}` };
   }
   if (!current) return { check, status: 'skipped', reason: 'it no longer exists' };
   if (current.problems.length === 0)
@@ -575,20 +608,22 @@ async function removeOutsideLimits(interaction) {
 
 async function removeAllOutsideLimits(interaction) {
   const { limits, lists } = await ExportBanList.checkLimits();
+  const checkedAt = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
   const outside = lists.filter((check) => check.problems.length > 0);
   const unchecked = lists.filter((check) => !check.checked);
   const uncheckedNote =
     unchecked.length > 0
       ? ` ${was(unchecked.length)} not checked, as the limits do not cover ${unchecked.length === 1 ? 'its type' : 'their types'}: ${unchecked.map((check) => `#${check.exportBanList.id}`).join(', ')}.`
       : '';
-  const updatingNote = describeUpdating(lists);
+  const updating = describeUpdating(lists, checkedAt);
   if (outside.length === 0) {
-    await interaction.editReply(
-      truncate(
-        `No export ban list is outside today's limits, so nothing was changed.${uncheckedNote}${updatingNote}\n${describeLimits(limits)}`,
+    await interaction.editReply({
+      content: truncate(
+        `No export ban list is outside today's limits, so nothing was changed.${uncheckedNote}\n${describeLimits(limits)}${updating.note}`,
         MESSAGE_LENGTH
-      )
-    );
+      ),
+      files: updating.files
+    });
     return;
   }
 
@@ -604,7 +639,6 @@ async function removeAllOutsideLimits(interaction) {
   const left = plan.length - removable.length;
 
   const title = `Export ban lists outside today's limits (${outside.length})`;
-  const checkedAt = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
   const preview = entriesMessage(
     title,
     plan.map(previewLine),
@@ -618,14 +652,16 @@ async function removeAllOutsideLimits(interaction) {
   );
   const notes = [describeAccess(access, left), describeLimits(limits)].filter(Boolean).join('\n');
   const found = `**${plural(outside.length, 'export ban list')} ${outside.length === 1 ? 'is' : 'are'} outside today's limits.**`;
+  const files = [...preview.files, ...updating.files];
 
   if (removable.length === 0) {
     await interaction.editReply({
       content: truncate(
-        `${found} None can be removed now, so nothing was changed.${uncheckedNote}${updatingNote}\n${notes}`,
+        `${found} None can be removed now, so nothing was changed.${uncheckedNote}\n${notes}${updating.note}`,
         MESSAGE_LENGTH
       ),
-      ...preview
+      ...preview,
+      files
     });
     return;
   }
@@ -635,11 +671,11 @@ async function removeAllOutsideLimits(interaction) {
   const confirmed = await confirm(
     interaction,
     truncate(
-      `${found} Remove ${which}? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.${uncheckedNote}${updatingNote}\n${notes}`,
+      `${found} Remove ${which}? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.${uncheckedNote}\n${notes}${updating.note}`,
       MESSAGE_LENGTH
     ),
     `Remove ${plural(removable.length, 'export ban list')}`,
-    { ...preview, timeout: REVIEW_TIMEOUT }
+    { ...preview, files, timeout: REVIEW_TIMEOUT }
   );
   if (!confirmed) return;
 
@@ -807,9 +843,10 @@ async function transfer(interaction) {
   const id = interaction.options.getInteger('id', true);
   const owner = parseSteamID(interaction.options.getString('owner', true));
 
+  // The list's players are only shown, so a count of them that fails does not stop the transfer.
   const {
     lists: [check]
-  } = await ExportBanList.checkLimits({ ids: [id] });
+  } = await ExportBanList.checkLimits({ ids: [id], keepRecountErrors: true });
   if (!check) throw new UserError(`There is no export ban list with ID ${id}.`);
   const { exportBanList } = check;
   const name = formatName(exportBanList);

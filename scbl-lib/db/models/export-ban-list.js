@@ -147,8 +147,8 @@ class ExportBanList extends Sequelize.Model {
   // checks changes to lists against (export-list-limits.js, with the EXPORT_* settings in
   // EXPORT_LIST_LIMITS), e.g. for the Discord bot to remove the lists outside them. Checks every
   // list, or those with the given IDs, and gives the limits and the lists, in ID order, each as
-  // { exportBanList, configs, players, recount, problems, checked }, with the list's owner as
-  // exportBanList.SteamUser.
+  // { exportBanList, configs, players, recount, recountError, problems, checked }, with the list's
+  // owner as exportBanList.SteamUser.
   //
   // A list is outside the limits when it has problems: those of its stored settings and configs
   // under its type's points rules, as checkRules gives them for the whole list, and one when it has
@@ -159,7 +159,12 @@ class ExportBanList extends Sequelize.Model {
   // settings and configs now, and recount is that count, or null for a list not counted again. It
   // is only over the cap when both are. A list of a type the limits do not cover is not checked,
   // and has no problems.
-  static async checkLimits({ ids, limits = EXPORT_LIST_LIMITS } = {}) {
+  //
+  // A count that fails fails the check, as whether the list is over the cap is then not known. A
+  // caller that only shows the lists can pass keepRecountErrors instead, and a list whose count
+  // failed then comes with the error as recountError, a null recount and no problem for the cap.
+  // recountError is null for every other list.
+  static async checkLimits({ ids, limits = EXPORT_LIST_LIMITS, keepRecountErrors = false } = {}) {
     if (ids !== undefined && ids.length === 0) return { limits, lists: [] };
     const { BanList, ExportBan, ExportBanListConfig, Organisation, SteamUser } = sequelize.models;
 
@@ -200,16 +205,21 @@ class ExportBanList extends Sequelize.Model {
     // the website saves without counting its players, keeps its old export bans until then. A list
     // with more of them than its type's cap is therefore counted again, as the website counts the
     // players a list would hold (countMembers), with its settings and configs as they are now. Only
-    // those lists are counted, one at a time, as each count reads every ban. A count that fails
-    // fails the check, as whether the list is over the cap is then not known.
+    // those lists are counted, one at a time, as each count reads every ban.
     const recounts = new Map();
+    const recountErrors = new Map();
     for (const exportBanList of exportBanLists) {
       const maxPlayers = maxPlayersOf(exportBanList.type, limits);
       if (maxPlayers === 0 || (players.get(exportBanList.id) ?? 0) <= maxPlayers) continue;
-      recounts.set(
-        exportBanList.id,
-        await countMembers(settingsOf(exportBanList), configs.get(exportBanList.id))
-      );
+      try {
+        recounts.set(
+          exportBanList.id,
+          await countMembers(settingsOf(exportBanList), configs.get(exportBanList.id))
+        );
+      } catch (error) {
+        if (!keepRecountErrors) throw error;
+        recountErrors.set(exportBanList.id, error);
+      }
     }
 
     return {
@@ -225,6 +235,7 @@ class ExportBanList extends Sequelize.Model {
           exportBanList,
           configs: listConfigs,
           ...listPlayers,
+          recountError: recountErrors.get(exportBanList.id) ?? null,
           problems: problems ?? [],
           checked: problems !== null
         };

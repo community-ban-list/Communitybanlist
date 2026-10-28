@@ -23,7 +23,7 @@ const destroyed = [];
 const counted = [];
 
 // The players the database counts for a list's settings and configs as they are now, by threshold:
-// the higher the threshold, the fewer players.
+// the higher the threshold, the fewer players. An error fails the count.
 const MEMBERS = new Map([
   [3, 45000],
   [6, 12000],
@@ -33,7 +33,9 @@ const MEMBERS = new Map([
 async function countMembers(settings) {
   counted.push(settings.threshold);
   assert.ok(MEMBERS.has(settings.threshold), `Unexpected count for ${settings.threshold}`);
-  return MEMBERS.get(settings.threshold);
+  const players = MEMBERS.get(settings.threshold);
+  if (players instanceof Error) throw players;
+  return players;
 }
 
 // A stand-in for Sequelize's Model, whose findAll gives the matching lists as instances, with the
@@ -235,7 +237,7 @@ await command.execute(
 const [preview] = replies.filter((reply) => reply.components?.length > 0);
 assert.strictEqual(
   preview.content,
-  `**2 export ban lists are outside today's limits.** Remove them? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told. 1 is within the cap by its settings now, though its export bans are over it until the importer updates them: #4 (42,000 players by its export bans, 39,000 by its settings now).\nLimits used: BattleMetrics lists have at most 20,000 players and a threshold of at least 4, and one active ban plus one expired ban must never be enough; remote lists have at most 40,000 players and a threshold of at least 4, and one active ban plus one expired ban must never be enough. They come from the bot's EXPORT_* settings, which must match the website's.`
+  `**2 export ban lists are outside today's limits.** Remove them? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.\nLimits used: BattleMetrics lists have at most 20,000 players and a threshold of at least 4, and one active ban plus one expired ban must never be enough; remote lists have at most 40,000 players and a threshold of at least 4, and one active ban plus one expired ban must never be enough. They come from the bot's EXPORT_* settings, which must match the website's.\n1 export ban list is within the cap by its settings now, though its export bans are over it until the importer updates them: #4 (42,000 players by its export bans, 39,000 by its settings now).`
 );
 assert.strictEqual(
   preview.embeds[0].toJSON().description,
@@ -272,6 +274,42 @@ assert.deepStrictEqual(audits, [
   "admin (1) removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it had changed."
 ]);
 
+// A list over the cap by both counts in the preview whose count fails as it is checked again just
+// before its removal is left, as whether it is still over the cap is not known: it is reported as
+// failed, and the others carry on.
+lists.clear();
+exportBans.clear();
+for (const done of [destroyed, counted, replies, audits]) done.length = 0;
+MEMBERS.set(11, 41000);
+MEMBERS.set(12, 42000);
+addList(5, 11, { CREATED: 43000 });
+addList(6, 12, { CREATED: 44000 });
+const TIMED_OUT = 'Query execution was interrupted, maximum statement execution time exceeded';
+await command.execute(
+  interaction(async () => {
+    MEMBERS.set(11, new Error(TIMED_OUT));
+  })
+);
+assert.deepStrictEqual(counted, [11, 12, 11, 12]);
+assert.deepStrictEqual(destroyed, [6]);
+assert.deepStrictEqual([...lists.keys()], [5]);
+assert.deepStrictEqual(exportBans.get(5), { CREATED: 43000 });
+const failedSummary = replies.at(-1);
+assert.strictEqual(
+  failedSummary.content,
+  "Removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 failed."
+);
+assert.deepStrictEqual(failedSummary.embeds[0].toJSON().description.split('\n'), [
+  `**List 5** (#5): failed: It could not be checked again: ${TIMED_OUT}`,
+  '**List 6** (#6): removed; there was nothing to delete on BattleMetrics'
+]);
+assert.deepStrictEqual(audits, [
+  "admin (1) started removing 2 export ban lists outside today's limits.",
+  `admin (1) could not remove export ban list "List 5" (ID: 5, Remote) of Steam user "Owner 5" (ID: 76561198000000005): It could not be checked again: ${TIMED_OUT}`,
+  'admin (1) removed export ban list "List 6" (ID: 6, Remote) of Steam user "Owner 6" (ID: 76561198000000006), outside today\'s limits with 44,000 players by its export bans, 42,000 by its settings now: there was nothing to delete on BattleMetrics.',
+  "admin (1) removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 failed."
+]);
+
 console.log(
-  'Export ban list limit checks passed: a list its owner has brought within the cap is left though its export bans are not updated yet, and one over the cap by both counts is removed.'
+  'Export ban list limit checks passed: a list its owner has brought within the cap is left though its export bans are not updated yet, one over the cap by both counts is removed, and one whose count fails just before its removal is left.'
 );

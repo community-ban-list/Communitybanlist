@@ -243,17 +243,20 @@ const configsOf = (id) =>
 const ruleProblems = (id, type, limits = DEFAULT_LIMITS) =>
   checkRules(type, { settings: settingsOf(id), configs: configsOf(id) }, limits);
 const capProblem = (message) => ({ rule: 'max-players', field: 'players', message });
-// What checkLimits gives for each list, copied.
+// What checkLimits gives for each list, copied, with a failed count's error as its message.
 const summary = (result) =>
-  [...result.lists].map(({ exportBanList, configs, players, recount, problems, checked }) => ({
-    id: exportBanList.id,
-    owner: exportBanList.SteamUser && { ...exportBanList.SteamUser },
-    configs: [...configs].map((config) => ({ ...config })),
-    players,
-    recount,
-    problems: [...problems].map((problem) => ({ ...problem })),
-    checked
-  }));
+  [...result.lists].map(
+    ({ exportBanList, configs, players, recount, recountError, problems, checked }) => ({
+      id: exportBanList.id,
+      owner: exportBanList.SteamUser && { ...exportBanList.SteamUser },
+      configs: [...configs].map((config) => ({ ...config })),
+      players,
+      recount,
+      recountError: recountError?.message ?? recountError,
+      problems: [...problems].map((problem) => ({ ...problem })),
+      checked
+    })
+  );
 const outside = (result) =>
   [...result.lists]
     .filter((check) => check.problems.length > 0)
@@ -312,6 +315,7 @@ assert.deepStrictEqual(
     configs: configsOf(row.id),
     players: expected[row.id].players,
     recount: expected[row.id].recount ?? null,
+    recountError: null,
     problems: expected[row.id].problems,
     checked: expected[row.id].checked ?? true
   }))
@@ -373,6 +377,7 @@ assert.deepStrictEqual(summary(result), [
     configs: [],
     players: 28337,
     recount: 28337,
+    recountError: null,
     problems: expected[3].problems,
     checked: true
   }
@@ -439,7 +444,8 @@ assert.deepStrictEqual(queries.at(-1), recounted(12));
 
 // A count that fails fails the check, as whether the list is over the cap is not known then, so
 // it is never taken to be over the cap by its export bans alone.
-membersByThreshold.set(7, new Error('Query execution was interrupted'));
+const interrupted = new Error('Query execution was interrupted');
+membersByThreshold.set(7, interrupted);
 await assert.rejects(ExportBanList.checkLimits({ ids: [12] }), {
   message: 'Query execution was interrupted'
 });
@@ -447,6 +453,52 @@ await assert.rejects(ExportBanList.checkLimits(), { message: 'Query execution wa
 // A list within its cap is not counted, so it is checked as before.
 result = await ExportBanList.checkLimits({ ids: [1] });
 assert.deepStrictEqual(summary(result)[0].problems, []);
+
+// A caller that only shows the lists can keep the error instead: the list whose count failed comes
+// with it, no count and no problem for the cap, as whether it is over the cap is not known, and its
+// points rules are still checked. The other lists are checked and counted as before.
+queries.length = 0;
+result = await ExportBanList.checkLimits({ ids: [12], keepRecountErrors: true });
+assert.strictEqual(result.lists[0].recountError, interrupted);
+assert.deepStrictEqual(
+  summary(result).map(({ players, recount, recountError, problems, checked }) => ({
+    players,
+    recount,
+    recountError,
+    problems,
+    checked
+  })),
+  [
+    {
+      players: 28337,
+      recount: null,
+      recountError: 'Query execution was interrupted',
+      problems: [],
+      checked: true
+    }
+  ]
+);
+assert.deepStrictEqual(queries.at(-1), recounted(12));
+lists[11].defaultExpiredPoints = 2;
+result = await ExportBanList.checkLimits({ ids: [12], keepRecountErrors: true });
+assert.deepStrictEqual(summary(result)[0].problems, ruleProblems(12, 'battlemetrics'));
+assert.ok(result.lists[0].problems.length > 0);
+lists[11].defaultExpiredPoints = 1;
+result = await ExportBanList.checkLimits({ keepRecountErrors: true });
+assert.deepStrictEqual(
+  summary(result).map(({ id, recount, recountError, problems }) => ({
+    id,
+    recount,
+    recountError,
+    problems
+  })),
+  lists.map((row) => ({
+    id: row.id,
+    recount: row.id === 12 ? null : (expected[row.id].recount ?? null),
+    recountError: row.id === 12 ? 'Query execution was interrupted' : null,
+    problems: expected[row.id].problems
+  }))
+);
 membersByThreshold.set(7, 1554);
 
 // The BattleMetrics ban lists the API key can see are read from BattleMetrics' list of ban lists,

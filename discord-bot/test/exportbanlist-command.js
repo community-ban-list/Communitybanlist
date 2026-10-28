@@ -106,10 +106,19 @@ function reset() {
 // Add a list to the database. Reading its Discord webhook, the only way to tell its owner anything,
 // is recorded. recount is what checkLimits gives for a list whose export bans are over its type's
 // cap: the players its settings and configs give now, or null for a list not counted again.
+// recountError is the error of a count that failed, which fails checkLimits, unless the caller
+// keeps such errors.
 function addList(
   id,
   type,
-  { battlemetricsID = null, players = 0, recount = null, problems = [RULE], ...more } = {}
+  {
+    battlemetricsID = null,
+    players = 0,
+    recount = null,
+    recountError = null,
+    problems = [RULE],
+    ...more
+  } = {}
 ) {
   const exportBanList = {
     id,
@@ -148,6 +157,7 @@ function addList(
     exportBanList,
     players,
     recount,
+    recountError,
     problems: problems.map((message) => ({ rule: 'never-enough', field: 'threshold', message })),
     checked: true
   });
@@ -170,7 +180,7 @@ const hasColumns = (exportBanList, where) =>
   Object.entries(where).every(([column, value]) => exportBanList[column] === value);
 
 const ExportBanList = {
-  async checkLimits({ ids } = {}) {
+  async checkLimits({ ids, keepRecountErrors = false } = {}) {
     calls.push(['check', ids === undefined ? 'all' : [...ids]]);
     const query = `check ${ids === undefined ? 'all' : ids.join(',')}`;
     const lists = [...rows.values()]
@@ -182,6 +192,9 @@ const ExportBanList = {
         configs: [],
         problems: [...row.problems]
       }));
+    // A count that failed fails the check, unless the caller keeps its error with the list.
+    const failed = lists.find((check) => check.recountError);
+    if (failed && !keepRecountErrors) throw failed.recountError;
     return { limits: LIMITS, lists };
   },
   // Like Sequelize's, it loads the list without its owner's Steam user.
@@ -711,6 +724,39 @@ assert.deepStrictEqual(fieldsOf(shown.embed), [
 ]);
 assert.deepStrictEqual(deleted(), []);
 
+// The count by its settings now only fills in what the confirmation shows, so a count that fails
+// does not stop the removal: the confirmation says it failed, and whether the list is within its
+// type's cap is not known, and the list can still be removed.
+const TIMED_OUT = 'Query execution was interrupted, maximum statement execution time exceeded';
+reset();
+addList(28, 'remote', { players: 41000, recountError: new Error(TIMED_OUT), problems: [] });
+await run('remove', { id: 28 });
+shown = prompt();
+assert.deepStrictEqual(fieldsOf(shown.embed), [
+  ['ID', '28'],
+  ['Type', 'Remote'],
+  ['Players', '41,000 by its export bans; they could not be counted by its settings now'],
+  ['Owner', '**Owner 28** (`76561198000000028`)'],
+  [
+    "Today's limits",
+    `Within the points rules. Whether it is within its type's cap is not known: its export bans are over it, and its players could not be counted by its settings now (${TIMED_OUT}).`
+  ]
+]);
+assert.deepStrictEqual(deleted(), [28]);
+assert.strictEqual(contentOf(replies.at(-1)), 'Removed export ban list **List 28** (#28).');
+// A list outside the points rules still shows why.
+reset();
+addList(29, 'remote', { players: 41000, recountError: new Error(TIMED_OUT) });
+answer = 'cancel';
+await run('remove', { id: 29 });
+assert.strictEqual(
+  fieldsOf(prompt().embed).at(-1)[1],
+  discord.escapeMarkdown(
+    `${RULE} Whether it is within its type's cap is not known: its export bans are over it, and its players could not be counted by its settings now (${TIMED_OUT}).`
+  )
+);
+assert.deepStrictEqual(deleted(), []);
+
 console.log('Removing one export ban list: checks passed.');
 
 // Removing every list outside today's limits previews each, with its type, owner, players and why,
@@ -804,7 +850,10 @@ reset();
 addList(34, 'battlemetrics', { battlemetricsID: 'bm-34', problems: [] });
 await run('remove_outside_limits');
 assert.deepStrictEqual(replies, [
-  `No export ban list is outside today's limits, so nothing was changed.\n${LIMITS_TEXT}`
+  {
+    content: `No export ban list is outside today's limits, so nothing was changed.\n${LIMITS_TEXT}`,
+    files: []
+  }
 ]);
 assert.deepStrictEqual(calls, [['check', 'all']]);
 
@@ -1031,7 +1080,7 @@ assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n').slice(0, 
 // (checkLimits' recount), and the preview and the log give both numbers. Lists over the cap by
 // their export bans but not by their settings now are within the limits, as their owners have made
 // them smaller since the importer last updated their export bans, and the reply names them, so the
-// admin knows why they are not removed.
+// admin knows why they are not removed, in a line after the limits used.
 const CAP_REASON =
   'It has 41,000 players by its export bans and 40,500 by its settings now, both more than the 40,000 a remote export ban list can have.';
 reset();
@@ -1047,12 +1096,13 @@ await run('remove_outside_limits');
 shown = prompt();
 assert.strictEqual(
   contentOf(shown.reply),
-  `**1 export ban list is outside today's limits.** Remove it? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told. 2 are within the cap by their settings now, though their export bans are over it until the importer updates them: #89 (28,337 players by its export bans, 1,554 by its settings now), #97 (45,000 players by its export bans, 40,000 by its settings now).\n${LIMITS_TEXT}`
+  `**1 export ban list is outside today's limits.** Remove it? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.\n${LIMITS_TEXT}\n2 export ban lists are within the cap by their settings now, though their export bans are over it until the importer updates them: #89 (28,337 players by its export bans, 1,554 by its settings now) and #97 (45,000 players by its export bans, 40,000 by its settings now).`
 );
 assert.strictEqual(
   shown.embed.description,
   `**List 88** (#88) · Remote · owner **Owner 88** (\`76561198000000088\`) · 41,000 players by its export bans, 40,500 by its settings now\n↳ ${discord.escapeMarkdown(CAP_REASON)}`
 );
+assert.deepStrictEqual(shown.reply.files, []);
 assert.deepStrictEqual(deleted(), [88]);
 assert.strictEqual(
   audits[1],
@@ -1069,9 +1119,59 @@ addList(89, 'battlemetrics', {
 });
 await run('remove_outside_limits');
 assert.deepStrictEqual(replies, [
-  `No export ban list is outside today's limits, so nothing was changed. 1 is within the cap by its settings now, though its export bans are over it until the importer updates them: #89 (28,337 players by its export bans, 1,554 by its settings now).\n${LIMITS_TEXT}`
+  {
+    content: `No export ban list is outside today's limits, so nothing was changed.\n${LIMITS_TEXT}\n1 export ban list is within the cap by its settings now, though its export bans are over it until the importer updates them: #89 (28,337 players by its export bans, 1,554 by its settings now).`,
+    files: []
+  }
 ]);
 assert.deepStrictEqual(calls, [['check', 'all']]);
+
+// The reply names at most five of them, and an attached file names them all, so that however many
+// there are, the reply keeps the limits used, which the admin compares with the website's.
+for (const outsideToo of [false, true]) {
+  reset();
+  for (let id = 200; id < 240; id++)
+    addList(id, 'remote', { players: 45000 + id, recount: 300, problems: [] });
+  if (outsideToo) addList(240, 'remote');
+  answer = 'cancel';
+  await run('remove_outside_limits');
+  const reply = outsideToo ? prompt().reply : replies[0];
+  assert.ok(reply.content.length <= 2000);
+  assert.ok(
+    reply.content.endsWith(
+      `\n${LIMITS_TEXT}\n40 export ban lists are within the cap by their settings now, though their export bans are over it until the importer updates them: #200 (45,200 players by its export bans, 300 by its settings now), #201 (45,201 players by its export bans, 300 by its settings now), #202 (45,202 players by its export bans, 300 by its settings now), #203 (45,203 players by its export bans, 300 by its settings now), #204 (45,204 players by its export bans, 300 by its settings now) and 35 more, all in the attached export-ban-lists-awaiting-the-importer.txt.`
+    )
+  );
+  assert.deepStrictEqual(
+    reply.files.map((attached) => attached.name),
+    ['export-ban-lists-awaiting-the-importer.txt']
+  );
+  const lines = reply.files[0].attachment.toString('utf8').split('\n');
+  assert.match(
+    lines[0],
+    /^Export ban lists within the cap by their settings now, though their export bans are over it until the importer updates them, checked \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: 40$/
+  );
+  assert.strictEqual(lines.length, 41);
+  assert.strictEqual(
+    lines[1],
+    '#200 Remote list "List 200": 45,200 players by its export bans, 300 by its settings now'
+  );
+  assert.strictEqual(
+    lines[40],
+    '#239 Remote list "List 239": 45,239 players by its export bans, 300 by its settings now'
+  );
+  assert.deepStrictEqual(deleted(), []);
+}
+
+// A list over its type's cap by its export bans whose players cannot be counted by its settings now
+// may be over the cap or not, so nothing is removed: the command fails before the preview.
+reset();
+addList(98, 'remote', { players: 41000, recountError: new Error(TIMED_OUT), problems: [] });
+addList(99, 'remote');
+await assert.rejects(run('remove_outside_limits'), { message: TIMED_OUT });
+assert.deepStrictEqual(calls, [['check', 'all']]);
+assert.strictEqual(prompt(), null);
+assert.deepStrictEqual(deleted(), []);
 
 // The summary says how many lists ended each way, and the log has each BattleMetrics list's ban
 // list as it was before the list was removed.
@@ -1321,6 +1421,28 @@ await run('transfer', { id: 12, owner: NEW_OWNER });
 assert.deepStrictEqual(fieldsOf(prompt().embed).at(-1), [
   "New owner's export ban lists",
   '3 now, and 4 with this one. A user can have 4.'
+]);
+assert.strictEqual(ownerOf(12), NEW_OWNER);
+assert.match(contentOf(replies.at(-1)), /^Transferred export ban list \*\*List 12\*\* \(#12\) /);
+
+// A list over its type's cap by its export bans is shown with its players by its settings now too,
+// and when that count fails, the confirmation says so, and the list can still be transferred.
+reset();
+addList(12, 'remote', { players: 41000, recount: 39000, problems: [] });
+addSteamUser(NEW_OWNER, 'New Owner');
+await run('transfer', { id: 12, owner: NEW_OWNER });
+assert.deepStrictEqual(fieldsOf(prompt().embed)[2], [
+  'Players',
+  '41,000 by its export bans, 39,000 by its settings now'
+]);
+assert.strictEqual(ownerOf(12), NEW_OWNER);
+reset();
+addList(12, 'remote', { players: 41000, recountError: new Error(TIMED_OUT), problems: [] });
+addSteamUser(NEW_OWNER, 'New Owner');
+await run('transfer', { id: 12, owner: NEW_OWNER });
+assert.deepStrictEqual(fieldsOf(prompt().embed)[2], [
+  'Players',
+  '41,000 by its export bans; they could not be counted by its settings now'
 ]);
 assert.strictEqual(ownerOf(12), NEW_OWNER);
 assert.match(contentOf(replies.at(-1)), /^Transferred export ban list \*\*List 12\*\* \(#12\) /);
