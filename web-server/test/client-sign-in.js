@@ -23,8 +23,26 @@ const localStorage = {
 };
 // The alerts the page shows and its reloads, in order.
 const events = [];
+// What the client writes to the browser's console.
+const consoleOutput = [];
+const record =
+  (level) =>
+  (...values) =>
+    consoleOutput.push({ level, values });
+// The requests the client sends to the web server outside GraphQL, and the answer it gets.
+const httpClient = { requests: [], answer: undefined };
+httpClient.get = async (uri) => {
+  httpClient.requests.push(uri);
+  return httpClient.answer;
+};
 const context = vm.createContext({
   localStorage,
+  console: Object.fromEntries(
+    ['log', 'info', 'debug', 'trace', 'dir', 'table', 'warn', 'error'].map((level) => [
+      level,
+      record(level)
+    ])
+  ),
   window: {
     alert: (message) => events.push(`alert: ${message}`),
     location: { reload: () => events.push('reload') }
@@ -37,7 +55,7 @@ const stubs = {
   rxjs,
   'jwt-decode': { jwtDecode },
   'scbl-lib/config': config,
-  './http-client': { default: {} },
+  './http-client': { default: httpClient },
   './color-mode.js': { COLOR_MODE_KEY: 'colorMode' }
 };
 
@@ -160,6 +178,22 @@ for (const token of [expired, oldToken(31 * DAY), ...unreadable]) {
 }
 assert.strictEqual(restore(), false);
 
+// Signing in with Steam fetches a token from the web server, and choosing to be remembered stores
+// it. Sign-in details stay out of the browser's console, so neither writes anything there.
+storage.clear();
+Auth.flush();
+const signInQuery = '?openid.mode=id_res&openid.claimed_id=x';
+httpClient.answer = { status: 200, data: { token: fresh } };
+await Auth.attemptAuth(signInQuery);
+assert.deepStrictEqual(httpClient.requests, ['/auth/steam/return' + signInQuery]);
+assert.strictEqual(Auth.isLoggedIn, true);
+assert.strictEqual(Auth.jwtToken, fresh);
+assert.deepStrictEqual({ ...Auth.claim }, user);
+Auth.saveToken = true;
+Auth.storeToken();
+assert.strictEqual(storage.get('JWT'), fresh);
+assert.deepStrictEqual(consoleOutput, []);
+
 // When the web server says it no longer accepts the token, the client forgets it and reports that
 // the user was signed in, so the page reloads as signed out.
 restore(fresh);
@@ -249,6 +283,9 @@ assert.strictEqual(events[1], 'reload');
 assert.deepStrictEqual(await send(change, refusedChange), heldBack(null));
 assert.strictEqual(events.length, 2);
 
+// Nothing the client did here wrote to the console.
+assert.deepStrictEqual(consoleOutput, []);
+
 console.log(
-  'Client sign-in checks passed: reading, restoring and forgetting tokens, and expiry mid-session.'
+  'Client sign-in checks passed: signing in, reading, restoring and forgetting tokens, and expiry mid-session.'
 );

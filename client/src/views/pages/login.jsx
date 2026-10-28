@@ -53,7 +53,6 @@ export default function () {
                         onClick={() => {
                           Auth.saveToken = true;
                           Auth.storeToken();
-                          console.log(Auth);
                           navigate('/');
                         }}
                       >
