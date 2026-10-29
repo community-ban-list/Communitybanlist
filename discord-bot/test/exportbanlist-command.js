@@ -51,10 +51,14 @@ const PAUSED_TEXT =
 const ONE_PAUSED_TEXT =
   "Ban list #46 is paused: its bans count for nothing for now. The ban importer leaves them out of export bans, but a count by settings now includes them, as the website's size check does, so that a list's cap holds once they count again. So a list within the cap by its export bans only while #46 is paused is not counted again, and is left until then.";
 // The same for the embed of a list counted again by its settings now, with ban lists 7 and 46
-// paused.
+// paused, and for that of a list not counted again, which shows only its export bans.
 const PAUSED_FIELD = [
   'Paused ban lists',
   "#7 and #46, whose bans count for nothing for now. The ban importer leaves them out of the list's export bans, but its count by its settings now includes them, as the website's size check does."
+];
+const PAUSED_UNCOUNTED_FIELD = [
+  'Paused ban lists',
+  "#7 and #46, whose bans count for nothing for now. The ban importer leaves them out of the list's export bans, and so out of its players here, but the website's size check counts them."
 ];
 // Ban lists 46, suspended, and 7, resuming, whose bans count for nothing until the importer has
 // caught up with it, as rows of the importer's table, out of order, as the names are sorted.
@@ -795,7 +799,9 @@ assert.deepStrictEqual(deleted(), []);
 // While ban lists are paused, its export bans leave out their bans, as the importer does, and its
 // count by its settings now includes them, as the website's size check does, so the two numbers can
 // differ with no change to the list. The confirmation then names the paused lists, suspended or
-// resuming, and says so. A list not counted again shows one number, so they are not read for it.
+// resuming, and says so. A list not counted again shows one number, its export bans, which leave
+// out their bans, so the website's size check can count more players for it: the confirmation names
+// the paused lists for it too, and says that, so its number and "Within them" are read rightly.
 reset();
 pausedRows = PAUSED_ROWS;
 const PAUSED_CAP =
@@ -818,16 +824,28 @@ pausedRows = PAUSED_ROWS;
 addList(25, 'remote', { players: 39000, problems: [] });
 answer = 'cancel';
 await run('remove', { id: 25 });
-assert.deepStrictEqual(fieldsOf(prompt().embed)[2], ['Players', '39,000']);
-assert.ok(!fieldsOf(prompt().embed).some(([name]) => name === PAUSED_FIELD[0]));
-assert.strictEqual(pausedReads, 0);
-// With no ban list paused, nothing is said of them.
-reset();
-addList(24, 'remote', { players: 41000, recount: 43500, problems: [PAUSED_CAP] });
-answer = 'cancel';
-await run('remove', { id: 24 });
-assert.ok(!fieldsOf(prompt().embed).some(([name]) => name === PAUSED_FIELD[0]));
+assert.deepStrictEqual(fieldsOf(prompt().embed), [
+  ['ID', '25'],
+  ['Type', 'Remote'],
+  ['Players', '39,000'],
+  PAUSED_UNCOUNTED_FIELD,
+  ['Owner', '**Owner 25** (`76561198000000025`)'],
+  ["Today's limits", 'Within them.']
+]);
 assert.strictEqual(pausedReads, 1);
+assert.deepStrictEqual(deleted(), []);
+// With no ban list paused, nothing is said of them, whether the list was counted again or not.
+for (const counted of [
+  { players: 41000, recount: 43500, problems: [PAUSED_CAP] },
+  { players: 900 }
+]) {
+  reset();
+  addList(24, 'remote', counted);
+  answer = 'cancel';
+  await run('remove', { id: 24 });
+  assert.ok(!fieldsOf(prompt().embed).some(([name]) => name === PAUSED_FIELD[0]));
+  assert.strictEqual(pausedReads, 1);
+}
 
 // The count by its settings now only fills in what the confirmation shows, so a count that fails
 // does not stop the removal: the confirmation says it failed, and whether the list is within its
@@ -1841,18 +1859,29 @@ assert.deepStrictEqual(fieldsOf(prompt().embed)[2], [
   '41,000 by its export bans, 39,000 by its settings now'
 ]);
 assert.strictEqual(ownerOf(12), NEW_OWNER);
-// While ban lists are paused, the confirmation names them for such a list, as a removal's does.
-reset();
-pausedRows = PAUSED_ROWS;
-addList(12, 'remote', { players: 41000, recount: 43500, problems: [] });
-addSteamUser(NEW_OWNER, 'New Owner');
-await run('transfer', { id: 12, owner: NEW_OWNER });
-assert.deepStrictEqual(fieldsOf(prompt().embed).slice(2, 5), [
-  ['Players', '41,000 by its export bans, 43,500 by its settings now'],
-  PAUSED_FIELD,
-  ['Current owner', '**Owner 12** (`76561198000000012`)']
-]);
-assert.strictEqual(ownerOf(12), NEW_OWNER);
+// While ban lists are paused, the confirmation names them, as a removal's does, for such a list and
+// for one not counted again, saying what they mean for each list's numbers of players.
+for (const [counted, players, field] of [
+  [
+    { players: 41000, recount: 43500 },
+    '41,000 by its export bans, 43,500 by its settings now',
+    PAUSED_FIELD
+  ],
+  [{ players: 39000 }, '39,000', PAUSED_UNCOUNTED_FIELD]
+]) {
+  reset();
+  pausedRows = PAUSED_ROWS;
+  addList(12, 'remote', { ...counted, problems: [] });
+  addSteamUser(NEW_OWNER, 'New Owner');
+  await run('transfer', { id: 12, owner: NEW_OWNER });
+  assert.deepStrictEqual(fieldsOf(prompt().embed).slice(2, 5), [
+    ['Players', players],
+    field,
+    ['Current owner', '**Owner 12** (`76561198000000012`)']
+  ]);
+  assert.strictEqual(pausedReads, 1);
+  assert.strictEqual(ownerOf(12), NEW_OWNER);
+}
 reset();
 addList(12, 'remote', { players: 41000, recountError: new Error(TIMED_OUT), problems: [] });
 addSteamUser(NEW_OWNER, 'New Owner');

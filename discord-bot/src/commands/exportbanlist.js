@@ -318,9 +318,21 @@ function describeBattlemetricsBanList(exportBanList, access) {
   return `${id}, which CBL's BattleMetrics key ${keySees(exportBanList.battlemetricsID, access) ? 'can' : 'cannot'} see.`;
 }
 
-// An embed for the list, with its ID, type and players. For a list counted again by its settings
-// now while ban lists are paused (paused, their IDs), it says what its two numbers mean (see
-// describePaused).
+// What the ban lists paused now (paused, their IDs) mean for the list's numbers of players, for its
+// embed, as describePaused says for every list in remove_outside_limits. Their bans are left out of
+// its export bans. A list counted again by its settings now has a second number, which includes
+// them, as the website's size check does, so its two numbers can differ with no change to it. A list
+// not counted again, e.g. one within the cap by its export bans only while ban lists are paused, has
+// only the first, so the website's size check can count more players for it.
+function describePausedFor(check, paused) {
+  const named = `${joinList(paused.map((id) => `#${id}`))}, whose bans count for nothing for now.`;
+  if (check.recount != null)
+    return `${named} The ban importer leaves them out of the list's export bans, but its count by its settings now includes them, as the website's size check does.`;
+  return `${named} The ban importer leaves them out of the list's export bans, and so out of its players here, but the website's size check counts them.`;
+}
+
+// An embed for the list, with its ID, type and players, and the ban lists paused now (paused, their
+// IDs), if any, with what they mean for its numbers of players (see describePausedFor).
 function listDetailsEmbed(check, paused = []) {
   const { exportBanList, players } = check;
   const embed = listEmbed(truncate(exportBanList.name || 'Unnamed', 256), null).addFields(
@@ -332,20 +344,13 @@ function listDetailsEmbed(check, paused = []) {
       inline: true
     }
   );
-  if (check.recount != null && paused.length > 0)
+  if (paused.length > 0)
     embed.addFields({
       name: 'Paused ban lists',
-      value: truncate(
-        `${joinList(paused.map((id) => `#${id}`))}, whose bans count for nothing for now. The ban importer leaves them out of the list's export bans, but its count by its settings now includes them, as the website's size check does.`,
-        1024
-      )
+      value: truncate(describePausedFor(check, paused), 1024)
     });
   return embed;
 }
-
-// The ban lists paused now, for the embed of a list counted again by its settings now, or none for
-// another list, whose embed does not need them.
-const pausedFor = async (check) => (check.recount == null ? [] : readPausedIDs());
 
 function exportBanListEmbed(check, access = null, paused = []) {
   const { exportBanList } = check;
@@ -400,7 +405,7 @@ async function remove(interaction) {
   const access = hasBattlemetricsBanList(exportBanList)
     ? await checkBattlemetricsAccess(await findRecordedBanLists())
     : null;
-  const paused = await pausedFor(check);
+  const paused = await readPausedIDs();
 
   const confirmed = await confirm(
     interaction,
@@ -926,7 +931,7 @@ function formatNewOwner(newOwner) {
 }
 
 // The list, its owner, the new owner and how many export ban lists the new owner has, with the ban
-// lists paused now for a list counted again by its settings now (see listDetailsEmbed).
+// lists paused now, if any (see listDetailsEmbed).
 function transferEmbed(check, newOwner, listCount, paused = []) {
   return listDetailsEmbed(check, paused).addFields(
     { name: 'Current owner', value: truncate(formatOwner(check.exportBanList), 1024) },
@@ -1022,7 +1027,7 @@ async function transfer(interaction) {
     );
 
   const { kept, shown } = transferTerms(exportBanList);
-  const paused = await pausedFor(check);
+  const paused = await readPausedIDs();
   const confirmed = await confirm(
     interaction,
     truncate(
