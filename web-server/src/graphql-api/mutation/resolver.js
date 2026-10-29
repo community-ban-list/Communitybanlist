@@ -25,8 +25,9 @@ import testWebhook from './test-webhook.js';
 // or BattleMetrics is asked for anything, such as a value out of bounds or a list that does not
 // exist, are only shown to the user, as they change nothing. So are changes refused as they are
 // saved, as the list changed after their checks, is no longer the user's or is being deleted (see
-// saveOwnList), or as the database was too busy to save them (see inTransaction), and a deletion of
-// a list that is being deleted already, e.g. by the Discord bot.
+// saveOwnList), or as the database was too busy to save them (see inTransaction), a config whose
+// ban list was removed after its checks (see createExportBanListConfig), and a deletion of a list
+// that is being deleted already, e.g. by the Discord bot.
 
 // The settings that decide who is on an export ban list, with its configs: its threshold, default
 // points and max ban age.
@@ -55,6 +56,15 @@ const DATABASE_BUSY =
 // The refusal for a change to a list that is being deleted, e.g. by the Discord bot, whose change
 // would be lost with the list (see saveOwnList). Nothing is saved.
 const BEING_DELETED = 'This export ban list is being deleted, so your change was not saved.';
+
+// The refusal for a config whose ban list does not exist, which the checks give, and which saving
+// it gives when an admin removed the ban list after the checks (see createExportBanListConfig).
+const NO_BAN_LIST = 'Ban list does not exist!';
+
+// MySQL's error number for a row whose foreign key names a row that does not exist, as Sequelize's
+// error holds MySQL's own.
+const NO_REFERENCED_ROW = 1452;
+const errorNumber = (error) => (error?.original ?? error?.parent)?.errno;
 
 // A list's settings, from its stored row or a change's arguments. Only the arguments given are
 // taken, so a change leaves the others as they are.
@@ -557,7 +567,7 @@ export default {
         include: [Organisation]
       });
 
-      if (!banList) throw new Error('Ban list does not exist!');
+      if (!banList) throw new Error(NO_BAN_LIST);
       // A paused ban list's bans count for nothing, and it is left out of the website's lists, so
       // no new config is made for it until it counts again. Configs it has are kept.
       if (context.paused?.has(banList.id))
@@ -598,10 +608,20 @@ export default {
         // the config was checked with.
         created = await saveOwnList(context, exportBanList.id, async (current, transaction) => {
           await checkUnchanged(current, settings, configs, transaction);
-          return ExportBanListConfig.create(
-            { exportBanList: args.exportBanList, banList: args.banList, ...points },
-            { transaction }
-          );
+          try {
+            return await ExportBanListConfig.create(
+              { exportBanList: args.exportBanList, banList: args.banList, ...points },
+              { transaction }
+            );
+          } catch (error) {
+            // An admin can remove the ban list after the checks, e.g. with the Discord bot's
+            // /banlist remove, and MySQL then refuses the config for its foreign key to the ban
+            // list. The list's row is locked here, so its own foreign key holds. Nothing is saved,
+            // so the config is refused as one whose ban list does not exist, which the checks
+            // would have given a moment later, rather than with MySQL's error, which names tables.
+            if (errorNumber(error) === NO_REFERENCED_ROW) throw refusal(NO_BAN_LIST);
+            throw error;
+          }
         });
       } catch (error) {
         if (error.refusal === true) throw error;
