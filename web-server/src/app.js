@@ -98,9 +98,31 @@ if (!inProduction) app.use(Logger());
 
 app.use(passport.initialize());
 
+// A browser that has a file already asks whether it has changed since the time it was given for it.
+// While the file still has exactly that time, answer 304 without it, so the browser uses its copy
+// rather than downloading the file again. A file with any other time is sent, even an older one, as
+// when the image of an earlier build is run again, so browsers always run the client the server
+// has. Only files have a time, so other answers, such as the API's, are always sent.
+app.use(async (ctx, next) => {
+  await next();
+  const lastModified = ctx.response.get('Last-Modified');
+  const unchanged = lastModified && ctx.get('If-Modified-Since') === lastModified;
+  if (ctx.status === 200 && unchanged && ctx.fresh) {
+    ctx.status = 304;
+    ctx.body = null;
+  }
+});
+
 const clientPath = './client';
 
-if (inProduction) app.use(mount('/static', serve(path.join(clientPath, '/build/static'))));
+// Vite names each file it builds into /static after a hash of its content, so a name never stands
+// for other content, and browsers can keep these files for a year without asking again. The files
+// at the top of the build, such as index.html, keep their names, so browsers ask about them on
+// every visit.
+const staticCaching = { maxage: 365 * 24 * 60 * 60 * 1000, immutable: true };
+
+if (inProduction)
+  app.use(mount('/static', serve(path.join(clientPath, '/build/static'), staticCaching)));
 else app.use(serve(path.join(clientPath, '/main-site')));
 
 router.use('/auth', routesAuth.routes(), routesAuth.allowedMethods());
