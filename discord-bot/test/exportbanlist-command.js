@@ -1733,9 +1733,12 @@ assert.match(
 );
 
 // The summary counts the lists left as they were already being deleted apart from those that had
-// changed.
+// changed, and both apart from those now within today's limits.
 reset();
-for (const id of [140, 141, 142, 143]) addList(id, 'remote');
+for (const id of [140, 141, 142, 143, 144]) addList(id, 'remote');
+whileConfirming = async () => {
+  rows.get(144).problems = [];
+};
 duringCheck = (ids) => {
   if (ids?.[0] === 140 || ids?.[0] === 141) beingDeleted.add(ids[0]);
   if (ids?.[0] === 142) rows.get(142).exportBanList.threshold = 9;
@@ -1744,12 +1747,19 @@ await run('remove_outside_limits');
 assert.deepStrictEqual(deleted(), [143]);
 assert.strictEqual(
   replies.at(-1).content,
-  "Removed 1 of the 4 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it had changed. 2 were not removed, as they were already being deleted."
+  "Removed 1 of the 5 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it is now within today's limits. 1 was not removed, as it had changed. 2 were not removed, as they were already being deleted."
 );
 assert.strictEqual(
   audits.at(-1),
-  "[important] admin (1) removed 1 of the 4 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it had changed. 2 were not removed, as they were already being deleted."
+  "[important] admin (1) removed 1 of the 5 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it is now within today's limits. 1 was not removed, as it had changed. 2 were not removed, as they were already being deleted."
 );
+assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n'), [
+  '**List 140** (#140): not removed, as it is already being deleted',
+  '**List 141** (#141): not removed, as it is already being deleted',
+  '**List 142** (#142): not removed, as it changed while it was being checked',
+  '**List 143** (#143): removed; there was nothing to delete on BattleMetrics',
+  "**List 144** (#144): not removed, as it is now within today's limits"
+]);
 
 // A list whose players cannot be counted by its settings now as it is checked again just before
 // its removal may be over its type's cap or not. It is removed when it breaks the points rules,
