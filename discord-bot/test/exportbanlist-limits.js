@@ -43,10 +43,12 @@ async function countMembers(settings) {
 
 // The lists' deletion locks, as MySQL keeps them: those the bot's connections hold, and those
 // another connection holds, e.g. the website's while a list's owner deletes it there. The lists
-// read with their rows locked, in turn, each while the bot held its deletion lock.
+// read with their rows locked, in turn, each while the bot held its deletion lock. An error in
+// lockErrors for a list fails GET_LOCK for it.
 const lockedByBot = new Set();
 const lockedElsewhere = new Set();
 const lockedReads = [];
+const lockErrors = new Map();
 
 // A deletion lock's connection, which takes the lock unless another connection holds it, and frees
 // it when it is closed.
@@ -55,6 +57,7 @@ async function openConnection() {
   return {
     async query(sql, [id]) {
       assert.match(sql, /^SELECT GET_LOCK\(/);
+      if (lockErrors.has(id)) throw lockErrors.get(id);
       if (lockedByBot.has(id) || lockedElsewhere.has(id)) return [[{ taken: 0 }]];
       lockedByBot.add(id);
       held.push(id);
@@ -331,6 +334,7 @@ function clear() {
   exportBans.clear();
   for (const done of [destroyed, counted, replies, audits, lockedReads]) done.length = 0;
   lockedElsewhere.clear();
+  lockErrors.clear();
   duringCount = null;
 }
 
@@ -447,13 +451,45 @@ assert.deepStrictEqual([...lockedByBot], []);
 const beingDeletedSummary = replies.at(-1);
 assert.strictEqual(
   beingDeletedSummary.content,
-  "Removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it had changed."
+  "Removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it was already being deleted."
 );
 assert.deepStrictEqual(beingDeletedSummary.embeds[0].toJSON().description.split('\n'), [
   '**List 13** (#13): not removed, as it is already being deleted',
   '**List 14** (#14): removed; there was nothing to delete on BattleMetrics'
 ]);
+// The log channel's summary says so too.
+assert.strictEqual(
+  audits.at(-1),
+  "admin (1) removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it was already being deleted."
+);
+
+// A list whose deletion lock cannot be taken, as MySQL gives an error for it, is left as it is, as
+// failed, with that error, though it was checked again. The others carry on.
+clear();
+addList(15, 9, { CREATED: 41000 });
+addList(16, 9, { CREATED: 42000 });
+lockErrors.set(15, new Error('Lock wait timeout exceeded'));
+await command.execute(interaction(async () => {}));
+assert.deepStrictEqual(destroyed, [16]);
+assert.deepStrictEqual([...lists.keys()], [15]);
+assert.deepStrictEqual(exportBans.get(15), { CREATED: 41000 });
+assert.deepStrictEqual(lockedReads, [16]);
+assert.deepStrictEqual([...lockedByBot], []);
+const lockFailedSummary = replies.at(-1);
+assert.strictEqual(
+  lockFailedSummary.content,
+  "Removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 failed."
+);
+assert.deepStrictEqual(lockFailedSummary.embeds[0].toJSON().description.split('\n'), [
+  '**List 15** (#15): failed: Its deletion lock could not be taken: Lock wait timeout exceeded',
+  '**List 16** (#16): removed; there was nothing to delete on BattleMetrics'
+]);
+assert.ok(
+  audits.includes(
+    'admin (1) could not remove export ban list "List 15" (ID: 15, Remote) of Steam user "Owner 15" (ID: 765611980000000015): Its deletion lock could not be taken: Lock wait timeout exceeded'
+  )
+);
 
 console.log(
-  'Export ban list limit checks passed: a list its owner has brought within the cap is left though its export bans are not updated yet, one over the cap by both counts is removed, one changed while it is checked just before its removal is left, one whose count fails is left unless it breaks the points rules, and one being deleted on the website is left.'
+  'Export ban list limit checks passed: a list its owner has brought within the cap is left though its export bans are not updated yet, one over the cap by both counts is removed, one changed while it is checked just before its removal is left, one whose count fails is left unless it breaks the points rules, and one being deleted on the website, or whose deletion lock cannot be taken, is left.'
 );

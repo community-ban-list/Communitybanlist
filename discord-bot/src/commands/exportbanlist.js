@@ -650,15 +650,29 @@ async function removeOne(check, access) {
   // to it and a transfer leaves it as it is. A list whose deletion lock is held already, as its
   // owner is deleting it on the website or another removal is under way, is left as it is. The
   // lock is taken once the list has been checked, so the website is not held up while its players
-  // are counted again.
+  // are counted again. A lock that cannot be taken, e.g. as its connection cannot be opened, leaves
+  // the list as it is, as failed.
+  let locked = false;
   try {
-    return await ExportBanList.whileDeleting(current.exportBanList.id, () =>
-      removeUnchanged(current)
-    );
+    return await ExportBanList.whileDeleting(current.exportBanList.id, () => {
+      locked = true;
+      return removeUnchanged(current);
+    });
   } catch (error) {
     if (error?.beingDeleted === true)
-      return { check: current, status: 'skipped', reason: 'it is already being deleted' };
-    return notCheckedAgain(current, error);
+      return {
+        check: current,
+        status: 'skipped',
+        reason: 'it is already being deleted',
+        beingDeleted: true
+      };
+    if (!locked)
+      return {
+        check: current,
+        status: 'failed',
+        reason: `Its deletion lock could not be taken: ${error.message}`
+      };
+    return { check: current, status: 'failed', reason: failureReason(error) };
   }
 }
 
@@ -691,12 +705,22 @@ async function removeUnchanged(current) {
   }
 }
 
-// How many lists ended each way.
+// How many lists ended each way. Of the lists not removed (skipped), beingDeleted counts those left
+// as their deletion lock was held already.
 function countResults(results) {
-  const counts = { removed: 0, deleted: 0, gone: 0, none: 0, failed: 0, skipped: 0 };
-  for (const { status, outcome } of results) {
+  const counts = {
+    removed: 0,
+    deleted: 0,
+    gone: 0,
+    none: 0,
+    failed: 0,
+    skipped: 0,
+    beingDeleted: 0
+  };
+  for (const { status, outcome, beingDeleted } of results) {
     counts[status]++;
     if (status === 'removed') counts[outcome in OUTCOMES ? outcome : 'none']++;
+    if (beingDeleted) counts.beingDeleted++;
   }
   return counts;
 }
@@ -721,10 +745,12 @@ function describeSummary(total, results, notTried, left) {
     counts.none > 0 && `${counts.none} with nothing to delete on BattleMetrics`
   ].filter(Boolean);
   // The lists not removed, a sentence each.
+  const changed = counts.skipped - counts.beingDeleted;
   const others = [
     counts.failed > 0 && `${counts.failed.toLocaleString('en-US')} failed.`,
-    counts.skipped > 0 &&
-      `${was(counts.skipped)} not removed, as ${counts.skipped === 1 ? 'it' : 'they'} had changed.`,
+    changed > 0 && `${was(changed)} not removed, as ${changed === 1 ? 'it' : 'they'} had changed.`,
+    counts.beingDeleted > 0 &&
+      `${was(counts.beingDeleted)} not removed, as ${counts.beingDeleted === 1 ? 'it was' : 'they were'} already being deleted.`,
     notTried > 0 && `${was(notTried)} not tried, as the removal stopped.`,
     left > 0 && `${was(left)} left from the start.`
   ].filter(Boolean);

@@ -1551,7 +1551,8 @@ assert.match(
 
 // A list whose deletion lock is held once it has been checked again, as its owner is deleting it on
 // the website, is left as it is, so the two never delete it at once, and one whose deletion lock
-// cannot be taken, as its connection cannot be opened, is left as failed. The others carry on.
+// cannot be taken, as its connection cannot be opened, is left as failed, saying so. The others
+// carry on.
 reset();
 for (const id of [125, 126, 127]) addList(id, 'remote');
 duringCheck = (ids) => {
@@ -1571,18 +1572,37 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(
   replies.at(-1).content,
-  "Removed 1 of the 3 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 failed. 1 was not removed, as it had changed."
+  "Removed 1 of the 3 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 failed. 1 was not removed, as it was already being deleted."
 );
 assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n'), [
   '**List 125** (#125): not removed, as it is already being deleted',
-  '**List 126** (#126): failed: It could not be checked again: connect ECONNREFUSED',
+  '**List 126** (#126): failed: Its deletion lock could not be taken: connect ECONNREFUSED',
   '**List 127** (#127): removed; there was nothing to delete on BattleMetrics'
 ]);
 // A list left as it is posts no line of its own, as the summary counts it, and a failure does.
 assert.ok(!audits.some((line) => line.includes('"List 125"')));
 assert.match(
   audits.find((line) => line.includes('"List 126"')),
-  /could not remove export ban list "List 126" .*: It could not be checked again: connect ECONNREFUSED$/
+  /could not remove export ban list "List 126" .*: Its deletion lock could not be taken: connect ECONNREFUSED$/
+);
+
+// The summary counts the lists left as they were already being deleted apart from those that had
+// changed.
+reset();
+for (const id of [140, 141, 142, 143]) addList(id, 'remote');
+duringCheck = (ids) => {
+  if (ids?.[0] === 140 || ids?.[0] === 141) beingDeleted.add(ids[0]);
+  if (ids?.[0] === 142) rows.get(142).exportBanList.threshold = 9;
+};
+await run('remove_outside_limits');
+assert.deepStrictEqual(deleted(), [143]);
+assert.strictEqual(
+  replies.at(-1).content,
+  "Removed 1 of the 4 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it had changed. 2 were not removed, as they were already being deleted."
+);
+assert.strictEqual(
+  audits.at(-1),
+  "[important] admin (1) removed 1 of the 4 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it had changed. 2 were not removed, as they were already being deleted."
 );
 
 // A list whose players cannot be counted by its settings now as it is checked again just before
