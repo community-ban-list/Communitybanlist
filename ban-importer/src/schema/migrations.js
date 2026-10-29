@@ -175,5 +175,30 @@ export default [
         ) ${options}`
       );
     }
+  },
+  {
+    // BanListSuspensions, which keeps the ban lists an admin has paused, one row each: suspended,
+    // as resumedAt is NULL, or resuming, once it is set, until the importer has caught up with the
+    // list and deletes the row (see scbl-lib/db/ban-list-suspensions.js). The bot adds the rows and
+    // sets or clears resumedAt. A list's row is deleted with the list, as the bot deletes ban lists
+    // without knowing of this table, so banList has the type of BanLists.id, which its foreign key
+    // needs.
+    id: '004-ban-list-suspensions',
+    async up(query) {
+      const options = await tableOptions(query);
+      const banListType = await keyType(query, 'BanLists');
+      await query(
+        `CREATE TABLE IF NOT EXISTS BanListSuspensions (
+          banList ${banListType} NOT NULL,
+          suspendedAt DATETIME(3) NOT NULL,
+          suspendedBy VARCHAR(100) NOT NULL,
+          reason VARCHAR(500) NULL,
+          resumedAt DATETIME(3) NULL,
+          PRIMARY KEY (banList),
+          CONSTRAINT BanListSuspensions_banList FOREIGN KEY (banList) REFERENCES BanLists (id)
+            ON DELETE CASCADE
+        ) ${options}`
+      );
+    }
   }
 ];
