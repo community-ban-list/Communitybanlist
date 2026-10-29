@@ -349,6 +349,25 @@ try {
   refuses({ 'yarn.lock': unused }, 'yarn.lock lists e@^5.0.0, which nothing here needs any more.');
   result = checkWith({ ...imageOnly, 'yarn.lock': unused });
   assert.strictEqual(result.status, 0, result.output);
+  // A key without a range, which Yarn does not write, fails it, in an image too, where Yarn would
+  // fetch it in place of the workspace. A key with an empty range is what Yarn writes for one.
+  const bare = [
+    lockfile,
+    'lib:',
+    '  version "1.0.0"',
+    `  resolved "${registry}/lib/-/lib-1.0.0.tgz#6666"`,
+    `  integrity ${checksum('f')}`,
+    ''
+  ].join('\n');
+  for (const changes of [{}, imageOnly])
+    refuses(
+      { ...changes, 'yarn.lock': bare },
+      'Line 29 of yarn.lock lists lib with no range, which Yarn does not write.'
+    );
+  passes({
+    ...withApp({ lib: '1.0.0', b: '^2.0.0', e: '' }),
+    'yarn.lock': unused.replace('e@^5.0.0:', 'e@:')
+  });
   // So does a package that no other package needs any more.
   refuses(
     replacing('\n  optionalDependencies:\n    c-native ">=3.0.0 <4"', ''),
@@ -474,6 +493,25 @@ try {
   refuses(
     replacing('  optionalDependencies:', '  peerDependencies:'),
     'Line 16 of yarn.lock is "  peerDependencies:", a field Yarn does not write'
+  );
+  // A package named like one of those fields is fine, and Yarn writes it first in a dependencies
+  // block, as it orders an entry's fields.
+  const uidEntry = [
+    '',
+    'uid@^1.0.0:',
+    '  version "1.0.1"',
+    `  resolved "${registry}/uid/-/uid-1.0.1.tgz#7777"`,
+    `  integrity ${checksum('u')}`,
+    ''
+  ].join('\n');
+  passes({
+    'yarn.lock': lockfile.replace('    b "^2.0.0"', '    uid "^1.0.0"\n    b "^2.0.0"') + uidEntry
+  });
+  refuses(
+    {
+      'yarn.lock': lockfile.replace('    b "^2.0.0"', '    b "^2.0.0"\n    uid "^1.0.0"') + uidEntry
+    },
+    'Line 10 of yarn.lock is "    b \\"^2.0.0\\"", but Yarn writes "    uid \\"^1.0.0\\"" there.'
   );
   // Yarn keeps the line endings a yarn.lock has, so Windows ones pass.
   passes({ 'yarn.lock': lockfile.replace(/\n/g, '\r\n') });
