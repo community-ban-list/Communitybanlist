@@ -11,8 +11,8 @@ import graphql from 'graphql';
 
 // Load a module in its own context, with its package imports replaced by stubs. Relative imports
 // load the real files.
-async function load(path, stubs) {
-  const context = vm.createContext({});
+async function load(path, stubs, globals = {}) {
+  const context = vm.createContext({ ...globals });
   const linker = async (specifier, referencingModule) => {
     if (specifier.startsWith('.')) {
       const url = new URL(specifier, referencingModule.identifier);
@@ -57,9 +57,13 @@ const suspensions = {
   })
 };
 
-const { default: pausedBanLists, MAX_AGE } = await load('../src/paused-ban-lists.js', {
-  'scbl-lib/db/ban-list-suspensions': suspensions
-});
+// What the cache warns of, in the console.
+const warnings = [];
+const { default: pausedBanLists, MAX_AGE } = await load(
+  '../src/paused-ban-lists.js',
+  { 'scbl-lib/db/ban-list-suspensions': suspensions },
+  { console: { warn: (line) => warnings.push(line) } }
+);
 const ids = (set) => [...set].sort((a, b) => a - b);
 
 // The paused lists, suspended or resuming, are read once for every request within 10 seconds, and
@@ -75,11 +79,17 @@ assert.deepStrictEqual(ids(await pausedBanLists(1000 + MAX_AGE - 1)), [7, 46]);
 assert.strictEqual(reads, 1);
 assert.deepStrictEqual(ids(await pausedBanLists(1000 + MAX_AGE)), []);
 assert.strictEqual(reads, 2);
-// A clock that went back reads them again, as does the next request after a read that failed.
-await pausedBanLists(500);
+// A clock that went back reads them again. A read that fails, e.g. as the database is down, never
+// fails the request, which every GraphQL request waits for: it is answered with the lists of the
+// last read that worked, and the next request reads them again.
+rows = [{ banList: 3, resumedAt: null }];
+assert.deepStrictEqual(ids(await pausedBanLists(500)), [3]);
 assert.strictEqual(reads, 3);
 failWith = new Error('connect ECONNREFUSED');
-await assert.rejects(pausedBanLists(500 + MAX_AGE), { message: 'connect ECONNREFUSED' });
+assert.deepStrictEqual(ids(await pausedBanLists(500 + MAX_AGE)), [3]);
+assert.deepStrictEqual(warnings, [
+  'Warning: could not read the paused ban lists: Error: connect ECONNREFUSED'
+]);
 failWith = null;
 rows = [{ banList: 9, resumedAt: null }];
 assert.deepStrictEqual(ids(await pausedBanLists(500 + MAX_AGE)), [9]);

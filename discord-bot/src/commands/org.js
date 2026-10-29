@@ -25,6 +25,7 @@ import {
   parseBanListSource,
   plural,
   readPaused,
+  readQueueSkips,
   skipCheckOption,
   suggestOrganisations,
   summariseBanListDeletion,
@@ -202,11 +203,9 @@ async function remove(interaction) {
 
   if (!(await confirm(interaction, prompt, 'Remove organisation'))) return;
 
-  // The players of paused lists are not queued, as their bans count for nothing.
-  const paused = await readPaused();
-  await deleteBanLists(banListIDs, organisation, {
-    paused: banListIDs.filter((id) => paused.has(id))
-  });
+  // The players of paused lists are not queued, as their bans count for nothing, once the importer
+  // has settled them (see readQueueSkips).
+  await deleteBanLists(banListIDs, organisation, { paused: await readQueueSkips(banListIDs) });
   audit(interaction, change);
   await interaction.editReply(reply);
 }

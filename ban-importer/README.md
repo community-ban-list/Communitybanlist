@@ -359,6 +359,10 @@ Every step of a run, or of a cycle of the importer service, leaves out the same 
 
 The website's export ban list size check counts the bans of paused lists too, so an export ban list cannot be given more points while a large list is paused and go over its cap when it counts again, and the website gives a paused list no new export ban list configs.
 
+The bot's `/banlist remove`, `/org remove` and `/banlist update` with a new source delete a paused list's bans without queueing its players once the reputation check has settled them without those bans, as its row says, as deleting them then changes no player's points. A list paused since the check last ran has its players queued, as any list's are.
+
+**Limits.** A resuming list that cannot be read, e.g. as CBL lost access to it, or that seems to have lost all its bans, stays resuming, so its bans count for nothing, until access comes back, or an admin confirms the removal or one of its bans comes back; `/banlist status` shows its state. A list that imports one of CBL's own export ban lists is never read, so its resumption ends at once. A read in full of a resuming list that completes but then fails, e.g. while removing bans, counts as read in full, so the list waits for its next full read, at its slot, rather than the next run. Only the reputation check settles paused lists' players' points, so it must stay among the run's steps.
+
 ```sql
 SELECT banList, suspendedAt, suspendedBy, reason, resumedAt FROM BanListSuspensions ORDER BY banList;
 ```
@@ -368,7 +372,9 @@ SELECT banList, suspendedAt, suspendedBy, reason, resumedAt FROM BanListSuspensi
 Besides the CBL's own tables, the importer owns `ImporterSchemaMigrations`, `ImporterState`, `BanListSyncs`, `BanListPendingRemovals` and `BanListSuspensions`. It makes them itself with its migrations (`src/schema/migrations.js`), which it applies once it holds the run lock, before its first step, and records in `ImporterSchemaMigrations`, and the importer never changes the CBL's own tables' columns or indexes. The web server and the bot never make or change these tables. They write only these rows, listed in `scbl-lib/db/models/importer/index.js`, where any other is to be listed too:
 
 - `ImporterState`: the row `lastLogMessage`, which the web server and the bot write.
-- `BanListSuspensions`: the bot adds the rows, and sets or clears their `resumedAt`; the importer deletes them. A migration that fails makes the run fail with exit code 1, naming the migration. Going back to an older importer image leaves the tables in place, and the older importer ignores them.
+- `BanListSuspensions`: the bot adds the rows, sets their `resumedAt`, and suspends a resuming list again by setting its `suspendedAt`, `suspendedBy` and `reason` anew and clearing its `resumedAt`; the importer deletes them. A list's row also goes with the list, by its foreign key, when the bot removes the list.
+
+A migration that fails makes the run fail with exit code 1, naming the migration. Going back to an older importer image leaves the tables in place, and the older importer ignores them.
 
 | Migration                       | What it makes                                                                                                                                                                 |
 | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

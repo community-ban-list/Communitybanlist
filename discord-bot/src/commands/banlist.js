@@ -28,24 +28,24 @@ import {
   describeBanListDeletion,
   findBanList,
   findOrganisation,
-  describeImport,
   describePause,
   formatBanListName,
   formatBanListType,
-  listEmbed,
   NO_TABLES,
   organisationOption,
+  paginate,
   parseBanListSource,
   pauseState,
   plural,
   readPause,
+  readQueueSkips,
   readStatus,
   skipCheckOption,
   suggestBanLists,
   suggestOrganisations,
   summariseBanListBans,
   summariseBanListDeletion,
-  truncate,
+  summariseImport,
   UserError
 } from '../utils/index.js';
 
@@ -125,10 +125,11 @@ const data = new SlashCommandBuilder()
 // a list is paused or counts again (see ban-importer/src/reputation-check.js).
 const SETTLED_PER_CYCLE = 1000;
 
-// How long a pause takes to reach the players of a list with this many players.
-function settles(steamUsers) {
+// How long a change to a list's bans counting takes to reach the players of a list with this many
+// players, from the ban importer cycle at which it changes.
+function settles(steamUsers, from = 'the next ban importer cycle') {
   const cycles = Math.max(1, Math.ceil(steamUsers / SETTLED_PER_CYCLE));
-  return `Export bans follow on the next ban importer cycle, and players' reputation points within ${plural(cycles, 'cycle')}.`;
+  return `Export bans follow from ${from}, and players' reputation points within ${plural(cycles, 'cycle')} of it.`;
 }
 
 // Ban lists are shown by name next to their organisation, so names must be unique within one.
@@ -221,10 +222,11 @@ async function update(interaction) {
       );
   }
 
-  // A paused list's bans count for nothing, so its players are not queued (see deleteBanLists).
-  const pausedIDs = pauseState(paused) ? [banList.id] : [];
+  // A paused list's bans count for nothing, so its players are not queued once the importer has
+  // settled them (see readQueueSkips), as read once the change is confirmed.
+  const skips = deletion ? await readQueueSkips([banList.id]) : [];
   await sequelize.transaction(async (transaction) => {
-    if (deletion) await deleteBansOfBanLists([banList.id], transaction, { paused: pausedIDs });
+    if (deletion) await deleteBansOfBanLists([banList.id], transaction, { paused: skips });
     await banList.save({ transaction });
   });
   const deleted = deletion ? `, deleting ${deletion}` : '';
@@ -246,7 +248,6 @@ async function remove(interaction) {
   const organisation = banList.Organisation;
   const listName = formatBanListName(banList, organisation);
   const deletion = describeBanListDeletion(await summariseBanListDeletion([banList.id]));
-  const paused = pauseState(await readPause(banList.id).catch(ignoreMissingTables));
 
   const confirmed = await confirm(
     interaction,
@@ -255,12 +256,15 @@ async function remove(interaction) {
   );
   if (!confirmed) return;
 
-  await deleteBanLists([banList.id], null, { paused: paused ? [banList.id] : [] });
+  // A paused list's players are not queued once the importer has settled them without its bans
+  // (see readQueueSkips), as read once the removal is confirmed.
+  const skips = await readQueueSkips([banList.id]);
+  await deleteBanLists([banList.id], null, { paused: skips });
   audit(interaction, `removed ${describeBanList(banList, organisation)}, deleting ${deletion}.`);
 
   await interaction.editReply(
-    paused
-      ? `Removed ${listName}. It was ${paused}, so its bans counted for nothing, and no player's reputation changes.`
+    skips.length > 0
+      ? `Removed ${listName}. It was paused, so its bans already counted for nothing.`
       : `Removed ${listName}. Affected players' reputation is recalculated on the next ban importer run.`
   );
 }
@@ -334,7 +338,7 @@ async function resume(interaction) {
   const bans = await summariseBanListBans([banList.id]);
   const confirmed = await confirm(
     interaction,
-    `Resume ${listName}? The ban importer reads it in full on its next cycle, and its ${describeBanListDeletion(bans)} count again once that read has confirmed the bans its owner removed meanwhile. ${settles(bans.steamUsers)}`,
+    `Resume ${listName}? The ban importer reads it in full on its next cycle, and its ${describeBanListDeletion(bans)} count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes at least 10 more minutes when there are any, and longer when it seems to have lost all of them. /banlist status shows when. ${settles(bans.steamUsers, 'the cycle after it counts again')}`,
     'Resume ban list'
   );
   if (!confirmed) return;
@@ -385,19 +389,19 @@ async function status(interaction) {
   const { paused, syncs, removals } = await readStatus(banLists.map((banList) => banList.id));
   const lines = banLists.map((banList) => {
     const state = pauseState(paused.get(banList.id));
-    const imported = describeImport(syncs.get(banList.id), removals.get(banList.id)).split('\n')[0];
-    return `${formatBanListName(banList, banList.Organisation)} (#${banList.id})${state ? ` · **${state}**` : ''}\n${imported}`;
+    const held = removals.get(banList.id);
+    const holding =
+      held && held.waiting + held.held > 0
+        ? ` · ${plural(held.waiting + held.held, 'removal')} held`
+        : '';
+    return `${formatBanListName(banList, banList.Organisation)} (#${banList.id})${state ? ` · **${state}**` : ''} · ${summariseImport(syncs.get(banList.id))}${holding}`;
   });
   const pausedCount = banLists.filter((banList) => paused.has(banList.id)).length;
-  await interaction.editReply({
-    embeds: [
-      listEmbed(
-        'Ban lists',
-        truncate(lines.join('\n\n'), 4096) || 'No ban lists yet.',
-        `${plural(banLists.length, 'ban list')}, ${pausedCount} paused. Pick one for its details.`
-      )
-    ]
-  });
+  await paginate(
+    interaction,
+    `Ban lists: ${plural(banLists.length, 'list')}, ${pausedCount} paused`,
+    lines
+  );
 }
 
 const subcommands = { add, update, remove, suspend, resume, status };

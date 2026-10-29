@@ -48,7 +48,8 @@ import { checkRunLock, reportProgress, stopIfRequested } from './run-control.js'
 // found again, as the row still names it.
 
 // The ImporterState row that keeps when the run that last checked started, when it checked, what
-// it found, and the paused lists it left out.
+// it found, and the paused lists it left out. The bot reads those lists, by the same name (see
+// scbl-lib/db/ban-list-suspensions.js, REPUTATION_CHECK_ROW).
 export const STATE_ROW = 'reputationCheck';
 
 // The check is due every 24 hours, unless IMPORTER_REPUTATION_CHECK_HOURS says otherwise, from 0,
@@ -147,7 +148,7 @@ const sameIDs = (a, b) => a.length === b.length && a.every((id, index) => id ===
 
 // What changed in the paused lists since the check last left out those in before, now that those
 // in after are left out, for the log channel, e.g. "ban list 46 was paused and ban lists 7 and 9
-// count again", or null when nothing did.
+// are no longer paused", as they count again or were removed, or null when nothing did.
 function describePausedChange(before, after) {
   const names = (ids) =>
     ids.length === 1
@@ -159,7 +160,7 @@ function describePausedChange(before, after) {
   if (paused.length > 0)
     parts.push(`${names(paused)} ${paused.length === 1 ? 'was' : 'were'} paused`);
   if (counting.length > 0)
-    parts.push(`${names(counting)} ${counting.length === 1 ? 'counts' : 'count'} again`);
+    parts.push(`${names(counting)} ${counting.length === 1 ? 'is' : 'are'} no longer paused`);
   return parts.length > 0 ? parts.join(' and ') : null;
 }
 
@@ -189,7 +190,7 @@ function describeQueued(
   else if (left > 0)
     rest = ` It queues at most ${plural(maxQueued, 'player')} a run, so the recalculation after it stays short: the other ${formatCount(left)} are left for the next runs, as the check is due again until none are left.`;
   const why = pausedChange
-    ? `${pausedChange[0].toUpperCase()}${pausedChange.slice(1)} since the last check: a paused ban list's bans count for nothing until it counts again.`
+    ? `${pausedChange[0].toUpperCase()}${pausedChange.slice(1)} since the last check: a paused ban list's bans count for nothing.`
     : 'This means bans were removed, or changed, without queueing their players, e.g. as a ban list was deleted by hand rather than with /banlist remove.';
   return `Queued ${plural(players.length, 'player')} for a recalculation, as their reputation points did not match their bans: ${examples.join(', ')}${more}. ${why}${rest}`;
 }

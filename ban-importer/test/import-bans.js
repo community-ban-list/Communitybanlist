@@ -5658,6 +5658,28 @@ pausedRun = await pausedPoll();
 assert.deepStrictEqual(endedResumptions, []);
 assert.strictEqual(pausedRows.length, 1);
 
+// A resuming list whose source is one of CBL's own export ban lists is never read, so there is
+// nothing to catch up with: it is back as it was before it was suspended at once.
+reset();
+delete env.IMPORTER_HEAD_POLL;
+battlemetricsList(125, [], paged(pairs('x', 0, 2)), 'cbl-export-125');
+exportBanLists.push({ id: 9, battlemetricsID: 'cbl-export-125' });
+pausedRows = [{ banList: 125, resumedAt: new Date(pausedNow) }];
+pausedRun = await pausedPoll();
+assert.deepStrictEqual(battlemetricsRequests, []);
+assert.deepStrictEqual(
+  endedResumptions.map(([id]) => id),
+  [125]
+);
+assert.deepStrictEqual(pausedRun.report.caughtUp, [125]);
+assert.strictEqual(
+  logged(
+    1,
+    /^Ban list \(ID: 125\) counts again: its source is one of CBL's own export ban lists, so it is not read, /
+  ).length,
+  1
+);
+
 assert.strictEqual(verboseLevelOneLines, 0, 'Lines for the log channel are logged as important');
 
 console.log(

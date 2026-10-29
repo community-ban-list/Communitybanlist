@@ -853,7 +853,7 @@ assert.deepStrictEqual(await run({ startedAt: START + 10 * MINUTE }), {
   assert.deepStrictEqual(
     lines(1).map(({ message }) => message),
     [
-      `Queued 3 players for a recalculation, as their reputation points did not match their bans: ${steamID(11)} (6 points, 3 by their bans), ${steamID(12)} (3 points, 0 by their bans), ${steamID(13)} (1 point, 0 by their bans). Ban list 2 was paused since the last check: a paused ban list's bans count for nothing until it counts again.`
+      `Queued 3 players for a recalculation, as their reputation points did not match their bans: ${steamID(11)} (6 points, 3 by their bans), ${steamID(12)} (3 points, 0 by their bans), ${steamID(13)} (1 point, 0 by their bans). Ban list 2 was paused since the last check: a paused ban list's bans count for nothing.`
     ]
   );
   recalculate();
@@ -883,7 +883,7 @@ assert.deepStrictEqual(await run({ startedAt: START + 10 * MINUTE }), {
     queued: 3,
     left: 0
   });
-  assert.match(lines(1)[0].message, /\. Ban list 2 counts again since the last check: /);
+  assert.match(lines(1)[0].message, /\. Ban list 2 is no longer paused since the last check: /);
   assert.deepStrictEqual(state.get(STATE_ROW).excludedBanLists, []);
   recalculate();
   assert.ok(matching());

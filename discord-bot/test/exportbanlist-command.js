@@ -260,6 +260,7 @@ const stubs = {
     isMissingTable: () => false,
     MAX_REASON_LENGTH: 500,
     readPausedBanLists: async () => [],
+    readSettledPausedBanLists: async () => [],
     async resumeBanList() {
       throw new Error('Not expected');
     },

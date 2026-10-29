@@ -865,36 +865,45 @@ export default class BanImporter {
   // settles its players (see reputation-check.js): it was read in full, completely, since it was
   // resumed, as the run read it after it saw the list resuming, and that read left no bans waiting
   // for a later read to confirm that they are gone, and none held for an admin as the list seemed
-  // to have lost all of them. So bans its owner lifted while it was suspended never count again.
-  // The row is only deleted while its resumedAt is the one the run saw, so a list suspended or
-  // resumed again since is left as it is. A dry run deletes nothing. Returns the result, with
-  // caughtUp set when the row was deleted.
+  // to have lost all of them. So bans its owner lifted while it was suspended never count again. A
+  // list that imports one of CBL's own export ban lists is never read, so there is nothing to
+  // catch up with, and it is back as it was before it was suspended at once. The row is only
+  // deleted while its resumedAt is the one the run saw, so a list suspended or resumed again since
+  // is left as it is. A dry run deletes nothing. Returns the result, with caughtUp set when the row
+  // was deleted.
   async endResumption(result) {
     const resumedAt = this.resuming.get(result.id);
-    if (
-      resumedAt === undefined ||
-      this.dryRun ||
-      result.read !== 'full' ||
-      result.complete !== true ||
-      result.error ||
-      result.accessLost ||
-      result.gone ||
-      result.stopped ||
-      result.sourceChanged ||
-      (result.replace && !result.replaced) ||
-      result.pending > 0 ||
-      result.hold
-    )
-      return result;
+    if (resumedAt === undefined || this.dryRun || result.gone || result.stopped) return result;
+    const caughtUp =
+      result.selfImport ||
+      (result.read === 'full' &&
+        result.complete === true &&
+        !result.error &&
+        !result.accessLost &&
+        !result.sourceChanged &&
+        (!result.replace || result.replaced) &&
+        !(result.pending > 0) &&
+        !result.hold);
+    if (!caughtUp) return result;
 
     await checkRunLock();
-    if (!(await retryOperation(() => endResumption(result.id, resumedAt)))) return result;
+    if (!(await retryOperation(() => endResumption(result.id, resumedAt)))) {
+      Logger.verbose(
+        'BanImporter',
+        2,
+        `Ban list (ID: ${result.id}) has caught up since it was resumed, but was suspended or resumed again meanwhile, so it stays paused.`
+      );
+      return result;
+    }
     this.resuming.delete(result.id);
     this.caughtUp.push(result.id);
     result.caughtUp = true;
+    const why = result.selfImport
+      ? "its source is one of CBL's own export ban lists, so it is not read, and there was nothing to catch up with"
+      : 'it was read in full since it was resumed, with no removals left to confirm';
     Logger.important(
       'BanImporter',
-      `Ban list (ID: ${result.id}) counts again: it was read in full since it was resumed, with no removals left to confirm. Its players' reputation points and export bans are recalculated from the next run.`
+      `Ban list (ID: ${result.id}) counts again: ${why}. Its players' reputation points and export bans are recalculated from the next run.`
     );
     return result;
   }

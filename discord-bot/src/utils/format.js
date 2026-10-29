@@ -141,6 +141,12 @@ export function describeImport(sync, removals = { waiting: 0, held: 0 }) {
   return lines.join('\n');
 }
 
+// How the ban importer last imported a list, on one line: its state and when, for a list of lists.
+export function summariseImport(sync) {
+  if (!sync) return 'not imported yet';
+  return `${IMPORT_STATES[sync.state] ?? escapeMarkdown(String(sync.state))} · last imported ${when(sync.lastSuccessAt)}`;
+}
+
 // A ban list's status: whether it is paused, and how the ban importer last imported it.
 export function banListStatusEmbed(
   banList,

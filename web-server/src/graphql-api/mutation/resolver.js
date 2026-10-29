@@ -428,10 +428,10 @@ export default {
 
       if (!banList) throw new Error('Ban list does not exist!');
       // A paused ban list's bans count for nothing, and it is left out of the website's lists, so
-      // no new config is made for it until it is resumed. Configs it has are kept.
+      // no new config is made for it until it counts again. Configs it has are kept.
       if (context.paused?.has(banList.id))
         throw new Error(
-          'That ban list is paused, so no config can be added for it until it is resumed.'
+          'That ban list is paused, so no config can be added for it until it counts again.'
         );
 
       const exportBanListConfig = await ExportBanListConfig.findOne({

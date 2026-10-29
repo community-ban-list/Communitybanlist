@@ -23,6 +23,8 @@ let syncRows = [];
 let removalRows = [];
 let tablesMissing = false;
 let suspendAnswer = null;
+// The paused lists the importer's reputation check last settled players without.
+let settled = [];
 const SUSPENDED_AT = new Date('2026-10-29T12:00:00.000Z');
 const noTable = () =>
   Object.assign(new Error("Table 'cbl.BanListSuspensions' doesn't exist"), {
@@ -31,6 +33,9 @@ const noTable = () =>
 const suspensions = {
   MAX_REASON_LENGTH: 500,
   isMissingTable: (err) => err?.original?.errno === 1146,
+  async readSettledPausedBanLists() {
+    return tablesMissing ? [] : [...settled];
+  },
   async readPausedBanLists({ banList = null, missingTable = 'empty' } = {}) {
     if (tablesMissing) {
       if (missingTable === 'throw') throw noTable();
@@ -218,6 +223,10 @@ const utils = {
     prompts.push({ content, confirmLabel });
     return confirmAnswer;
   },
+  // The list of every ban list, as one reply with its title and lines.
+  async paginate(interaction, title, lines) {
+    await interaction.editReply({ title, lines: [...lines] });
+  },
   findBanList: async () => record,
   findOrganisation: async () => record.Organisation,
   organisationOption: option,
@@ -245,6 +254,7 @@ function reset(bans = 0, steamUsers = 0, exportBanListConfigs = 0) {
   removalRows = [];
   tablesMissing = false;
   suspendAnswer = null;
+  settled = [];
   counts = { bans, steamUsers, exportBanListConfigs };
   record = {
     id: 5,
@@ -434,7 +444,7 @@ await run('suspend', { banlist: '5', reason: '  Dispute over appeals  ' });
 assert.deepStrictEqual(prompts, [
   {
     content:
-      "Suspend **Org** / **Main**? Its 3 bans on 2 players stop counting toward reputation and export ban lists, and are left out of the website's lists of bans. The ban importer stops importing it until it is resumed. Export bans follow on the next ban importer cycle, and players' reputation points within 1 cycle.",
+      "Suspend **Org** / **Main**? Its 3 bans on 2 players stop counting toward reputation and export ban lists, and are left out of the website's lists of bans. The ban importer stops importing it until it is resumed. Export bans follow from the next ban importer cycle, and players' reputation points within 1 cycle of it.",
     confirmLabel: 'Suspend ban list'
   }
 ]);
@@ -452,7 +462,7 @@ assert.strictEqual(
 // A large list's players take a cycle for each 1,000.
 reset(30000, 4500);
 await run('suspend', { banlist: '5' });
-assert.match(prompts[0].content, /reputation points within 5 cycles\.$/);
+assert.match(prompts[0].content, /reputation points within 5 cycles of it\.$/);
 assert.deepStrictEqual(calls.at(-1), ['suspend', 5, { by: 'admin (1)', reason: null }]);
 assert.deepStrictEqual(audits, [
   'suspended ban list "Main" (ID: 5) of organisation "Org" (ID: 2).'
@@ -520,7 +530,7 @@ await run('resume', { banlist: '5' });
 assert.deepStrictEqual(prompts, [
   {
     content:
-      "Resume **Org** / **Main**? The ban importer reads it in full on its next cycle, and its 3 bans on 2 players count again once that read has confirmed the bans its owner removed meanwhile. Export bans follow on the next ban importer cycle, and players' reputation points within 1 cycle.",
+      "Resume **Org** / **Main**? The ban importer reads it in full on its next cycle, and its 3 bans on 2 players count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes at least 10 more minutes when there are any, and longer when it seems to have lost all of them. /banlist status shows when. Export bans follow from the cycle after it counts again, and players' reputation points within 1 cycle of it.",
     confirmLabel: 'Resume ban list'
   }
 ]);
@@ -548,9 +558,11 @@ await run('resume', { banlist: '5' });
 assert.ok(!calls.some(([call]) => call === 'resume'));
 
 // A new source for a suspended list deletes its bans without queueing its players, as its bans
-// count for nothing, and its new source's bans are imported once it is resumed.
+// count for nothing and the importer has settled its players, and its new source's bans are
+// imported once it is resumed.
 reset(3, 2);
 pausedRows = [paused()];
+settled = [5];
 await run('update', { banlist: '5', source: 'new-list' });
 assert.strictEqual(
   prompts[0].content,
@@ -569,13 +581,22 @@ assert.strictEqual(
 // A resuming list's players are not queued either, but its new source is imported at once.
 reset(3, 2);
 pausedRows = [paused({ resumedAt: new Date(SUSPENDED_AT.getTime() + 1) })];
+settled = [5];
 await run('update', { banlist: '5', source: 'new-list' });
 assert.match(prompts[0].content, /imported on the next ban importer run\.$/);
 assert.ok(!calls.some(([call]) => call === 'flags'));
+// A list paused since the importer's reputation check last ran has players it has not settled, so
+// they are queued as for any list.
+reset(3, 2);
+pausedRows = [paused()];
+settled = [7];
+await run('update', { banlist: '5', source: 'new-list' });
+assert.ok(calls.some(([call]) => call === 'flags'));
 
-// Removing a suspended list queues none of its players either.
+// Removing a suspended list queues none of its players either, once the importer has settled them.
 reset(3, 2, 1);
 pausedRows = [paused()];
+settled = [5];
 await run('remove', { banlist: '5' });
 assert.deepStrictEqual(calls.slice(-5), [
   ['begin', 1],
@@ -586,7 +607,15 @@ assert.deepStrictEqual(calls.slice(-5), [
 ]);
 assert.strictEqual(
   replies.at(-1),
-  "Removed **Org** / **Main**. It was suspended, so its bans counted for nothing, and no player's reputation changes."
+  'Removed **Org** / **Main**. It was paused, so its bans already counted for nothing.'
+);
+reset(3, 2, 1);
+pausedRows = [paused()];
+await run('remove', { banlist: '5' });
+assert.deepStrictEqual(calls.slice(-6)[1], ['flags', 1, [5]]);
+assert.strictEqual(
+  replies.at(-1),
+  "Removed **Org** / **Main**. Affected players' reputation is recalculated on the next ban importer run."
 );
 
 // The status of one list, or of every list, reads whether each is paused, its BanListSyncs row and
@@ -610,6 +639,12 @@ assert.strictEqual(replies.length, 1);
 assert.strictEqual(replies[0].embeds.length, 1);
 await run('status', {});
 assert.strictEqual(replies.length, 2);
+assert.deepStrictEqual(replies[1], {
+  title: 'Ban lists: 1 list, 1 paused',
+  lines: [
+    `**Org** / **Main** (#5) · **suspended** · Imported, with removals held until they are confirmed · last imported ${String(new Date('2026-10-29T11:00:00.000Z'))} · 3 removals held`
+  ]
+});
 assert.ok(!calls.some(([call]) => ['begin', 'flags', 'suspend', 'resume', 'save'].includes(call)));
 const { readStatus } = status;
 const read = await readStatus([5]);

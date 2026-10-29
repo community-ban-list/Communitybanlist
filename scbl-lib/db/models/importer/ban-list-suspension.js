@@ -8,8 +8,8 @@ const { DataTypes } = Sequelize;
 // list and its bans count for nothing, or resuming, so the importer imports it again while its bans
 // still count for nothing, until it has caught up with the list. A list's row is deleted with the
 // list. The importer makes this table with its migrations, so the model is never synced. The bot
-// adds the rows and sets or clears resumedAt, and the importer deletes them (see
-// scbl-lib/db/ban-list-suspensions.js).
+// adds the rows, sets resumedAt, and suspends a resuming list again, and the importer deletes them
+// (see scbl-lib/db/ban-list-suspensions.js).
 export default sequelize.define(
   'BanListSuspension',
   {

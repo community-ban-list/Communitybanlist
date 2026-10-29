@@ -13,9 +13,9 @@ export { checkExcludedBanLists, excludedBanListsSQL };
 //   read all of it since it was resumed and confirmed the removals that read found. The importer
 //   then deletes the row, and the list counts again. So bans the list's owner lifted while it was
 //   suspended never count again.
-// The bot adds the rows and sets or clears resumedAt, and the importer deletes them: the web server
-// and the bot never change the table otherwise (see scbl-lib/db/models/importer/index.js). A
-// list's row is deleted with the list. Every service reads the rows here, and each statement that
+// The bot adds the rows, sets resumedAt, and suspends a resuming list again, and the importer deletes
+// them: the web server and the bot never change the table otherwise (see
+// scbl-lib/db/models/importer/index.js). A list's row is deleted with the list. Every service reads the rows here, and each statement that
 // counts bans is given the lists to leave out as literal IDs (see excludedBanListsSQL), rather than
 // joining this table, so it takes no locks on it and works before the importer has made it (see
 // excluded-ban-lists.js).
@@ -144,12 +144,19 @@ export async function suspendBanList(banList, { by, reason = null }) {
 // - 'resuming': the list is resuming now, and row is its row, with resumedAt set.
 // - 'already': the list was resuming already, and row is its row, unchanged.
 // - 'not_paused': the list is not paused, and row is null.
-// A missing table is passed on as the database gives it (see isMissingTable).
+// Its row is locked while it is read and changed, so of two resumptions at once, or a resumption
+// and a suspension, the second sees what the first did. A missing table is passed on as the
+// database gives it (see isMissingTable).
 export async function resumeBanList(banList) {
   return sequelize.transaction(async (transaction) => {
-    const [current] = await readPausedBanLists({ banList, transaction, missingTable: 'throw' });
+    const [current] = await sequelize.query(`${READ} WHERE banList = ? FOR UPDATE`, {
+      type: QueryTypes.SELECT,
+      replacements: [banList],
+      transaction
+    });
     if (!current) return { outcome: 'not_paused', row: null };
-    if (current.resumedAt !== null) return { outcome: 'already', row: current };
+    if (current.resumedAt !== null)
+      return { outcome: 'already', row: { ...current, banList: Number(current.banList) } };
 
     await sequelize.query(
       `UPDATE BanListSuspensions SET resumedAt = UTC_TIMESTAMP(3)
@@ -161,15 +168,49 @@ export async function resumeBanList(banList) {
   });
 }
 
+// A time as MySQL's DATETIME(3) columns hold it: in UTC, to the millisecond. A Date given to a query
+// as it is loses its milliseconds, and is written in the process's own time zone.
+function sqlTime(date) {
+  return new Date(date).toISOString().replace('T', ' ').replace('Z', '');
+}
+
 // Delete a resuming list's row, once the importer has caught up with the list, so the list counts
 // again. Only the importer calls this. The row is only deleted while its resumedAt is still the one
-// the importer read (resumedAt, a Date), so a list suspended again since stays suspended, and one
-// resumed again stays resuming until the importer catches up since then. Resolves with whether it
-// deleted the row.
+// the importer read (resumedAt, a Date, compared to the millisecond), so a list suspended again
+// since stays suspended, and one resumed again stays resuming until the importer catches up since
+// then. Resolves with whether it deleted the row.
 export async function endResumption(banList, resumedAt) {
   const deleted = await sequelize.query(
-    'DELETE FROM BanListSuspensions WHERE banList = ? AND resumedAt = ?',
-    { replacements: [banList, resumedAt], type: QueryTypes.BULKDELETE }
+    'DELETE FROM BanListSuspensions WHERE banList = ? AND resumedAt = CAST(? AS DATETIME(3))',
+    { replacements: [banList, sqlTime(resumedAt)], type: QueryTypes.BULKDELETE }
   );
   return Number(deleted) > 0;
+}
+
+// The ImporterState row of the importer's reputation check, which keeps the paused lists whose
+// bans the players it last settled were recalculated without (see
+// ban-importer/src/reputation-check.js, whose STATE_ROW it is).
+export const REPUTATION_CHECK_ROW = 'reputationCheck';
+
+// The IDs of the paused lists that the importer's reputation check has settled players without, as
+// its row names them, in order: deleting the bans of one of them changes no player's points, as its
+// players were recalculated without them, or the check finds them again once the list is no longer
+// paused. Deleting those of a list paused since the check last ran does, as nothing would find its
+// players again, so they must be queued. None, when the row or the table is not there yet.
+export async function readSettledPausedBanLists() {
+  try {
+    const [row] = await sequelize.query('SELECT value FROM ImporterState WHERE name = ?', {
+      type: QueryTypes.SELECT,
+      replacements: [REPUTATION_CHECK_ROW]
+    });
+    let value = row?.value;
+    if (typeof value === 'string') value = JSON.parse(value);
+    const ids = Array.isArray(value?.excludedBanLists) ? value.excludedBanLists : [];
+    return [...new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0))].sort(
+      (a, b) => a - b
+    );
+  } catch (err) {
+    if (isMissingTable(err)) return [];
+    throw err;
+  }
 }

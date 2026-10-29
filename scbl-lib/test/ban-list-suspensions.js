@@ -28,6 +28,9 @@ const sent = [];
 const failures = new Map();
 let tableExists = true;
 let now = Date.parse('2026-10-29T12:00:00.000Z');
+// The value of the importer's reputationCheck row, if any, and whether its table is there.
+let checkRow;
+let checkTableExists = true;
 // Called as an insert is made, e.g. to add the row of another connection's suspension first.
 let onInsert = null;
 // The lists whose rows the transaction under way changed, which a rollback restores.
@@ -46,6 +49,8 @@ const sequelize = {
     if (statement === `${COLUMNS} ORDER BY banList`) kind = 'read all';
     else if (statement === `${COLUMNS} WHERE banList = ?`) kind = 'read one';
     else if (statement === `${COLUMNS} WHERE banList = :banList FOR UPDATE`) kind = 'lock one';
+    else if (statement === `${COLUMNS} WHERE banList = ? FOR UPDATE`) kind = 'lock to resume';
+    else if (statement === 'SELECT value FROM ImporterState WHERE name = ?') kind = 'read check';
     else if (statement.startsWith('INSERT INTO BanListSuspensions')) kind = 'insert';
     else if (statement.startsWith('UPDATE BanListSuspensions SET suspendedAt'))
       kind = 'suspend again';
@@ -67,6 +72,14 @@ const sequelize = {
       case 'lock one':
         assert.strictEqual(type, QueryTypes.SELECT);
         return rows.has(values.banList) ? [rowOut(rows.get(values.banList))] : [];
+      case 'lock to resume':
+        assert.strictEqual(type, QueryTypes.SELECT);
+        return rows.has(values[0]) ? [rowOut(rows.get(values[0]))] : [];
+      case 'read check':
+        assert.strictEqual(type, QueryTypes.SELECT);
+        assert.deepStrictEqual(values, ['reputationCheck']);
+        if (!checkTableExists) throw noTable();
+        return checkRow === undefined ? [] : [{ value: checkRow }];
       case 'insert':
         onInsert?.();
         onInsert = null;
@@ -115,12 +128,17 @@ const sequelize = {
       case 'end': {
         assert.strictEqual(
           statement,
-          'DELETE FROM BanListSuspensions WHERE banList = ? AND resumedAt = ?'
+          'DELETE FROM BanListSuspensions WHERE banList = ? AND resumedAt = CAST(? AS DATETIME(3))'
         );
         assert.strictEqual(type, QueryTypes.BULKDELETE);
+        // The time is given as MySQL's DATETIME(3) takes it, in UTC to the millisecond, as a Date
+        // given as it is loses its milliseconds and is written in the process's own time zone.
         const [banList, resumedAt] = values;
+        assert.strictEqual(typeof resumedAt, 'string');
+        assert.match(resumedAt, /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}$/);
         const row = rows.get(banList);
-        if (!row || row.resumedAt?.getTime() !== resumedAt.getTime()) return 0;
+        if (!row || row.resumedAt?.getTime() !== Date.parse(`${resumedAt.replace(' ', 'T')}Z`))
+          return 0;
         rows.delete(banList);
         return 1;
       }
@@ -307,7 +325,7 @@ result = await resumeBanList(46);
 assert.strictEqual(result.outcome, 'resuming');
 assert.strictEqual(result.row.resumedAt.getTime(), now);
 assert.deepStrictEqual([result.row.suspendedBy, result.row.reason], ['admin (1)', 'Dispute']);
-assert.deepStrictEqual(kinds(), ['begin', 'read one', 'resume', 'read one', 'commit']);
+assert.deepStrictEqual(kinds(), ['begin', 'lock to resume', 'resume', 'read one', 'commit']);
 const resumedAt = result.row.resumedAt;
 now += 60 * 1000;
 result = await resumeBanList(46);
@@ -327,6 +345,30 @@ assert.ok(rows.has(46));
 assert.strictEqual(await endResumption(46, resumedAt), true);
 assert.ok(!rows.has(46));
 assert.strictEqual(await endResumption(46, resumedAt), false);
+
+// A time with milliseconds that are not 0 is matched to the millisecond.
+reset();
+await suspendBanList(7, { by: 'admin (1)' });
+now += 123;
+const withMilliseconds = (await resumeBanList(7)).row.resumedAt;
+assert.strictEqual(withMilliseconds.getUTCMilliseconds(), 123);
+assert.strictEqual(await endResumption(7, withMilliseconds), true);
+
+// The lists the importer's reputation check last settled players without, from its row, in order,
+// each once, leaving out anything else, and none without the row or its table.
+const { REPUTATION_CHECK_ROW, readSettledPausedBanLists } = module.namespace;
+assert.strictEqual(REPUTATION_CHECK_ROW, 'reputationCheck');
+checkRow = undefined;
+assert.deepStrictEqual(copy(await readSettledPausedBanLists()), []);
+checkRow = { startedAt: 'x', excludedBanLists: [46, 7, 7, 0, '9', 1.5], pending: false };
+assert.deepStrictEqual(copy(await readSettledPausedBanLists()), [7, 46]);
+checkRow = JSON.stringify({ excludedBanLists: [3] });
+assert.deepStrictEqual(copy(await readSettledPausedBanLists()), [3]);
+checkRow = { startedAt: 'x' };
+assert.deepStrictEqual(copy(await readSettledPausedBanLists()), []);
+checkTableExists = false;
+assert.deepStrictEqual(copy(await readSettledPausedBanLists()), []);
+checkTableExists = true;
 
 // The SQL piece: the paused lists' IDs, in order, or nothing for none, and anything but positive
 // whole IDs, each once, refused.

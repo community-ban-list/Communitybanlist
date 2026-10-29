@@ -607,7 +607,7 @@ await assert.rejects(
     paused,
     {}
   ),
-  { message: 'That ban list is paused, so no config can be added for it until it is resumed.' }
+  { message: 'That ban list is paused, so no config can be added for it until it counts again.' }
 );
 assert.deepStrictEqual([writes.length, tested.length, battlemetrics.length], before);
 lookedUp();

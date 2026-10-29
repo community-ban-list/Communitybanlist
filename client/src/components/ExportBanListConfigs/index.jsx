@@ -96,7 +96,7 @@ export default function (props) {
                       {exportBanListConfig.banList.name}
                       {exportBanListConfig.banList.paused && (
                         <div className="small text-muted fw-normal">
-                          Paused: its bans count for nothing until it is resumed. This config is
+                          Paused: its bans count for nothing until it counts again. This config is
                           kept.
                         </div>
                       )}

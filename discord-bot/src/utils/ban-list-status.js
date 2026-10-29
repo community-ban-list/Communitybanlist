@@ -1,5 +1,9 @@
 import { sequelize } from 'scbl-lib/db';
-import { isMissingTable, readPausedBanLists } from 'scbl-lib/db/ban-list-suspensions';
+import {
+  isMissingTable,
+  readPausedBanLists,
+  readSettledPausedBanLists
+} from 'scbl-lib/db/ban-list-suspensions';
 import { BanListSync } from 'scbl-lib/db/importer-models';
 import { QueryTypes } from 'scbl-lib/db/sequelize';
 
@@ -21,6 +25,16 @@ function tablesMissing(err) {
 // The paused row of each paused ban list, by ban list ID. A missing table means no list is paused.
 export async function readPaused() {
   return new Map((await readPausedBanLists()).map((row) => [row.banList, row]));
+}
+
+// Of the ban lists with these IDs, those whose players need not be queued when their bans are
+// deleted: the lists paused now whose players the importer's reputation check has settled without
+// their bans (see readSettledPausedBanLists). A list paused since the check last ran is not one of
+// them, as nothing would find its players again once its bans are gone. None until the importer
+// has made its tables.
+export async function readQueueSkips(banListIDs) {
+  const [paused, settled] = await Promise.all([readPaused(), readSettledPausedBanLists()]);
+  return banListIDs.filter((id) => paused.has(id) && settled.includes(id));
 }
 
 // The paused row of one ban list, or null, failing with the bot's answer when the table is missing,

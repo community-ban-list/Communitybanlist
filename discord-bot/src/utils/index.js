@@ -8,7 +8,7 @@ import {
   skipCheckOption
 } from './ban-list-input.js';
 import { checkBanListSource, parseBanListSource } from './ban-list-source.js';
-import { NO_TABLES, readPause, readPaused, readStatus } from './ban-list-status.js';
+import { NO_TABLES, readPause, readPaused, readQueueSkips, readStatus } from './ban-list-status.js';
 import confirm from './confirm.js';
 import {
   deleteBanLists,
@@ -31,6 +31,7 @@ import {
   organisationEmbed,
   pauseState,
   plural,
+  summariseImport,
   truncate
 } from './format.js';
 import {
@@ -81,12 +82,14 @@ export {
   plural,
   readPause,
   readPaused,
+  readQueueSkips,
   readStatus,
   ReplyUpdater,
   skipCheckOption,
   suggestBanLists,
   suggestOrganisations,
   summariseBanListBans,
+  summariseImport,
   summariseBanListDeletion,
   truncate,
   UserError
