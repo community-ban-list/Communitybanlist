@@ -8,6 +8,8 @@ import Cors from '@koa/cors';
 import Logger from 'koa-logger';
 import serve from 'koa-static';
 import mount from 'koa-mount';
+import compress from 'koa-compress';
+import Negotiator from 'negotiator';
 import { send } from '@koa/send';
 import { STATUS_CODES } from 'http';
 
@@ -97,6 +99,25 @@ app.use(bodyParser);
 if (!inProduction) app.use(Logger());
 
 app.use(passport.initialize());
+
+// Compress text answers of 1 KB or more, such as the client's scripts and styles, the API's answers
+// and export lists, with gzip, which every browser accepts. koa-compress's other encodings are left
+// out: Brotli, at a level quick enough to use on every answer, makes the client's script no smaller
+// than gzip does, and needs several times the memory for each answer it compresses.
+const compressAnswers = compress({
+  threshold: 1024,
+  gzip: { level: 6 },
+  br: false,
+  deflate: false,
+  zstd: false
+});
+app.use((ctx, next) => {
+  // koa-compress fails a request that refuses an uncompressed answer and does not accept gzip, so
+  // answer it uncompressed, as most servers do. The header is read with negotiator, as koa-compress
+  // reads it, so that the two agree on which requests those are.
+  if (!new Negotiator(ctx.request).encoding(['gzip', 'identity'])) ctx.compress = false;
+  return compressAnswers(ctx, next);
+});
 
 // A browser that has a file already asks whether it has changed since the time it was given for it.
 // While the file still has exactly that time, answer 304 without it, so the browser uses its copy

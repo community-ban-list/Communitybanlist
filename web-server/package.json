@@ -16,11 +16,13 @@
     "jsonwebtoken": "^9.0.2",
     "koa": "^3.2.1",
     "koa-bodyparser": "^4.2.1",
+    "koa-compress": "^5.2.2",
     "koa-helmet": "^9.0.0",
     "koa-logger": "^4.0.0",
     "koa-mount": "^4.0.0",
     "koa-passport": "^6.0.0",
     "koa-static": "^5.0.0",
+    "negotiator": "^1.0.0",
     "passport-steam": "^1.0.12",
     "scbl-lib": "1.0.0"
   },
