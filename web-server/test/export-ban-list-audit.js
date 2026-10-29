@@ -828,6 +828,53 @@ await assert.rejects(
   { message: 'That ban list is paused, so no config can be added for it until it counts again.' }
 );
 assert.deepStrictEqual(take(), []);
+// A config whose ban list an admin removes after its checks, e.g. with the Discord bot's /banlist
+// remove, fails as it is saved: MySQL refuses it for its foreign key to the ban list, and Sequelize
+// gives MySQL's error, which names the database's tables. Nothing was saved, so it is refused as a
+// ban list that does not exist, as the checks refuse one, and posts nothing.
+rows.BanList.push({ id: 6, name: 'Removed Bans', organisation: 1 });
+const noBanList = Object.assign(
+  new Error(
+    'Cannot add or update a child row: a foreign key constraint fails (`cbl`.`ExportBanListConfigs`, CONSTRAINT `ExportBanListConfigs_ibfk_2` FOREIGN KEY (`banList`) REFERENCES `BanLists` (`id`) ON DELETE CASCADE ON UPDATE CASCADE)'
+  ),
+  { errno: 1452, code: 'ER_NO_REFERENCED_ROW_2' }
+);
+failures.set('ExportBanListConfig.create', [
+  Object.assign(new Error(noBanList.message), {
+    name: 'SequelizeForeignKeyConstraintError',
+    parent: noBanList,
+    original: noBanList,
+    table: 'BanLists',
+    fields: ['banList']
+  })
+]);
+await refused(
+  'createExportBanListConfig',
+  { ...configArgs, banList: 6 },
+  'Ban list does not exist!'
+);
+assert.deepStrictEqual(failures.get('ExportBanListConfig.create'), []);
+assert.deepStrictEqual(take(), []);
+assert.ok(!rows.ExportBanListConfig.some(({ banList }) => banList === 6));
+// Other errors saving a config are not taken for a missing ban list: a lock wait that times out is
+// refused as the database being busy, as before, and any other error is posted, with the error, as
+// a failure.
+failures.set('ExportBanListConfig.create', [
+  Object.assign(new Error('Lock wait timeout exceeded'), {
+    parent: { errno: 1205 },
+    original: { errno: 1205 }
+  })
+]);
+await refused(
+  'createExportBanListConfig',
+  { ...configArgs, banList: 6 },
+  'The database was busy, so your change was not saved. Please try again in a minute.'
+);
+failures.set('ExportBanListConfig.create', [new Error('Database unavailable')]);
+await refused('createExportBanListConfig', { ...configArgs, banList: 6 }, 'Database unavailable');
+assert.deepStrictEqual(take(), [
+  `[WebServer][1] ${ALICE_TEXT} could not add a config to export ban list ${keptList} (ban list "Removed Bans" (ID: 6) of organisation "Partner Org", 2 points for an active ban and 1 for an expired ban): Error: Database unavailable`
+]);
 for (let i = 0; i < 3; i++)
   await change('createExportBanList', { name: `List ${i}`, server: 'Server', type: 'remote' });
 take();

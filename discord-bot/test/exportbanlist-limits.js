@@ -324,7 +324,7 @@ assert.deepStrictEqual(exportBans.get(1), {
 const summary = replies.at(-1);
 assert.strictEqual(
   summary.content,
-  "Removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it had changed."
+  "Removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it is now within today's limits."
 );
 assert.deepStrictEqual(summary.embeds[0].toJSON().description.split('\n'), [
   "**List 1** (#1): not removed, as it is now within today's limits",
@@ -333,7 +333,7 @@ assert.deepStrictEqual(summary.embeds[0].toJSON().description.split('\n'), [
 assert.deepStrictEqual(audits, [
   "admin (1) started removing 2 export ban lists outside today's limits.",
   'admin (1) removed export ban list "List 2" (ID: 2, Remote) of Steam user "Owner 2" (ID: 76561198000000002), outside today\'s limits with 41,000 players by its export bans, 40,500 by its settings now: there was nothing to delete on BattleMetrics.',
-  "admin (1) removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it had changed."
+  "admin (1) removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it is now within today's limits."
 ]);
 
 // Each list removed was read a last time with its row locked, under its deletion lock, which the bot
@@ -507,8 +507,8 @@ assert.ok(
 // list's settings now includes them, as the website's size check does, so that the list's cap
 // holds once they count again. A list over the cap by its export bans, and by its settings now with
 // the paused list's bans, is removed. One within the cap by its export bans only while the ban list
-// is paused is not counted again, and is left until it counts again. The preview says so after
-// the limits used.
+// is paused is not counted again, and is left until the ban list counts again. The preview says so
+// after the limits used.
 clear();
 pausedRows = [{ banList: 46, resumedAt: null }];
 MEMBERS.set(15, 43500);
@@ -537,6 +537,51 @@ assert.deepStrictEqual([...lists.keys()], [14]);
 assert.deepStrictEqual(lockedReads, [13]);
 assert.deepStrictEqual([...lockedByBot], []);
 
+// A ban list paused while the admin reads the preview, once the importer has left its bans out of
+// the export bans of lists over the cap by both counts, takes some of them within the cap by their
+// export bans, with no change to them. Those are not counted again just before their removal, and
+// are left as now within today's limits, which the summary says, in the reply and the log, rather
+// than that they had changed. One still over the cap by both counts is removed.
+clear();
+MEMBERS.set(17, 41500);
+MEMBERS.set(18, 42500);
+MEMBERS.set(19, 44000);
+addList(15, 17, { CREATED: 41500 });
+addList(16, 18, { CREATED: 42500 });
+addList(17, 19, { CREATED: 44000 });
+await command.execute(
+  interaction(async () => {
+    // Ban list 46 is paused, and the importer's export step leaves its bans out.
+    pausedRows = [{ banList: 46, resumedAt: null }];
+    exportBans.set(15, { CREATED: 39000 });
+    exportBans.set(16, { CREATED: 38000 });
+    exportBans.set(17, { CREATED: 40500 });
+  })
+);
+pausedRows = [];
+assert.deepStrictEqual(counted, [17, 18, 19, 19]);
+assert.deepStrictEqual(destroyed, [17]);
+assert.deepStrictEqual([...lists.keys()], [15, 16]);
+// The two left were checked again before their deletion locks were taken, so only the one removed
+// was read a last time with its row locked, under its deletion lock, which the bot then freed.
+assert.deepStrictEqual(lockedReads, [17]);
+assert.deepStrictEqual([...lockedByBot], []);
+const pausedSummary = replies.at(-1);
+assert.strictEqual(
+  pausedSummary.content,
+  "Removed 1 of the 3 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 2 were not removed, as they are now within today's limits."
+);
+assert.deepStrictEqual(pausedSummary.embeds[0].toJSON().description.split('\n'), [
+  "**List 15** (#15): not removed, as it is now within today's limits",
+  "**List 16** (#16): not removed, as it is now within today's limits",
+  '**List 17** (#17): removed; there was nothing to delete on BattleMetrics'
+]);
+assert.deepStrictEqual(audits, [
+  "admin (1) started removing 3 export ban lists outside today's limits.",
+  'admin (1) removed export ban list "List 17" (ID: 17, Remote) of Steam user "Owner 17" (ID: 765611980000000017), outside today\'s limits with 40,500 players by its export bans, 44,000 by its settings now: there was nothing to delete on BattleMetrics.',
+  "admin (1) removed 1 of the 3 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 2 were not removed, as they are now within today's limits."
+]);
+
 console.log(
-  'Export ban list limit checks passed: a list its owner has brought within the cap is left though its export bans are not updated yet, one over the cap by both counts is removed, one changed while it is checked just before its removal is left, one whose count fails is left unless it breaks the points rules, one being deleted on the website, or whose deletion lock cannot be taken, is left, and paused ban lists are named.'
+  'Export ban list limit checks passed: a list its owner has brought within the cap is left though its export bans are not updated yet, one over the cap by both counts is removed, one changed while it is checked just before its removal is left, one whose count fails is left unless it breaks the points rules, one being deleted on the website, or whose deletion lock cannot be taken, is left, paused ban lists are named, and lists a paused ban list takes within the cap are left and counted apart in the summary.'
 );
