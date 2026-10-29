@@ -415,7 +415,7 @@ pausedRows = [];
 const [pausedPreview] = replies.filter((reply) => reply.components?.length > 0);
 assert.ok(
   pausedPreview.content.endsWith(
-    "They come from the bot's EXPORT_* settings, which must match the website's.\nBan list #46 is paused: its bans count for nothing for now. The ban importer leaves them out of export bans, but a count by settings now includes them, as the website's size check does, so that a list's cap holds once they count again. So a list within the cap by its export bans only while it is paused is not counted again, and is left until then."
+    "They come from the bot's EXPORT_* settings, which must match the website's.\nBan list #46 is paused: its bans count for nothing for now. The ban importer leaves them out of export bans, but a count by settings now includes them, as the website's size check does, so that a list's cap holds once they count again. So a list within the cap by its export bans only while #46 is paused is not counted again, and is left until then."
   )
 );
 assert.strictEqual(

@@ -215,8 +215,8 @@ class ExportBanList extends Sequelize.Model {
     // count too, so that a list's cap holds once they count again, though the importer leaves them
     // out of export bans (see export-membership.js). So while a ban list is paused, a list's two
     // numbers can differ with no change to it, and a list within the cap by its export bans only
-    // while one is paused is not counted again, so it has no problem for the cap until that list
-    // counts again.
+    // while one is paused is not counted again, so it has no problem for the cap until that ban
+    // list counts again.
     const recounts = new Map();
     const recountErrors = new Map();
     for (const exportBanList of exportBanLists) {

@@ -49,7 +49,7 @@ const LIMITS_TEXT =
 const PAUSED_TEXT =
   "Ban lists #7 and #46 are paused: their bans count for nothing for now. The ban importer leaves them out of export bans, but a count by settings now includes them, as the website's size check does, so that a list's cap holds once they count again. So a list within the cap by its export bans only while they are paused is not counted again, and is left until then.";
 const ONE_PAUSED_TEXT =
-  "Ban list #46 is paused: its bans count for nothing for now. The ban importer leaves them out of export bans, but a count by settings now includes them, as the website's size check does, so that a list's cap holds once they count again. So a list within the cap by its export bans only while it is paused is not counted again, and is left until then.";
+  "Ban list #46 is paused: its bans count for nothing for now. The ban importer leaves them out of export bans, but a count by settings now includes them, as the website's size check does, so that a list's cap holds once they count again. So a list within the cap by its export bans only while #46 is paused is not counted again, and is left until then.";
 // The same for the embed of a list counted again by its settings now, with ban lists 7 and 46
 // paused.
 const PAUSED_FIELD = [

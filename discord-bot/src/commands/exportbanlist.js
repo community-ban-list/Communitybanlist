@@ -299,13 +299,13 @@ async function readPausedIDs() {
 // importer leaves them out of export bans, but a count by a list's settings now (checkLimits'
 // recount) includes them, as the website's size check does, so that the list's cap holds once they
 // count again. Only a list over the cap by its export bans is counted again, so one within it only
-// while a ban list is paused is left, until that list counts again and the importer has updated
+// while a ban list is paused is left, until that ban list counts again and the importer has updated
 // the list's export bans.
 function describePaused(paused) {
   if (paused.length === 0) return '';
   const lists = joinList(paused.map((id) => `#${id}`));
   const one = paused.length === 1;
-  return `${one ? `Ban list ${lists} is` : `Ban lists ${lists} are`} paused: ${one ? 'its' : 'their'} bans count for nothing for now. The ban importer leaves them out of export bans, but a count by settings now includes them, as the website's size check does, so that a list's cap holds once they count again. So a list within the cap by its export bans only while ${one ? 'it is' : 'they are'} paused is not counted again, and is left until then.`;
+  return `${one ? `Ban list ${lists} is` : `Ban lists ${lists} are`} paused: ${one ? 'its' : 'their'} bans count for nothing for now. The ban importer leaves them out of export bans, but a count by settings now includes them, as the website's size check does, so that a list's cap holds once they count again. So a list within the cap by its export bans only while ${one ? `${lists} is` : 'they are'} paused is not counted again, and is left until then.`;
 }
 
 // The list's BattleMetrics ban list, and whether CBL's BattleMetrics key can see it.
