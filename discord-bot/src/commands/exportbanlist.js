@@ -91,8 +91,8 @@ const NAMED_LISTS = 5;
 const UPDATING_FILE = 'export-ban-lists-awaiting-the-importer.txt';
 const UNCOUNTED_FILE = 'export-ban-lists-not-counted.txt';
 
-// The longest error a note gives for a list whose players could not be counted. The attached file
-// has them in full.
+// The longest error a note gives for a list whose players could not be counted. A note that cuts
+// one short attaches its file, which has them in full.
 const COUNT_ERROR_LENGTH = 100;
 
 // How long the admin has to read the preview of the lists outside the limits, which can be long
@@ -488,10 +488,15 @@ function previewFileEntry({ check, left }) {
 // NAMED_LISTS of them, and when there are more, an attached file names them all, so that however
 // many there are, the limits used before the note are never cut off. sentence(count, named) gives
 // the note's text, with the lists as entry(check) names them, and the file gives title and then a
-// line for each list, as fileEntry(check) gives it. Gives the note, if any, and the files to attach,
-// and a brief form of them, which names the lists by ID only and always attaches the file, for a
-// reply that would be too long with the full note (see withListNotes).
-function namedListsNote(checks, { sentence, entry, fileName, title, fileEntry }) {
+// line for each list, as fileEntry(check) gives it. When entry cuts short what it says of a list it
+// names (shortened(check)), the note attaches the file too, so nothing is lost. Gives the note, if
+// any, and the files to attach, and a brief form of them, which names the lists by ID only and
+// always attaches the file, for a reply that would be too long with the full note (see
+// withListNotes).
+function namedListsNote(
+  checks,
+  { sentence, entry, fileName, title, fileEntry, shortened = () => false }
+) {
   if (checks.length === 0) return { note: '', files: [], brief: { note: '', files: [] } };
   const named = (format, inFile) => {
     const names = checks.slice(0, NAMED_LISTS).map(format);
@@ -507,7 +512,8 @@ function namedListsNote(checks, { sentence, entry, fileName, title, fileEntry })
   const text = [`${title}: ${checks.length}`, ...checks.map(fileEntry)].join('\n');
   const file = new AttachmentBuilder(Buffer.from(text, 'utf8'), { name: fileName });
   const brief = { note: named(({ exportBanList }) => `#${exportBanList.id}`, true), files: [file] };
-  return { note: named(entry, false), files: checks.length > NAMED_LISTS ? [file] : [], brief };
+  const inFile = checks.length > NAMED_LISTS || checks.slice(0, NAMED_LISTS).some(shortened);
+  return { note: named(entry, inFile), files: inFile ? [file] : [], brief };
 }
 
 // The reply's text, followed by the notes (from namedListsNote) and with their files. When the
@@ -564,6 +570,7 @@ function describeUncounted(lists, checkedAt) {
       },
       entry: (check) =>
         `#${check.exportBanList.id} (${truncate(check.recountError.message, COUNT_ERROR_LENGTH)})`,
+      shortened: (check) => check.recountError.message.length > COUNT_ERROR_LENGTH,
       fileName: UNCOUNTED_FILE,
       title: `Export ban lists over the cap by their export bans that could not be counted by their settings now, and so are left, checked ${checkedAt}`,
       fileEntry: (check) =>

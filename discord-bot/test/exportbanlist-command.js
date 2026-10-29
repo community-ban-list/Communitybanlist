@@ -1306,6 +1306,27 @@ assert.strictEqual(
 );
 assert.deepStrictEqual(deleted(), []);
 
+// A note naming five or fewer lists attaches its file too when it cuts an error short, so the whole
+// error is never lost.
+reset();
+addList(300, 'remote', { players: 41300, recountError: new Error(longError), problems: [] });
+addList(301, 'remote', { players: 41301, recountError: new Error(TIMED_OUT), problems: [] });
+await run('remove_outside_limits');
+assert.strictEqual(replies.length, 1);
+assert.strictEqual(
+  replies[0].content,
+  `No export ban list was found outside today's limits, so nothing was changed.\n${LIMITS_TEXT}\n2 export ban lists over the cap by their export bans could not be counted by their settings now, so whether they are within the cap is not known, and they are left: #300 (${longError.slice(0, 99)}…) and #301 (${TIMED_OUT}), all in the attached export-ban-lists-not-counted.txt. Run the command again later to check them.`
+);
+assert.deepStrictEqual(
+  replies[0].files.map((attached) => attached.name),
+  ['export-ban-lists-not-counted.txt']
+);
+assert.strictEqual(
+  replies[0].files[0].attachment.toString('utf8').split('\n')[1],
+  `#300 Remote list "List 300": 41,300 players by its export bans; the count failed: ${longError}`
+);
+assert.deepStrictEqual(deleted(), []);
+
 // With many lists in both notes, and a list left for CBL's BattleMetrics key, the notes in full
 // would take the reply past Discord's 2,000 characters. Then they name the lists by ID only, and
 // each attaches its file, with the whole errors, however few lists it names, so the limits used
