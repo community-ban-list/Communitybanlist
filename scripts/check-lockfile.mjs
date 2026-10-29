@@ -6,12 +6,13 @@
 // yarn install --frozen-lockfile installs the versions yarn.lock lists, but it compares yarn.lock
 // with the root package.json only. When a workspace's package.json asks for a package or a version
 // range that yarn.lock does not list, Yarn 1 installs the newest matching version from the registry
-// and still succeeds. It installs the version the root package.json's resolutions ask for in the
-// same way, and without a yarn.lock it resolves every package afresh. In those cases this script
-// fails instead. It also fails when a yarn.lock entry is fetched from anywhere but the npm registry
-// over HTTPS, is not the package and version the entry names, has no sha512 checksum, or needs a
-// package yarn.lock does not list. And it fails unless yarn.lock is exactly as Yarn writes it, so
-// that it reads the same entries from it as Yarn.
+// and still succeeds. It does the same when yarn.lock lists a version outside a range that a
+// workspace or another package asks for, as it then ignores that entry. It installs the version the
+// root package.json's resolutions ask for in the same way, and without a yarn.lock it resolves
+// every package afresh. In those cases this script fails instead. It also fails when a yarn.lock
+// entry is fetched from anywhere but the npm registry over HTTPS, is not the package and version
+// the entry names, has no sha512 checksum, or needs a package yarn.lock does not list. And it fails
+// unless yarn.lock is exactly as Yarn writes it, so that it reads the same entries from it as Yarn.
 //
 // An image copies only some of the workspaces, so there the other workspaces' packages are left
 // alone. When every workspace is here, as in the pull request checks, the script also fails when
@@ -173,6 +174,185 @@ function httpsHost(address) {
   }
 }
 
+// Yarn compares a yarn.lock entry's version with a range using the copy of the semver package it
+// bundles, which reads ranges strictly. The code from here to satisfies follows that copy, with its
+// names, so it reads the ranges that copy reads, the same way, and no others.
+const num = '0|[1-9]\\d*';
+const id = `(?:${num}|\\d*[a-zA-Z-][a-zA-Z0-9-]*)`;
+const looseId = '(?:[0-9]+|\\d*[a-zA-Z-][a-zA-Z0-9-]*)';
+const pre = `(?:-(${id}(?:\\.${id})*))`;
+const build = '(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))';
+const full = `v?(${num})\\.(${num})\\.(${num})${pre}?${build}?`;
+const loose =
+  '[v=\\s]*([0-9]+)\\.([0-9]+)\\.([0-9]+)' + `(?:-?(${looseId}(?:\\.${looseId})*))?${build}?`;
+const xId = `${num}|x|X|\\*`;
+const xPlain = `[v=\\s]*(${xId})(?:\\.(${xId})(?:\\.(${xId})(?:${pre})?${build}?)?)?`;
+const gtlt = '((?:<|>)?=?)';
+const fullRe = new RegExp(`^${full}$`);
+const hyphenRe = new RegExp(`^\\s*(${xPlain})\\s+-\\s+(${xPlain})\\s*$`);
+const comparatorTrimRe = new RegExp(`(\\s*)${gtlt}\\s*(${loose}|${xPlain})`, 'g');
+const caretRe = new RegExp(`^\\^${xPlain}$`);
+const tildeRe = new RegExp(`^~>?${xPlain}$`);
+const xRangeRe = new RegExp(`^${gtlt}\\s*${xPlain}$`);
+const comparatorRe = new RegExp(`^${gtlt}\\s*(${full})$|^$`);
+
+const isX = (part) => !part || part.toLowerCase() === 'x' || part === '*';
+const preTag = (tag) => (!tag ? '' : tag.startsWith('-') ? tag : `-${tag}`);
+
+// ^1.2.3 is >=1.2.3 <2.0.0, ^0.2.3 is >=0.2.3 <0.3.0 and ^0.0.3 is >=0.0.3 <0.0.4.
+function replaceCaret(_, M, m, p, tag) {
+  if (isX(M)) return '';
+  if (isX(m)) return `>=${M}.0.0 <${+M + 1}.0.0`;
+  if (isX(p)) return `>=${M}.${m}.0 <${M === '0' ? `${M}.${+m + 1}.0` : `${+M + 1}.0.0`}`;
+  const low = `>=${M}.${m}.${p}${preTag(tag)}`;
+  if (M !== '0') return `${low} <${+M + 1}.0.0`;
+  return m !== '0' ? `${low} <${M}.${+m + 1}.0` : `${low} <${M}.${m}.${+p + 1}`;
+}
+
+// ~1.2.3 is >=1.2.3 <1.3.0, and ~1 is >=1.0.0 <2.0.0.
+function replaceTilde(_, M, m, p, tag) {
+  if (isX(M)) return '';
+  if (isX(m)) return `>=${M}.0.0 <${+M + 1}.0.0`;
+  if (isX(p)) return `>=${M}.${m}.0 <${M}.${+m + 1}.0`;
+  return `>=${M}.${m}.${p}${preTag(tag)} <${M}.${+m + 1}.0`;
+}
+
+// 1.x is >=1.0.0 <2.0.0, >1.2 is >=1.3.0 and <=1.2 is <1.3.0.
+function replaceXRange(text, op, M, m, p) {
+  const xM = isX(M);
+  const xm = xM || isX(m);
+  const xp = xm || isX(p);
+  if (op === '=' && xp) op = '';
+  if (xM) return op === '>' || op === '<' ? '<0.0.0' : '*';
+  if (op && xp) {
+    if (xm) m = 0;
+    p = 0;
+    if (op === '>') {
+      op = '>=';
+      if (xm) [M, m] = [+M + 1, 0];
+      else m = +m + 1;
+    } else if (op === '<=') {
+      op = '<';
+      if (xm) M = +M + 1;
+      else m = +m + 1;
+    }
+    return `${op}${M}.${m}.${p}`;
+  }
+  if (xm) return `>=${M}.0.0 <${+M + 1}.0.0`;
+  if (xp) return `>=${M}.${m}.0 <${M}.${+m + 1}.0`;
+  return text;
+}
+
+// 1.2.3 - 2.3 is >=1.2.3 <2.4.0.
+function replaceHyphen(_, from, fM, fm, fp, fTag, fBuild, to, tM, tm, tp, tTag) {
+  if (isX(fM)) from = '';
+  else if (isX(fm)) from = `>=${fM}.0.0`;
+  else if (isX(fp)) from = `>=${fM}.${fm}.0`;
+  else from = `>=${from}`;
+  if (isX(tM)) to = '';
+  else if (isX(tm)) to = `<${+tM + 1}.0.0`;
+  else if (isX(tp)) to = `<${tM}.${+tm + 1}.0`;
+  else if (tTag) to = `<=${tM}.${tm}.${tp}-${tTag}`;
+  else to = `<=${to}`;
+  return `${from} ${to}`.trim();
+}
+
+// A version's three numbers and prerelease identifiers, or null for one semver does not take.
+function readVersion(text) {
+  const match = typeof text === 'string' && text.length <= 256 && fullRe.exec(text);
+  const numbers = match ? match.slice(1, 4).map(Number) : [];
+  if (!match || numbers.some((number) => number > Number.MAX_SAFE_INTEGER)) return null;
+  return { numbers, prerelease: match[4]?.split('.') ?? [] };
+}
+
+// A comparator as an operator and a version, or null for one that takes any version.
+function readComparator(text) {
+  const match = comparatorRe.exec(text);
+  const version = match?.[2] && readVersion(match[2]);
+  if (!match || version === null) throw new Error(`Cannot read ${text}`);
+  return version ? { op: match[1] === '=' ? '' : match[1], version } : null;
+}
+
+// The forms a word of a range can take, each replaced by plain comparators, in this order.
+const forms = [
+  [caretRe, replaceCaret],
+  [tildeRe, replaceTilde],
+  [xRangeRe, replaceXRange]
+];
+
+// The comparators of one of a range's || alternatives, all of which a version must pass.
+function readComparators(text) {
+  const words = text
+    .trim()
+    .replace(hyphenRe, replaceHyphen)
+    .replace(comparatorTrimRe, '$1$2$3')
+    .replace(/(\s*)~>?\s+/g, '$1~')
+    .replace(/(\s*)\^\s+/g, '$1^')
+    .split(/\s+/)
+    .map((word) => {
+      for (const [re, replace] of forms)
+        word = word
+          .trim()
+          .split(/\s+/)
+          .map((part) => part.replace(re, replace))
+          .join(' ');
+      return word.trim().replace(/(<|>)?=?\s*\*/, '');
+    });
+  return words.join(' ').split(/\s+/).map(readComparator);
+}
+
+function compareIdentifiers(a, b) {
+  const [aNumeric, bNumeric] = [/^[0-9]+$/.test(a), /^[0-9]+$/.test(b)];
+  if (aNumeric && bNumeric) [a, b] = [Number(a), Number(b)];
+  if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+// Below zero when version a comes before b, zero when they are the same, and above zero otherwise.
+function compare(a, b) {
+  for (const index of [0, 1, 2]) {
+    const order = compareIdentifiers(a.numbers[index], b.numbers[index]);
+    if (order !== 0) return order;
+  }
+  const [x, y] = [a.prerelease, b.prerelease];
+  if (x.length === 0 || y.length === 0) return x.length === y.length ? 0 : x.length === 0 ? 1 : -1;
+  for (let index = 0; ; index++) {
+    if (x[index] === undefined || y[index] === undefined)
+      return x[index] === y[index] ? 0 : x[index] === undefined ? -1 : 1;
+    if (x[index] !== y[index]) return compareIdentifiers(x[index], y[index]);
+  }
+}
+
+const operators = {
+  '': (order) => order === 0,
+  '<': (order) => order < 0,
+  '<=': (order) => order <= 0,
+  '>': (order) => order > 0,
+  '>=': (order) => order >= 0
+};
+
+// Whether version is inside range, or null when semver cannot read range. A prerelease version
+// is only inside an alternative that names a prerelease of the same major, minor and patch.
+function satisfies(version, range) {
+  let alternatives;
+  try {
+    alternatives = range.split(/\s*\|\|\s*/).map(readComparators);
+  } catch {
+    return null;
+  }
+  return alternatives.some(
+    (comparators) =>
+      comparators.every((c) => c === null || operators[c.op](compare(version, c.version))) &&
+      (version.prerelease.length === 0 ||
+        comparators.some(
+          (c) =>
+            c !== null &&
+            c.version.prerelease.length > 0 &&
+            c.version.numbers.every((number, index) => number === version.numbers[index])
+        ))
+  );
+}
+
 if (!existsSync('package.json')) stop('Found no package.json. Run this from the repository root.');
 const root = readJson('package.json');
 
@@ -234,6 +414,8 @@ for (const [file, manifest] of manifests)
 // needed, without comparing it with yarn.lock. yarn.lock lists that version under the resolution's
 // own name@range, so every entry for the package must be that version. A resolution for a package
 // under one parent only cannot be checked against yarn.lock, so it fails.
+const resolvedNames = new Set();
+const resolutionPatterns = new Set();
 for (const [key, range] of Object.entries(root.resolutions ?? {})) {
   const name = key.replace(/^\*\*\//, '');
   const pattern = `${name}@${range}`;
@@ -248,6 +430,8 @@ for (const [key, range] of Object.entries(root.resolutions ?? {})) {
     );
   } else {
     needed.push(pattern);
+    resolvedNames.add(name);
+    resolutionPatterns.add(pattern);
     const { version } = entries.get(pattern);
     for (const [other, entry] of entries)
       if (nameAndRange(other)[0] === name && entry.version !== version)
@@ -275,6 +459,33 @@ if (absent.length === 0)
   for (const pattern of entries.keys())
     if (!reached.has(pattern))
       problems.push(`yarn.lock lists ${pattern}, which nothing here needs any more.`);
+
+// Yarn compares each entry's version with every name@range it is listed under. For a range the
+// version is outside, it ignores the entry and installs the newest version in the range from the
+// registry, which --frozen-lockfile stops only for the root package.json's own ranges. For a
+// package with a resolution, only the resolution's own range is compared: for the ranges that
+// workspaces and other packages ask for, Yarn installs the resolution's version, compared above,
+// without comparing it with them. Yarn cannot read a tag such as latest, an npm: alias or an
+// address as a range, and takes the entry as it is for one. A range that starts the way a version
+// range does, but that this check cannot read, fails, so that a range Yarn reads is never left
+// unchecked.
+for (const [pattern, entry] of entries) {
+  const [name, range] = nameAndRange(pattern);
+  const version = readVersion(entry.version);
+  if (range === '' || version === null) continue;
+  if (resolvedNames.has(name) && !resolutionPatterns.has(pattern)) continue;
+  const inside = satisfies(version, range);
+  if (inside === false)
+    problems.push(
+      `yarn.lock lists ${pattern} at ${entry.version}, which is outside that range, so Yarn ` +
+        'would ignore the entry and resolve the range afresh.'
+    );
+  else if (inside === null && /^\s*[\d^~<>=*vxX|]/.test(range))
+    problems.push(
+      `yarn.lock lists ${pattern}, but this check cannot read that range, so it cannot tell ` +
+        `whether Yarn installs ${entry.version} for it.`
+    );
+}
 
 // Each package comes from the npm registry over HTTPS, as the tarball of the package and version
 // its entry names, and Yarn checks it against its checksum.

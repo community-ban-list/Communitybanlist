@@ -218,6 +218,106 @@ try {
     `package.json's resolutions name app/b. Name only the package, as in "ms" or "**/ms",`
   );
 
+  // Yarn ignores an entry for a range its version is outside, and installs the newest version in
+  // that range from the registry instead, so that fails it. These ranges and versions are read the
+  // way Yarn's copy of semver reads them, prereleases included. A tag such as latest, which Yarn
+  // takes as written, is not compared.
+  const named = (index) => `e${String(index).padStart(2, '0')}`;
+  const withRanges = (pairs) => ({
+    'other/package.json': {
+      ...files['other/package.json'],
+      dependencies: {
+        d: '^4.0.0',
+        ...Object.fromEntries(pairs.map(([range], i) => [named(i), range]))
+      }
+    },
+    'yarn.lock': [
+      lockfile,
+      ...pairs.map(([range, version], i) =>
+        [
+          `${/\s/.test(range) ? JSON.stringify(`${named(i)}@${range}`) : `${named(i)}@${range}`}:`,
+          `  version "${version}"`,
+          `  resolved "${registry}/${named(i)}/-/${named(i)}-${version}.tgz#5555"`,
+          `  integrity ${checksum('e')}`,
+          ''
+        ].join('\n')
+      )
+    ].join('\n')
+  });
+  passes(
+    withRanges([
+      ['^2.4.1', '2.9.0'],
+      ['^0.2.3', '0.2.9'],
+      ['^0.0.3', '0.0.3'],
+      ['~3.1.2', '3.1.9'],
+      ['2.0.1', '2.0.1'],
+      ['=0.155.0', '0.155.0'],
+      ['1.x.x', '1.9.9'],
+      ['^4', '4.5.0'],
+      ['6', '6.1.0'],
+      ['*', '5.0.0'],
+      ['>= 2.1.2 < 3', '2.9.9'],
+      ['>=0.6.2 <2.0.0', '1.0.0'],
+      ['^3.0.0 || ^4.0.0', '4.1.0'],
+      ['^1.0.0-beta.2', '1.0.0-beta.10'],
+      ['^1.0.0-beta.2', '1.2.0'],
+      ['1.2.3 - 2.3', '2.3.9'],
+      ['<=1.2', '1.2.9'],
+      ['>1.2', '1.3.0'],
+      ['latest', '5.0.0']
+    ])
+  );
+  const outside = [
+    ['^2.4.1', '2.4.0'],
+    ['^2.4.1', '3.0.0'],
+    ['^0.2.3', '0.3.0'],
+    ['^0.0.3', '0.0.4'],
+    ['~3.1.2', '3.2.0'],
+    ['2.0.1', '2.0.2'],
+    ['1.x.x', '2.0.0'],
+    ['*', '5.0.0-beta.1'],
+    ['>= 2.1.2 < 3', '3.0.0'],
+    ['^3.0.0 || ^4.0.0', '5.0.0'],
+    ['^1.0.0-beta.2', '1.0.0-beta.1'],
+    ['^1.0.0-beta.2', '1.0.1-beta.3'],
+    ['^2.0.0', '2.1.0-beta.1'],
+    ['1.2.3 - 2.3', '2.4.0'],
+    ['<=1.2', '1.3.0'],
+    ['>1.2', '1.2.9']
+  ];
+  result = checkWith(withRanges(outside));
+  assert.strictEqual(result.status, 1, result.output);
+  assert.deepStrictEqual(
+    result.output.match(/^yarn\.lock lists .* which is outside that range, .*$/gm),
+    outside.map(
+      ([range, version], i) =>
+        `yarn.lock lists ${named(i)}@${range} at ${version}, which is outside that range, so ` +
+        'Yarn would ignore the entry and resolve the range afresh.'
+    )
+  );
+  // A range that starts the way a version range does, but that cannot be read, fails it rather
+  // than go unchecked.
+  refuses(
+    withRanges([['^1.2.3.4', '1.2.3']]),
+    'yarn.lock lists e00@^1.2.3.4, but this check cannot read that range, so it cannot tell ' +
+      'whether Yarn installs 1.2.3 for it.'
+  );
+
+  // A resolution makes Yarn install its version for the package's other ranges, so yarn install
+  // writes it under them even when it is outside them, and that passes. The resolution's own range
+  // is still compared.
+  const bAt = (header, version) => ({
+    'yarn.lock': lockfile
+      .replace('b@^2.0.0:', header)
+      .replace('version "2.0.1"', `version "${version}"`)
+      .replace('b-2.0.1.tgz', `b-${version}.tgz`)
+  });
+  passes({ ...bAt('b@1.9.0, b@^2.0.0:', '1.9.0'), ...withRoot({ resolutions: { b: '1.9.0' } }) });
+  refuses(
+    { ...bAt('b@^2.0.0, b@^2.0.1:', '2.0.0'), ...withRoot({ resolutions: { b: '^2.0.1' } }) },
+    'yarn.lock lists b@^2.0.1 at 2.0.0, which is outside that range,'
+  );
+
   // With every workspace here, a package that nothing needs any more fails it. Without one, that
   // package may be the missing workspace's, so it passes.
   const unused = [
@@ -485,6 +585,7 @@ for (const name of dockerfiles) {
 
 console.log(
   "yarn.lock checks passed: the repository's yarn.lock, Yarn's format, missing and unused " +
-    'packages, resolutions, workspaces, sources, checksums, made-up Dockerfiles, and ' +
+    'packages, versions outside their ranges, resolutions, workspaces, sources, checksums, ' +
+    'made-up Dockerfiles, and ' +
     `${dockerfiles.join(', ')}.`
 );
