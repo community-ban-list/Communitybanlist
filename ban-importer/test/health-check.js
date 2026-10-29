@@ -55,12 +55,15 @@ async function load(path) {
     process: { exit: (code) => exits.push(code) },
     Date
   });
+  // Each module is kept before its file is read, as linking asks for a module's imports at once.
   const modules = new Map();
-  const loadModule = async (url) => {
+  const loadModule = (url) => {
     if (!modules.has(url.href))
       modules.set(
         url.href,
-        new vm.SourceTextModule(await readFile(url, 'utf8'), { context, identifier: url.href })
+        readFile(url, 'utf8').then(
+          (source) => new vm.SourceTextModule(source, { context, identifier: url.href })
+        )
       );
     return modules.get(url.href);
   };

@@ -148,8 +148,9 @@ const packages = {
 // imports load the real files.
 async function load(path, globals) {
   const context = vm.createContext(globals);
+  // Each module is kept before its file is read, as linking asks for a module's imports at once.
   const modules = new Map();
-  async function moduleFor(specifier, referencingURL) {
+  function moduleFor(specifier, referencingURL) {
     const exports = packages[specifier];
     assert.ok(exports || specifier.startsWith('.'), `Unexpected dependency: ${specifier}`);
     const url = exports ? specifier : new URL(specifier, referencingURL).href;
@@ -164,10 +165,9 @@ async function load(path, globals) {
               },
               { context }
             )
-          : new vm.SourceTextModule(await readFile(new URL(url), 'utf8'), {
-              context,
-              identifier: url
-            })
+          : readFile(new URL(url), 'utf8').then(
+              (source) => new vm.SourceTextModule(source, { context, identifier: url })
+            )
       );
     }
     return modules.get(url);
