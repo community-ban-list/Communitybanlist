@@ -9,10 +9,13 @@
 // and still succeeds. It does the same when yarn.lock lists a version outside a range that a
 // workspace or another package asks for, as it then ignores that entry. It installs the version the
 // root package.json's resolutions ask for in the same way, and without a yarn.lock it resolves
-// every package afresh. In those cases this script fails instead. It also fails when a yarn.lock
-// entry is fetched from anywhere but the npm registry over HTTPS, is not the package and version
-// the entry names, has no sha512 checksum, or needs a package yarn.lock does not list. And it fails
-// unless yarn.lock is exactly as Yarn writes it, so that it reads the same entries from it as Yarn.
+// every package afresh. A workspace that another one asks for comes from its folder only when its
+// version is inside the range asked for; otherwise Yarn takes that name from the registry. In those
+// cases this script fails instead. It also fails when a yarn.lock entry is fetched from anywhere
+// but the npm registry over HTTPS, is not the package and version the entry names, has no sha512
+// checksum, has a field other than those Yarn writes for a package from the npm registry, or needs
+// a package yarn.lock does not list. And it fails unless yarn.lock is exactly as Yarn writes it, so
+// that it reads the same entries from it as Yarn.
 //
 // An image copies only some of the workspaces, so there the other workspaces' packages are left
 // alone. When every workspace is here, as in the pull request checks, the script also fails when
@@ -33,6 +36,10 @@ const registries = ['registry.yarnpkg.com', 'registry.npmjs.org'];
 const manifestBlocks = ['dependencies', 'devDependencies', 'optionalDependencies'];
 // The blocks of a yarn.lock entry that list the packages it needs.
 const entryBlocks = ['dependencies', 'optionalDependencies'];
+// The other fields Yarn writes in the entry of a package from the npm registry. It also reads
+// fields such as name and uid, which make it install an entry under another name, but it writes
+// them only for packages from elsewhere.
+const entryFields = ['version', 'resolved', 'integrity'];
 
 function stop(message) {
   console.error(message);
@@ -56,7 +63,7 @@ const written = (word) =>
   /^[a-zA-Z]/.test(word) && !/^(true|false)|[\s:,"\\[\]]/.test(word) ? word : JSON.stringify(word);
 // Yarn sorts the keys at each level in character order, but puts these fields of an entry first,
 // in this order.
-const firstFields = ['name', 'version', 'uid', 'resolved', 'integrity', 'registry', 'dependencies'];
+const firstFields = [...entryFields, 'dependencies'];
 function yarnOrder(a, b) {
   const [first, second] = [a, b].map((key) => firstFields.indexOf(key) + 1 || 100);
   if (first < 100 || second < 100) return first > second ? 1 : -1;
@@ -114,6 +121,11 @@ function readLockfile(text) {
     if (line === '' || line.startsWith('#')) continue;
     const unread = () =>
       stop(`Line ${index + 1} of yarn.lock is not in Yarn's format: ${shown(line)}\n${fix}`);
+    const unknownField = () =>
+      stop(
+        `Line ${index + 1} of yarn.lock is ${shown(line)}, a field Yarn does not write for a ` +
+          `package from the npm registry.\n${fix}`
+      );
     const indent = line.length - line.trimStart().length;
     const opens = line.endsWith(':');
     const words = wordsOf(opens ? line.slice(0, -1) : line);
@@ -125,9 +137,11 @@ function readLockfile(text) {
       block = null;
       for (const pattern of words) lockfile[pattern] = entry;
     } else if (indent === 2 && entry && opens && words.length === 1) {
+      if (!entryBlocks.includes(words[0])) unknownField();
       block = {};
       entry[words[0]] = block;
     } else if (indent === 2 && entry && !opens && words.length === 2) {
+      if (!entryFields.includes(words[0])) unknownField();
       block = null;
       entry[words[0]] = words[1];
     } else if (indent === 4 && block && !opens && words.length === 2) {
@@ -393,8 +407,12 @@ const manifests = [
     return [file, readJson(file)];
   })
 ];
-// Yarn installs a workspace that another one asks for from its folder, not from yarn.lock.
-const workspaceNames = new Set(manifests.slice(1).map(([, manifest]) => manifest.name));
+// The version of each workspace here, by its name. Yarn installs a workspace that another one asks
+// for from its folder, not from yarn.lock, but only when its version is inside the range asked for.
+// Otherwise it takes that name from the registry, which --frozen-lockfile does not stop.
+const workspaceVersions = new Map(
+  manifests.slice(1).map(([, manifest]) => [manifest.name, manifest.version])
+);
 
 if (!existsSync('yarn.lock')) stop(`Found no yarn.lock. ${fix}`);
 const entries = readLockfile(readFileSync('yarn.lock', 'utf8'));
@@ -405,7 +423,16 @@ const needed = [];
 for (const [file, manifest] of manifests)
   for (const block of manifestBlocks)
     for (const [name, range] of Object.entries(manifest[block] ?? {})) {
-      if (workspaceNames.has(name)) continue;
+      if (workspaceVersions.has(name)) {
+        const version = readVersion(workspaceVersions.get(name));
+        if (version === null || satisfies(version, range) !== true)
+          problems.push(
+            `${file} asks for ${name} ${range}, but the ${name} workspace is ` +
+              `${workspaceVersions.get(name) ?? 'not versioned'}, so Yarn would take ${name} ` +
+              'from the registry.'
+          );
+        continue;
+      }
       if (entries.has(`${name}@${range}`)) needed.push(`${name}@${range}`);
       else problems.push(`${file} asks for ${name} ${range}, which yarn.lock does not list.`);
     }
