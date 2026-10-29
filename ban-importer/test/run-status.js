@@ -458,6 +458,18 @@ for (const [name, counts, expected, progress] of [
     { ...COUNTS.importBans, dryRun: true },
     '20 ban lists: 87,026 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed, in a dry run that wrote nothing'
   ],
+  // An import that left suspended ban lists out says how many, and names the resuming lists it
+  // caught up with, which count again.
+  [
+    'importBans',
+    { ...COUNTS.importBans, lists: 19, imported: 19, suspended: 1, caughtUp: [46] },
+    '19 ban lists (1 suspended left out): 87,026 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed; ban list 46 counts again'
+  ],
+  [
+    'importBans',
+    { ...COUNTS.importBans, suspended: 0, caughtUp: [7, 46, 'x'] },
+    '20 ban lists: 87,026 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 0 lists failed; ban lists 7, 46 count again'
+  ],
   ['expireBans', { due: 0, expired: 0, players: 0 }, 'none had expired'],
   ['expireBans', { due: 1, expired: 1, players: 1 }, '1 ban marked expired, 1 player queued'],
   // A step that stopped part-way says of how many.

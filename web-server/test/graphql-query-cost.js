@@ -126,6 +126,11 @@ const packages = {
     }
   },
   'scbl-lib/db/models': models,
+  // No ban list is paused.
+  'scbl-lib/db/ban-list-suspensions': {
+    readPausedBanLists: async () => [],
+    pausedSets: () => ({ suspended: [], excluded: [] })
+  },
   'scbl-lib/db/sequelize': {
     DATABASE_UNAVAILABLE_MESSAGE: 'The database is unavailable.',
     isDatabaseUnavailable: () => false,

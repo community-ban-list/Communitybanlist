@@ -10,6 +10,7 @@ import { queryCostRule } from './core/query-cost.js';
 import { directives } from './core/index.js';
 import formatError from './core/format-error.js';
 import { reportRejectedSignInTokens, signInContext } from './core/sign-in.js';
+import pausedBanLists from '../paused-ban-lists.js';
 
 const schema = Object.values(directives).reduce(
   (schema, directive) => directive(schema),
@@ -52,7 +53,13 @@ const server = new ApolloServer({
 
 await server.start();
 
-const middleware = koaMiddleware(server, { context: signInContext });
+// Each request is answered for the user its sign-in token signs in, and with the ban lists paused
+// as read at most seconds before (see paused-ban-lists.js).
+async function context(args) {
+  return { ...(await signInContext(args)), paused: await pausedBanLists() };
+}
+
+const middleware = koaMiddleware(server, { context });
 
 // Answer requests to /graphql and stop there, as Apollo Server 2 did, so later middleware such as
 // the client's catch-all route cannot replace the response.

@@ -550,7 +550,11 @@ async function loadLoop({
     clearTimeout: (timer) => timers.delete(timer)
   });
 
-  // The service's own modules, each loaded once, as several import the same ones.
+  // The service's own modules, each loaded once, as several import the same ones. Each is kept as
+  // it starts loading, before its file is read, as linking asks for the modules a module imports
+  // all at once: two that import the same one share it, whichever read ends first, rather than
+  // each getting a copy with its own state, e.g. a stop asked for in one copy of run-control.js
+  // that the other never sees.
   const OWN = [
     './loop.js',
     './health-check-server.js',
@@ -561,12 +565,14 @@ async function loadLoop({
     './service-status.js'
   ];
   const modules = new Map();
-  const load = async (specifier) => {
+  const load = (specifier) => {
     if (!modules.has(specifier)) {
       const url = new URL(`../src/${specifier.slice(2)}`, import.meta.url);
       modules.set(
         specifier,
-        new vm.SourceTextModule(await readFile(url, 'utf8'), { context, identifier: url.href })
+        readFile(url, 'utf8').then(
+          (source) => new vm.SourceTextModule(source, { context, identifier: url.href })
+        )
       );
     }
     return modules.get(specifier);
