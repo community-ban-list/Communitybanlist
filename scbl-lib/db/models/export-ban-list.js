@@ -363,8 +363,12 @@ class ExportBanList extends Sequelize.Model {
   // - a list created for a user with none and a list given to them at the same moment, as both
   //   lock the gap between other users' lists in the index on the owner where the user's lists
   //   would go (see lockListsOf), and then add a list to it;
-  // - and in the same way two or more users with no lists whose Steam IDs fall in the same gap,
-  //   creating their first lists at the same moment.
+  // - in the same way two or more users with no lists whose Steam IDs fall in the same gap,
+  //   creating their first lists at the same moment;
+  // - and a transfer and a list created at the same moment by the list's old owner, when no other
+  //   user's lists sit between the old owner's and the new owner's in the index on the owner: the
+  //   creation locks the old owner's lists, the list being given among them, and the transfer
+  //   locks the new owner's lists with the gap before them, where the new list would go.
   // So a transaction ended in a deadlock is run again, after a short random wait, up to
   // DEADLOCK_ATTEMPTS times in all, which lets several such users through one after another. Each
   // work reads again what it checks, so running it again is safe. When MySQL still ends it in a

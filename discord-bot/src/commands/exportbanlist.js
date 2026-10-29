@@ -902,11 +902,13 @@ function transferEmbed(check, newOwner, listCount) {
 // of their own. Gives null once the list is theirs, or why it was left as it is.
 //
 // The website changes lists from its own process, so the transfer is one short transaction that
-// locks what it reads, in the order the website does (see ExportBanList.inTransaction): the new
-// owner's lists first (ExportBanList.lockListsOf), so a list they create on the website meanwhile
-// waits for the transfer, or the transfer for it, and is counted, and then the list itself, so a
-// change its owner is saving on the website lands before the transfer or not at all. A list whose
-// deletion on the website has started is left as it is, as the deletion goes on.
+// locks what it reads: the new owner's lists first (ExportBanList.lockListsOf), as a creation on
+// the website locks its user's lists, so a list they create on the website meanwhile waits for the
+// transfer, or the transfer for it, and is counted, and then the list itself, so a change its owner
+// is saving on the website lands before the transfer or not at all. A few of these can still meet
+// in a deadlock, such as a list its old owner creates at the same moment, which
+// ExportBanList.inTransaction runs again (see there). A list whose deletion on the website has
+// started is left as it is, as the deletion goes on.
 function transferIfUnchanged(exportBanList, newOwner) {
   const name = formatName(exportBanList);
   const to = formatSteamUser(newOwner.id, newOwner.name);
