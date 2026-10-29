@@ -143,7 +143,14 @@ const stubs = {
     ExportBanListConfig: {},
     Organisation: {}
   },
-  'scbl-lib/db/sequelize': { Op: {} },
+  // No ban list is paused. The bot's other commands, which pause and resume them, are not run here.
+  'scbl-lib/db/ban-list-suspensions': {
+    isMissingTable: () => false,
+    readPausedBanLists: async () => [],
+    readSettledPausedBanLists: async () => []
+  },
+  'scbl-lib/db/importer-models': { BanListSync: {} },
+  'scbl-lib/db/sequelize': { Op: {}, QueryTypes: { SELECT: 'SELECT' } },
   'scbl-lib/utils': {
     ...scblUtils,
     Logger: {
