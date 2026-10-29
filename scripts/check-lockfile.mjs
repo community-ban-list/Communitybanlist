@@ -37,8 +37,8 @@ const manifestBlocks = ['dependencies', 'devDependencies', 'optionalDependencies
 // The blocks of a yarn.lock entry that list the packages it needs.
 const entryBlocks = ['dependencies', 'optionalDependencies'];
 // The other fields Yarn writes in the entry of a package from the npm registry. It also reads
-// fields such as name and uid, which make it install an entry under another name, but it writes
-// them only for packages from elsewhere.
+// fields such as name, uid and registry, and installs an entry differently for them, but it does
+// not write them for a package from the npm registry.
 const entryFields = ['version', 'resolved', 'integrity'];
 
 function stop(message) {
@@ -62,8 +62,9 @@ const readJson = (file) => JSON.parse(readFileSync(file, 'utf8'));
 const written = (word) =>
   /^[a-zA-Z]/.test(word) && !/^(true|false)|[\s:,"\\[\]]/.test(word) ? word : JSON.stringify(word);
 // Yarn sorts the keys at each level in character order, but puts these fields of an entry first,
-// in this order.
-const firstFields = [...entryFields, 'dependencies'];
+// in this order. It does so at every level, so a package named uid comes first in a dependencies
+// block too.
+const firstFields = ['name', 'version', 'uid', 'resolved', 'integrity', 'registry', 'dependencies'];
 function yarnOrder(a, b) {
   const [first, second] = [a, b].map((key) => firstFields.indexOf(key) + 1 || 100);
   if (first < 100 || second < 100) return first > second ? 1 : -1;
@@ -133,6 +134,14 @@ function readLockfile(text) {
     // they are not in its format here. No name, version, address or checksum has a backslash.
     if (line.includes('\\') || (opens ? words : words.slice(0, 1)).includes('')) unread();
     if (indent === 0 && opens && words.length > 0) {
+      // Yarn writes every key as name@range, so a key without a range is a hand edit. Yarn reads
+      // it as asking for the latest version, and for a workspace's name it then fetches that entry
+      // from the registry instead of using the workspace.
+      const bare = words.find((pattern) => pattern.indexOf('@', 1) === -1);
+      if (bare !== undefined)
+        stop(
+          `Line ${index + 1} of yarn.lock lists ${bare} with no range, which Yarn does not write.\n${fix}`
+        );
       entry = {};
       block = null;
       for (const pattern of words) lockfile[pattern] = entry;
