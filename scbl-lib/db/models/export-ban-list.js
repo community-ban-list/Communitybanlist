@@ -138,6 +138,24 @@ async function saveBattlemetricsBanList(exportBanList, battlemetricsID, battleme
   }
 }
 
+// Delete a list's row, which takes its export bans and configs with it, only while the Steam user
+// owns the list, by a statement that locks the row as it checks the owner. The website holds the
+// list's deletion lock while it deletes a list for its owner, so the Discord bot does not give the
+// list to another user meanwhile, but MySQL frees that lock without a word if its connection is
+// lost (see whileDeleting). A list given to another user meanwhile is kept, and the error says so.
+// One deleted meanwhile, e.g. by the bot, is gone as asked. It runs in inTransaction, so it is run
+// again if MySQL ends it in a deadlock, e.g. with the importer, which writes the list's export bans.
+function destroyIfOwnedBy(exportBanList, owner) {
+  const { id } = exportBanList;
+  return ExportBanList.inTransaction(async (transaction) => {
+    if ((await ExportBanList.destroy({ where: { id, owner }, transaction })) > 0) return;
+    if ((await ExportBanList.count({ where: { id }, transaction })) > 0)
+      throw new Error(
+        'This export ban list was given to another user while it was being deleted, so it was not deleted.'
+      );
+  });
+}
+
 // Throw an error with the stage of a list's creation it failed in, for the caller to say what
 // failed, as deleteExportBanList's errors give theirs.
 const failedAt = (stage) => (error) => {
@@ -330,7 +348,7 @@ class ExportBanList extends Sequelize.Model {
   //   count of their lists cannot change before the new list or new owner is written.
   // - A deletion on the website holds the list's deletion lock while it works, which can take
   //   minutes on BattleMetrics (whileDeleting), and a transfer leaves a list being deleted as it is
-  //   (isBeingDeleted).
+  //   (isBeingDeleted). The row is then deleted only while its user still owns the list.
   // The transactions are short: nothing in them waits for BattleMetrics, Discord or a count of
   // players. They can wait for a statement of the ban importer's export step, which reads every
   // list, for as long as the statement runs. Creating a list, and giving one to a user, can also
@@ -400,8 +418,10 @@ class ExportBanList extends Sequelize.Model {
   // to another user while it is being deleted, e.g. while its BattleMetrics ban list is deleted,
   // which can take minutes. The lock is MySQL's, on a connection of its own, outside the Sequelize
   // pool, for the whole deletion, and MySQL frees it once the connection closes, so a deletion that
-  // fails, or a web server that stops part-way, never leaves it held. Throws without running
-  // deletion() when another deletion of the list holds the lock.
+  // fails, or a web server that stops part-way, never leaves it held. A connection lost part-way
+  // frees it too, without a word, so the website's deletion also deletes the row only while its
+  // user still owns the list (see deleteExportBanList). Throws without running deletion() when
+  // another deletion of the list holds the lock.
   static async whileDeleting(id, deletion) {
     let connection;
     try {
@@ -528,7 +548,10 @@ class ExportBanList extends Sequelize.Model {
   // why it failed, as the website and the bot both do, so a failure is only thrown. A caller that
   // posts its lines as important ones, as the bot does when it removes many lists, passes
   // important, so these lines are posted that way too and reach the channel in order with its own.
-  async deleteExportBanList({ important = false } = {}) {
+  //
+  // A caller that deletes a list for its owner, as the website does, passes owner, their Steam ID,
+  // and the row is then only deleted while they still own the list (see destroyIfOwnedBy).
+  async deleteExportBanList({ important = false, owner } = {}) {
     let stage = 'battlemetrics';
     try {
       const outcome =
@@ -536,7 +559,8 @@ class ExportBanList extends Sequelize.Model {
           ? await this.deleteBattlemetricsBanList({ important })
           : 'none';
       stage = 'database deletion';
-      await this.destroy();
+      if (owner === undefined) await this.destroy();
+      else await destroyIfOwnedBy(this, owner);
       return outcome;
     } catch (error) {
       error.stage = stage;

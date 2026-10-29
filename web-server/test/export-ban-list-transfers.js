@@ -97,6 +97,9 @@ function database() {
   const beforeDeleting = new Map();
   // Gates each BattleMetrics list's deletion waits for, for its requests to BattleMetrics.
   const battlemetrics = new Map();
+  // Making a new BattleMetrics list's ban list, which can take a while within the BattleMetrics
+  // budget: it waits for the gate, if there is one, and then fails with the error, if there is one.
+  const making = { gate: null, error: null };
   // How many of the next lock requests MySQL ends in a deadlock, and how many it gives up waiting
   // for.
   const deadlocks = { next: 0 };
@@ -231,11 +234,28 @@ function database() {
         });
       },
       async createBattlemetricsInvite() {},
+      // Making a new BattleMetrics list's ban list, which saves its ID to the list.
+      async createBattlemetricsBanList() {
+        await making.gate?.until;
+        if (making.error) throw making.error;
+        this.battlemetricsID = `bm-${this.id}`;
+        await this.save();
+      },
       // ExportBanList's shared deletion: a BattleMetrics list's requests to BattleMetrics, which
-      // can take minutes, and then the row, by ID.
-      async deleteExportBanList() {
+      // can take minutes, and then the row, by ID, or, for its owner, only while they own it.
+      async deleteExportBanList({ owner } = {}) {
         if (this.type === 'battlemetrics') await battlemetrics.get(this.id)?.until;
-        await this.destroy();
+        if (owner === undefined) await this.destroy();
+        else if (
+          (await models.ExportBanList.destroy({ where: { id: this.id, owner } })) === 0 &&
+          rows.ExportBanList.some(({ id }) => id === this.id)
+        )
+          throw Object.assign(
+            new Error(
+              'This export ban list was given to another user while it was being deleted, so it was not deleted.'
+            ),
+            { stage: 'database deletion' }
+          );
         return this.type === 'battlemetrics' ? 'deleted' : 'none';
       }
     };
@@ -329,6 +349,24 @@ function database() {
       });
       return [updated];
     },
+    // DELETE ... WHERE id = ? AND owner = ?, which locks the row by its ID first, deletes it with
+    // its configs if the rest of the where clause matches, and gives how many rows it deleted.
+    async destroy({ where, transaction }) {
+      let deleted = 0;
+      await write(transaction, [`list ${where.id}`], () => {
+        const row = rows.ExportBanList.find((list) => matches(list, where));
+        if (!row) return () => {};
+        deleted = 1;
+        writes.push(`destroy ExportBanList ${row.id}`);
+        const configs = rows.ExportBanListConfig.filter((c) => c.exportBanList === row.id);
+        const undo = [
+          remove('ExportBanList', row),
+          ...configs.map((c) => remove('ExportBanListConfig', c))
+        ];
+        return () => undo.reverse().forEach((step) => step());
+      });
+      return deleted;
+    },
     async whileDeleting(id, deletion) {
       await beforeDeleting.get(id)?.until;
       if (deleting.has(id)) throw new Error('This export ban list is already being deleted.');
@@ -342,6 +380,8 @@ function database() {
     isBeingDeleted: async (id) => deleting.has(id)
   });
 
+  // MySQL frees a deletion lock without a word when the connection holding it is lost.
+  const loseDeletionLock = (id) => deleting.delete(id);
   const waiting = (name) => locks.get(name)?.waiting.length ?? 0;
   return {
     rows,
@@ -350,8 +390,10 @@ function database() {
     holds,
     beforeDeleting,
     battlemetrics,
+    making,
     deadlocks,
     timeouts,
+    loseDeletionLock,
     waiting
   };
 }
@@ -754,6 +796,78 @@ const LIST_LIMIT = { message: 'You are limited to 4 export ban lists.' };
   // Each user can create or delete 3 lists a minute.
   for (let i = 0; i < 3; i++) await Mutation.createExportBanList(null, newList, as('B'), {});
   assert.strictEqual(listsOf(db, 'B').length, 3);
+}
+
+// 12. A new BattleMetrics list given to another user while its BattleMetrics ban list is being
+// made, which can take a while within the BattleMetrics budget, is not deleted when making it
+// fails, as the list is the new owner's by then. The line says it was left as it is.
+{
+  const { db, posted, Mutation } = await mutations();
+  const making = gate();
+  db.making.gate = making;
+  db.making.error = Object.assign(new Error('BattleMetrics POST ban-lists failed: HTTP 422'), {
+    stage: 'battlemetrics'
+  });
+  const creating = Mutation.createExportBanList(
+    null,
+    { name: 'New BM', server: 'Server', type: 'battlemetrics' },
+    as('A'),
+    {}
+  );
+  await settle();
+  const [{ id }] = db.rows.ExportBanList;
+  assert.strictEqual(await transfer(db, id, 'A', 'B'), 'transferred');
+  making.open();
+  await assert.rejects(creating, {
+    message:
+      'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.'
+  });
+  assert.strictEqual(ownerOf(db, id), 'B');
+  assert.deepStrictEqual(db.writes, [`create ExportBanList ${id}`, `update ExportBanList ${id}`]);
+  assert.deepStrictEqual(posted, [
+    `Steam user A could not create export ban list Server's List "New BM" (ID: ${id}, BattleMetrics), as making its BattleMetrics ban list failed, and it was no longer theirs, as it had been given to another user or removed meanwhile, so it was left as it is. BattleMetrics POST ban-lists failed: HTTP 422`
+  ]);
+
+  // Without a transfer, the list is deleted, as before.
+  posted.length = 0;
+  db.making.gate = null;
+  await assert.rejects(
+    Mutation.createExportBanList(
+      null,
+      { name: 'Other BM', server: 'Server', type: 'battlemetrics' },
+      as('A'),
+      {}
+    )
+  );
+  assert.deepStrictEqual(listsOf(db, 'A'), []);
+  assert.match(
+    posted[0],
+    /, as making its BattleMetrics ban list failed, so the list was deleted\./
+  );
+}
+
+// 13. MySQL frees the deletion lock without a word if the connection holding it is lost, and the
+// list can then be given to another user while its BattleMetrics ban list is deleted. The row is
+// still not deleted, as the deletion deletes it only while its user owns the list, and the failure
+// is posted, after the deletion of the BattleMetrics ban list, which ExportBanList posts itself.
+{
+  const { db, posted, Mutation } = await mutations();
+  db.rows.ExportBanList.push(list(30, 'F', { type: 'battlemetrics', battlemetricsID: 'bm-30' }));
+  const requests = gate();
+  db.battlemetrics.set(30, requests);
+  const deleting = Mutation.deleteExportBanList(null, { id: 30 }, as('F'), {});
+  await settle();
+  db.loseDeletionLock(30);
+  assert.strictEqual(await transfer(db, 30, 'F', 'E'), 'transferred');
+  requests.open();
+  const GIVEN_AWAY =
+    'This export ban list was given to another user while it was being deleted, so it was not deleted.';
+  await assert.rejects(deleting, { message: GIVEN_AWAY });
+  assert.strictEqual(ownerOf(db, 30), 'E');
+  assert.deepStrictEqual(db.writes, ['update ExportBanList 30']);
+  assert.deepStrictEqual(posted, [
+    `Steam user F could not delete export ban list Server's List "List 30" (ID: 30, BattleMetrics), as deleting it from the database failed: ${GIVEN_AWAY}`
+  ]);
 }
 
 console.log(

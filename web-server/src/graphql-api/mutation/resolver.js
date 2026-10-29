@@ -299,7 +299,10 @@ export default {
           // one transaction with its BattleMetrics ban list, as f6630b9 tried:
           // createBattlemetricsBanList saves the list outside the transaction, so the save waited
           // on the list's uncommitted row until MySQL gave up. The list's own transaction above has
-          // ended before the BattleMetrics ban list is made.
+          // ended before the BattleMetrics ban list is made, which can take a while within the
+          // BattleMetrics budget, and the Discord bot can give the list to another user meanwhile.
+          // So it is deleted only while it is still the user's, in one statement, which locks the
+          // row as it checks the owner.
           if (!exportBanLsit.battlemetricsID) {
             const failed = `could not create export ban list ${describeList(exportBanLsit)}, as making its BattleMetrics ban list failed`;
             // A ban list BattleMetrics may have made without saying so is recorded nowhere, so the
@@ -309,8 +312,11 @@ export default {
               ? ` BattleMetrics may have made the ban list anyway, which nothing records: look for ${quote(exportBanLsit.battlemetricsBanListName())} among CBL's ban lists on BattleMetrics, and remove it.`
               : '';
             const postFailure = error.ambiguous ? auditCleanup : audit;
+            let deleted;
             try {
-              await exportBanLsit.destroy();
+              deleted = await ExportBanList.destroy({
+                where: { id: exportBanLsit.id, owner: context.user.id }
+              });
             } catch (destroyError) {
               console.error(
                 'Failed to delete the export ban list with no BattleMetrics ban list:',
@@ -330,7 +336,12 @@ export default {
                 'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later.'
               );
             }
-            postFailure(context, `${failed}, so the list was deleted.${unrecorded}`, error);
+            // A list that is no longer the user's is left to its new owner, who can delete it.
+            const outcome =
+              deleted > 0
+                ? 'so the list was deleted'
+                : 'and it was no longer theirs, as it had been given to another user or removed meanwhile, so it was left as it is';
+            postFailure(context, `${failed}, ${outcome}.${unrecorded}`, error);
             throw new Error(
               'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.'
             );
@@ -481,11 +492,12 @@ export default {
           if (!exportBanList) throw new Error('Export ban list does not exist!');
 
           // Delete the export ban list, and its BattleMetrics ban list if it has one. Its error
-          // says which of these failed.
+          // says which of these failed. Its row is deleted only while the user still owns it, in
+          // case the deletion lock was lost part-way.
           stage = 'deletion';
           list = describeList(exportBanList);
           ({ battlemetricsID } = exportBanList);
-          return exportBanList.deleteExportBanList();
+          return exportBanList.deleteExportBanList({ owner: context.user.id });
         });
       } catch (error) {
         // Do not log the full Axios error: it includes the API authorization header.

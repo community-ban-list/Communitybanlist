@@ -250,6 +250,17 @@ class Model {
       (config) => config.exportBanList !== this.id
     );
   }
+
+  // The website deletes a list only while its user owns it, and gives how many rows it deleted.
+  static async destroy({ where }) {
+    failure('ExportBanList.destroy');
+    const deleted = rows.ExportBanList.filter((row) => matches(row, where));
+    rows.ExportBanList = rows.ExportBanList.filter((row) => !deleted.includes(row));
+    rows.ExportBanListConfig = rows.ExportBanListConfig.filter(
+      (config) => !deleted.some(({ id }) => id === config.exportBanList)
+    );
+    return deleted.length;
+  }
 }
 const dataType = () => dataType;
 

@@ -135,15 +135,17 @@ const BM_LIST = `Server's List "List 42" (ID: 42, BattleMetrics)`;
 const REMOTE_LIST = `Server's List "List 42" (ID: 42, remote)`;
 for (const type of ['battlemetrics', 'remote']) {
   calls.length = 0;
-  list = exportBanList(type, async function () {
-    calls.push('delete');
+  list = exportBanList(type, async function (options) {
+    calls.push(['delete', { ...options }]);
     steps.push('delete');
     this.battlemetricsID = null;
     return type === 'battlemetrics' ? 'deleted' : 'none';
   });
   steps.length = 0;
   assert.strictEqual(await remove(), list);
-  assert.deepStrictEqual(calls, ['delete']);
+  // It is deleted for its owner, so its row is deleted only while they still own it, as the
+  // deletion lock can be lost part-way.
+  assert.deepStrictEqual(calls, [['delete', { owner: 'owner' }]]);
   // The deletion holds the list's deletion lock throughout, so the Discord bot cannot give the
   // list to another user meanwhile, and once it holds it, the list is looked up again with its row
   // locked, so a list given away just before is not deleted.

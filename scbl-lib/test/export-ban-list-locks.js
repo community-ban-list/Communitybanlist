@@ -3,14 +3,16 @@ import { readFile } from 'fs/promises';
 import vm from 'vm';
 
 // Check how ExportBanList makes changes from the website and the Discord bot wait for each other in
-// the database: the transactions they run, again after a deadlock, the lock on a user's lists, and
-// the deletion lock, against stand-ins for Sequelize and MySQL. That MySQL's locks work this way
-// across connections is checked against MySQL itself, outside these checks.
+// the database: the transactions they run, again after a deadlock, the lock on a user's lists, the
+// deletion lock, and a deletion that deletes the row only while its user owns the list, against
+// stand-ins for Sequelize and MySQL. That MySQL's locks work this way across connections is checked
+// against MySQL itself, outside these checks.
 
 // Every query, in order, and what the stand-ins answer.
 const calls = [];
 
-// A stand-in for Sequelize's Model, whose findAll records its options.
+// A stand-in for Sequelize's Model, whose queries record their options. destroy deletes as many
+// rows as `deletedRows`, and count counts `countedRows`.
 class Model {
   static init() {}
 
@@ -18,7 +20,23 @@ class Model {
     calls.push(['findAll', options]);
     return lockedLists.map((id) => ({ id }));
   }
+
+  static async destroy(options) {
+    calls.push(['destroy', options]);
+    return deletedRows;
+  }
+
+  static async count(options) {
+    calls.push(['count', options]);
+    return countedRows;
+  }
+
+  async destroy() {
+    calls.push(['destroy this', this.id]);
+  }
 }
+let deletedRows = 1;
+let countedRows = 0;
 const dataType = () => dataType;
 // Sequelize's error for a database it cannot reach, which the web server shows as unavailable.
 class ConnectionError extends Error {
@@ -147,6 +165,8 @@ function reset() {
   ending = null;
   openFailure = null;
   random = 0.5;
+  deletedRows = 1;
+  countedRows = 0;
 }
 // MySQL's errors as Sequelize gives them, with MySQL's own as original and parent.
 const mysqlError = (errno, message) => {
@@ -356,6 +376,68 @@ for (const [connection, expected] of [
   assert.strictEqual(queryOptions.transaction, transaction);
 }
 
+// A deletion for the list's owner, as the website's, deletes the row only while they still own the
+// list, by a statement whose where clause gives both, as MySQL frees the deletion lock without a
+// word if its connection is lost. It runs in a transaction, which is run again after a deadlock.
+// Here the list is a remote one, which has nothing on BattleMetrics.
+const remoteList = () =>
+  Object.assign(new ExportBanList(), { id: 42, name: 'List 42', server: 'S', type: 'remote' });
+// The queries, with their where clauses and the number of the transaction they ran in.
+const queries = () =>
+  calls.map(([call, options]) =>
+    typeof options === 'number'
+      ? [call, options]
+      : [call, { ...options.where }, options.transaction.number]
+  );
+reset();
+assert.strictEqual(await remoteList().deleteExportBanList({ owner: 'A' }), 'none');
+assert.deepStrictEqual(queries(), [
+  ['begin', 1],
+  ['destroy', { id: 42, owner: 'A' }, 1],
+  ['commit', 1]
+]);
+
+// A list given to another user meanwhile is kept, and the error says so, with the stage that
+// failed.
+reset();
+deletedRows = 0;
+countedRows = 1;
+await assert.rejects(remoteList().deleteExportBanList({ owner: 'A' }), {
+  message:
+    'This export ban list was given to another user while it was being deleted, so it was not deleted.',
+  stage: 'database deletion'
+});
+assert.deepStrictEqual(queries(), [
+  ['begin', 1],
+  ['destroy', { id: 42, owner: 'A' }, 1],
+  ['count', { id: 42 }, 1],
+  ['rollback', 1]
+]);
+
+// One that something else deleted meanwhile, e.g. the Discord bot, is gone, as asked.
+reset();
+deletedRows = 0;
+countedRows = 0;
+assert.strictEqual(await remoteList().deleteExportBanList({ owner: 'A' }), 'none');
+assert.deepStrictEqual(
+  queries().map(([call]) => call),
+  ['begin', 'destroy', 'count', 'commit']
+);
+
+// A deletion MySQL ends in a deadlock is run again.
+reset();
+attempts = [deadlock()];
+assert.strictEqual(await remoteList().deleteExportBanList({ owner: 'A' }), 'none');
+assert.deepStrictEqual(
+  queries().map(([call]) => call),
+  ['begin', 'destroy', 'rollback', 'begin', 'destroy', 'commit']
+);
+
+// The bot, which deletes lists whoever owns them, gives no owner, and the row is deleted by its ID.
+reset();
+assert.strictEqual(await remoteList().deleteExportBanList({ important: true }), 'none');
+assert.deepStrictEqual(calls, [['destroy this', 42]]);
+
 console.log(
-  "Export ban list lock checks passed: transactions run again after a deadlock, the lock on a user's lists, and the deletion lock."
+  "Export ban list lock checks passed: transactions run again after a deadlock, the lock on a user's lists, the deletion lock, and deletions only while the user owns the list."
 );
