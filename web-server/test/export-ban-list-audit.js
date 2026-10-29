@@ -806,6 +806,18 @@ await refused(
   'Export ban list config does not exist!',
   BOB
 );
+// So is a config for a ban list paused as the request read them, among the checks, before the list
+// is locked to save it.
+rows.BanList.push({ id: 5, name: 'Paused Bans', organisation: 1 });
+now += 60 * 1000;
+await assert.rejects(
+  Mutation.createExportBanListConfig(
+    null,
+    { ...configArgs, banList: 5 },
+    { ...as(ALICE), paused: new Set([5]) }
+  ),
+  { message: 'That ban list is paused, so no config can be added for it until it counts again.' }
+);
 assert.deepStrictEqual(take(), []);
 for (let i = 0; i < 3; i++)
   await change('createExportBanList', { name: `List ${i}`, server: 'Server', type: 'remote' });
