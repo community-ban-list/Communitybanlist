@@ -2,14 +2,17 @@ name: Pull request checks
 
 # Lint, test and build every pull request, so a change that breaks them shows on the pull request
 # before it is merged, not after. It runs for a pull request into any branch that has this file,
-# such as master or another pull request's branch. Pull requests from forks run code nobody has
-# reviewed yet, so the jobs run on GitHub's own runners rather than the self-hosted one, and the
-# trigger is pull_request, which gives a fork's run no secrets and a read-only token.
+# such as master or another pull request's branch. The jobs run on the self-hosted dal-1 runner, as
+# the image workflows do. A fork's pull request runs code nobody has reviewed yet, on that runner
+# and with its Docker access, so keep the repository's setting that a fork's runs wait for an
+# admin's approval, and read the code before approving them. The trigger is pull_request, which
+# gives a fork's run no secrets and a read-only token.
 on:
   pull_request:
 
 # A new push to a pull request cancels the checks still running for its earlier commit. The image
-# workflows use another group, so these checks never wait for a deployment.
+# workflows use another group, so a push to master never cancels these checks or is cancelled by
+# them. Both run on dal-1, though, so each may wait for the runner while the other uses it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -20,7 +23,7 @@ permissions:
 jobs:
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: dal-1
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -33,6 +36,10 @@ jobs:
         with:
           node-version: 26
 
+      # The self-hosted runner may not have Yarn, so install the Yarn 1 release the images use.
+      - name: Install Yarn
+        run: npm install --global yarn@1.22.22
+
       - name: Install dependencies
         run: yarn install
 
@@ -42,7 +49,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: dal-1
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -54,6 +61,10 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26
+
+      # The self-hosted runner may not have Yarn, so install the Yarn 1 release the images use.
+      - name: Install Yarn
+        run: npm install --global yarn@1.22.22
 
       - name: Install dependencies
         run: yarn install
@@ -75,7 +86,7 @@ jobs:
   image-build:
     name: Image build
     if: github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: dal-1
     timeout-minutes: 30
     steps:
       - name: Checkout
