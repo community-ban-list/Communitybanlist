@@ -39,10 +39,14 @@ export function describeBanListDeletion({ bans, steamUsers, exportBanListConfigs
 
 // Delete the ban lists' bans in the transaction. The banned Steam users are queued to be updated,
 // as the ban importer does when their bans change, so their reputation and export bans are
-// recalculated without these bans on the next run.
-export async function deleteBansOfBanLists(banListIDs, transaction) {
-  await sequelize.query(
-    `
+// recalculated without these bans on the next run. Not those of the paused lists, whose IDs are in
+// paused: their bans count for nothing, so deleting them changes no player's points, and queueing
+// every player of a large list at once holds up the website while the importer recalculates them.
+export async function deleteBansOfBanLists(banListIDs, transaction, { paused = [] } = {}) {
+  const counted = banListIDs.filter((id) => !paused.includes(id));
+  if (counted.length > 0)
+    await sequelize.query(
+      `
       UPDATE SteamUsers SU
       JOIN (
         SELECT DISTINCT steamUser FROM Bans WHERE banList IN (:banListIDs)
@@ -52,8 +56,8 @@ export async function deleteBansOfBanLists(banListIDs, transaction) {
         SU.lastRefreshedReputationPoints = NULL,
         SU.lastRefreshedReputationRank = NULL
     `,
-    { replacements: { banListIDs }, transaction }
-  );
+      { replacements: { banListIDs: counted }, transaction }
+    );
   await Ban.destroy({ where: { banList: banListIDs }, transaction });
 }
 
@@ -61,14 +65,15 @@ export async function deleteBansOfBanLists(banListIDs, transaction) {
 // is deleted too if one is given. The deletion is one transaction, run again if it ends in a
 // deadlock or a lock wait timeout, which a ban importer run writing the same players can cause.
 // Every statement in it can run again, as a rolled back transaction changed nothing, and the
-// organisation is deleted by its ID.
-export async function deleteBanLists(banListIDs, organisation = null) {
+// organisation is deleted by its ID. A paused list's row of BanListSuspensions goes with it, by its
+// foreign key, and its players are not queued (see deleteBansOfBanLists).
+export async function deleteBanLists(banListIDs, organisation = null, { paused = [] } = {}) {
   for (let attempt = 1; ; attempt++) {
     try {
       return await sequelize.transaction(async (transaction) => {
         if (banListIDs.length > 0) {
           // Delete dependent records explicitly rather than relying on the database's cascades.
-          await deleteBansOfBanLists(banListIDs, transaction);
+          await deleteBansOfBanLists(banListIDs, transaction, { paused });
           await ExportBanListConfig.destroy({ where: { banList: banListIDs }, transaction });
           await BanList.destroy({ where: { id: banListIDs }, transaction });
         }

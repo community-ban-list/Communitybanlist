@@ -1,3 +1,4 @@
+import { excludedBanListsSQL } from './excluded-ban-lists.js';
 import sequelize, { QueryTypes } from './sequelize.js';
 
 // Who is on an export ban list. The importer recalculates the lists with membershipForPlayers, and
@@ -11,6 +12,9 @@ import sequelize, { QueryTypes } from './sequelize.js';
 //   has none or the config's value is NULL. With several configs for one ban list, the largest
 //   active points count, and the expired points of every one are added up.
 // - A player whose points from every ban list reach the list's threshold is on it.
+// - The bans of paused ban lists count for nothing (see ban-list-suspensions.js). Each statement is
+//   given their IDs (excludedBanLists), as the caller read them, and with none to leave out it is
+//   the statement it was before lists could be paused.
 
 // The columns of an export ban list that decide who is on it. Its configs are the only other input.
 export const SCORING_FIELDS = [
@@ -48,10 +52,21 @@ const TEMPORARY_TABLE_SIZE = 64 * 1024 * 1024;
 // and the statement then runs with none.
 const MAX_TIME_LIMIT = 4294967295;
 
+// Whether the bans of the lists with these IDs are left out, as the condition that leaves them out,
+// joined on with AND, or nothing when there are none. The IDs must be given: an undefined one
+// throws a TypeError, as a caller that forgot them would count the bans of paused lists.
+function andNotExcluded(excludedBanLists) {
+  if (excludedBanLists === undefined)
+    throw new TypeError('The excluded ban lists are undefined. Give [] for none.');
+  const condition = excludedBanListsSQL(excludedBanLists);
+  return condition ? ` AND ${condition}` : '';
+}
+
 // The export bans that the players with these Steam IDs qualify for, on every export ban list, as
-// new ExportBans rows: [{ id, status, steamUser, exportBanList }]. The caller chooses the
-// transaction it runs in.
-export function membershipForPlayers(steamUserIDs, { transaction }) {
+// new ExportBans rows: [{ id, status, steamUser, exportBanList }], leaving out the bans of the ban
+// lists with the IDs in excludedBanLists. The caller chooses the transaction it runs in.
+export function membershipForPlayers(steamUserIDs, { transaction, excludedBanLists }) {
+  const notExcluded = andNotExcluded(excludedBanLists);
   return sequelize.query(
     `
       SELECT
@@ -69,7 +84,7 @@ export function membershipForPlayers(steamUserIDs, { transaction }) {
         FROM Bans B
         CROSS JOIN ExportBanLists EBL
         LEFT JOIN ExportBanListConfigs EBLC ON EBL.id = EBLC.exportBanList AND B.banList = EBLC.banList
-        WHERE ${COUNTED} AND B.steamUser IN (?)
+        WHERE ${COUNTED} AND B.steamUser IN (?)${notExcluded}
         GROUP BY EBL.id, B.steamUser, B.banList
       ) A
       GROUP BY exportBanList, steamUser
@@ -86,8 +101,9 @@ export function membershipForPlayers(steamUserIDs, { transaction }) {
 // The statement that finds the players a list with these settings and configs would hold, with
 // its replacements, and the optimizer hints for the statement it goes in. The settings and configs
 // take the place of the list's rows in ExportBanLists and ExportBanListConfigs, so the rule is the
-// importer's, piece for piece.
-function qualifyingPlayers(settings, configs, timeLimit) {
+// importer's, piece for piece. The bans of the ban lists with the IDs in excludedBanLists are left
+// out.
+function qualifyingPlayers(settings, configs, timeLimit, excludedBanLists) {
   // A setting left undefined means the caller did not merge in the stored values, and sending NULL
   // in its place could count fewer players than the importer will, or none. A NULL one is sent as
   // NULL, as the importer would read it.
@@ -106,6 +122,7 @@ function qualifyingPlayers(settings, configs, timeLimit) {
     throw new TypeError(
       `The time limit must be a whole number of milliseconds from 1 to ${MAX_TIME_LIMIT}.`
     );
+  const notExcluded = andNotExcluded(excludedBanLists);
 
   // Each config is a row of literals, which UNION ALL keeps even when it repeats another, so
   // duplicates count as they do in the importer. MySQL reads these faster than a JSON_TABLE.
@@ -132,7 +149,7 @@ function qualifyingPlayers(settings, configs, timeLimit) {
         FROM Bans B
         CROSS JOIN (SELECT ${SCORING_FIELDS.map((field) => `? AS ${field}`).join(', ')}) EBL
         LEFT JOIN (${configRows}) EBLC ON B.banList = EBLC.banList
-        WHERE ${COUNTED}
+        WHERE ${COUNTED}${notExcluded}
         GROUP BY B.steamUser, B.banList
       ) A
       GROUP BY steamUser
@@ -151,12 +168,19 @@ function qualifyingPlayers(settings, configs, timeLimit) {
 // - configs are the list's configs as stored, duplicates and NULLs included, with a change applied:
 //   plus a new config, or minus a deleted one. A new list has none.
 // - timeLimit is how long MySQL may take, in milliseconds.
+// - excludedBanLists are the IDs of the ban lists whose bans are left out, [] for none. It must be
+//   given: undefined throws a TypeError.
 // The count is one statement outside any transaction, so it reads a consistent snapshot and takes
 // no locks: in the importer's SERIALIZABLE transaction it would lock every ban it reads. Errors,
 // such as MySQL's ER_QUERY_TIMEOUT when the time limit is reached, are passed on as Sequelize
 // gives them.
-export async function countMembers(settings, configs, { timeLimit = 3000 } = {}) {
-  const { hints, sql, replacements } = qualifyingPlayers(settings, configs, timeLimit);
+export async function countMembers(settings, configs, { timeLimit = 3000, excludedBanLists } = {}) {
+  const { hints, sql, replacements } = qualifyingPlayers(
+    settings,
+    configs,
+    timeLimit,
+    excludedBanLists
+  );
   const [{ players }] = await sequelize.query(
     `SELECT ${hints} COUNT(*) AS players FROM (${sql}) Q`,
     {
@@ -168,8 +192,13 @@ export async function countMembers(settings, configs, { timeLimit = 3000 } = {})
 }
 
 // The Steam IDs of the players countMembers counts, as it would count them.
-export async function findMembers(settings, configs, { timeLimit = 3000 } = {}) {
-  const { hints, sql, replacements } = qualifyingPlayers(settings, configs, timeLimit);
+export async function findMembers(settings, configs, { timeLimit = 3000, excludedBanLists } = {}) {
+  const { hints, sql, replacements } = qualifyingPlayers(
+    settings,
+    configs,
+    timeLimit,
+    excludedBanLists
+  );
   const rows = await sequelize.query(`SELECT ${hints} steamUser FROM (${sql}) Q`, {
     type: QueryTypes.SELECT,
     replacements

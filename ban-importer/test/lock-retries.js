@@ -2,6 +2,7 @@ import assert from 'assert';
 import { readFile } from 'fs/promises';
 import vm from 'vm';
 
+import * as excludedBanLists from '../../scbl-lib/db/excluded-ban-lists.js';
 import describeError from '../../scbl-lib/utils/describe-error.js';
 
 // Check that the statements that recalculate players' reputation points, ranks and export bans are
@@ -167,6 +168,12 @@ const SteamUser = {
 const stubs = {
   'scbl-lib/config': { HOST: 'https://communitybanlist.example' },
   'scbl-lib/db': { sequelize },
+  // No ban list is paused, as the run reads them with the real paused-lists.js.
+  'scbl-lib/db/ban-list-suspensions': {
+    readPausedBanLists: async () => [],
+    pausedSets: () => ({ suspended: [], excluded: [] })
+  },
+  'scbl-lib/db/excluded-ban-lists': { ...excludedBanLists },
   'scbl-lib/db/export-membership': { membershipForPlayers },
   'scbl-lib/db/models': { ExportBan, ExportBanList, SteamUser },
   'scbl-lib/db/sequelize': {

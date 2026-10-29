@@ -4,7 +4,8 @@ import { QueryTypes } from 'scbl-lib/db/sequelize';
 import { Logger, logText } from 'scbl-lib/utils';
 
 import { BATCH_SIZE, retryOperation, timeOf } from './apply-list.js';
-import { FIND_MISMATCHED } from './reputation-points.js';
+import pausedBanLists from './paused-lists.js';
+import { findMismatched } from './reputation-points.js';
 import { checkRunLock, reportProgress, stopIfRequested } from './run-control.js';
 
 // The reputation check, a safety net for players' reputation points. A player's points, and from
@@ -32,8 +33,22 @@ import { checkRunLock, reportProgress, stopIfRequested } from './run-control.js'
 // A run's check queues at most MAX_QUEUED players, so the recalculation after it stays short, and
 // leaves the others for the next runs, which check again until none are left (see MAX_QUEUED).
 
-// The ImporterState row that keeps when the run that last checked started, when it checked, and
-// what it found.
+// The check also settles the players of ban lists an admin paused or that count again (see
+// paused-lists.js), whose bans then count for nothing, or again: rather than every one of a large
+// list's players being queued at once, which would hold up the website for as long as a minute,
+// the check finds them, as their points no longer match their bans, and queues them a run at a
+// time, as it does any others. So its row also keeps the paused lists whose bans were left out
+// when it last checked (excludedBanLists), and whether players it found then are still left
+// (pending), and the check is due, whenever it is next due by time, also as soon as a run sees
+// other lists paused than those, or while players are left, even with
+// IMPORTER_REPUTATION_CHECK_HOURS at 0, which turns off only the daily check. Every step of a run
+// leaves out the same lists (see paused-lists.js), so the players recalculated in a run are always
+// recalculated with the lists the row names, or the next run checks them: e.g. a list paused and
+// resumed again before all its players were settled has the players recalculated without its bans
+// found again, as the row still names it.
+
+// The ImporterState row that keeps when the run that last checked started, when it checked, what
+// it found, and the paused lists it left out.
 export const STATE_ROW = 'reputationCheck';
 
 // The check is due every 24 hours, unless IMPORTER_REPUTATION_CHECK_HOURS says otherwise, from 0,
@@ -115,12 +130,50 @@ export function dueAt({ last, hours, cadenceSeconds, startedAt }) {
   return last + hours * HOUR - Math.min(LEEWAY, (cadenceSeconds * 1000) / 10);
 }
 
+// The paused lists a row says the check last left out, and whether players it found then are still
+// left, from a row of an older version, without them, as none and not.
+function settledOf(row) {
+  const ids = row?.value?.excludedBanLists;
+  return {
+    excluded: Array.isArray(ids)
+      ? [...new Set(ids.filter((id) => Number.isSafeInteger(id) && id > 0))].sort((a, b) => a - b)
+      : [],
+    pending: row?.value?.pending === true
+  };
+}
+
+// Whether two lists of ban list IDs, each in order, hold the same IDs.
+const sameIDs = (a, b) => a.length === b.length && a.every((id, index) => id === b[index]);
+
+// What changed in the paused lists since the check last left out those in before, now that those
+// in after are left out, for the log channel, e.g. "ban list 46 was paused and ban lists 7 and 9
+// count again", or null when nothing did.
+function describePausedChange(before, after) {
+  const names = (ids) =>
+    ids.length === 1
+      ? `ban list ${ids[0]}`
+      : `ban lists ${ids.slice(0, -1).join(', ')} and ${ids.at(-1)}`;
+  const paused = after.filter((id) => !before.includes(id));
+  const counting = before.filter((id) => !after.includes(id));
+  const parts = [];
+  if (paused.length > 0)
+    parts.push(`${names(paused)} ${paused.length === 1 ? 'was' : 'were'} paused`);
+  if (counting.length > 0)
+    parts.push(`${names(counting)} ${counting.length === 1 ? 'counts' : 'count'} again`);
+  return parts.length > 0 ? parts.join(' and ') : null;
+}
+
 // The log channel's line about players the check queued, given as { id, reputationPoints, points },
 // with their stored points and those their bans give, in the order they were queued, and about
 // those it left for the next runs (left), as it stopped part-way (stopped) or queues at most
 // maxQueued a run. A player's ID is shown as written (logText), as players saved before SteamIDs
-// were checked can have other IDs, e.g. the address of a Steam profile named by its player.
-function describeQueued(players, { left = 0, stopped = false, maxQueued = MAX_QUEUED } = {}) {
+// were checked can have other IDs, e.g. the address of a Steam profile named by its player. When
+// the paused lists changed since the last check (pausedChange, as describePausedChange gives it),
+// the line says so, as that is why their points no longer match.
+function describeQueued(
+  players,
+  { left = 0, stopped = false, maxQueued = MAX_QUEUED, pausedChange = null } = {}
+) {
   const examples = players.slice(0, MAX_EXAMPLES).map(({ id, reputationPoints, points }) => {
     const had =
       reputationPoints === null || reputationPoints === undefined
@@ -135,7 +188,10 @@ function describeQueued(players, { left = 0, stopped = false, maxQueued = MAX_QU
     rest = ` The check stopped before it queued the other ${formatCount(left)}, which are left for the next runs, as the check is due again until none are left.`;
   else if (left > 0)
     rest = ` It queues at most ${plural(maxQueued, 'player')} a run, so the recalculation after it stays short: the other ${formatCount(left)} are left for the next runs, as the check is due again until none are left.`;
-  return `Queued ${plural(players.length, 'player')} for a recalculation, as their reputation points did not match their bans: ${examples.join(', ')}${more}. This means bans were removed, or changed, without queueing their players, e.g. as a ban list was deleted by hand rather than with /banlist remove.${rest}`;
+  const why = pausedChange
+    ? `${pausedChange[0].toUpperCase()}${pausedChange.slice(1)} since the last check: a paused ban list's bans count for nothing until it counts again.`
+    : 'This means bans were removed, or changed, without queueing their players, e.g. as a ban list was deleted by hand rather than with /banlist remove.';
+  return `Queued ${plural(players.length, 'player')} for a recalculation, as their reputation points did not match their bans: ${examples.join(', ')}${more}. ${why}${rest}`;
 }
 
 // Check every player's reputation points against their bans, if the check is due, and queue those
@@ -149,7 +205,12 @@ function describeQueued(players, { left = 0, stopped = false, maxQueued = MAX_QU
 // holds its locks before it writes. Once it has queued them all, it saves when the run started, for
 // the next run to tell when the check is due: a check that left players for the next runs, as it
 // queued as many as it may, stopped part-way or failed, saves no row, so the next run checks
-// again. hours is the setting, cadenceSeconds how often runs start and startedAt when this one did.
+// again, unless the paused lists changed: it then saves them, with the time of the check before,
+// and that players are left (pending), so the next run checks again too. It leaves out the bans of
+// the lists paused as the run saw them (see paused-lists.js), and is also due when those differ
+// from the ones its row names, or players are left, even when the setting is 0, which turns off
+// only the daily check. hours is the setting, cadenceSeconds how often runs start and startedAt
+// when this one did.
 export async function checkReputationPoints(
   counts = {},
   {
@@ -170,39 +231,54 @@ export async function checkReputationPoints(
     Logger.important('Reputation', setting.warning);
   }
 
-  if (setting.hours === 0) {
-    Object.assign(counts, { ran: false, off: true });
-    Logger.verbose(
-      'Reputation',
-      2,
-      'Skipped the reputation check, as IMPORTER_REPUTATION_CHECK_HOURS is 0, which turns it off.'
-    );
-    return;
-  }
-
+  const { excluded } = await pausedBanLists({ startedAt });
   const row = await retryOperation(() => ImporterState.findByPk(STATE_ROW));
-  const due = dueAt({
-    last: timeOf(row?.value?.startedAt),
-    hours: setting.hours,
-    cadenceSeconds,
-    startedAt
-  });
-  if (startedAt < due) {
-    Object.assign(counts, { ran: false, dueAt: new Date(due).toISOString() });
-    Logger.verbose(
-      'Reputation',
-      2,
-      `Skipped the reputation check, as it is not due until ${counts.dueAt}: it runs every ${plural(setting.hours, 'hour')} (IMPORTER_REPUTATION_CHECK_HOURS).`
-    );
-    return;
+  const settled = settledOf(row);
+  const pausedChange = sameIDs(excluded, settled.excluded)
+    ? null
+    : describePausedChange(settled.excluded, excluded);
+
+  // With nothing to settle, the check runs only when it is due by time.
+  if (pausedChange === null && !settled.pending) {
+    if (setting.hours === 0) {
+      Object.assign(counts, { ran: false, off: true });
+      Logger.verbose(
+        'Reputation',
+        2,
+        'Skipped the reputation check, as IMPORTER_REPUTATION_CHECK_HOURS is 0, which turns it off.'
+      );
+      return;
+    }
+    const due = dueAt({
+      last: timeOf(row?.value?.startedAt),
+      hours: setting.hours,
+      cadenceSeconds,
+      startedAt
+    });
+    if (startedAt < due) {
+      Object.assign(counts, { ran: false, dueAt: new Date(due).toISOString() });
+      Logger.verbose(
+        'Reputation',
+        2,
+        `Skipped the reputation check, as it is not due until ${counts.dueAt}: it runs every ${plural(setting.hours, 'hour')} (IMPORTER_REPUTATION_CHECK_HOURS).`
+      );
+      return;
+    }
   }
 
-  Logger.verbose('Reputation', 2, "Checking players' reputation points against their bans...");
+  Logger.verbose(
+    'Reputation',
+    2,
+    pausedChange
+      ? `Checking players' reputation points against their bans, as ${pausedChange} since the last check...`
+      : "Checking players' reputation points against their bans..."
+  );
+  const statement = findMismatched(excluded);
   const [{ checked } = {}] = await retryOperation(() =>
     sequelize.query(COUNT_CHECKED, { type: QueryTypes.SELECT })
   );
   const mismatched = await retryOperation(() =>
-    sequelize.query(FIND_MISMATCHED, { type: QueryTypes.SELECT })
+    sequelize.query(statement, { type: QueryTypes.SELECT })
   );
   // Only now are there counts, so a check that could not read the players does not say that every
   // player's points matched.
@@ -239,13 +315,29 @@ export async function checkReputationPoints(
       Logger.verbose(
         'Reputation',
         1,
-        describeQueued(players.slice(0, counts.queued), { left: counts.left, stopped, maxQueued })
+        describeQueued(players.slice(0, counts.queued), {
+          left: counts.left,
+          stopped,
+          maxQueued,
+          pausedChange
+        })
       );
   }
 
   const took = () => `Took ${((Date.now() - startTime) / 1000).toFixed(2)}s`;
   // Players are left for the next runs, so the next run checks again, as no row says this one did.
+  // When the paused lists changed, the row says which are now left out, as the players this run
+  // queued are recalculated without their bans, and that players are left, so the next run checks
+  // again whether or not it is due by time, and then knows which lists those players' points left
+  // out. The time of the last check that finished is kept.
   if (counts.left > 0) {
+    if (pausedChange !== null)
+      await retryOperation(() =>
+        ImporterState.upsert({
+          name: STATE_ROW,
+          value: { ...(row?.value ?? {}), excludedBanLists: excluded, pending: true }
+        })
+      );
     Logger.verbose(
       'Reputation',
       2,
@@ -262,7 +354,9 @@ export async function checkReputationPoints(
         startedAt: new Date(startedAt).toISOString(),
         checkedAt: new Date().toISOString(),
         checked: counts.checked,
-        queued: counts.queued
+        queued: counts.queued,
+        excludedBanLists: excluded,
+        pending: false
       }
     })
   );

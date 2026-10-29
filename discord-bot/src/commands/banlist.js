@@ -1,7 +1,13 @@
 import { SlashCommandBuilder } from 'discord.js';
 
 import { isRunLockHeld, sequelize } from 'scbl-lib/db';
-import { BanList } from 'scbl-lib/db/models';
+import {
+  isMissingTable,
+  MAX_REASON_LENGTH,
+  resumeBanList,
+  suspendBanList
+} from 'scbl-lib/db/ban-list-suspensions';
+import { BanList, Organisation } from 'scbl-lib/db/models';
 import { Op } from 'scbl-lib/db/sequelize';
 
 import {
@@ -9,6 +15,7 @@ import {
   audit,
   banListEmbed,
   banListOption,
+  banListStatusEmbed,
   banListSourceOption,
   banListTypeOption,
   bold,
@@ -21,15 +28,24 @@ import {
   describeBanListDeletion,
   findBanList,
   findOrganisation,
+  describeImport,
+  describePause,
   formatBanListName,
   formatBanListType,
+  listEmbed,
+  NO_TABLES,
   organisationOption,
   parseBanListSource,
+  pauseState,
+  plural,
+  readPause,
+  readStatus,
   skipCheckOption,
   suggestBanLists,
   suggestOrganisations,
   summariseBanListBans,
   summariseBanListDeletion,
+  truncate,
   UserError
 } from '../utils/index.js';
 
@@ -73,7 +89,47 @@ const data = new SlashCommandBuilder()
       .setName('remove')
       .setDescription('Remove a ban list along with its bans.')
       .addStringOption((option) => banListOption(option, 'Ban list to remove.'))
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName('suspend')
+      .setDescription(
+        'Stop importing a ban list, and stop its bans counting anywhere, until resumed.'
+      )
+      .addStringOption((option) => banListOption(option, 'Ban list to suspend.'))
+      .addStringOption((option) =>
+        option
+          .setName('reason')
+          .setDescription('Why it is suspended, for the log and /banlist status.')
+          .setMaxLength(MAX_REASON_LENGTH)
+      )
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName('resume')
+      .setDescription('Import a suspended ban list again, so its bans count again.')
+      .addStringOption((option) => banListOption(option, 'Ban list to resume.'))
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName('status')
+      .setDescription('Show whether ban lists are paused, and how they were last imported.')
+      .addStringOption((option) =>
+        banListOption(option, 'Ban list to show. Leave out for every ban list.', {
+          required: false
+        })
+      )
   );
+
+// The ban importer recalculates players' reputation points at most this many players a cycle when
+// a list is paused or counts again (see ban-importer/src/reputation-check.js).
+const SETTLED_PER_CYCLE = 1000;
+
+// How long a pause takes to reach the players of a list with this many players.
+function settles(steamUsers) {
+  const cycles = Math.max(1, Math.ceil(steamUsers / SETTLED_PER_CYCLE));
+  return `Export bans follow on the next ban importer cycle, and players' reputation points within ${plural(cycles, 'cycle')}.`;
+}
 
 // Ban lists are shown by name next to their organisation, so names must be unique within one.
 async function checkName(name, organisation, banList = null) {
@@ -133,16 +189,23 @@ async function update(interaction) {
     throw new UserError('Nothing to change. Give a new name, type or source.');
 
   // The list's bans came from its old source, so a new type or source deletes them, and the new
-  // source's bans are imported on the next ban importer run. Left to the importer, most of them
-  // would be kept, as it holds back removing many of a list's bans at once.
+  // source's bans are imported on the next ban importer run, or once the list is resumed, if it is
+  // suspended. Left to the importer, most of them would be kept, as it holds back removing many of
+  // a list's bans at once.
   let deletion = null;
+  let paused = null;
   if (check !== undefined) {
+    paused = (await readPause(banList.id).catch(ignoreMissingTables)) ?? null;
+    const imported =
+      pauseState(paused) === 'suspended'
+        ? 'imported once it is resumed'
+        : 'imported on the next ban importer run';
     const bans = await summariseBanListBans([banList.id]);
     if (bans.bans > 0) {
       deletion = describeBanListDeletion(bans);
       const confirmed = await confirm(
         interaction,
-        `Change the source of ${currentName}? This deletes its ${deletion}, and the new source's bans are imported on the next ban importer run.`,
+        `Change the source of ${currentName}? This deletes its ${deletion}, and the new source's bans are ${imported}.`,
         'Change source'
       );
       if (!confirmed) return;
@@ -158,19 +221,23 @@ async function update(interaction) {
       );
   }
 
+  // A paused list's bans count for nothing, so its players are not queued (see deleteBanLists).
+  const pausedIDs = pauseState(paused) ? [banList.id] : [];
   await sequelize.transaction(async (transaction) => {
-    if (deletion) await deleteBansOfBanLists([banList.id], transaction);
+    if (deletion) await deleteBansOfBanLists([banList.id], transaction, { paused: pausedIDs });
     await banList.save({ transaction });
   });
   const deleted = deletion ? `, deleting ${deletion}` : '';
   audit(interaction, `updated ${description}: ${changes.join(', ')}${deleted}.`);
 
   const listName = formatBanListName(banList, organisation);
+  const reimported =
+    pauseState(paused) === 'suspended'
+      ? 'Its bans are imported from the new source once it is resumed.'
+      : 'Its bans are re-imported on the next ban importer run.';
   await interaction.editReply({
-    content: check
-      ? `Updated ${listName}. ${check} Its bans are re-imported on the next ban importer run.`
-      : `Updated ${listName}.`,
-    embeds: [banListEmbed(banList, organisation)]
+    content: check ? `Updated ${listName}. ${check} ${reimported}` : `Updated ${listName}.`,
+    embeds: [banListEmbed(banList, organisation, paused)]
   });
 }
 
@@ -179,6 +246,7 @@ async function remove(interaction) {
   const organisation = banList.Organisation;
   const listName = formatBanListName(banList, organisation);
   const deletion = describeBanListDeletion(await summariseBanListDeletion([banList.id]));
+  const paused = pauseState(await readPause(banList.id).catch(ignoreMissingTables));
 
   const confirmed = await confirm(
     interaction,
@@ -187,15 +255,152 @@ async function remove(interaction) {
   );
   if (!confirmed) return;
 
-  await deleteBanLists([banList.id]);
+  await deleteBanLists([banList.id], null, { paused: paused ? [banList.id] : [] });
   audit(interaction, `removed ${describeBanList(banList, organisation)}, deleting ${deletion}.`);
 
   await interaction.editReply(
-    `Removed ${listName}. Affected players' reputation is recalculated on the next ban importer run.`
+    paused
+      ? `Removed ${listName}. It was ${paused}, so its bans counted for nothing, and no player's reputation changes.`
+      : `Removed ${listName}. Affected players' reputation is recalculated on the next ban importer run.`
   );
 }
 
-const subcommands = { add, update, remove };
+// A paused list is read as not paused while the ban importer has not made its tables, as none can
+// be paused then.
+function ignoreMissingTables(err) {
+  if (err?.message === NO_TABLES || isMissingTable(err)) return null;
+  throw err;
+}
+
+// Who made a change, as the audit line names them.
+const describeUser = (interaction) => `${interaction.user.tag} (${interaction.user.id})`;
+
+async function suspend(interaction) {
+  const banList = await findBanList(interaction.options.getString('banlist', true));
+  const organisation = banList.Organisation;
+  const listName = formatBanListName(banList, organisation);
+  const reason = interaction.options.getString('reason')?.trim() || null;
+
+  const before = await readPause(banList.id);
+  if (pauseState(before) === 'suspended')
+    throw new UserError(`${listName} is suspended already.\n${describePause(before)}`);
+
+  const bans = await summariseBanListBans([banList.id]);
+  const resuming = pauseState(before) === 'resuming' ? ' It stops resuming.' : '';
+  const confirmed = await confirm(
+    interaction,
+    `Suspend ${listName}? Its ${describeBanListDeletion(bans)} stop counting toward reputation and export ban lists, and are left out of the website's lists of bans. The ban importer stops importing it until it is resumed.${resuming} ${settles(bans.steamUsers)}`,
+    'Suspend ban list'
+  );
+  if (!confirmed) return;
+
+  const { outcome, row } = await suspendBanList(banList.id, {
+    by: describeUser(interaction),
+    reason
+  }).catch((err) => {
+    if (isMissingTable(err)) throw new UserError(NO_TABLES);
+    throw err;
+  });
+  if (outcome === 'gone')
+    throw new UserError(`${listName} was removed meanwhile, so nothing was suspended.`);
+  if (outcome === 'already') {
+    await interaction.editReply({
+      content: `${listName} was suspended meanwhile, so nothing was changed.`,
+      embeds: [banListEmbed(banList, organisation, row)]
+    });
+    return;
+  }
+
+  audit(
+    interaction,
+    `suspended ${describeBanList(banList, organisation)}${reason ? `, for the reason "${reason}"` : ''}.`
+  );
+  await interaction.editReply({
+    content: `Suspended ${listName}. Resume it with /banlist resume.`,
+    embeds: [banListEmbed(banList, organisation, row)]
+  });
+}
+
+async function resume(interaction) {
+  const banList = await findBanList(interaction.options.getString('banlist', true));
+  const organisation = banList.Organisation;
+  const listName = formatBanListName(banList, organisation);
+
+  const before = await readPause(banList.id);
+  if (!pauseState(before)) throw new UserError(`${listName} is not suspended.`);
+  if (pauseState(before) === 'resuming')
+    throw new UserError(`${listName} is resuming already.\n${describePause(before)}`);
+
+  const bans = await summariseBanListBans([banList.id]);
+  const confirmed = await confirm(
+    interaction,
+    `Resume ${listName}? The ban importer reads it in full on its next cycle, and its ${describeBanListDeletion(bans)} count again once that read has confirmed the bans its owner removed meanwhile. ${settles(bans.steamUsers)}`,
+    'Resume ban list'
+  );
+  if (!confirmed) return;
+
+  const { outcome, row } = await resumeBanList(banList.id).catch((err) => {
+    if (isMissingTable(err)) throw new UserError(NO_TABLES);
+    throw err;
+  });
+  if (outcome !== 'resuming') {
+    await interaction.editReply({
+      content: `${listName} was ${outcome === 'already' ? 'resumed' : 'no longer suspended'} meanwhile, so nothing was changed.`,
+      embeds: [banListEmbed(banList, organisation, row)]
+    });
+    return;
+  }
+
+  audit(interaction, `resumed ${describeBanList(banList, organisation)}.`);
+  await interaction.editReply({
+    content: `Resumed ${listName}. It counts again once the ban importer has caught up with it, which /banlist status shows.`,
+    embeds: [banListEmbed(banList, organisation, row)]
+  });
+}
+
+async function status(interaction) {
+  const value = interaction.options.getString('banlist');
+  if (value) {
+    const banList = await findBanList(value);
+    const { paused, syncs, removals } = await readStatus([banList.id]);
+    await interaction.editReply({
+      embeds: [
+        banListStatusEmbed(banList, banList.Organisation, {
+          paused: paused.get(banList.id) ?? null,
+          sync: syncs.get(banList.id) ?? null,
+          removals: removals.get(banList.id)
+        })
+      ]
+    });
+    return;
+  }
+
+  const banLists = await BanList.findAll({
+    include: [{ model: Organisation, required: true }],
+    order: [
+      [Organisation, 'name', 'ASC'],
+      ['name', 'ASC']
+    ]
+  });
+  const { paused, syncs, removals } = await readStatus(banLists.map((banList) => banList.id));
+  const lines = banLists.map((banList) => {
+    const state = pauseState(paused.get(banList.id));
+    const imported = describeImport(syncs.get(banList.id), removals.get(banList.id)).split('\n')[0];
+    return `${formatBanListName(banList, banList.Organisation)} (#${banList.id})${state ? ` · **${state}**` : ''}\n${imported}`;
+  });
+  const pausedCount = banLists.filter((banList) => paused.has(banList.id)).length;
+  await interaction.editReply({
+    embeds: [
+      listEmbed(
+        'Ban lists',
+        truncate(lines.join('\n\n'), 4096) || 'No ban lists yet.',
+        `${plural(banLists.length, 'ban list')}, ${pausedCount} paused. Pick one for its details.`
+      )
+    ]
+  });
+}
+
+const subcommands = { add, update, remove, suspend, resume, status };
 
 export default {
   data,

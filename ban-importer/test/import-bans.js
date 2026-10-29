@@ -475,8 +475,33 @@ const remoteLists = new Map();
 const remoteRequests = [];
 const remoteHeaders = [];
 
+// The paused ban lists' rows, as the run reads them (see paused-lists.js), and the resumptions the
+// import ended, as [banList, resumedAt], which delete the rows that still have that resumedAt.
+let pausedRows = [];
+const endedResumptions = [];
+const pausedIDs = (rows) => rows.map(({ banList }) => banList).sort((a, b) => a - b);
+
 const env = {};
 const dependencies = {
+  './paused-lists.js': {
+    default: async () => ({
+      rows: pausedRows.map((row) => ({ ...row })),
+      suspended: pausedIDs(pausedRows.filter(({ resumedAt }) => resumedAt === null)),
+      excluded: pausedIDs(pausedRows)
+    })
+  },
+  'scbl-lib/db/ban-list-suspensions': {
+    async endResumption(banList, resumedAt) {
+      events.push(`end resumption ${banList}`);
+      endedResumptions.push([banList, resumedAt]);
+      const index = pausedRows.findIndex(
+        (row) => row.banList === banList && row.resumedAt === resumedAt
+      );
+      if (index === -1) return false;
+      pausedRows.splice(index, 1);
+      return true;
+    }
+  },
   axios: {
     default: {
       async get(url, options) {
@@ -612,9 +637,11 @@ function reset() {
     battlemetricsParams,
     banListReads,
     syncSaves,
-    exportBanLists
+    exportBanLists,
+    endedResumptions
   ])
     list.length = 0;
+  pausedRows = [];
   onWrite = null;
   onCount = null;
   onBattlemetrics = null;
@@ -5497,6 +5524,139 @@ assert.deepStrictEqual(plainReport(stoppedImporter), {
     stage: 'saving its bans'
   }
 });
+
+// Paused ban lists (see paused-lists.js), with an importer of their own, as the checks above leave
+// theirs asked to stop. A suspended list is not imported at all: not fetched, not counted among the
+// run's lists and given no row, and the run says how many it left out.
+// Each run is a minute after the one before, on a clock of their own, so a list resumed between two
+// runs was resumed after the first read it.
+const { BanImporter: PausedImporter } = await loadImporter();
+let pausedNow = Date.parse('2026-10-29T12:00:00.000Z');
+const pausedPoll = () => {
+  pausedNow += 60 * 1000;
+  return pollRun({ clock: () => pausedNow }, PausedImporter);
+};
+reset();
+delete env.IMPORTER_HEAD_POLL;
+battlemetricsList(120, [], paged(pairs('s', 0, 4)));
+battlemetricsList(121, pairs('t', 0, 2), paged(pairs('t', 0, 4)));
+pausedRows = [{ banList: 121, resumedAt: null }];
+let pausedRun = await pausedPoll();
+assert.deepStrictEqual(readsOf(pausedRun), [[120, 'full', 'new']]);
+assert.ok(asked().every(([list]) => list === 'bm-120'));
+assert.deepStrictEqual(
+  [pausedRun.report.lists, pausedRun.report.imported, pausedRun.report.suspended],
+  [1, 1, 1]
+);
+assert.strictEqual(pausedRun.report.caughtUp, undefined);
+assert.deepStrictEqual(storedIDs(121), ['121,t0', '121,t1']);
+assert.strictEqual(syncRows.has(121), false);
+assert.strictEqual(
+  logged(2, /^Fetched 1 ban lists to import, leaving out 1 suspended ban list \(121\)\.$/).length,
+  1
+);
+assert.deepStrictEqual(endedResumptions, []);
+
+// Once resumed, it is imported again, read in full at once, newest first, as it has not been read
+// in full since it was resumed, whether or not it is due a full read by its row. A read that leaves
+// no bans waiting for a later read to confirm that they are gone ends its resumption, so it counts
+// again from the next run: the run says so, and the import's line and report name it.
+pausedRows = [];
+await pausedPoll();
+const resumedAt = new Date(new Date(row(121).lastFullScanAt).getTime() + 1);
+pausedRows = [{ banList: 121, resumedAt }];
+pausedRun = await pausedPoll();
+assert.deepStrictEqual(readsOf(pausedRun), [
+  [120, 'head', null],
+  [121, 'full', 'resume']
+]);
+assert.deepStrictEqual(endedResumptions, [[121, resumedAt]]);
+assert.deepStrictEqual(pausedRows, []);
+assert.deepStrictEqual(pausedRun.report.caughtUp, [121]);
+assert.strictEqual(pausedRun.report.banLists.find(({ id }) => id === 121).caughtUp, true);
+assert.strictEqual(pausedRun.report.suspended, undefined);
+assert.strictEqual(
+  logged(1, /^Ban list \(ID: 121\) counts again: it was read in full since it was resumed, /)
+    .length,
+  1
+);
+assert.ok(logs.filter(({ level }) => level === 1).every(({ important }) => important));
+
+// A resumed list whose read finds bans gone, which wait for a later complete read to confirm it,
+// as its owner lifted them while it was suspended, stays resuming, so they never count again. The
+// read that confirms they are gone, once it is due, removes them and ends the resumption.
+reset();
+delete env.IMPORTER_HEAD_POLL;
+battlemetricsList(122, [], paged(pairs('u', 0, 30)));
+await pausedPoll();
+assert.strictEqual(storedIDs(122).length, 30);
+serve(122, pairs('u', 0, 15));
+const resumed122 = new Date(new Date(row(122).lastFullScanAt).getTime() + 1);
+pausedRows = [{ banList: 122, resumedAt: resumed122 }];
+pausedRun = await pausedPoll();
+assert.deepStrictEqual(readsOf(pausedRun), [[122, 'full', 'resume']]);
+assert.strictEqual(pendingIDs(122).length, 15);
+assert.deepStrictEqual(endedResumptions, []);
+assert.strictEqual(pausedRows.length, 1);
+assert.strictEqual(pausedRun.report.caughtUp, undefined);
+pausedNow += 11 * 60 * 1000;
+pausedRun = await pausedPoll();
+assert.deepStrictEqual(readsOf(pausedRun), [[122, 'full', 'removal']]);
+assert.strictEqual(storedIDs(122).length, 15);
+assert.deepStrictEqual(endedResumptions, [[122, resumed122]]);
+assert.deepStrictEqual(pausedRun.report.caughtUp, [122]);
+
+// A list that seems to have lost all its bans while it was suspended keeps them, held for an admin,
+// and stays resuming, so it does not count again until an admin has confirmed or they come back.
+reset();
+delete env.IMPORTER_HEAD_POLL;
+battlemetricsList(123, [], paged(pairs('v', 0, 12)));
+await pausedPoll();
+serve(123, []);
+pausedRows = [
+  { banList: 123, resumedAt: new Date(new Date(row(123).lastFullScanAt).getTime() + 1) }
+];
+pausedRun = await pausedPoll();
+assert.deepStrictEqual(readsOf(pausedRun), [[123, 'full', 'resume']]);
+assert.strictEqual(pausedRun.report.banLists[0].hold, 'empty');
+assert.strictEqual(storedIDs(123).length, 12);
+assert.deepStrictEqual(endedResumptions, []);
+
+// A list resumed again, or suspended again, while the run imported it keeps its row: the run only
+// deletes the row it saw. A dry run, which writes nothing, never ends a resumption, and a list that
+// is only polled, or whose read failed, has not caught up.
+reset();
+delete env.IMPORTER_HEAD_POLL;
+battlemetricsList(124, [], paged(pairs('w', 0, 4)));
+await pausedPoll();
+const later = new Date(new Date(row(124).lastFullScanAt).getTime() + 1);
+pausedRows = [{ banList: 124, resumedAt: later }];
+onBattlemetrics = () => {
+  pausedRows = [{ banList: 124, resumedAt: new Date(later.getTime() + 1) }];
+};
+pausedRun = await pausedPoll();
+onBattlemetrics = null;
+assert.deepStrictEqual(endedResumptions, [[124, later]]);
+assert.strictEqual(pausedRows.length, 1);
+assert.strictEqual(pausedRun.report.caughtUp, undefined);
+
+// The read under way when it was resumed again ended after then, so the next run need not read it
+// in full: the list catches up at its next full read, in a run that saw it resumed.
+assert.deepStrictEqual(readsOf(await pausedPoll()), [[124, 'head', null]]);
+assert.strictEqual(pausedRows.length, 1);
+
+endedResumptions.length = 0;
+pausedRows = [{ banList: 124, resumedAt: new Date(pausedNow + 1) }];
+env.IMPORTER_DRY_RUN = '1';
+pausedRun = await pausedPoll();
+delete env.IMPORTER_DRY_RUN;
+assert.deepStrictEqual(readsOf(pausedRun), [[124, 'full', 'resume']]);
+assert.deepStrictEqual(endedResumptions, []);
+
+battlemetricsLists.set('bm-124', [new Error('Request failed with status code 500')]);
+pausedRun = await pausedPoll();
+assert.deepStrictEqual(endedResumptions, []);
+assert.strictEqual(pausedRows.length, 1);
 
 assert.strictEqual(verboseLevelOneLines, 0, 'Lines for the log channel are logged as important');
 

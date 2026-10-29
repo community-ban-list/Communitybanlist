@@ -4,7 +4,7 @@ import vm from 'vm';
 
 import describeError from '../../scbl-lib/utils/describe-error.js';
 import logText from '../../scbl-lib/utils/log-text.js';
-import { FIND_MISMATCHED } from '../src/reputation-points.js';
+import { findMismatched } from '../src/reputation-points.js';
 
 // Check the reputation check without a database: when it is due, from the setting,
 // IMPORTER_REPUTATION_CHECK_HOURS, and the ImporterState row it keeps, that it queues exactly the
@@ -57,10 +57,13 @@ const QUEUE_RECALCULATION =
   'UPDATE SteamUsers SET lastRefreshedExport = NULL, lastRefreshedReputationPoints = NULL, lastRefreshedReputationRank = NULL WHERE id IN (?)';
 
 // A player's points by the rule: on each ban list, 3 if any of their bans there is active, as it
-// has no expiry or its expiry is now or later, and 1 for each of their bans there that is not.
-function pointsByRule(steamUser) {
+// has no expiry or its expiry is now or later, and 1 for each of their bans there that is not,
+// leaving out the bans of the paused lists, whose IDs are in excluded.
+function pointsByRule(steamUser, excluded = []) {
   const lists = new Map();
-  for (const ban of bans.filter((ban) => ban.steamUser === steamUser)) {
+  for (const ban of bans.filter(
+    (ban) => ban.steamUser === steamUser && !excluded.includes(ban.banList)
+  )) {
     const list = lists.get(ban.banList) ?? { active: 0, expired: 0 };
     if (ban.expires === null || ban.expires >= databaseNow) list.active++;
     else list.expired++;
@@ -91,13 +94,21 @@ const sequelize = {
       ).length;
       return [{ checked }];
     }
-    if (sql === FIND_MISMATCHED) {
+    // The statement leaves out the bans of the lists paused as the run read them, as the
+    // statement for them has them, and the find is recorded with them when there are any.
+    const excluded = ids(pausedRows);
+    if (sql === findMismatched(excluded)) {
       assert.strictEqual(type, QueryTypes.SELECT);
-      send('find');
+      if (excluded.length === 0) send('find');
+      else send('find', excluded);
       // MySQL gives a SUM as a DECIMAL, which mysql2 gives as text.
       return [...players.entries()]
         .filter(([, player]) => player.lastRefreshedReputationPoints !== null)
-        .map(([id, { reputationPoints }]) => ({ id, reputationPoints, points: pointsByRule(id) }))
+        .map(([id, { reputationPoints }]) => ({
+          id,
+          reputationPoints,
+          points: pointsByRule(id, excluded)
+        }))
         .filter(({ reputationPoints, points }) => reputationPoints !== points)
         .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
         .map(({ id, reputationPoints, points }) => ({
@@ -132,6 +143,10 @@ const ImporterState = {
   }
 };
 
+// The paused ban lists' rows, as the check's run reads them (see paused-lists.js), which tests set.
+let pausedRows = [];
+const ids = (rows) => rows.map(({ banList }) => banList).sort((a, b) => a - b);
+
 const stubs = {
   'scbl-lib/db': { sequelize },
   'scbl-lib/db/importer-models': { ImporterState },
@@ -151,9 +166,22 @@ const stubs = {
   }
 };
 
+// The paused lists as a run sees them, read afresh for each check, as each case here is a run of
+// its own, though several start at the same time. That a run reads them once is checked in
+// paused-lists.js.
+const PAUSED = new URL('../src/paused-lists.js', import.meta.url).href;
+stubs[PAUSED] = {
+  default: async () => ({
+    rows: structuredClone(pausedRows),
+    suspended: ids(pausedRows.filter(({ resumedAt }) => resumedAt === null)),
+    excluded: ids(pausedRows)
+  })
+};
+
 // Load the check once, with the real modules of the importer it imports, apply-list.js,
-// reputation-points.js and run-control.js, and the stand-ins above for packages, in a context
-// whose waits are skipped and recorded.
+// reputation-points.js and run-control.js, a stand-in for paused-lists.js, the real
+// excluded-ban-lists.js of scbl-lib, and the stand-ins above for other packages, in a context whose
+// waits are skipped and recorded.
 const context = vm.createContext({
   process: { env: {} },
   setTimeout: (callback, ms) => {
@@ -162,19 +190,27 @@ const context = vm.createContext({
   }
 });
 const loaded = new Map();
+const REAL = {
+  'scbl-lib/db/excluded-ban-lists': new URL(
+    '../../scbl-lib/db/excluded-ban-lists.js',
+    import.meta.url
+  ).href
+};
 function moduleFor(specifier, referencingModule) {
   const key = specifier.startsWith('.')
     ? new URL(specifier, referencingModule.identifier).href
-    : specifier;
+    : (REAL[specifier] ?? specifier);
+  const real =
+    !Object.hasOwn(stubs, key) && (specifier.startsWith('.') || Object.hasOwn(REAL, specifier));
   if (!loaded.has(key))
     loaded.set(
       key,
-      specifier.startsWith('.')
+      real
         ? readFile(new URL(key), 'utf8').then(
             (source) => new vm.SourceTextModule(source, { context, identifier: key })
           )
         : Promise.resolve().then(() => {
-            const exports = stubs[specifier];
+            const exports = stubs[key];
             assert.ok(exports, `Unexpected dependency: ${specifier}`);
             return new vm.SyntheticModule(
               Object.keys(exports),
@@ -218,6 +254,7 @@ const player = (reputationPoints, refreshed = START - 3 * DAY) => ({
 function reset() {
   players.clear();
   bans = [];
+  pausedRows = [];
   state.clear();
   databaseNow = START;
   statements.length = 0;
@@ -239,7 +276,7 @@ function recalculate() {
   for (const [id, player] of players)
     if (player.lastRefreshedReputationPoints === null)
       Object.assign(player, {
-        reputationPoints: pointsByRule(id),
+        reputationPoints: pointsByRule(id, ids(pausedRows)),
         lastRefreshedReputationPoints: databaseNow,
         lastRefreshedReputationRank: databaseNow,
         lastRefreshedExport: databaseNow
@@ -329,7 +366,9 @@ const MISMATCHED = [steamID(1), steamID(3), steamID(6), steamID(8)];
       startedAt: '2026-10-23T12:00:00.000Z',
       checkedAt: null,
       checked: 8,
-      queued: 4
+      queued: 4,
+      excludedBanLists: [],
+      pending: false
     }
   );
   assert.ok(Date.parse(saved.checkedAt) >= START);
@@ -733,19 +772,227 @@ assert.strictEqual(MAX_HOURS, 8760);
   assert.strictEqual(logs.filter(({ important }) => important).length, 2);
 }
 
-// With 0 the check is off: it reads and writes nothing, and says so in its counts, which the run's
-// status leaves it out for. It runs again at once once the setting is taken off.
+// With 0 the check is off: it reads its row, to tell whether paused lists changed since it last
+// checked (see below), but writes nothing, and says so in its counts, which the run's status
+// leaves it out for. It runs again at once once the setting is taken off.
 for (const value of ['0', ' "0" ']) {
   reset();
   seed();
   assert.deepStrictEqual(await run({ hours: value }), { ran: false, off: true });
-  assert.deepStrictEqual(statements, []);
+  assert.deepStrictEqual(statements, [['read state', STATE_ROW]]);
   assert.deepStrictEqual(lines(1), []);
   assert.strictEqual(
     lines(2).at(-1).message,
     'Skipped the reputation check, as IMPORTER_REPUTATION_CHECK_HOURS is 0, which turns it off.'
   );
   assert.strictEqual((await run({ startedAt: START + MINUTE })).ran, true);
+}
+
+// Paused ban lists. Players whose stored points match their bans, and a row from a check at START,
+// as the version before lists could be paused saved it, without excludedBanLists or pending, which
+// count as none paused and none left. 11 has bans on lists 1 and 2, 12 an active ban and 13 an
+// expired one on list 2 only, and 14 a ban on list 1 only.
+function seedPaused() {
+  players.set(steamID(11), player(6));
+  bans.push(
+    { banList: 1, steamUser: steamID(11), expires: null },
+    { banList: 2, steamUser: steamID(11), expires: null }
+  );
+  players.set(steamID(12), player(3));
+  bans.push({ banList: 2, steamUser: steamID(12), expires: null });
+  players.set(steamID(13), player(1));
+  bans.push({ banList: 2, steamUser: steamID(13), expires: START - DAY });
+  players.set(steamID(14), player(3));
+  bans.push({ banList: 1, steamUser: steamID(14), expires: null });
+  const at = new Date(START).toISOString();
+  state.set(STATE_ROW, { startedAt: at, checkedAt: at, checked: 4, queued: 0 });
+}
+const ON_LIST_2 = [steamID(11), steamID(12), steamID(13)];
+const matching = () =>
+  [...players].every(
+    ([id, { reputationPoints }]) => reputationPoints === pointsByRule(id, ids(pausedRows))
+  );
+
+// An old row with nothing paused is not due before its time, as before.
+reset();
+seedPaused();
+assert.deepStrictEqual(await run({ startedAt: START + 10 * MINUTE }), {
+  ran: false,
+  dueAt: '2026-10-24T11:59:00.000Z'
+});
+
+// Once a list is paused, the next run is due the check, whenever it is next due by time: its bans
+// count for nothing, so it finds and queues exactly the players with bans on it, whose points the
+// recalculation then works out without them, and posts why. It saves the lists it left out, and
+// the next run is due it by time only. While the list is resuming, it is still left out, so
+// nothing changes. Once it counts again, the next run settles the same players back.
+{
+  reset();
+  seedPaused();
+  pausedRows = [{ banList: 2, resumedAt: null }];
+  const counts = await run({ startedAt: START + 10 * MINUTE });
+  assert.deepStrictEqual(counts, { ran: true, checked: 4, mismatched: 3, queued: 3, left: 0 });
+  assert.deepStrictEqual(statements, [
+    ['read state', STATE_ROW],
+    ['count'],
+    ['find', [2]],
+    ['queue', ON_LIST_2],
+    ['save state', STATE_ROW]
+  ]);
+  assert.deepStrictEqual(
+    { ...state.get(STATE_ROW), checkedAt: null },
+    {
+      startedAt: new Date(START + 10 * MINUTE).toISOString(),
+      checkedAt: null,
+      checked: 4,
+      queued: 3,
+      excludedBanLists: [2],
+      pending: false
+    }
+  );
+  assert.deepStrictEqual(
+    lines(1).map(({ message }) => message),
+    [
+      `Queued 3 players for a recalculation, as their reputation points did not match their bans: ${steamID(11)} (6 points, 3 by their bans), ${steamID(12)} (3 points, 0 by their bans), ${steamID(13)} (1 point, 0 by their bans). Ban list 2 was paused since the last check: a paused ban list's bans count for nothing until it counts again.`
+    ]
+  );
+  recalculate();
+  assert.ok(matching());
+  assert.deepStrictEqual(
+    [steamID(11), steamID(12), steamID(13), steamID(14)].map(
+      (id) => players.get(id).reputationPoints
+    ),
+    [3, 0, 0, 3]
+  );
+
+  statements.length = 0;
+  assert.strictEqual((await run({ startedAt: START + 20 * MINUTE })).ran, false);
+  pausedRows = [{ banList: 2, resumedAt: new Date(START + 25 * MINUTE) }];
+  assert.strictEqual((await run({ startedAt: START + 30 * MINUTE })).ran, false);
+  assert.deepStrictEqual(statements, [
+    ['read state', STATE_ROW],
+    ['read state', STATE_ROW]
+  ]);
+
+  pausedRows = [];
+  logs.length = 0;
+  assert.deepStrictEqual(await run({ startedAt: START + 40 * MINUTE }), {
+    ran: true,
+    checked: 4,
+    mismatched: 3,
+    queued: 3,
+    left: 0
+  });
+  assert.match(lines(1)[0].message, /\. Ban list 2 counts again since the last check: /);
+  assert.deepStrictEqual(state.get(STATE_ROW).excludedBanLists, []);
+  recalculate();
+  assert.ok(matching());
+  assert.deepStrictEqual(
+    [steamID(11), steamID(12), steamID(13)].map((id) => players.get(id).reputationPoints),
+    [6, 3, 1]
+  );
+}
+
+// A run's check queues at most maxQueued players for a pause too. While players are left, its row
+// names the lists the players it queued are recalculated without, and that players are left, with
+// the time of the check before, so every later run checks again until none are left, though none
+// is due by time.
+reset();
+seedPaused();
+pausedRows = [{ banList: 2, resumedAt: null }];
+assert.deepStrictEqual(await run({ startedAt: START + 10 * MINUTE, maxQueued: 1 }), {
+  ran: true,
+  checked: 4,
+  mismatched: 3,
+  queued: 1,
+  left: 2
+});
+assert.deepStrictEqual(state.get(STATE_ROW), {
+  startedAt: new Date(START).toISOString(),
+  checkedAt: new Date(START).toISOString(),
+  checked: 4,
+  queued: 0,
+  excludedBanLists: [2],
+  pending: true
+});
+recalculate();
+statements.length = 0;
+assert.deepStrictEqual(await run({ startedAt: START + 20 * MINUTE, maxQueued: 1 }), {
+  ran: true,
+  checked: 4,
+  mismatched: 2,
+  queued: 1,
+  left: 1
+});
+// The row already says so, so it is not saved again.
+assert.deepStrictEqual(statements, [
+  ['read state', STATE_ROW],
+  ['count'],
+  ['find', [2]],
+  ['queue', [steamID(12)]]
+]);
+recalculate();
+assert.strictEqual((await run({ startedAt: START + 30 * MINUTE, maxQueued: 1 })).queued, 1);
+assert.deepStrictEqual(state.get(STATE_ROW).pending, false);
+recalculate();
+assert.ok(matching());
+assert.strictEqual((await run({ startedAt: START + 40 * MINUTE, maxQueued: 1 })).ran, false);
+
+// A list resumed before all its players were settled. The players already recalculated without its
+// bans are found again, as the row still names it, and nobody else is touched: without the row,
+// they would keep the points of a pause that ended until the daily check.
+reset();
+seedPaused();
+pausedRows = [{ banList: 2, resumedAt: null }];
+assert.strictEqual((await run({ startedAt: START + 10 * MINUTE, maxQueued: 1 })).queued, 1);
+recalculate();
+assert.strictEqual(players.get(steamID(11)).reputationPoints, 3);
+pausedRows = [];
+statements.length = 0;
+assert.deepStrictEqual(await run({ startedAt: START + 20 * MINUTE, maxQueued: 1 }), {
+  ran: true,
+  checked: 4,
+  mismatched: 1,
+  queued: 1,
+  left: 0
+});
+assert.deepStrictEqual(statements, [
+  ['read state', STATE_ROW],
+  ['count'],
+  ['find'],
+  ['queue', [steamID(11)]],
+  ['save state', STATE_ROW]
+]);
+assert.deepStrictEqual(state.get(STATE_ROW).excludedBanLists, []);
+recalculate();
+assert.ok(matching());
+
+// A list paused and resumed again between two runs changed nobody's points, so the next run finds
+// the lists it left out unchanged, and is not due.
+reset();
+seedPaused();
+pausedRows = [{ banList: 2, resumedAt: null }];
+pausedRows = [];
+assert.strictEqual((await run({ startedAt: START + 10 * MINUTE })).ran, false);
+
+// IMPORTER_REPUTATION_CHECK_HOURS=0 turns off only the daily check: paused lists are still settled,
+// and with nothing to settle the check is off again.
+{
+  reset();
+  seedPaused();
+  pausedRows = [
+    { banList: 2, resumedAt: null },
+    { banList: 9, resumedAt: null }
+  ];
+  const counts = await run({ hours: '0', startedAt: START + 10 * MINUTE });
+  assert.deepStrictEqual(counts, { ran: true, checked: 4, mismatched: 3, queued: 3, left: 0 });
+  assert.match(lines(1)[0].message, /\. Ban lists 2 and 9 were paused since the last check: /);
+  assert.deepStrictEqual(state.get(STATE_ROW).excludedBanLists, [2, 9]);
+  recalculate();
+  assert.deepStrictEqual(await run({ hours: '0', startedAt: START + 20 * MINUTE }), {
+    ran: false,
+    off: true
+  });
 }
 
 // When it is due, a run with no last check is due at once, and one is next due the setting's hours
@@ -757,5 +1004,5 @@ assert.strictEqual(
 );
 
 console.log(
-  'Reputation check checks passed: exactly the players whose points do not match their bans queued, in batches with their retries, at most 1,000 a run with the others left for the next runs, its schedule from the row it keeps, IMPORTER_REPUTATION_CHECK_HOURS, and what it counts and posts, with IDs shown as written.'
+  'Reputation check checks passed: exactly the players whose points do not match their bans queued, in batches with their retries, at most 1,000 a run with the others left for the next runs, its schedule from the row it keeps, IMPORTER_REPUTATION_CHECK_HOURS, what it counts and posts, with IDs shown as written, and the players of paused lists settled, also when a pause ends before they all are.'
 );

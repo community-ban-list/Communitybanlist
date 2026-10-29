@@ -36,7 +36,14 @@ const module = new vm.SourceTextModule(
   await readFile(new URL('../db/export-membership.js', import.meta.url), 'utf8'),
   { context }
 );
+// Its other import, the piece that leaves out paused ban lists, has no imports, and is loaded as it
+// is.
+const excludedPiece = new vm.SourceTextModule(
+  await readFile(new URL('../db/excluded-ban-lists.js', import.meta.url), 'utf8'),
+  { context }
+);
 await module.link((specifier) => {
+  if (specifier === './excluded-ban-lists.js') return excludedPiece;
   assert.strictEqual(specifier, './sequelize.js');
   return new vm.SyntheticModule(
     ['default', 'QueryTypes'],
@@ -122,7 +129,10 @@ const generated = [
 answer = () => generated;
 const transaction = { isolationLevel: 'SERIALIZABLE' };
 assert.strictEqual(
-  await membershipForPlayers(['76561198000000001', '76561198000000002'], { transaction }),
+  await membershipForPlayers(['76561198000000001', '76561198000000002'], {
+    transaction,
+    excludedBanLists: []
+  }),
   generated
 );
 assert.strictEqual(queries.length, 1);
@@ -140,6 +150,9 @@ assert.deepStrictEqual(copy(membership.options.replacements), [
   ['76561198000000001', '76561198000000002']
 ]);
 assert.strictEqual(placeholders(membership.sql), 1);
+
+// No paused ban list is left out of any of these, which is given as [].
+const NONE = { excludedBanLists: [] };
 
 // A count takes the list's settings, whatever else the list holds, and every config as stored:
 // here two copies of one config, and configs with NULL and 0 points. Each setting and config value
@@ -161,7 +174,7 @@ const configs = [
 ];
 queries.length = 0;
 answer = () => [{ players: 1234 }];
-assert.strictEqual(await countMembers(settings, configs), 1234);
+assert.strictEqual(await countMembers(settings, configs, NONE), 1234);
 const [count] = queries;
 const replacements = copy(count.options.replacements);
 assert.deepStrictEqual(replacements.slice(0, 4), [9, 3, 1, 0]);
@@ -218,7 +231,7 @@ assert.strictEqual(
   await countMembers(
     { threshold: null, defaultActivePoints: 1, defaultExpiredPoints: null, maxBanAge: 365 },
     [],
-    { timeLimit: 1500 }
+    { timeLimit: 1500, ...NONE }
   ),
   0
 );
@@ -257,7 +270,7 @@ for (const timeLimit of [0, -1, 1.5, '3000', NaN, Infinity, null, 2 ** 32, 2 ** 
   await assert.rejects(countMembers(settings, configs, { timeLimit }), typeError(/time limit/));
 assert.strictEqual(queries.length, 0);
 // The longest time limit MySQL takes is used as given.
-await countMembers(settings, configs, { timeLimit: 2 ** 32 - 1 });
+await countMembers(settings, configs, { timeLimit: 2 ** 32 - 1, ...NONE });
 assert.strictEqual(queries.length, 1);
 assert.ok(tidy(queries[0].sql).includes('MAX_EXECUTION_TIME(4294967295) */ COUNT(*) AS players'));
 
@@ -269,13 +282,16 @@ const timeout = Object.assign(new Error('Query execution was interrupted'), {
 answer = () => {
   throw timeout;
 };
-await assert.rejects(countMembers(settings, configs, { timeLimit: 1 }), (err) => err === timeout);
+await assert.rejects(
+  countMembers(settings, configs, { timeLimit: 1, ...NONE }),
+  (err) => err === timeout
+);
 
 // The players a count counts are found by the same statement, giving their Steam IDs instead of
 // their number.
 queries.length = 0;
 answer = () => [{ steamUser: '76561198000000001' }, { steamUser: '76561198000000002' }];
-assert.deepStrictEqual(copy(await findMembers(settings, configs)), [
+assert.deepStrictEqual(copy(await findMembers(settings, configs, NONE)), [
   '76561198000000001',
   '76561198000000002'
 ]);
@@ -296,19 +312,79 @@ assert.strictEqual(queries.length, 1);
 // any age and no configs.
 queries.length = 0;
 answer = () => [{ players: 13289 }];
-assert.strictEqual(await countPlayersWithBans(2), 13289);
+assert.strictEqual(await countPlayersWithBans(2, NONE), 13289);
 assert.deepStrictEqual(copy(queries[0].options.replacements), [2, 1, 1, 0]);
 assert.ok(tidy(queries[0].sql).includes('FROM DUAL WHERE FALSE'));
 assert.ok(tidy(queries[0].sql).includes('MAX_EXECUTION_TIME(3000)'));
-await countPlayersWithBans(3, { timeLimit: 10000 });
+await countPlayersWithBans(3, { timeLimit: 10000, ...NONE });
 assert.deepStrictEqual(copy(queries[1].options.replacements), [3, 1, 1, 0]);
 assert.ok(tidy(queries[1].sql).includes('MAX_EXECUTION_TIME(10000)'));
 const threeBans = { threshold: 3, defaultActivePoints: 1, defaultExpiredPoints: 1, maxBanAge: 0 };
-await countMembers(threeBans, [], { timeLimit: 10000 });
+await countMembers(threeBans, [], { timeLimit: 10000, ...NONE });
 assert.strictEqual(queries[1].sql, queries[2].sql);
 await assert.rejects(countPlayersWithBans(), typeError(/threshold/));
 assert.strictEqual(queries.length, 3);
 
+// The bans of paused ban lists count for nothing. Each statement leaves them out by one condition
+// on the bans, with their IDs in order, written into it, and is otherwise the statement with none
+// left out: the same text and the same replacements. The importer's and the count's have it alike.
+const PAUSED = 'B.banList NOT IN (7, 46)';
+queries.length = 0;
+answer = () => generated;
+await membershipForPlayers(['76561198000000001'], { transaction, excludedBanLists: [46, 7] });
+assert.strictEqual(
+  tidy(queries[0].sql),
+  tidy(IMPORTER_STATEMENT).replace('AND B.steamUser IN (?)', `AND B.steamUser IN (?) AND ${PAUSED}`)
+);
+assert.strictEqual(placeholders(queries[0].sql), 1);
+answer = () => [{ players: 12 }];
+assert.strictEqual(await countMembers(settings, configs, { excludedBanLists: [46, 7] }), 12);
+assert.strictEqual(
+  tidy(queries[1].sql),
+  tidy(count.sql).replace(
+    'DATEDIFF(NOW(), B.created))',
+    `DATEDIFF(NOW(), B.created)) AND ${PAUSED}`
+  )
+);
+assert.deepStrictEqual(copy(queries[1].options.replacements), replacements);
+assert.strictEqual(times(queries[0].sql, PAUSED), 1);
+assert.strictEqual(times(queries[1].sql, PAUSED), 1);
+answer = () => [];
+await findMembers(settings, configs, { excludedBanLists: [7, 46] });
+assert.strictEqual(
+  tidy(queries[2].sql),
+  tidy(queries[1].sql).replace('COUNT(*) AS players', 'steamUser')
+);
+answer = () => [{ players: 3 }];
+await countPlayersWithBans(2, { excludedBanLists: [46, 7] });
+assert.strictEqual(times(queries[3].sql, PAUSED), 1);
+
+// The lists to leave out must be given, [] for none, as a caller that forgot them would count the
+// bans of paused lists, and must be positive whole IDs, each once. Each is checked after the other
+// arguments, and throws before anything is asked of the database.
+queries.length = 0;
+assert.throws(
+  () => membershipForPlayers(['76561198000000001'], { transaction }),
+  typeError(/excluded ban lists are undefined/)
+);
+await assert.rejects(
+  countMembers(settings, configs),
+  typeError(/excluded ban lists are undefined/)
+);
+await assert.rejects(findMembers(settings, configs), typeError(/excluded ban lists are undefined/));
+await assert.rejects(countPlayersWithBans(2), typeError(/excluded ban lists are undefined/));
+for (const excludedBanLists of [null, '7', [0], [-7], [1.5], ['7'], [7, 7], [Number.NaN]])
+  await assert.rejects(
+    countMembers(settings, configs, { excludedBanLists }),
+    typeError(/excluded ban list/),
+    String(excludedBanLists)
+  );
+await assert.rejects(
+  countMembers(settings, configs, { timeLimit: 0, excludedBanLists: [0] }),
+  typeError(/time limit/)
+);
+assert.strictEqual(queries.length, 0);
+
 console.log(
-  "Export membership checks passed: the importer's statement unchanged, counts built from the same pieces, with every setting and config."
+  "Export membership checks passed: the importer's statement unchanged, counts built from the same pieces, with every setting and config, and paused ban lists left out of each alike."
 );

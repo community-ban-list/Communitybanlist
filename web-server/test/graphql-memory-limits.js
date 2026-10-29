@@ -35,6 +35,11 @@ const packages = {
     JWT_AUTH: { ALGORITHM: 'HS256', SECRET: 'a-secret-only-these-checks-use' },
     SIGN_IN_TOKEN_LIFETIME: 30 * 24 * 60 * 60
   },
+  // No ban list is paused.
+  'scbl-lib/db/ban-list-suspensions': {
+    readPausedBanLists: async () => [],
+    pausedSets: () => ({ suspended: [], excluded: [] })
+  },
   'scbl-lib/db/sequelize': {
     DATABASE_UNAVAILABLE_MESSAGE: 'The database is unavailable.',
     isDatabaseUnavailable: () => false
