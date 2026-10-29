@@ -62,6 +62,10 @@ let notifications;
 // removes the list, unless the list's answer in `deletions` is an error.
 let rows;
 let deletions;
+// Runs as checkLimits finishes, with the IDs it was given, e.g. to change a list while its players
+// are counted again. An error in changeErrors for a list fails changeSince for it.
+let duringCheck;
+let changeErrors;
 // The query that loaded each list deleted, in turn, e.g. 'find 12' for findByPk(12), as each query
 // gives instances of its own, as Sequelize's do, and for each, the Steam name of the owner the list
 // had loaded with it, which ExportBanList's lines name, and whether its lines were to be important.
@@ -92,6 +96,8 @@ function reset() {
   notifications = [];
   rows = new Map();
   deletions = new Map();
+  duringCheck = null;
+  changeErrors = new Map();
   deletedFrom = [];
   deletedWith = [];
   lockAnswers = [];
@@ -195,6 +201,7 @@ const ExportBanList = {
     // A count that failed fails the check, unless the caller keeps its error with the list.
     const failed = lists.find((check) => check.recountError);
     if (failed && !keepRecountErrors) throw failed.recountError;
+    if (duringCheck) await duringCheck(ids);
     return { limits: LIMITS, lists };
   },
   // Like Sequelize's, it loads the list without its owner's Steam user.
@@ -237,6 +244,25 @@ const ExportBanList = {
     calls.push(['visible']);
     if (visible instanceof Error) throw visible;
     return new Set(visible);
+  },
+  // What has changed in a list since checkLimits gave this check of it, as the real one finds it:
+  // 'deleted' once the list is gone, 'changed' when its settings or its BattleMetrics ban list
+  // differ from those it was checked with, or null.
+  async changeSince({ exportBanList }) {
+    calls.push(['changed?', exportBanList.id]);
+    if (changeErrors.has(exportBanList.id)) throw changeErrors.get(exportBanList.id);
+    const row = rows.get(exportBanList.id);
+    if (!row) return 'deleted';
+    const columns = [
+      'battlemetricsID',
+      'threshold',
+      'defaultActivePoints',
+      'defaultExpiredPoints',
+      'maxBanAge'
+    ];
+    return columns.some((column) => row.exportBanList[column] !== exportBanList[column])
+      ? 'changed'
+      : null;
   }
 };
 
@@ -794,14 +820,18 @@ assert.deepStrictEqual(calls, [
   ['check', 'all'],
   ['visible'],
   ['check', [30]],
+  ['changed?', 30],
   ['delete', 30],
   ['check', [31]],
+  ['changed?', 31],
   ['delete', 31],
   ['check', [33]],
+  ['changed?', 33],
   ['delete', 33]
 ]);
 // Each list is deleted as it was read again just before, not as the preview showed it, with its
-// owner's Steam user. ExportBanList's lines about each deletion are important, as the bot's are.
+// owner's Steam user, once it is found unchanged since it was read and checked again.
+// ExportBanList's lines about each deletion are important, as the bot's are.
 assert.deepStrictEqual(deletedFrom, ['check 30', 'check 31', 'check 33']);
 assert.deepStrictEqual(deletedWith, [
   { owner: 'Owner 30', important: true },
@@ -1164,14 +1194,173 @@ for (const outsideToo of [false, true]) {
 }
 
 // A list over its type's cap by its export bans whose players cannot be counted by its settings now
-// may be over the cap or not, so nothing is removed: the command fails before the preview.
+// may be over the cap or not, so it is never removed for the cap, and it holds up no other list.
+// Within the points rules, it is left, and named after the limits used, with why its count failed.
+// When it breaks the points rules, which need no count, it is outside the limits all the same, and
+// its line in the preview says that the count failed.
+const UNKNOWN_CAP = `Whether it is within its type's cap is not known: its export bans are over it, and its players could not be counted by its settings now (${TIMED_OUT}).`;
+const uncountedNote = (id) =>
+  `1 export ban list over the cap by its export bans could not be counted by its settings now, so whether it is within the cap is not known, and it is left: #${id} (${TIMED_OUT}). Run the command again later to check it.`;
 reset();
 addList(98, 'remote', { players: 41000, recountError: new Error(TIMED_OUT), problems: [] });
 addList(99, 'remote');
-await assert.rejects(run('remove_outside_limits'), { message: TIMED_OUT });
-assert.deepStrictEqual(calls, [['check', 'all']]);
-assert.strictEqual(prompt(), null);
+addList(109, 'remote', { players: 42000, recountError: new Error(TIMED_OUT) });
+await run('remove_outside_limits');
+shown = prompt();
+assert.strictEqual(
+  contentOf(shown.reply),
+  `**2 export ban lists are outside today's limits.** Remove them? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.\n${LIMITS_TEXT}\n${uncountedNote(98)}`
+);
+const [line99, reason99, line109, reason109] = shown.embed.description.split('\n');
+assert.deepStrictEqual(
+  [line99, reason99, line109],
+  [
+    '**List 99** (#99) · Remote · owner **Owner 99** (`76561198000000099`) · 0 players',
+    `↳ ${escapedRule}`,
+    '**List 109** (#109) · Remote · owner **Owner 109** (`765611980000000109`) · 42,000 players by its export bans; they could not be counted by its settings now'
+  ]
+);
+assert.ok(reason109.startsWith(`↳ ${discord.escapeMarkdown(`${RULE} Whether it is within`)}`));
+assert.deepStrictEqual(calls, [
+  ['check', 'all'],
+  ['check', [99]],
+  ['changed?', 99],
+  ['delete', 99],
+  ['check', [109]],
+  ['changed?', 109],
+  ['delete', 109]
+]);
+assert.deepStrictEqual([...rows.keys()], [98]);
+assert.strictEqual(
+  audits[2],
+  `[important] admin (1) removed export ban list "List 109" (ID: 109, Remote) of Steam user "Owner 109" (ID: 765611980000000109), outside today's limits with 42,000 players by its export bans; they could not be counted by its settings now: there was nothing to delete on BattleMetrics.`
+);
+// The preview's attached file gives such a list's whole reason, with its count that failed.
+reset();
+addList(109, 'remote', { players: 42000, recountError: new Error(TIMED_OUT) });
+const longRule = 'A rule that is long. '.repeat(40);
+for (let id = 140; id < 170; id++) addList(id, 'remote', { problems: [longRule] });
+answer = 'cancel';
+await run('remove_outside_limits');
+assert.ok(
+  fileOf(prompt().reply)
+    .attachment.toString('utf8')
+    .includes(
+      `\n#109 Remote list "List 109"\n  Owner: Owner 109 (Steam ID 765611980000000109)\n  Players: 42,000 by its export bans; they could not be counted by its settings now\n  Settings: threshold 5, 5 points for an active ban and 1 for an expired ban, max ban age 0 days (0 for any), 0 configs\n  Outside the limits: ${RULE} ${UNKNOWN_CAP}\n  To be removed.`
+    )
+);
 assert.deepStrictEqual(deleted(), []);
+
+// When no list is found outside the limits, nothing is changed, and the reply says it is not known
+// for the lists that could not be counted.
+reset();
+addList(98, 'remote', { players: 41000, recountError: new Error(TIMED_OUT), problems: [] });
+await run('remove_outside_limits');
+assert.deepStrictEqual(replies, [
+  {
+    content: `No export ban list was found outside today's limits, so nothing was changed.\n${LIMITS_TEXT}\n${uncountedNote(98)}`,
+    files: []
+  }
+]);
+assert.deepStrictEqual(calls, [['check', 'all']]);
+
+// The reply names at most five of them, each with its error cut short, and an attached file names
+// them all, with the whole error, after the limits used and before the lists within the cap by
+// their settings now.
+reset();
+const longError = `${TIMED_OUT} ${'and more '.repeat(20)}`;
+for (let id = 300; id < 307; id++)
+  addList(id, 'remote', {
+    players: 41000 + id,
+    recountError: new Error(id === 300 ? longError : TIMED_OUT),
+    problems: []
+  });
+addList(310, 'remote', { players: 45000, recount: 300, problems: [] });
+addList(311, 'remote');
+answer = 'cancel';
+await run('remove_outside_limits');
+shown = prompt();
+assert.ok(shown.reply.content.length <= 2000);
+assert.ok(
+  shown.reply.content.endsWith(
+    `\n${LIMITS_TEXT}\n7 export ban lists over the cap by their export bans could not be counted by their settings now, so whether they are within the cap is not known, and they are left: #300 (${longError.slice(0, 99)}…), #301 (${TIMED_OUT}), #302 (${TIMED_OUT}), #303 (${TIMED_OUT}), #304 (${TIMED_OUT}) and 2 more, all in the attached export-ban-lists-not-counted.txt. Run the command again later to check them.\n1 export ban list is within the cap by its settings now, though its export bans are over it until the importer updates them: #310 (45,000 players by its export bans, 300 by its settings now).`
+  )
+);
+assert.deepStrictEqual(
+  shown.reply.files.map((attached) => attached.name),
+  ['export-ban-lists-not-counted.txt']
+);
+const uncountedLines = shown.reply.files[0].attachment.toString('utf8').split('\n');
+assert.match(
+  uncountedLines[0],
+  /^Export ban lists over the cap by their export bans that could not be counted by their settings now, and so are left, checked \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: 7$/
+);
+assert.strictEqual(uncountedLines.length, 8);
+assert.strictEqual(
+  uncountedLines[1],
+  `#300 Remote list "List 300": 41,300 players by its export bans; the count failed: ${longError}`
+);
+assert.strictEqual(
+  uncountedLines[7],
+  `#306 Remote list "List 306": 41,306 players by its export bans; the count failed: ${TIMED_OUT}`
+);
+assert.deepStrictEqual(deleted(), []);
+
+// Checking a list again takes a moment, longer when its players are counted again, so it is read
+// once more just before it is removed. One its owner changed while it was being checked, e.g. by
+// raising its threshold, or deleted, is left, and one that cannot be read once more is left as
+// failed. The others carry on.
+reset();
+for (const id of [120, 121, 122, 123, 124]) addList(id, 'remote');
+duringCheck = (ids) => {
+  if (ids?.[0] === 120) rows.get(120).exportBanList.threshold = 9;
+  if (ids?.[0] === 121) rows.delete(121);
+  if (ids?.[0] === 122) rows.get(122).exportBanList.name = 'Renamed';
+};
+changeErrors.set(123, new Error('Connection lost'));
+await run('remove_outside_limits');
+assert.deepStrictEqual(deleted(), [122, 124]);
+assert.deepStrictEqual(
+  calls.filter(([call]) => call === 'changed?'),
+  [120, 121, 122, 123, 124].map((id) => ['changed?', id])
+);
+assert.strictEqual(
+  replies.at(-1).content,
+  "Removed 2 of the 5 export ban lists outside today's limits: 2 with nothing to delete on BattleMetrics. 1 failed. 2 were not removed, as they had changed."
+);
+assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n'), [
+  '**List 120** (#120): not removed, as it changed while it was being checked',
+  '**List 121** (#121): not removed, as it no longer exists',
+  '**List 122** (#122): removed; there was nothing to delete on BattleMetrics',
+  '**List 123** (#123): failed: It could not be checked again: Connection lost',
+  '**List 124** (#124): removed; there was nothing to delete on BattleMetrics'
+]);
+assert.match(
+  audits.find((line) => line.includes('"List 123"')),
+  /could not remove export ban list "List 123" .*: It could not be checked again: Connection lost$/
+);
+
+// A list whose players cannot be counted by its settings now as it is checked again just before
+// its removal may be over its type's cap or not. It is removed when it breaks the points rules,
+// which need no count, and otherwise left as failed.
+reset();
+addList(130, 'remote', { players: 41000, recount: 40500, problems: [RULE, CAP_REASON] });
+addList(131, 'remote', { players: 41000, recount: 40500, problems: [CAP_REASON] });
+whileConfirming = async () => {
+  Object.assign(rows.get(130), { recount: null, recountError: new Error(TIMED_OUT) });
+  rows.get(130).problems.splice(1);
+  Object.assign(rows.get(131), { recount: null, recountError: new Error(TIMED_OUT), problems: [] });
+};
+await run('remove_outside_limits');
+assert.deepStrictEqual(deleted(), [130]);
+assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n'), [
+  '**List 130** (#130): removed; there was nothing to delete on BattleMetrics',
+  `**List 131** (#131): failed: It could not be checked again: ${TIMED_OUT}`
+]);
+assert.match(
+  audits[1],
+  /^\[important\] admin \(1\) removed export ban list "List 130" .*, outside today's limits with 41,000 players by its export bans; they could not be counted by its settings now: there was nothing to delete on BattleMetrics\.$/
+);
 
 // The summary says how many lists ended each way, and the log has each BattleMetrics list's ban
 // list as it was before the list was removed.

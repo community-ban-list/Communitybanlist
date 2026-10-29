@@ -23,15 +23,18 @@ const destroyed = [];
 const counted = [];
 
 // The players the database counts for a list's settings and configs as they are now, by threshold:
-// the higher the threshold, the fewer players. An error fails the count.
+// the higher the threshold, the fewer players. An error fails the count. duringCount runs while a
+// count is made, with its settings, e.g. for the list's owner to change it meanwhile.
 const MEMBERS = new Map([
   [3, 45000],
   [6, 12000],
   [9, 40500],
   [10, 39000]
 ]);
+let duringCount = null;
 async function countMembers(settings) {
   counted.push(settings.threshold);
+  if (duringCount) await duringCount(settings);
   assert.ok(MEMBERS.has(settings.threshold), `Unexpected count for ${settings.threshold}`);
   const players = MEMBERS.get(settings.threshold);
   if (players instanceof Error) throw players;
@@ -39,7 +42,8 @@ async function countMembers(settings) {
 }
 
 // A stand-in for Sequelize's Model, whose findAll gives the matching lists as instances, with the
-// owner's Steam user included, and whose destroy deletes the list with its export bans.
+// owner's Steam user included, whose findByPk gives one list, and whose destroy deletes the list
+// with its export bans.
 class Model {
   static init() {}
 
@@ -51,6 +55,10 @@ class Model {
       .map((row) =>
         Object.assign(new this(), row, { SteamUser: { id: row.owner, name: `Owner ${row.id}` } })
       );
+  }
+
+  static async findByPk(id) {
+    return lists.has(id) ? Object.assign(new this(), lists.get(id)) : null;
   }
 
   async destroy() {
@@ -274,42 +282,108 @@ assert.deepStrictEqual(audits, [
   "admin (1) removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it had changed."
 ]);
 
+// Start again with an empty database.
+function clear() {
+  lists.clear();
+  exportBans.clear();
+  for (const done of [destroyed, counted, replies, audits]) done.length = 0;
+  duringCount = null;
+}
+
 // A list over the cap by both counts in the preview whose count fails as it is checked again just
 // before its removal is left, as whether it is still over the cap is not known: it is reported as
-// failed, and the others carry on.
-lists.clear();
-exportBans.clear();
-for (const done of [destroyed, counted, replies, audits]) done.length = 0;
+// failed, and the others carry on. One that breaks the points rules, which need no count, is
+// removed all the same.
+clear();
 MEMBERS.set(11, 41000);
 MEMBERS.set(12, 42000);
 addList(5, 11, { CREATED: 43000 });
 addList(6, 12, { CREATED: 44000 });
+// Its threshold is below the lowest of 4.
+addList(7, 3, { CREATED: 45000 }, [1, 1]);
 const TIMED_OUT = 'Query execution was interrupted, maximum statement execution time exceeded';
 await command.execute(
   interaction(async () => {
     MEMBERS.set(11, new Error(TIMED_OUT));
+    MEMBERS.set(3, new Error(TIMED_OUT));
   })
 );
-assert.deepStrictEqual(counted, [11, 12, 11, 12]);
-assert.deepStrictEqual(destroyed, [6]);
+MEMBERS.set(3, 45000);
+assert.deepStrictEqual(counted, [11, 12, 3, 11, 12, 3]);
+assert.deepStrictEqual(destroyed, [6, 7]);
 assert.deepStrictEqual([...lists.keys()], [5]);
 assert.deepStrictEqual(exportBans.get(5), { CREATED: 43000 });
 const failedSummary = replies.at(-1);
 assert.strictEqual(
   failedSummary.content,
-  "Removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 failed."
+  "Removed 2 of the 3 export ban lists outside today's limits: 2 with nothing to delete on BattleMetrics. 1 failed."
 );
 assert.deepStrictEqual(failedSummary.embeds[0].toJSON().description.split('\n'), [
   `**List 5** (#5): failed: It could not be checked again: ${TIMED_OUT}`,
-  '**List 6** (#6): removed; there was nothing to delete on BattleMetrics'
+  '**List 6** (#6): removed; there was nothing to delete on BattleMetrics',
+  '**List 7** (#7): removed; there was nothing to delete on BattleMetrics'
 ]);
 assert.deepStrictEqual(audits, [
-  "admin (1) started removing 2 export ban lists outside today's limits.",
+  "admin (1) started removing 3 export ban lists outside today's limits.",
   `admin (1) could not remove export ban list "List 5" (ID: 5, Remote) of Steam user "Owner 5" (ID: 76561198000000005): It could not be checked again: ${TIMED_OUT}`,
   'admin (1) removed export ban list "List 6" (ID: 6, Remote) of Steam user "Owner 6" (ID: 76561198000000006), outside today\'s limits with 44,000 players by its export bans, 42,000 by its settings now: there was nothing to delete on BattleMetrics.',
-  "admin (1) removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 failed."
+  'admin (1) removed export ban list "List 7" (ID: 7, Remote) of Steam user "Owner 7" (ID: 76561198000000007), outside today\'s limits with 45,000 players by its export bans; they could not be counted by its settings now: there was nothing to delete on BattleMetrics.',
+  "admin (1) removed 2 of the 3 export ban lists outside today's limits: 2 with nothing to delete on BattleMetrics. 1 failed."
 ]);
 
+// A list its owner changes while it is checked again just before its removal, here by raising its
+// threshold while its players are counted, is left: it is read once more after the check, so it is
+// not removed as it was counted. The others carry on.
+clear();
+addList(8, 9, { CREATED: 41000 });
+addList(9, 9, { CREATED: 42000 });
+await command.execute(
+  interaction(async () => {
+    duringCount = () => {
+      duringCount = null;
+      lists.get(8).threshold = 10;
+    };
+  })
+);
+assert.deepStrictEqual(counted, [9, 9, 9, 9]);
+assert.deepStrictEqual(destroyed, [9]);
+assert.deepStrictEqual(lists.get(8).threshold, 10);
+assert.deepStrictEqual(replies.at(-1).embeds[0].toJSON().description.split('\n'), [
+  '**List 8** (#8): not removed, as it changed while it was being checked',
+  '**List 9** (#9): removed; there was nothing to delete on BattleMetrics'
+]);
+
+// A list whose players cannot be counted by its settings now before the preview may be over the cap
+// or not, so it is left, and the preview names it after the limits used. It holds up no other list,
+// and one whose count fails but which breaks the points rules is removed with the rest.
+clear();
+MEMBERS.set(14, new Error(TIMED_OUT));
+MEMBERS.set(3, new Error(TIMED_OUT));
+addList(10, 14, { CREATED: 43000 });
+// Their thresholds are below the lowest of 4, and only list 11 is over the cap.
+addList(11, 3, { CREATED: 44000 }, [1, 1]);
+addList(12, 3, { CREATED: 900 }, [1, 1]);
+await command.execute(interaction(async () => {}));
+MEMBERS.set(3, 45000);
+const [uncountedPreview] = replies.filter((reply) => reply.components?.length > 0);
+assert.ok(
+  uncountedPreview.content.startsWith(
+    "**2 export ban lists are outside today's limits.** Remove them? "
+  )
+);
+assert.ok(
+  uncountedPreview.content.endsWith(
+    `\n1 export ban list over the cap by its export bans could not be counted by its settings now, so whether it is within the cap is not known, and it is left: #10 (${TIMED_OUT}). Run the command again later to check it.`
+  )
+);
+assert.match(
+  uncountedPreview.embeds[0].toJSON().description,
+  /^\*\*List 11\*\* \(#11\) · Remote · .* · 44,000 players by its export bans; they could not be counted by its settings now\n↳ .* Whether it is within its type's cap is not known: /
+);
+assert.deepStrictEqual(counted, [14, 3, 3]);
+assert.deepStrictEqual(destroyed, [11, 12]);
+assert.deepStrictEqual([...lists.keys()], [10]);
+
 console.log(
-  'Export ban list limit checks passed: a list its owner has brought within the cap is left though its export bans are not updated yet, one over the cap by both counts is removed, and one whose count fails just before its removal is left.'
+  'Export ban list limit checks passed: a list its owner has brought within the cap is left though its export bans are not updated yet, one over the cap by both counts is removed, one changed while it is checked just before its removal is left, and one whose count fails is left unless it breaks the points rules.'
 );

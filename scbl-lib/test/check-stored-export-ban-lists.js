@@ -117,7 +117,7 @@ async function countMembers(settings, listConfigs) {
 }
 
 // A stand-in for Sequelize's Model, whose findAll gives the matching rows as instances, with the
-// owner's Steam user included as Sequelize includes it.
+// owner's Steam user included as Sequelize includes it, and whose findByPk gives one row.
 class Model {
   static init() {}
 
@@ -132,6 +132,12 @@ class Model {
         })
       );
   }
+
+  static async findByPk(id, options) {
+    queries.push(['ExportBanList.findByPk', id, structuredClone(options)]);
+    const row = lists.find((listRow) => listRow.id === id);
+    return row ? Object.assign(new this(), row) : null;
+  }
 }
 const dataType = () => dataType;
 
@@ -140,10 +146,12 @@ const models = {
   Organisation: { name: 'Organisation' },
   SteamUser: { name: 'SteamUser' },
   ExportBanListConfig: {
+    // The configs of the lists with the IDs given, or of the list with the ID given.
     async findAll(options) {
       queries.push(['ExportBanListConfig', structuredClone(options)]);
+      const ids = [options.where.exportBanList].flat();
       return configs
-        .filter((config) => options.where.exportBanList.includes(config.exportBanList))
+        .filter((config) => ids.includes(config.exportBanList))
         .map((config) => {
           const banList = banLists.find(({ id }) => id === config.banList);
           return {
@@ -454,9 +462,9 @@ await assert.rejects(ExportBanList.checkLimits(), { message: 'Query execution wa
 result = await ExportBanList.checkLimits({ ids: [1] });
 assert.deepStrictEqual(summary(result)[0].problems, []);
 
-// A caller that only shows the lists can keep the error instead: the list whose count failed comes
-// with it, no count and no problem for the cap, as whether it is over the cap is not known, and its
-// points rules are still checked. The other lists are checked and counted as before.
+// A caller that deals with such a list itself can keep the error instead: the list whose count
+// failed comes with it, no count and no problem for the cap, as whether it is over the cap is not
+// known, and its points rules are still checked. The other lists are checked and counted as before.
 queries.length = 0;
 result = await ExportBanList.checkLimits({ ids: [12], keepRecountErrors: true });
 assert.strictEqual(result.lists[0].recountError, interrupted);
@@ -500,6 +508,76 @@ assert.deepStrictEqual(
   }))
 );
 membersByThreshold.set(7, 1554);
+
+// Checking a list takes a moment, longer when it is counted again, and its owner may change it on
+// the website meanwhile. So just before the Discord bot removes a list, it asks what has changed
+// since the check: nothing here. The list is read again, with its settings and BattleMetrics ban
+// list, and so are its configs, in ID order, as checkLimits loads them.
+const [checked12] = (await ExportBanList.checkLimits({ ids: [12] })).lists;
+queries.length = 0;
+assert.strictEqual(await ExportBanList.changeSince(checked12), null);
+assert.deepStrictEqual(queries, [
+  [
+    'ExportBanList.findByPk',
+    12,
+    {
+      attributes: [
+        'id',
+        'battlemetricsID',
+        'threshold',
+        'defaultActivePoints',
+        'defaultExpiredPoints',
+        'maxBanAge'
+      ]
+    }
+  ],
+  [
+    'ExportBanListConfig',
+    {
+      attributes: ['id', 'banList', 'activePoints', 'expiredPoints'],
+      where: { exportBanList: 12 },
+      order: [['id', 'ASC']]
+    }
+  ]
+]);
+// A new value of any setting, a BattleMetrics ban list made or deleted meanwhile, and a config
+// changed, added or deleted are each a change.
+const changes = [
+  ...[
+    ['threshold', 9],
+    ['defaultActivePoints', 4],
+    ['defaultExpiredPoints', 0],
+    ['maxBanAge', 30],
+    ['battlemetricsID', null]
+  ].map(([column, value]) => [column, lists[11], column, value]),
+  ...[
+    ['banList', 8],
+    ['activePoints', 3],
+    ['expiredPoints', 1]
+  ].map(([field, value]) => [`config's ${field}`, configs[6], field, value])
+];
+for (const [what, row, field, value] of changes) {
+  const before = row[field];
+  row[field] = value;
+  assert.strictEqual(await ExportBanList.changeSince(checked12), 'changed', what);
+  row[field] = before;
+}
+configs.push({ id: 8, exportBanList: 12, banList: 8, activePoints: 1, expiredPoints: 1 });
+assert.strictEqual(await ExportBanList.changeSince(checked12), 'changed', 'a config added');
+configs.pop();
+const [config7] = configs.splice(6, 1);
+assert.strictEqual(await ExportBanList.changeSince(checked12), 'changed', 'a config deleted');
+configs.splice(6, 0, config7);
+// What does not decide who is on the list or whether it is within the limits is no change, such as
+// its name.
+lists[11].name = 'Renamed';
+assert.strictEqual(await ExportBanList.changeSince(checked12), null);
+lists[11].name = 'List 12';
+// A list deleted meanwhile is gone.
+const [list12] = lists.splice(11, 1);
+assert.strictEqual(await ExportBanList.changeSince(checked12), 'deleted');
+lists.splice(11, 0, list12);
+assert.strictEqual(await ExportBanList.changeSince(checked12), null);
 
 // The BattleMetrics ban lists the API key can see are read from BattleMetrics' list of ban lists,
 // every page of it, 100 at a time.

@@ -20,6 +20,9 @@ const { DataTypes } = Sequelize;
 // The settings that decide who is on a list, with its configs.
 const SETTINGS = Object.keys(DEFAULT_SETTINGS);
 
+// The columns of a config that decide who is on its list.
+const CONFIG_SETTINGS = ['banList', 'activePoints', 'expiredPoints'];
+
 // The export bans of the players on a list: those waiting to be added and those already added.
 // /export/:id serves these, and a BattleMetrics list holds them once the importer has added them.
 const PLAYER_STATUSES = ['TO_BE_CREATED', 'CREATED'];
@@ -161,8 +164,9 @@ class ExportBanList extends Sequelize.Model {
   // and has no problems.
   //
   // A count that fails fails the check, as whether the list is over the cap is then not known. A
-  // caller that only shows the lists can pass keepRecountErrors instead, and a list whose count
-  // failed then comes with the error as recountError, a null recount and no problem for the cap.
+  // caller that deals with such a list itself, as the Discord bot does, can pass keepRecountErrors
+  // instead: a list whose count failed then comes with the error as recountError, a null recount
+  // and no problem for the cap, so it has problems only when it breaks the points rules.
   // recountError is null for every other list.
   static async checkLimits({ ids, limits = EXPORT_LIST_LIMITS, keepRecountErrors = false } = {}) {
     if (ids !== undefined && ids.length === 0) return { limits, lists: [] };
@@ -241,6 +245,33 @@ class ExportBanList extends Sequelize.Model {
         };
       })
     };
+  }
+
+  // What has changed in a list since checkLimits checked it, given the check it gave for the list:
+  // 'deleted' when the list is gone, 'changed' when its settings, its configs or its BattleMetrics
+  // ban list differ from those it was checked with, or null when none of them has. A check takes a
+  // moment, longer for a list whose players it counts again, and the list's owner can change it on
+  // the website meanwhile, so the Discord bot asks this just before it removes a list outside the
+  // limits. Nothing is locked, so a change saved in the moment after this is not seen.
+  static async changeSince({ exportBanList, configs }) {
+    const { ExportBanListConfig } = sequelize.models;
+    const columns = ['battlemetricsID', ...SETTINGS];
+    const current = await ExportBanList.findByPk(exportBanList.id, {
+      attributes: ['id', ...columns]
+    });
+    if (!current) return 'deleted';
+    const currentConfigs = await ExportBanListConfig.findAll({
+      attributes: ['id', ...CONFIG_SETTINGS],
+      where: { exportBanList: exportBanList.id },
+      order: [['id', 'ASC']]
+    });
+    const unchanged =
+      columns.every((name) => current[name] === exportBanList[name]) &&
+      currentConfigs.length === configs.length &&
+      currentConfigs.every((config, index) =>
+        ['id', ...CONFIG_SETTINGS].every((name) => config[name] === configs[index][name])
+      );
+    return unchanged ? null : 'changed';
   }
 
   // The IDs of every BattleMetrics ban list CBL's API key can see. Deleting a list treats a ban
