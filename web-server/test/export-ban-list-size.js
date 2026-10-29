@@ -829,6 +829,12 @@ const NO_CONNECTION = `Error: The count could not get a database connection with
     counts.transactions.map((transaction) => transaction?.id),
     [1, 1, 2, 2]
   );
+  // Both counts in a snapshot are given the time limit alone, and no ban lists to leave out, as
+  // the size check's counts are, so the bans of paused ones count too, in each of them alike.
+  assert.deepStrictEqual(
+    counts.calls.map(({ options }) => options),
+    Array(4).fill(counting)
+  );
   assert.deepStrictEqual(pool.events, [
     '1: begin REPEATABLE READ',
     '1: commit',

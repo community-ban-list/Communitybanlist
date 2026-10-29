@@ -219,8 +219,11 @@ function oneAtATime(count) {
 // Run counts on the counts' connection, in one REPEATABLE READ transaction, so they all read the
 // bans as they were when the first one started, whatever the importer or the bot saves meanwhile,
 // and take no locks. counts(nextCount) runs them, each with the options nextCount() gives: the time
-// limit and the transaction. This resolves with what counts resolves with as soon as it does, as
-// the transaction then ends on its own.
+// limit and the transaction. They give no ban lists to leave out, so, as in every count of the size
+// check, the bans of paused ones count too, as a list's cap must hold once they count again (see
+// countMembers), and the counts in one snapshot all count the bans of the same ban lists. This
+// resolves with what counts resolves with as soon as it does, as the transaction then ends on its
+// own.
 // The counts are given up on, as counts that failed, when the connection is not theirs within
 // CONNECTION_WAIT, or when the database has not answered a count within ANSWER_LIMIT of its start.
 // nextCount() then throws, so they start nothing more, and a late answer is not used.
