@@ -263,6 +263,11 @@ const packages = {
     // counted.
     countPlayersWithBans: async () => 0
   },
+  // No ban list is paused.
+  'scbl-lib/db/ban-list-suspensions': {
+    readPausedBanLists: async () => [],
+    pausedSets: () => ({ suspended: [], excluded: [] })
+  },
   'scbl-lib/db/models': models,
   'scbl-lib/db/sequelize': database,
   'scbl-lib/export-list-limits': exportListLimits,
