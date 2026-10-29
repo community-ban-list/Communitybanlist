@@ -158,8 +158,9 @@ export function describeProgress(progress, { bar = false } = {}) {
 // is also given the step's latest progress.
 const DETAILS = {
   // The import's totals, as in its summary line, and how many lists it only polled and read in
-  // full, with the BattleMetrics requests that took, when it says. Those of a dry run say what it
-  // would have done.
+  // full, with the BattleMetrics requests that took, when it says, and the suspended lists it left
+  // out and the resuming ones that count again, if any. Those of a dry run say what it would have
+  // done.
   importBans: (counts) => {
     const { lists, imported, fetched, updated, removed, held, failedLists } = counts;
     if (![imported, fetched, counts.new, updated, removed, held, failedLists].every(isCount))
@@ -182,7 +183,18 @@ const DETAILS = {
         )}`;
     }
     const dryRun = counts.dryRun === true ? ', in a dry run that wrote nothing' : '';
-    return `${banLists}: ${plural(fetched, 'ban')} fetched, ${formatCount(counts.new)} new, ${formatCount(updated)} updated, ${formatCount(removed)} removed, ${formatCount(held)} held, ${plural(failedLists, 'list')} failed${reads}${dryRun}`;
+    const suspended =
+      isCount(counts.suspended) && counts.suspended > 0
+        ? ` (${formatCount(counts.suspended)} suspended left out)`
+        : '';
+    const caughtUp = Array.isArray(counts.caughtUp)
+      ? counts.caughtUp.filter((id) => Number.isSafeInteger(id))
+      : [];
+    const again =
+      caughtUp.length > 0
+        ? `; ${caughtUp.length === 1 ? `ban list ${caughtUp[0]} counts` : `ban lists ${caughtUp.join(', ')} count`} again`
+        : '';
+    return `${banLists}${suspended}: ${plural(fetched, 'ban')} fetched, ${formatCount(counts.new)} new, ${formatCount(updated)} updated, ${formatCount(removed)} removed, ${formatCount(held)} held, ${plural(failedLists, 'list')} failed${reads}${again}${dryRun}`;
   },
   // The bans marked expired, of those found, and the players queued for a recalculation.
   expireBans: ({ due, expired, players }) => {

@@ -2,6 +2,7 @@ import { Ban, BanList, Organisation, SteamUser } from 'scbl-lib/db/models';
 
 import { listOrder } from '../core/list-order.js';
 import { PAGE_SIZE, pageArgs } from '../core/page-size.js';
+import { pausedOf, withoutPaused } from '../core/paused.js';
 import recordView from './record-view.js';
 
 export default {
@@ -11,14 +12,19 @@ export default {
         order: [['name', 'ASC']]
       });
     },
-    banLists: () => {
-      return BanList.findAll({
-        order: [['name', 'ASC']]
-      });
+    // Paused ban lists are left out, as their bans count for nothing.
+    banLists: async (parent, args, context) => {
+      const paused = pausedOf(context);
+      return (await BanList.findAll({ order: [['name', 'ASC']] })).filter(
+        (banList) => !paused.has(banList.id)
+      );
     },
-    bans: (parent, filter) => {
+    // The bans of paused ban lists are left out.
+    bans: (parent, filter, context) => {
+      const { order, where } = listOrder('bans', filter);
       return Ban.paginate({
-        ...listOrder('bans', filter),
+        order,
+        where: withoutPaused(where, context),
         ...pageArgs(filter, PAGE_SIZE.list)
       });
     },

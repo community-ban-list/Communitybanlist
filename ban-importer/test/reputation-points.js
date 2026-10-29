@@ -4,10 +4,14 @@ import vm from 'vm';
 
 import {
   FIND_MISMATCHED,
+  findMismatched,
   POINTS,
   POINTS_MONTH_BEFORE,
+  pointsMonthBefore,
+  pointsNow,
   pointsOf,
-  RECALCULATE_POINTS
+  RECALCULATE_POINTS,
+  recalculatePoints
 } from '../src/reputation-points.js';
 
 // Check the rule that players' reputation points are worked out by, without a database: the
@@ -142,12 +146,64 @@ assert.ok(
 assert.ok(RECALCULATE_POINTS.trim().endsWith('WHERE SU.lastRefreshedReputationPoints IS NULL'));
 assert.doesNotMatch(FIND_MISMATCHED, /FOR UPDATE|FOR SHARE|LOCK IN SHARE MODE|MonthBefore/i);
 
+// The bans of paused lists count for nothing. With none, each statement is the one above, as it was
+// before lists could be paused. With some, every read of the bans leaves out theirs, now and a
+// month before, by one condition, with their IDs in order, and nothing else changes: points now get
+// a WHERE, which they had none of, and points a month before have it added to theirs.
+assert.strictEqual(pointsNow([]), POINTS);
+assert.strictEqual(pointsMonthBefore([]), POINTS_MONTH_BEFORE);
+assert.strictEqual(recalculatePoints([]), RECALCULATE_POINTS);
+assert.strictEqual(findMismatched([]), FIND_MISMATCHED);
+const NOT_PAUSED = 'B.banList NOT IN (2, 7)';
+assert.deepStrictEqual(
+  tokens(pointsNow([7, 2])),
+  tokens(POINTS.replace('FROM Bans B', `FROM Bans B WHERE ${NOT_PAUSED}`))
+);
+assert.deepStrictEqual(
+  tokens(pointsMonthBefore([7, 2])),
+  tokens(
+    POINTS_MONTH_BEFORE.replace(
+      'WHERE B.created < NOW() - INTERVAL 1 MONTH',
+      `WHERE B.created < NOW() - INTERVAL 1 MONTH AND ${NOT_PAUSED}`
+    )
+  )
+);
+assert.deepStrictEqual(
+  tokens(recalculatePoints([7, 2])),
+  tokens(
+    RECALCULATE_POINTS.replace(POINTS, pointsNow([2, 7])).replace(
+      POINTS_MONTH_BEFORE,
+      pointsMonthBefore([2, 7])
+    )
+  )
+);
+assert.strictEqual(recalculatePoints([7, 2]).split(NOT_PAUSED).length - 1, 2);
+assert.deepStrictEqual(
+  tokens(findMismatched([7, 2])),
+  tokens(FIND_MISMATCHED.replace(POINTS, pointsNow([2, 7])))
+);
+assert.strictEqual(findMismatched([7, 2]).split(NOT_PAUSED).length - 1, 1);
+// Anything but an array of positive whole IDs, each once, is refused, as a statement given it could
+// count every ban, or none.
+for (const excluded of [undefined, null, '2', [0], [-1], [1.5], ['2'], [2, 2], [Number.NaN]])
+  assert.throws(() => recalculatePoints(excluded), TypeError, String(excluded));
+
 // Core.updateReputationPoints sends the recalculation as it sent it before: one statement, on its
-// own, outside any transaction. core.js is loaded with the real reputation-points.js, and empty
-// stand-ins for its other imports, named from its import statements.
+// own, outside any transaction, leaving out the bans of the lists paused as the run saw them, the
+// run whose start it is given. core.js is loaded with the real reputation-points.js and the
+// excluded-ban-lists.js it imports, a stand-in for paused-lists.js, and empty stand-ins for its
+// other imports, named from its import statements.
 {
   const queries = [];
+  const reads = [];
+  let paused = [];
   const stubs = {
+    './paused-lists.js': {
+      default: async (settings) => {
+        reads.push(settings);
+        return { rows: [], suspended: [], excluded: paused };
+      }
+    },
     'scbl-lib/db': {
       sequelize: {
         QueryTypes: { BULKUPDATE: 'BULKUPDATE' },
@@ -168,11 +224,19 @@ assert.doesNotMatch(FIND_MISMATCHED, /FOR UPDATE|FOR SHARE|LOCK IN SHARE MODE|Mo
       .split(',')
       .map((name) => name.trim().split(/\s+as\s+/)[0])
       .filter(Boolean);
+  for (const [, specifier] of source.matchAll(/import\s+\w+\s+from\s*'([^']+)'/g))
+    imports[specifier] = ['default'];
+  const real = {
+    './reputation-points.js': (referencingModule) =>
+      new URL('./reputation-points.js', referencingModule.identifier),
+    'scbl-lib/db/excluded-ban-lists': () =>
+      new URL('../../scbl-lib/db/excluded-ban-lists.js', import.meta.url)
+  };
   const context = vm.createContext({});
   const module = new vm.SourceTextModule(source, { context, identifier: url.href });
   await module.link(async (specifier, referencingModule) => {
-    if (specifier === './reputation-points.js') {
-      const shared = new URL(specifier, referencingModule.identifier);
+    if (real[specifier]) {
+      const shared = real[specifier](referencingModule);
       return new vm.SourceTextModule(await readFile(shared, 'utf8'), {
         context,
         identifier: shared.href
@@ -190,10 +254,21 @@ assert.doesNotMatch(FIND_MISMATCHED, /FOR UPDATE|FOR SHARE|LOCK IN SHARE MODE|Mo
     );
   });
   await module.evaluate();
-  await module.namespace.default.updateReputationPoints();
+  await module.namespace.default.updateReputationPoints({ startedAt: 1000 });
   assert.strictEqual(queries.length, 1);
   assert.strictEqual(queries[0].sql, RECALCULATE_POINTS);
   assert.deepStrictEqual({ ...queries[0].options }, { type: 'BULKUPDATE' });
+  // The settings come from core.js's context, so they are copied into this one to be compared.
+  assert.deepStrictEqual(
+    reads.map((settings) => ({ ...settings })),
+    [{ startedAt: 1000 }]
+  );
+
+  paused = [7, 2];
+  await module.namespace.default.updateReputationPoints({ startedAt: 2000 });
+  assert.strictEqual(queries.length, 2);
+  assert.strictEqual(queries[1].sql, recalculatePoints([2, 7]));
+  assert.deepStrictEqual({ ...reads.at(-1) }, { startedAt: 2000 });
 }
 
 // The rule is written in reputation-points.js only: no other file of the importer works out points
@@ -211,5 +286,5 @@ assert.doesNotMatch(FIND_MISMATCHED, /FOR UPDATE|FOR SHARE|LOCK IN SHARE MODE|Mo
 }
 
 console.log(
-  'Reputation points checks passed: the recalculation unchanged token for token and sent as before, the check joining the same table of points, and the rule written in one place.'
+  'Reputation points checks passed: the recalculation unchanged token for token and sent as before, the check joining the same table of points, paused lists left out of every read of the bans, and the rule written in one place.'
 );
