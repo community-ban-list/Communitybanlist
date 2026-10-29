@@ -34,10 +34,20 @@ function ended(promise, what) {
 // has none to give them.
 const Logger = { verbose() {}, important() {} };
 
+// The module of scbl-lib with the SQL piece that leaves out paused ban lists, which has no imports,
+// and is loaded as it is.
+const EXCLUDED_BAN_LISTS = 'scbl-lib/db/excluded-ban-lists';
+
 // Load a module of the importer with stand-ins for its dependencies, the real run-control.js, the
 // real version of any other module of the importer it imports without a stand-in, such as
-// ban-list-sync.js, and any other globals it needs.
+// ban-list-sync.js, the real excluded-ban-lists.js, and any other globals it needs. Its run sees no
+// ban list paused, unless a stand-in for paused-lists.js is given.
 async function load(path, dependencies, globals = {}) {
+  dependencies = {
+    './paused-lists.js': { default: async () => ({ rows: [], suspended: [], excluded: [] }) },
+    'scbl-lib/db/ban-list-suspensions': { endResumption: async () => false },
+    ...dependencies
+  };
   const context = vm.createContext({
     console: { log() {} },
     process: { env: {} },
@@ -67,8 +77,10 @@ async function load(path, dependencies, globals = {}) {
       return control;
     }
     const exports = dependencies[specifier];
-    if (!exports && specifier.startsWith('./')) {
-      const url = new URL(specifier, referencingModule.identifier);
+    if (!exports && (specifier.startsWith('./') || specifier === EXCLUDED_BAN_LISTS)) {
+      const url = specifier.startsWith('./')
+        ? new URL(specifier, referencingModule.identifier)
+        : new URL('../../scbl-lib/db/excluded-ban-lists.js', import.meta.url);
       return new vm.SourceTextModule(await readFile(url, 'utf8'), {
         context,
         identifier: url.href

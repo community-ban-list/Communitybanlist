@@ -255,7 +255,21 @@ const stubs = {
     ExportBanListConfig: {},
     Organisation: {}
   },
-  'scbl-lib/db/sequelize': { Op: {} },
+  // No ban list is paused, and the bot's other commands never change that.
+  'scbl-lib/db/ban-list-suspensions': {
+    isMissingTable: () => false,
+    MAX_REASON_LENGTH: 500,
+    readPausedBanLists: async () => [],
+    readSettledPausedBanLists: async () => [],
+    async resumeBanList() {
+      throw new Error('Not expected');
+    },
+    async suspendBanList() {
+      throw new Error('Not expected');
+    }
+  },
+  'scbl-lib/db/importer-models': { BanListSync: {} },
+  'scbl-lib/db/sequelize': { Op: {}, QueryTypes: { SELECT: 'SELECT' } },
   // The real utils, so the bot's other helpers find what they import, but a logger that records
   // what the command logs rather than sending it.
   'scbl-lib/utils': {

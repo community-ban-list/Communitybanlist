@@ -45,6 +45,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 assert.deepStrictEqual(plain(REASONS), {
   NEW: 'new',
   SOURCE: 'source',
+  RESUME: 'resume',
   REMOVAL: 'removal',
   DRIFT: 'drift',
   OVERFLOW: 'overflow',
@@ -154,6 +155,23 @@ for (const fields of [
 ])
   assert.deepStrictEqual(plan(rowOf(fields)), full('new'), JSON.stringify(fields));
 assert.deepStrictEqual(plan(rowOf({ headUids: '[]', headTotal: 0 })), { read: 'head' });
+
+// A list an admin resumed is read in full until a read in full has completed since it was resumed,
+// as a Date or a time, so the bans its owner added or lifted while it was suspended are found
+// before it counts again. Once one has, it is planned as any other list.
+const lastFull = rowOf().lastFullScanAt;
+const resumed = (offset) => new Date(lastFull + offset);
+assert.deepStrictEqual(plan(rowOf(), { resumedAt: resumed(1) }), full('resume'));
+assert.deepStrictEqual(plan(rowOf(), { resumedAt: lastFull + 1 }), full('resume'));
+assert.deepStrictEqual(plan(rowOf(), { resumedAt: resumed(0) }), { read: 'head' });
+assert.deepStrictEqual(plan(rowOf(), { resumedAt: resumed(-MINUTE) }), { read: 'head' });
+assert.deepStrictEqual(plan(rowOf(), { resumedAt: null }), { read: 'head' });
+// A new list, or one whose source changed, keeps that reason, which reads it in full too.
+assert.deepStrictEqual(plan(null, { resumedAt: resumed(1) }), full('new'));
+assert.deepStrictEqual(
+  plan(rowOf({ sourceKey: 'o'.repeat(64) }), { resumedAt: resumed(1) }),
+  full('source')
+);
 
 // A list with a missing ban that is due to be confirmed as gone is read in full, which removes it.
 // One whose first missing ban is not due yet is not, nor is one CBL cannot read, as it is never

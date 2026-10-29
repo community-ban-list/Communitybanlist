@@ -151,7 +151,21 @@ const stubs = {
       }
     }
   },
-  'scbl-lib/db/sequelize': { Op },
+  // No ban list is paused, and the bot's other commands never change that.
+  'scbl-lib/db/ban-list-suspensions': {
+    isMissingTable: () => false,
+    MAX_REASON_LENGTH: 500,
+    readPausedBanLists: async () => [],
+    readSettledPausedBanLists: async () => [],
+    async resumeBanList() {
+      throw new Error('Not expected');
+    },
+    async suspendBanList() {
+      throw new Error('Not expected');
+    }
+  },
+  'scbl-lib/db/importer-models': { BanListSync: {} },
+  'scbl-lib/db/sequelize': { Op, QueryTypes: { SELECT: 'SELECT' } },
   'scbl-lib/utils': {
     isSameBattlemetricsID,
     Logger: { verbose: (...args) => audits.push(args.slice(2).join('')) }
