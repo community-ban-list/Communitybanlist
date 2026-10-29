@@ -141,6 +141,22 @@ for (const error of [
   assert.deepStrictEqual([transactions, delays], [1, []], error.message);
 }
 
+// The players of paused lists are not queued, as their bans count for nothing, while those of the
+// other lists deleted with them are; with every list paused, no player is.
+reset();
+await deleteBanLists([5, 6, 7], organisation, { paused: [6] });
+assert.deepStrictEqual(calls[1], ['flags', 1, [5, 7]]);
+reset();
+await deleteBanLists([5], organisation, { paused: [5] });
+assert.deepStrictEqual(calls, [
+  ['begin', 1],
+  ['destroy bans', 1, [5]],
+  ['destroy export ban list configs', 1, [5]],
+  ['destroy ban lists', 1, [5]],
+  ['destroy organisation', 1],
+  ['commit', 1]
+]);
+
 console.log(
-  'Ban list deletion checks passed: one transaction, run again after deadlocks and lock wait timeouts, at most 3 times, and other errors at once.'
+  'Ban list deletion checks passed: one transaction, run again after deadlocks and lock wait timeouts, at most 3 times, other errors at once, and no players queued for paused lists.'
 );

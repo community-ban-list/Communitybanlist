@@ -97,10 +97,18 @@ const sequelize = {
   }
 };
 
+// The paused ban lists as the run saw them (see paused-lists.js), which the step reads once, given
+// when the run started, and leaves out of every batch alike.
+let excluded = [];
+const pausedReads = [];
+const excludedGiven = [];
+
 // The statement that says which export bans the batch's players qualify for, which scbl-lib holds.
-// It runs on its own, in a SERIALIZABLE transaction that is still open when it is made.
-async function membershipForPlayers(steamUserIDs, { transaction, ...rest }) {
+// It runs on its own, in a SERIALIZABLE transaction that is still open when it is made, leaving
+// out the bans of the paused lists.
+async function membershipForPlayers(steamUserIDs, { transaction, excludedBanLists, ...rest }) {
   assert.deepStrictEqual(rest, {});
+  excludedGiven.push([...excludedBanLists]);
   assert.strictEqual(transaction.isolationLevel, 'SERIALIZABLE');
   assert.strictEqual(transaction.open, true);
   batch = [...steamUserIDs];
@@ -209,6 +217,12 @@ const dependencies = {
   },
   // The batch's statements are run again after a deadlock, which lock-retries.js checks.
   './apply-list.js': { retryOperation: (operation) => operation() },
+  './paused-lists.js': {
+    default: async (settings) => {
+      pausedReads.push({ ...settings });
+      return { rows: [], suspended: [], excluded };
+    }
+  },
   './run-control.js': {
     stopIfRequested() {},
     reportProgress: (...args) => progress.push(args)
@@ -653,6 +667,32 @@ assert.deepStrictEqual(statesOf('F'), Array(1001).fill(['CREATED', '1', 'now']))
 assert.deepStrictEqual(statesOf('G'), Array(1001).fill(['CREATED', null, 'now']));
 assert.strictEqual(table.size, 7505);
 
+// The step reads the paused lists once, as the run whose start it is given saw them, and gives
+// every batch the same ones to leave out, also when they change meanwhile, as the next run then
+// sees them.
+{
+  pausedReads.length = 0;
+  excludedGiven.length = 0;
+  excluded = [1, 3];
+  const Paused = await load({ UPDATE_EXPORT_BANS_BATCH_SIZE: '1' });
+  setUp({
+    types: { 10: 'remote' },
+    steamUsers: ['A', 'B', 'C'],
+    qualifying: {},
+    exportBans: {}
+  });
+  const pending = Paused.updateExportBans({}, { startedAt: 5000 });
+  excluded = [1, 2, 3];
+  await pending;
+  assert.deepStrictEqual(pausedReads, [{ startedAt: 5000 }]);
+  assert.deepStrictEqual(excludedGiven, [
+    [1, 3],
+    [1, 3],
+    [1, 3]
+  ]);
+  excluded = [];
+}
+
 console.log(
-  'Export ban manager checks passed: one read a batch, every transition by ID with its conditions, no writes when nothing changes.'
+  'Export ban manager checks passed: one read a batch, every transition by ID with its conditions, no writes when nothing changes, and paused lists read once a run and left out of every batch.'
 );

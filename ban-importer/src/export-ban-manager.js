@@ -5,6 +5,7 @@ import { Op, Transaction } from 'scbl-lib/db/sequelize';
 import { Logger } from 'scbl-lib/utils';
 
 import { retryOperation } from './apply-list.js';
+import pausedBanLists from './paused-lists.js';
 import { reportProgress, stopIfRequested } from './run-control.js';
 
 // Changed Below on the 14900k. Will need to monitor to make sure issues do not arise.
@@ -98,10 +99,12 @@ async function setStatus(ids, status, conditions, options = {}) {
 
 export default class ExportBanManager {
   // Recalculate every player's export bans, counting in counts how many players have been, also
-  // when the step stops part-way.
-  static async updateExportBans(counts = {}) {
+  // when the step stops part-way. The bans of the lists paused as the run saw them, the run that
+  // started at startedAt, are left out (see paused-lists.js), in every batch alike.
+  static async updateExportBans(counts = {}, { startedAt } = {}) {
     Logger.verbose('ExportBanManager', 2, 'Fetching Steam users to update...');
     const profileStartTime = Date.now();
+    const { excluded: excludedBanLists } = await pausedBanLists({ startedAt });
     const users = await SteamUser.findAll({ attributes: ['id'] });
     Logger.verbose(
       'ExportBanManager',
@@ -148,7 +151,7 @@ export default class ExportBanManager {
           async (t) => {
             return membershipForPlayers(
               batch.map((steamUser) => steamUser.id),
-              { transaction: t }
+              { transaction: t, excludedBanLists }
             );
           }
         )
