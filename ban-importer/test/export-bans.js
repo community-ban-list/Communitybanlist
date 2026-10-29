@@ -42,7 +42,9 @@ const dependencies = {
   },
   'scbl-lib/db/sequelize': { Op: { in: 'in' } },
   'scbl-lib/utils': {
-    createDiscordWebhookMessage: (webhook) => {
+    // As the real one, it takes only the message's options. The alerts show the colour it was
+    // given, so a call that passes anything else first loses it here.
+    createDiscordWebhookMessage: (options = {}) => {
       const message = {
         setTitle(title) {
           this.title = title;
@@ -50,10 +52,10 @@ const dependencies = {
         setDescription() {},
         setThumbnail() {},
         getJSON() {
-          return { embeds: [this.title] };
+          return { embeds: [options.color ? `${this.title} (${options.color})` : this.title] };
         }
       };
-      return [webhook, message];
+      return message;
     },
     DELETED_WEBHOOK_CODES: [10015, 50027],
     isDiscordWebhookUrl: () => true,
@@ -104,8 +106,11 @@ const remoteList = {
   name: 'Remote',
   discordWebhook: webhook(99)
 };
-const added = (list) => `${webhook(list)}: Player has been added to your export ban list.`;
-const removed = (list) => `${webhook(list)}: Player has been removed from your export ban list.`;
+// Players added are shown in green, and players removed in red.
+const added = (list) =>
+  `${webhook(list)}: Player has been added to your export ban list. (#00ff00)`;
+const removed = (list) =>
+  `${webhook(list)}: Player has been removed from your export ban list. (#ff0000)`;
 
 // An export ban as the run first reads it, with the given battlemetricsID. Reading it again finds
 // it the same, or with the fields in again, or not at all when again is null, and its BattleMetrics

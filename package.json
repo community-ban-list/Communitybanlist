@@ -15,6 +15,7 @@
   "scripts": {
     "prepare": "husky || true",
     "lint": "eslint --fix . && prettier --write \"./**/*.{js,jsx,mjs}\"",
+    "lint:check": "eslint . && prettier --check \"./**/*.{js,jsx,mjs}\"",
     "prettier": "prettier --write \"./**/*.{js,jsx,mjs}\"",
     "start-ban-importer": "node ban-importer/index.js",
     "start-discord-bot": "node discord-bot/index.js",
@@ -38,9 +39,5 @@
     "neostandard": "^0.13.0",
     "nodemon": "^3.1.14",
     "prettier": "^3.9.9"
-  },
-  "dependencies": {
-    "react-step-wizard": "^5.3.5",
-    "simple-discord-webhooks": "^2.1.0"
   }
 }
