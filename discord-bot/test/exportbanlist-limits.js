@@ -401,8 +401,8 @@ assert.deepStrictEqual([...lists.keys()], [10]);
 // list's settings now includes them, as the website's size check does, so that the list's cap
 // holds once they count again. A list over the cap by its export bans, and by its settings now with
 // the paused list's bans, is removed. One within the cap by its export bans only while the ban list
-// is paused is not counted again, and is left until it counts again. The preview says so after
-// the limits used.
+// is paused is not counted again, and is left until the ban list counts again. The preview says so
+// after the limits used.
 clear();
 pausedRows = [{ banList: 46, resumedAt: null }];
 MEMBERS.set(15, 43500);
