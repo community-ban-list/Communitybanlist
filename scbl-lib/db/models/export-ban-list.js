@@ -360,6 +360,9 @@ class ExportBanList extends Sequelize.Model {
   // ahead. These transactions can meet in one:
   // - a transfer and the ban importer's export step: the transfer locks the new owner's lists
   //   before the list it gives them, while the export step reads every list in ID order;
+  // - a change saved on the website, such as a config added or deleted, and the export step, which
+  //   reads every list and config: the change locks its list before it writes the list's configs,
+  //   while the export step can lock the configs it has read and then wait for the list;
   // - a list created for a user with none and a list given to them at the same moment, as both
   //   lock the gap between other users' lists in the index on the owner where the user's lists
   //   would go (see lockListsOf), and then add a list to it;
