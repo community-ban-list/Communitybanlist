@@ -95,6 +95,10 @@ Object.assign(models.ExportBanList, {
   async whileDeleting(id, deletion) {
     calls.push({ model: 'ExportBanList', method: 'whileDeleting', options: { id } });
     return deletion();
+  },
+  async isBeingDeleted(id) {
+    calls.push({ model: 'ExportBanList', method: 'isBeingDeleted', options: { id } });
+    return false;
   }
 });
 

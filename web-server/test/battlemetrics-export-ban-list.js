@@ -90,6 +90,8 @@ const dependencies = {
         }
       },
       lockListsOf: async () => 0,
+      // No list here is being deleted.
+      isBeingDeleted: async () => false,
       // A list is created in a transaction of its own, which has ended before its BattleMetrics
       // ban list is made, as making it saves the list, which would wait on the uncommitted row.
       create: async (fields, options) => {

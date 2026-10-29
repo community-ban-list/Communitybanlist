@@ -24,8 +24,9 @@ import testWebhook from './test-webhook.js';
 // who made it (audit.js). Changes the checks refuse, before anything is saved, a webhook is tested
 // or BattleMetrics is asked for anything, such as a value out of bounds or a list that does not
 // exist, are only shown to the user, as they change nothing. So are changes refused as they are
-// saved, as the list changed after their checks or is no longer the user's (see saveOwnList), or
-// as the database was too busy to save them (see inTransaction).
+// saved, as the list changed after their checks, is no longer the user's or is being deleted (see
+// saveOwnList), or as the database was too busy to save them (see inTransaction), and a deletion of
+// a list that is being deleted already, e.g. by the Discord bot.
 
 // The settings that decide who is on an export ban list, with its configs: its threshold, default
 // points and max ban age.
@@ -50,6 +51,10 @@ const CHANGED =
 // inTransaction). Nothing is saved, and the user can try again shortly.
 const DATABASE_BUSY =
   'The database was busy, so your change was not saved. Please try again in a minute.';
+
+// The refusal for a change to a list that is being deleted, e.g. by the Discord bot, whose change
+// would be lost with the list (see saveOwnList). Nothing is saved.
+const BEING_DELETED = 'This export ban list is being deleted, so your change was not saved.';
 
 // A list's settings, from its stored row or a change's arguments. Only the arguments given are
 // taken, so a change leaves the others as they are.
@@ -149,8 +154,12 @@ async function inTransaction(work) {
 // each user's changes in order is not enough: the list is looked up again with its row locked, and
 // the change is only saved while the user still owns it. Another change to the list, such as the
 // new owner's or the transfer itself, waits for the row until this one is saved, and this one waits
-// for theirs. save(list, transaction) gets the list as it is now, to check it again and write the
-// change in the transaction.
+// for theirs. The bot can also remove the list, which can take minutes on BattleMetrics, and holds
+// its deletion lock meanwhile, so a change to a list being deleted is refused, as it would be lost
+// with the list. The bot reads the list a last time with its row locked once it holds that lock,
+// so a change that got past this check is saved before that read, which then sees it.
+// save(list, transaction) gets the list as it is now, to check it again and write the change in the
+// transaction.
 function saveOwnList(context, id, save) {
   return inTransaction(async (transaction) => {
     const list = await ExportBanList.findOne({
@@ -159,6 +168,7 @@ function saveOwnList(context, id, save) {
       transaction
     });
     if (!list) throw refusal('Export ban list does not exist!');
+    if (await ExportBanList.isBeingDeleted(id, { transaction })) throw refusal(BEING_DELETED);
     return save(list, transaction);
   });
 }
@@ -478,9 +488,9 @@ export default {
         if (!found) throw new Error('Export ban list does not exist!');
 
         // The deletion holds the list's deletion lock, as deleting a BattleMetrics list can take
-        // minutes, and the Discord bot does not give a list being deleted to another user. The
-        // list is looked up again once the lock is held, with its row locked, so a list given to
-        // another user just before is not deleted either.
+        // minutes, and the Discord bot neither gives a list being deleted to another user nor
+        // removes it meanwhile. The list is looked up again once the lock is held, with its row
+        // locked, so a list given to another user just before is not deleted either.
         outcome = await ExportBanList.whileDeleting(found.id, async () => {
           exportBanList = await inTransaction((transaction) =>
             ExportBanList.findOne({
@@ -500,6 +510,11 @@ export default {
           return exportBanList.deleteExportBanList({ owner: context.user.id });
         });
       } catch (error) {
+        // A list whose deletion lock is held is being deleted already, e.g. by the Discord bot.
+        // Nothing was changed, so this is only shown to the user, as a refusal, which does not
+        // count towards their limit on creating and deleting lists.
+        if (error.beingDeleted === true) throw refusal(error.message);
+
         // Do not log the full Axios error: it includes the API authorization header.
         const response = error.response;
         const errors = response && response.data && response.data.errors;

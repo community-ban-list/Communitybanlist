@@ -226,9 +226,11 @@ const ExportBanList = {
     await list.save();
     return list;
   },
-  // Changes are saved in transactions, which lock rows these checks never share.
+  // Changes are saved in transactions, which lock rows these checks never share, and no list is
+  // being deleted meanwhile.
   inTransaction: (work) => work({}),
-  lockListsOf: (owner) => ExportBanList.count({ where: { owner } })
+  lockListsOf: (owner) => ExportBanList.count({ where: { owner } }),
+  isBeingDeleted: async () => false
 };
 const listsOf = (user) => [...stored.values()].filter((list) => list.owner === user);
 const mutations = discord();

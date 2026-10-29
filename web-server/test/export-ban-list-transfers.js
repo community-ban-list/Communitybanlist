@@ -8,12 +8,13 @@ import logText from '../../scbl-lib/utils/log-text.js';
 import Validators from '../../scbl-lib/validators.js';
 
 // Checks that changes to export ban lists on the website and the Discord bot's /exportbanlist
-// transfer, made at the same time from their two processes, cannot together leave a list outside
-// the limits, give a user more lists than they may have, or delete a list that was just given to
-// another user. Changes go through mutation/index.js to the real resolvers, with a stand-in for the
-// database that locks rows as MySQL does for the statements they make. The transfer makes the
-// database steps of the bot's transferIfUnchanged (discord-bot/src/commands/exportbanlist.js), in
-// the order the bot's own checks hold it to. Webhook tests, counts of players and deletions of
+// transfer and removals, made at the same time from their two processes, cannot together leave a
+// list outside the limits, give a user more lists than they may have, delete a list that was just
+// given to another user, or save a change to a list that is then removed. Changes go through
+// mutation/index.js to the real resolvers, with a stand-in for the database that locks rows as
+// MySQL does for the statements they make. The transfer and the removal make the database steps of
+// the bot's transferIfUnchanged and removeOne (discord-bot/src/commands/exportbanlist.js), in the
+// order the bot's own checks hold them to. Webhook tests, counts of players and deletions of
 // BattleMetrics ban lists wait until a check lets them finish, so a transfer can be made while a
 // change waits for one of them, and a transaction can be held while it has a lock.
 
@@ -369,7 +370,10 @@ function database() {
     },
     async whileDeleting(id, deletion) {
       await beforeDeleting.get(id)?.until;
-      if (deleting.has(id)) throw new Error('This export ban list is already being deleted.');
+      if (deleting.has(id))
+        throw Object.assign(new Error('This export ban list is already being deleted.'), {
+          beingDeleted: true
+        });
       deleting.add(id);
       try {
         return await deletion();
@@ -495,6 +499,31 @@ const listsOf = (db, owner) =>
   db.rows.ExportBanList.filter((row) => row.owner === owner).map(({ id }) => id);
 const DOES_NOT_EXIST = { message: 'Export ban list does not exist!' };
 const LIST_LIMIT = { message: 'You are limited to 4 export ban lists.' };
+const BEING_DELETED = {
+  message: 'This export ban list is being deleted, so your change was not saved.'
+};
+
+// The bot's removal of a list outside the limits once it has checked it again, as removeOne makes
+// it, given the list as it was checked: holding the list's deletion lock, it reads the list once
+// more with its row locked, in a transaction (changeSince), and unless its settings have changed
+// since the check, deletes it, whoever owns it. Gives 'removed', or why it was left as it is.
+async function removal(db, checked) {
+  const { ExportBanList } = db.models;
+  try {
+    return await ExportBanList.whileDeleting(checked.id, async () => {
+      const current = await ExportBanList.inTransaction((transaction) =>
+        ExportBanList.findByPk(checked.id, { lock: true, transaction })
+      );
+      if (!current) return 'no longer exists';
+      if (SCORING.some((name) => current[name] !== checked[name])) return 'changed';
+      await current.deleteExportBanList({ important: true });
+      return 'removed';
+    });
+  } catch (error) {
+    if (error.beingDeleted === true) return 'is being deleted';
+    throw error;
+  }
+}
 
 // 1. The old owner's change in progress when a list is given to another user is not saved, so it
 // cannot together with the new owner's change leave the list outside the rules. Here remote list 1,
@@ -870,6 +899,126 @@ const LIST_LIMIT = { message: 'You are limited to 4 export ban lists.' };
   ]);
 }
 
+// 14. While the bot removes a list outside the limits, it holds the list's deletion lock, here while
+// its BattleMetrics ban list is deleted, which can take minutes. Meanwhile its owner's changes to
+// it and its configs are refused, rather than saved and then lost with the list, their deletion is
+// refused as one already under way, which does not count towards their limit on deletions, and a
+// transfer leaves it as it is. Nothing of theirs is saved or posted, and the removal goes on.
+{
+  const { db, posted, Mutation } = await mutations();
+  db.rows.ExportBanList.push(list(40, 'G', { type: 'battlemetrics', battlemetricsID: 'bm-40' }));
+  db.rows.ExportBanListConfig.push({
+    id: 41,
+    exportBanList: 40,
+    banList: 2,
+    activePoints: 1,
+    expiredPoints: 0
+  });
+  const requests = gate();
+  db.battlemetrics.set(40, requests);
+  const removing = removal(db, list(40, 'G'));
+  await settle();
+  await assert.rejects(
+    Mutation.updateExportBanList(null, { id: 40, threshold: 12 }, as('G'), {}),
+    BEING_DELETED
+  );
+  await assert.rejects(
+    Mutation.createExportBanListConfig(
+      null,
+      { exportBanList: 40, banList: 1, activePoints: 1, expiredPoints: 0 },
+      as('G'),
+      {}
+    ),
+    BEING_DELETED
+  );
+  await assert.rejects(
+    Mutation.deleteExportBanListConfig(null, { id: 41 }, as('G'), {}),
+    BEING_DELETED
+  );
+  // Each user can create or delete 3 lists a minute, so a fourth refusal shows none counted.
+  for (let i = 0; i < 4; i++)
+    await assert.rejects(Mutation.deleteExportBanList(null, { id: 40 }, as('G'), {}), {
+      message: 'This export ban list is already being deleted.'
+    });
+  assert.strictEqual(await transfer(db, 40, 'G', 'H'), 'is being deleted');
+  requests.open();
+  assert.strictEqual(await removing, 'removed');
+  assert.deepStrictEqual(db.rows.ExportBanList, []);
+  assert.deepStrictEqual(db.rows.ExportBanListConfig, []);
+  assert.deepStrictEqual(db.writes, ['destroy ExportBanList 40']);
+  assert.deepStrictEqual(posted, []);
+}
+
+// 15. A change that has found the list not being deleted, and is being saved when the removal takes
+// the deletion lock, is saved first: the removal's last read waits for the list's row, sees the
+// change, and leaves the list, so the change the owner was told was saved is kept.
+{
+  const { db, posted, Mutation } = await mutations();
+  db.rows.ExportBanList.push(list(42, 'G'));
+  const { isBeingDeleted } = db.models.ExportBanList;
+  const checked = gate();
+  db.models.ExportBanList.isBeingDeleted = async (id, options) => {
+    const held = await isBeingDeleted(id, options);
+    await checked.until;
+    return held;
+  };
+  const saving = Mutation.updateExportBanList(null, { id: 42, threshold: 12 }, as('G'), {});
+  await settle();
+  const removing = removal(db, list(42, 'G'));
+  await settle();
+  assert.strictEqual(db.waiting('list 42'), 1, "The removal's last read waits for the list's row.");
+  checked.open();
+  assert.strictEqual((await saving).threshold, 12);
+  assert.strictEqual(await removing, 'changed');
+  assert.strictEqual(db.rows.ExportBanList.find((row) => row.id === 42).threshold, 12);
+  assert.deepStrictEqual(db.writes, ['save ExportBanList 42']);
+  assert.strictEqual(posted.length, 1);
+  assert.match(posted[0], /^Steam user G updated export ban list .*: threshold 9 → 12\.$/);
+}
+
+// 16. A change that holds the list's row but has not yet checked its deletion lock when the removal
+// takes it finds the lock held, and is refused, so the removal, whose last read waited for the row,
+// removes the list as it was checked, and nothing the owner was told was saved is lost.
+{
+  const { db, posted, Mutation } = await mutations();
+  db.rows.ExportBanList.push(list(43, 'G'));
+  const held = gate();
+  db.holds.set('list 43', held);
+  const saving = Mutation.updateExportBanList(null, { id: 43, threshold: 12 }, as('G'), {});
+  await settle();
+  const removing = removal(db, list(43, 'G'));
+  await settle();
+  assert.strictEqual(db.waiting('list 43'), 1, "The removal's last read waits for the list's row.");
+  held.open();
+  await assert.rejects(saving, BEING_DELETED);
+  assert.strictEqual(await removing, 'removed');
+  assert.deepStrictEqual(db.rows.ExportBanList, []);
+  assert.deepStrictEqual(db.writes, ['destroy ExportBanList 43']);
+  assert.deepStrictEqual(posted, []);
+}
+
+// 17. A removal of a list its owner is deleting on the website, which holds its deletion lock, leaves
+// the list as it is, so the two never delete it at once: the website's deletion goes on alone.
+{
+  const { db, posted, Mutation } = await mutations();
+  db.rows.ExportBanList.push(list(44, 'G', { type: 'battlemetrics', battlemetricsID: 'bm-44' }));
+  const requests = gate();
+  db.battlemetrics.set(44, requests);
+  const deleting = Mutation.deleteExportBanList(null, { id: 44 }, as('G'), {});
+  await settle();
+  assert.strictEqual(
+    await removal(db, list(44, 'G', { type: 'battlemetrics', battlemetricsID: 'bm-44' })),
+    'is being deleted'
+  );
+  requests.open();
+  await deleting;
+  assert.deepStrictEqual(db.rows.ExportBanList, []);
+  assert.deepStrictEqual(db.writes, ['destroy ExportBanList 44']);
+  assert.deepStrictEqual(posted, [
+    `Steam user G deleted export ban list Server's List "List 44" (ID: 44, BattleMetrics) and its BattleMetrics ban list bm-44.`
+  ]);
+}
+
 console.log(
-  'Export ban list transfer checks passed: changes in progress, new lists and deletions on the website, with the Discord bot giving lists away at the same time.'
+  'Export ban list transfer checks passed: changes in progress, new lists and deletions on the website, with the Discord bot giving lists away and removing them at the same time.'
 );

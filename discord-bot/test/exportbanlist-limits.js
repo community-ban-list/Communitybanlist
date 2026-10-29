@@ -41,6 +41,34 @@ async function countMembers(settings) {
   return players;
 }
 
+// The lists' deletion locks, as MySQL keeps them: those the bot's connections hold, and those
+// another connection holds, e.g. the website's while a list's owner deletes it there. The lists
+// read with their rows locked, in turn, each while the bot held its deletion lock.
+const lockedByBot = new Set();
+const lockedElsewhere = new Set();
+const lockedReads = [];
+
+// A deletion lock's connection, which takes the lock unless another connection holds it, and frees
+// it when it is closed.
+async function openConnection() {
+  const held = [];
+  return {
+    async query(sql, [id]) {
+      assert.match(sql, /^SELECT GET_LOCK\(/);
+      if (lockedByBot.has(id) || lockedElsewhere.has(id)) return [[{ taken: 0 }]];
+      lockedByBot.add(id);
+      held.push(id);
+      return [[{ taken: 1 }]];
+    },
+    async end() {
+      for (const id of held) lockedByBot.delete(id);
+    },
+    destroy() {
+      this.end();
+    }
+  };
+}
+
 // A stand-in for Sequelize's Model, whose findAll gives the matching lists as instances, with the
 // owner's Steam user included, whose findByPk gives one list, and whose destroy deletes the list
 // with its export bans.
@@ -57,11 +85,17 @@ class Model {
       );
   }
 
-  static async findByPk(id) {
+  static async findByPk(id, options) {
+    if (options?.lock) {
+      assert.ok(options.transaction, 'A row is locked in a transaction.');
+      assert.ok(lockedByBot.has(id), 'A list is read with its row locked under its deletion lock.');
+      lockedReads.push(id);
+    }
     return lists.has(id) ? Object.assign(new this(), lists.get(id)) : null;
   }
 
   async destroy() {
+    assert.ok(lockedByBot.has(this.id), 'A list is deleted under its deletion lock.');
     destroyed.push(this.id);
     lists.delete(this.id);
     exportBans.delete(this.id);
@@ -92,12 +126,13 @@ async function battlemetrics() {
   assert.fail('BattleMetrics is not asked anything.');
 }
 
-// The real ExportBanList, in a context of its own.
+// The real ExportBanList, in a context of its own. Its transactions only run their work.
 const modelStubs = {
   sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
-  '../sequelize.js': { default: { models } },
-  // A deletion on the website holds a lock on a connection of its own, which the bot never needs.
-  '../open-connection.js': { default: () => assert.fail('A connection was opened.') },
+  '../sequelize.js': { default: { models, transaction: (work) => work({}) } },
+  // A removal holds the list's deletion lock on a connection of its own, as the website's
+  // deletions do.
+  '../open-connection.js': { default: openConnection },
   '../export-membership.js': { countMembers },
   '../../apis/index.js': { battlemetrics },
   '../../utils/index.js': { Logger: { verbose() {}, important() {} } },
@@ -106,7 +141,8 @@ const modelStubs = {
   './battlemetrics.js': { default: battlemetrics },
   '../config.js': { BATTLEMETRICS_ORGANIZATION: '1' }
 };
-const modelContext = vm.createContext({ URL });
+// Closing a deletion lock's connection sets a time limit on it.
+const modelContext = vm.createContext({ URL, setTimeout, clearTimeout });
 const loadModelFile = async (url) =>
   new vm.SourceTextModule(await readFile(url, 'utf8'), {
     context: modelContext,
@@ -284,11 +320,17 @@ assert.deepStrictEqual(audits, [
   "admin (1) removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it had changed."
 ]);
 
+// Each list removed was read a last time with its row locked, under its deletion lock, which the bot
+// freed once it was deleted.
+assert.deepStrictEqual(lockedReads, [2]);
+assert.deepStrictEqual([...lockedByBot], []);
+
 // Start again with an empty database.
 function clear() {
   lists.clear();
   exportBans.clear();
-  for (const done of [destroyed, counted, replies, audits]) done.length = 0;
+  for (const done of [destroyed, counted, replies, audits, lockedReads]) done.length = 0;
+  lockedElsewhere.clear();
   duringCount = null;
 }
 
@@ -386,6 +428,32 @@ assert.deepStrictEqual(counted, [14, 3, 3]);
 assert.deepStrictEqual(destroyed, [11, 12]);
 assert.deepStrictEqual([...lists.keys()], [10]);
 
+// A list whose deletion lock another connection holds, as its owner is deleting it on the website,
+// is left as it is, once it has been checked again, so the two never delete it at once. The others
+// carry on, each removed under its own deletion lock, which is freed once it is deleted.
+clear();
+addList(13, 9, { CREATED: 41000 });
+addList(14, 9, { CREATED: 42000 });
+await command.execute(
+  interaction(async () => {
+    lockedElsewhere.add(13);
+  })
+);
+assert.deepStrictEqual(counted, [9, 9, 9, 9]);
+assert.deepStrictEqual(destroyed, [14]);
+assert.deepStrictEqual([...lists.keys()], [13]);
+assert.deepStrictEqual(lockedReads, [14]);
+assert.deepStrictEqual([...lockedByBot], []);
+const beingDeletedSummary = replies.at(-1);
+assert.strictEqual(
+  beingDeletedSummary.content,
+  "Removed 1 of the 2 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it had changed."
+);
+assert.deepStrictEqual(beingDeletedSummary.embeds[0].toJSON().description.split('\n'), [
+  '**List 13** (#13): not removed, as it is already being deleted',
+  '**List 14** (#14): removed; there was nothing to delete on BattleMetrics'
+]);
+
 console.log(
-  'Export ban list limit checks passed: a list its owner has brought within the cap is left though its export bans are not updated yet, one over the cap by both counts is removed, one changed while it is checked just before its removal is left, and one whose count fails is left unless it breaks the points rules.'
+  'Export ban list limit checks passed: a list its owner has brought within the cap is left though its export bans are not updated yet, one over the cap by both counts is removed, one changed while it is checked just before its removal is left, one whose count fails is left unless it breaks the points rules, and one being deleted on the website is left.'
 );

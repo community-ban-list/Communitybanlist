@@ -316,18 +316,21 @@ assert.strictEqual(connections[0].closed, 'ended');
 // It uses no connection of the Sequelize pool, and no transaction.
 assert.deepStrictEqual(calls, []);
 
-// A deletion that fails is given to the caller, and its connection is closed all the same.
+// A deletion that fails is given to the caller as it is, and its connection is closed all the
+// same.
 reset();
 const failure = new Error('Deleting its BattleMetrics ban list failed');
 await assert.rejects(
   ExportBanList.whileDeleting(42, async () => {
     throw failure;
   }),
-  (error) => error === failure
+  (error) => error === failure && !('beingDeleted' in error)
 );
 assert.strictEqual(connections[0].closed, 'ended');
 
-// While another connection holds the list's deletion lock, the deletion does not run.
+// While another connection holds the list's deletion lock, e.g. the website's while the Discord bot
+// would remove the list, the deletion does not run, and the error says so, marked beingDeleted, so
+// the caller can tell it from a deletion that failed.
 reset();
 taken = 0;
 let ran = false;
@@ -335,7 +338,7 @@ await assert.rejects(
   ExportBanList.whileDeleting(42, async () => {
     ran = true;
   }),
-  { message: 'This export ban list is already being deleted.' }
+  { message: 'This export ban list is already being deleted.', beingDeleted: true }
 );
 assert.strictEqual(ran, false);
 assert.strictEqual(connections[0].closed, 'ended');

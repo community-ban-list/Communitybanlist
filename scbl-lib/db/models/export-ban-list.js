@@ -309,26 +309,34 @@ class ExportBanList extends Sequelize.Model {
   // ban list differ from those it was checked with, or null when none of them has. A check takes a
   // moment, longer for a list whose players it counts again, and the list's owner can change it on
   // the website meanwhile, so the Discord bot asks this just before it removes a list outside the
-  // limits. Nothing is locked, so a change saved in the moment after this is not seen.
-  static async changeSince({ exportBanList, configs }) {
+  // limits, once it holds the list's deletion lock (whileDeleting). The list is read with its row
+  // locked, in a short transaction, so a change to the list or its configs that the website is
+  // saving, which holds the row until it is saved, is saved first and seen here. The website
+  // refuses changes to a list whose deletion lock is held, so none is saved after this either.
+  static changeSince({ exportBanList, configs }) {
     const { ExportBanListConfig } = sequelize.models;
     const columns = ['battlemetricsID', ...SETTINGS];
-    const current = await ExportBanList.findByPk(exportBanList.id, {
-      attributes: ['id', ...columns]
+    return ExportBanList.inTransaction(async (transaction) => {
+      const current = await ExportBanList.findByPk(exportBanList.id, {
+        attributes: ['id', ...columns],
+        lock: true,
+        transaction
+      });
+      if (!current) return 'deleted';
+      const currentConfigs = await ExportBanListConfig.findAll({
+        attributes: ['id', ...CONFIG_SETTINGS],
+        where: { exportBanList: exportBanList.id },
+        order: [['id', 'ASC']],
+        transaction
+      });
+      const unchanged =
+        columns.every((name) => current[name] === exportBanList[name]) &&
+        currentConfigs.length === configs.length &&
+        currentConfigs.every((config, index) =>
+          ['id', ...CONFIG_SETTINGS].every((name) => config[name] === configs[index][name])
+        );
+      return unchanged ? null : 'changed';
     });
-    if (!current) return 'deleted';
-    const currentConfigs = await ExportBanListConfig.findAll({
-      attributes: ['id', ...CONFIG_SETTINGS],
-      where: { exportBanList: exportBanList.id },
-      order: [['id', 'ASC']]
-    });
-    const unchanged =
-      columns.every((name) => current[name] === exportBanList[name]) &&
-      currentConfigs.length === configs.length &&
-      currentConfigs.every((config, index) =>
-        ['id', ...CONFIG_SETTINGS].every((name) => config[name] === configs[index][name])
-      );
-    return unchanged ? null : 'changed';
   }
 
   // The IDs of every BattleMetrics ban list CBL's API key can see. Deleting a list treats a ban
@@ -346,9 +354,11 @@ class ExportBanList extends Sequelize.Model {
   //   the old owner's change in progress when the list is given away is refused.
   // - Creating a list, and giving one to a user, first lock that user's lists (lockListsOf), so the
   //   count of their lists cannot change before the new list or new owner is written.
-  // - A deletion on the website holds the list's deletion lock while it works, which can take
-  //   minutes on BattleMetrics (whileDeleting), and a transfer leaves a list being deleted as it is
-  //   (isBeingDeleted). The row is then deleted only while its user still owns the list.
+  // - A deletion on the website, and the bot's removal of a list, hold the list's deletion lock
+  //   while they work, which can take minutes on BattleMetrics (whileDeleting). A transfer, a change
+  //   saved on the website and another deletion leave a list being deleted as it is
+  //   (isBeingDeleted). The website deletes the row only while its user still owns the list, and the
+  //   bot reads the list a last time with its row locked once it holds the lock (changeSince).
   // The transactions are short: nothing in them waits for BattleMetrics, Discord or a count of
   // players. They can wait for a statement of the ban importer's export step, which reads every
   // list, for as long as the statement runs. Creating a list, and giving one to a user, can also
@@ -420,15 +430,17 @@ class ExportBanList extends Sequelize.Model {
     return lists.length;
   }
 
-  // Run deletion() while holding the list's deletion lock, and give what it gives. A transfer
-  // leaves a list whose deletion lock is held as it is (isBeingDeleted), so a list cannot be given
-  // to another user while it is being deleted, e.g. while its BattleMetrics ban list is deleted,
-  // which can take minutes. The lock is MySQL's, on a connection of its own, outside the Sequelize
-  // pool, for the whole deletion, and MySQL frees it once the connection closes, so a deletion that
-  // fails, or a web server that stops part-way, never leaves it held. A connection lost part-way
-  // frees it too, without a word, so the website's deletion also deletes the row only while its
-  // user still owns the list (see deleteExportBanList). Throws without running deletion() when
-  // another deletion of the list holds the lock.
+  // Run deletion() while holding the list's deletion lock, and give what it gives. A transfer, and a
+  // change saved on the website, leave a list whose deletion lock is held as it is
+  // (isBeingDeleted), so a list cannot be given to another user, or changed by its owner, while it
+  // is being deleted, e.g. while its BattleMetrics ban list is deleted, which can take minutes. The
+  // lock is MySQL's, on a connection of its own, outside the Sequelize pool, for the whole
+  // deletion, and MySQL frees it once the connection closes, so a deletion that fails, or a web
+  // server or bot that stops part-way, never leaves it held. A connection lost part-way frees it
+  // too, without a word, so the website's deletion also deletes the row only while its user still
+  // owns the list (see deleteExportBanList). When another deletion holds the list's lock, as when
+  // the website and the bot delete it at the same moment, deletion() is not run, and the error
+  // thrown is marked beingDeleted.
   static async whileDeleting(id, deletion) {
     let connection;
     try {
@@ -442,7 +454,10 @@ class ExportBanList extends Sequelize.Model {
         `SELECT GET_LOCK(${DELETION_LOCK}, 0) AS taken`,
         [id]
       );
-      if (Number(taken) !== 1) throw new Error('This export ban list is already being deleted.');
+      if (Number(taken) !== 1)
+        throw Object.assign(new Error('This export ban list is already being deleted.'), {
+          beingDeleted: true
+        });
       return await deletion();
     } finally {
       await closeConnection(connection);

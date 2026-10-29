@@ -590,8 +590,9 @@ function database(pause = async () => {}) {
     Organisation: model('Organisation')
   };
   // Changes are saved in transactions, with the rows they check locked, which these stand-ins only
-  // record: each user here only changes their own lists (export-ban-list-transfers.js checks
-  // changes to a list from the website and the Discord bot at once).
+  // record: each user here only changes their own lists, none of which the Discord bot is removing
+  // (export-ban-list-transfers.js checks changes to a list from the website and the Discord bot at
+  // once).
   Object.assign(models.ExportBanList, {
     inTransaction: (work) => work({}),
     async lockListsOf(owner) {
@@ -599,7 +600,8 @@ function database(pause = async () => {}) {
       await pause();
       return rows.ExportBanList.filter((row) => row.owner === owner).length;
     },
-    whileDeleting: (id, deletion) => deletion()
+    whileDeleting: (id, deletion) => deletion(),
+    isBeingDeleted: async () => false
   });
   return { rows, queries, writes, models };
 }

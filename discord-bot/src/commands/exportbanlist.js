@@ -16,10 +16,13 @@ import {
 } from '../utils/index.js';
 
 // Export ban lists are removed the way the website's Delete button removes them, with
-// ExportBanList's deleteExportBanList, and their owners are not told. The lists outside today's
-// limits are found with the website's own rules and the EXPORT_* settings, through ExportBanList's
-// checkLimits, so the bot needs the same settings as the web server. A list given to another user
-// changes only its owner, and neither owner is told either.
+// ExportBanList's deleteExportBanList, and their owners are not told. Like the website, a removal
+// holds the list's deletion lock while it deletes the list (ExportBanList.whileDeleting), so the
+// two never delete a list at once, and meanwhile the website refuses changes to the list and a
+// transfer leaves it as it is. The lists outside today's limits are found with the website's own
+// rules and the EXPORT_* settings, through ExportBanList's checkLimits, so the bot needs the same
+// settings as the web server. A list given to another user changes only its owner, and neither
+// owner is told either.
 //
 // A removal does not wait for the ban importer, as the website's Delete button does not: what a
 // run, or a cycle of the importer service, does meanwhile to the list's export bans it could as
@@ -353,7 +356,7 @@ async function remove(interaction) {
     lists: [check]
   } = await ExportBanList.checkLimits({ ids: [id], keepRecountErrors: true });
   if (!check) throw new UserError(`There is no export ban list with ID ${id}.`);
-  const { exportBanList, players } = check;
+  const { exportBanList } = check;
   const name = formatName(exportBanList);
 
   // Whether CBL's BattleMetrics key can see the list's ban list, so the admin knows before
@@ -374,7 +377,29 @@ async function remove(interaction) {
   );
   if (!confirmed) return;
 
-  // The list as it is now, which its owner may have changed or deleted meanwhile.
+  // The list is deleted while the bot holds its deletion lock, as the website's Delete button does,
+  // so the two never delete a list at once, and meanwhile the website refuses changes to it and a
+  // transfer leaves it as it is. A list whose deletion lock is held already, as its owner is
+  // deleting it on the website or another removal is under way, is left as it is.
+  try {
+    await ExportBanList.whileDeleting(id, () => removeConfirmed(interaction, check, access));
+  } catch (error) {
+    if (error?.beingDeleted !== true) throw error;
+    await interaction.editReply({
+      content: truncate(
+        `Export ban list ${name} is already being deleted, so nothing was changed.`,
+        MESSAGE_LENGTH
+      ),
+      embeds: []
+    });
+  }
+}
+
+// Remove the list the admin confirmed, while the bot holds its deletion lock (see remove), as it is
+// now, which its owner may have changed or deleted meanwhile.
+async function removeConfirmed(interaction, { exportBanList, players }, access) {
+  const { id } = exportBanList;
+  const name = formatName(exportBanList);
   const current = await ExportBanList.findByPk(id);
   if (!current) {
     await interaction.editReply({
@@ -588,15 +613,15 @@ function describeResult({ status, outcome, reason }) {
   return 'removed; there was nothing to delete on BattleMetrics';
 }
 
+// A list that could not be checked again just before its removal, which is left, as failed.
+function notCheckedAgain(check, error) {
+  return { check, status: 'failed', reason: `It could not be checked again: ${error.message}` };
+}
+
 // Remove one list outside the limits, as it is now: it is read and checked again first, as its
 // owner may have changed or deleted it since the preview. Gives what happened, with the list
 // described for the log as it was before it was removed, as removing it clears its BattleMetrics ID.
 async function removeOne(check, access) {
-  const failed = (list, error) => ({
-    check: list,
-    status: 'failed',
-    reason: `It could not be checked again: ${error.message}`
-  });
   let current;
   try {
     ({
@@ -607,28 +632,48 @@ async function removeOne(check, access) {
     }));
   } catch (error) {
     // Reading it failed, so it is left.
-    return failed(check, error);
+    return notCheckedAgain(check, error);
   }
   if (!current) return { check, status: 'skipped', reason: 'it no longer exists' };
   if (current.problems.length === 0) {
     // Its players could not be counted by its settings now, and it is within the points rules, so
     // whether it is still over its type's cap is not known, and it is left. One that breaks the
     // points rules, which need no count, is removed all the same.
-    if (current.recountError) return failed(current, current.recountError);
+    if (current.recountError) return notCheckedAgain(current, current.recountError);
     return { check: current, status: 'skipped', reason: "it is now within today's limits" };
   }
   const left = leftReason(current.exportBanList, access);
   if (left) return { check: current, status: 'skipped', reason: left };
 
-  // Checking the list takes a moment, longer when its players are counted again, and its owner may
-  // change it on the website meanwhile, so it is read once more, and left if it has changed since
-  // it was checked. The bot does not lock the list, so a change saved in the moment after that is
-  // not seen.
+  // From here until the list is gone, the bot holds its deletion lock, as the website's Delete
+  // button does, so the two never delete a list at once, and meanwhile the website refuses changes
+  // to it and a transfer leaves it as it is. A list whose deletion lock is held already, as its
+  // owner is deleting it on the website or another removal is under way, is left as it is. The
+  // lock is taken once the list has been checked, so the website is not held up while its players
+  // are counted again.
+  try {
+    return await ExportBanList.whileDeleting(current.exportBanList.id, () =>
+      removeUnchanged(current)
+    );
+  } catch (error) {
+    if (error?.beingDeleted === true)
+      return { check: current, status: 'skipped', reason: 'it is already being deleted' };
+    return notCheckedAgain(current, error);
+  }
+}
+
+// Remove a list outside the limits that was just checked again, as current gives it, while the bot
+// holds its deletion lock (see removeOne), unless it has changed since. Checking the list takes a
+// moment, longer when its players are counted again, and its owner may have changed it on the
+// website meanwhile, so it is read once more, with its row locked, which waits for a change the
+// website is saving, and left if it has changed since it was checked. From then on the website
+// refuses changes to it, as the bot holds its deletion lock.
+async function removeUnchanged(current) {
   let change;
   try {
     change = await ExportBanList.changeSince(current);
   } catch (error) {
-    return failed(current, error);
+    return notCheckedAgain(current, error);
   }
   if (change === 'deleted')
     return { check: current, status: 'skipped', reason: 'it no longer exists' };
@@ -898,8 +943,9 @@ function transferEmbed(check, newOwner, listCount) {
 
 // Give the list to the new owner, as the admin confirmed it, if that can still be done: the list
 // and the new owner's lists are read again first, as the list may have been deleted or given to
-// someone else meanwhile, or its deletion may have started, and the new owner may have made lists
-// of their own. Gives null once the list is theirs, or why it was left as it is.
+// someone else meanwhile, or its deletion may have started, on the website or by a removal here,
+// and the new owner may have made lists of their own. Gives null once the list is theirs, or why it
+// was left as it is.
 //
 // The website changes lists from its own process, so the transfer is one short transaction that
 // locks what it reads: the new owner's lists first (ExportBanList.lockListsOf), as a creation on
@@ -907,8 +953,8 @@ function transferEmbed(check, newOwner, listCount) {
 // transfer, or the transfer for it, and is counted, and then the list itself, so a change its owner
 // is saving on the website lands before the transfer or not at all. A few of these can still meet
 // in a deadlock, such as a list its old owner creates at the same moment, which
-// ExportBanList.inTransaction runs again (see there). A list whose deletion on the website has
-// started is left as it is, as the deletion goes on.
+// ExportBanList.inTransaction runs again (see there). A list being deleted, on the website or by a
+// removal here, which holds its deletion lock, is left as it is, as the deletion goes on.
 function transferIfUnchanged(exportBanList, newOwner) {
   const name = formatName(exportBanList);
   const to = formatSteamUser(newOwner.id, newOwner.name);
@@ -920,7 +966,7 @@ function transferIfUnchanged(exportBanList, newOwner) {
     if (current.owner !== exportBanList.owner)
       return `Export ban list ${name} now belongs to \`${current.owner}\`, not ${formatOwner(exportBanList)} as shown`;
     if (await ExportBanList.isBeingDeleted(exportBanList.id, { transaction }))
-      return `Export ban list ${name} is being deleted by its owner`;
+      return `Export ban list ${name} is being deleted`;
     if (listCount >= MAX_LISTS_PER_USER)
       return `${to} now has ${plural(listCount, 'export ban list')}, and the website lets a user have at most ${MAX_LISTS_PER_USER}`;
 
