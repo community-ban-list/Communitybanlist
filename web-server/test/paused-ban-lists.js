@@ -128,7 +128,8 @@ const stubs = {
   graphql: { default: graphql },
   'scbl-lib/db/models': models,
   'scbl-lib/db/sequelize': { Op },
-  'scbl-lib/utils': { calculateRiskRating() {} }
+  // The query resolver's background save of player views imports describeError.
+  'scbl-lib/utils': { calculateRiskRating() {}, describeError: String }
 };
 const { default: query } = await load('../src/graphql-api/query/resolver.js', stubs);
 const { default: organisation } = await load('../src/graphql-api/organisation/resolver.js', stubs);
