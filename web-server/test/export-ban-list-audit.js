@@ -835,7 +835,7 @@ assert.deepStrictEqual(take(), []);
 rows.BanList.push({ id: 6, name: 'Removed Bans', organisation: 1 });
 const noBanList = Object.assign(
   new Error(
-    'Cannot add or update a child row: a foreign key constraint fails (`cbl`.`ExportBanListConfigs`, CONSTRAINT `ExportBanListConfigs_ibfk_2` FOREIGN KEY (`banList`) REFERENCES `BanLists` (`id`) ON DELETE CASCADE ON UPDATE CASCADE)'
+    'Cannot add or update a child row: a foreign key constraint fails (`cbl`.`ExportBanListConfigs`, CONSTRAINT `ExportBanListConfigs_ibfk_1` FOREIGN KEY (`banList`) REFERENCES `BanLists` (`id`) ON DELETE CASCADE ON UPDATE CASCADE)'
   ),
   { errno: 1452, code: 'ER_NO_REFERENCED_ROW_2' }
 );
