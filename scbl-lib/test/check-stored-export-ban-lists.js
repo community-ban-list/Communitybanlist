@@ -97,7 +97,8 @@ const exportBans = [
 
 // The players the database counts for a list's settings and configs as they are now, as the website
 // counts them (countMembers), by the list's threshold: an error fails the count. Each count is
-// recorded among the queries.
+// recorded among the queries. Like the website's size check, a count leaves out no ban list, so the
+// bans of paused ones count too, though the importer leaves them out of export bans.
 const membersByThreshold = new Map([
   // List 3, whose export bans are up to date.
   [5, 28337],
@@ -108,8 +109,9 @@ const membersByThreshold = new Map([
   // List 13.
   [10, 40000]
 ]);
-async function countMembers(settings, listConfigs) {
+async function countMembers(settings, listConfigs, options) {
   queries.push(['countMembers', structuredClone({ settings, configs: listConfigs })]);
+  assert.ok(!options?.excludedBanLists?.length, 'The count leaves out no ban list.');
   const players = membersByThreshold.get(settings.threshold);
   assert.ok(players !== undefined, `Unexpected count for threshold ${settings.threshold}`);
   if (players instanceof Error) throw players;

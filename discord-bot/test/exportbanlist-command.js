@@ -44,6 +44,24 @@ const LIMITS = {
 };
 const LIMITS_TEXT =
   "Limits used: BattleMetrics lists have at most 20,000 players and a threshold of at least 4, and one active ban plus one expired ban must never be enough; remote lists have at most 40,000 players and a threshold of at least 4, and one active ban plus one expired ban must never be enough. They come from the bot's EXPORT_* settings, which must match the website's.";
+// What the numbers of players mean while ban lists are paused, which remove_outside_limits says
+// after the limits used, here with ban lists 7 and 46 paused, and with 46 alone.
+const PAUSED_TEXT =
+  "Ban lists #7 and #46 are paused: their bans count for nothing for now. The ban importer leaves them out of export bans, but a count by settings now includes them, as the website's size check does, so that a list's cap holds once they count again. So a list within the cap by its export bans only while they are paused is not counted again, and is left until then.";
+const ONE_PAUSED_TEXT =
+  "Ban list #46 is paused: its bans count for nothing for now. The ban importer leaves them out of export bans, but a count by settings now includes them, as the website's size check does, so that a list's cap holds once they count again. So a list within the cap by its export bans only while it is paused is not counted again, and is left until then.";
+// The same for the embed of a list counted again by its settings now, with ban lists 7 and 46
+// paused.
+const PAUSED_FIELD = [
+  'Paused ban lists',
+  "#7 and #46, whose bans count for nothing for now. The ban importer leaves them out of the list's export bans, but its count by its settings now includes them, as the website's size check does."
+];
+// Ban lists 46, suspended, and 7, resuming, whose bans count for nothing until the importer has
+// caught up with it, as rows of the importer's table, out of order, as the names are sorted.
+const PAUSED_ROWS = [
+  { banList: 46, suspendedBy: 'admin', reason: null, resumedAt: null },
+  { banList: 7, suspendedBy: 'admin', reason: null, resumedAt: new Date('2026-10-28T12:00:00Z') }
+];
 const PROGRESS_NOTE =
   'This reply can only be updated for 15 minutes after the command, so each result and the summary also go to the CBL log channel.';
 // A message from the website's rules, as checkLimits gives them.
@@ -94,6 +112,10 @@ let beforeUpdate;
 let beingDeleted;
 let transaction;
 let lockErrors;
+// The ban lists paused now, as rows of the importer's table, suspended or resuming, and how many
+// times they were read.
+let pausedRows;
+let pausedReads;
 
 function reset() {
   calls = [];
@@ -116,6 +138,8 @@ function reset() {
   beingDeleted = new Set();
   transaction = null;
   lockErrors = new Map();
+  pausedRows = [];
+  pausedReads = 0;
 }
 
 // Add a list to the database. Reading its Discord webhook, the only way to tell its owner anything,
@@ -359,11 +383,15 @@ const stubs = {
     ExportBanListConfig: {},
     Organisation: {}
   },
-  // No ban list is paused, and the bot's other commands never change that.
+  // The ban lists paused now (pausedRows), which /exportbanlist names where the numbers of a list's
+  // players depend on them. The bot's other commands, which pause and resume them, are not run.
   'scbl-lib/db/ban-list-suspensions': {
     isMissingTable: () => false,
     MAX_REASON_LENGTH: 500,
-    readPausedBanLists: async () => [],
+    async readPausedBanLists() {
+      pausedReads += 1;
+      return pausedRows;
+    },
     readSettledPausedBanLists: async () => [],
     async resumeBanList() {
       throw new Error('Not expected');
@@ -873,6 +901,43 @@ assert.deepStrictEqual(fieldsOf(shown.embed), [
 ]);
 assert.deepStrictEqual(deleted(), []);
 
+// While ban lists are paused, its export bans leave out their bans, as the importer does, and its
+// count by its settings now includes them, as the website's size check does, so the two numbers can
+// differ with no change to the list. The confirmation then names the paused lists, suspended or
+// resuming, and says so. A list not counted again shows one number, so they are not read for it.
+reset();
+pausedRows = PAUSED_ROWS;
+const PAUSED_CAP =
+  'It has 41,000 players by its export bans and 43,500 by its settings now, both more than the 40,000 a remote export ban list can have.';
+addList(26, 'remote', { players: 41000, recount: 43500, problems: [PAUSED_CAP] });
+await run('remove', { id: 26 });
+shown = prompt();
+assert.deepStrictEqual(fieldsOf(shown.embed), [
+  ['ID', '26'],
+  ['Type', 'Remote'],
+  ['Players', '41,000 by its export bans, 43,500 by its settings now'],
+  PAUSED_FIELD,
+  ['Owner', '**Owner 26** (`76561198000000026`)'],
+  ["Today's limits", discord.escapeMarkdown(PAUSED_CAP)]
+]);
+assert.strictEqual(pausedReads, 1);
+assert.deepStrictEqual(deleted(), [26]);
+reset();
+pausedRows = PAUSED_ROWS;
+addList(25, 'remote', { players: 39000, problems: [] });
+answer = 'cancel';
+await run('remove', { id: 25 });
+assert.deepStrictEqual(fieldsOf(prompt().embed)[2], ['Players', '39,000']);
+assert.ok(!fieldsOf(prompt().embed).some(([name]) => name === PAUSED_FIELD[0]));
+assert.strictEqual(pausedReads, 0);
+// With no ban list paused, nothing is said of them.
+reset();
+addList(24, 'remote', { players: 41000, recount: 43500, problems: [PAUSED_CAP] });
+answer = 'cancel';
+await run('remove', { id: 24 });
+assert.ok(!fieldsOf(prompt().embed).some(([name]) => name === PAUSED_FIELD[0]));
+assert.strictEqual(pausedReads, 1);
+
 // The count by its settings now only fills in what the confirmation shows, so a count that fails
 // does not stop the removal: the confirmation says it failed, and whether the list is within its
 // type's cap is not known, and the list can still be removed.
@@ -1287,6 +1352,53 @@ assert.deepStrictEqual(replies, [
 ]);
 assert.deepStrictEqual(calls, [['check', 'all']]);
 
+// While ban lists are paused, the importer leaves their bans out of export bans, but a count by a
+// list's settings now includes them, as the website's size check does, so that the list's cap
+// holds once they count again. Every reply says so after the limits used, naming the paused lists,
+// suspended or resuming, so the numbers are read rightly. A list within the cap by its export bans
+// is not counted again, so one within it only while they are paused is left, which it says too.
+reset();
+pausedRows = PAUSED_ROWS;
+addList(88, 'remote', { players: 41000, recount: 43500, problems: [PAUSED_CAP] });
+addList(90, 'remote', { players: 39000, problems: [] });
+await run('remove_outside_limits');
+shown = prompt();
+assert.strictEqual(
+  contentOf(shown.reply),
+  `**1 export ban list is outside today's limits.** Remove it? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.\n${LIMITS_TEXT}\n${PAUSED_TEXT}`
+);
+assert.strictEqual(
+  shown.embed.description,
+  `**List 88** (#88) · Remote · owner **Owner 88** (\`76561198000000088\`) · 41,000 players by its export bans, 43,500 by its settings now\n↳ ${discord.escapeMarkdown(PAUSED_CAP)}`
+);
+assert.strictEqual(pausedReads, 1);
+assert.deepStrictEqual(deleted(), [88]);
+assert.deepStrictEqual([...rows.keys()], [90]);
+// With one paused, and with lists within the cap by their settings now, which the reply names after
+// it, or none outside the limits.
+reset();
+pausedRows = [PAUSED_ROWS[0]];
+addList(89, 'remote', { players: 41000, recount: 39500, problems: [] });
+await run('remove_outside_limits');
+assert.deepStrictEqual(replies, [
+  {
+    content: `No export ban list is outside today's limits, so nothing was changed.\n${LIMITS_TEXT}\n${ONE_PAUSED_TEXT}\n1 export ban list is within the cap by its settings now, though its export bans are over it until the importer updates them: #89 (41,000 players by its export bans, 39,500 by its settings now).`,
+    files: []
+  }
+]);
+// And when none can be removed.
+reset();
+pausedRows = PAUSED_ROWS;
+addList(91, 'battlemetrics', { battlemetricsID: 'bm-91', players: 900 });
+visible = new Set(['partner-list']);
+await run('remove_outside_limits');
+assert.ok(
+  contentOf(replies.at(-1)).endsWith(
+    ` so the lists with BattleMetrics ban lists are left. Check BATTLEMETRICS_API_KEY.\n${LIMITS_TEXT}\n${PAUSED_TEXT}`
+  )
+);
+assert.deepStrictEqual(deleted(), []);
+
 // The reply names at most five of them, and an attached file names them all, so that however many
 // there are, the reply keeps the limits used, which the admin compares with the website's.
 for (const outsideToo of [false, true]) {
@@ -1677,8 +1789,10 @@ assert.match(
 reset();
 const long = 'A reason that is long. '.repeat(40);
 for (let id = 100; id < 130; id++) addList(id, 'remote', { problems: [long] });
-// One counted again by its settings now, as its export bans are over the cap.
+// One counted again by its settings now, as its export bans are over the cap. A ban list is paused,
+// which the file says after the limits used, as the reply does.
 Object.assign(rows.get(128), { players: 41000, recount: 40500 });
+pausedRows = [PAUSED_ROWS[0]];
 answer = 'cancel';
 await run('remove_outside_limits');
 shown = prompt();
@@ -1692,7 +1806,7 @@ assert.match(
   text,
   /^Export ban lists outside today's limits, checked \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: 30\n/
 );
-assert.ok(text.includes(`\n${LIMITS_TEXT}\n`));
+assert.ok(text.includes(`\n${LIMITS_TEXT}\n${ONE_PAUSED_TEXT}\n\n#100 Remote list "List 100"\n`));
 assert.ok(
   text.includes(
     `\n#129 Remote list "List 129"\n  Owner: Owner 129 (Steam ID 765611980000000129)\n  Players: 0\n  Settings: threshold 5, 5 points for an active ban and 1 for an expired ban, max ban age 0 days (0 for any), 0 configs\n  Outside the limits: ${long}\n  To be removed.`
@@ -1907,6 +2021,18 @@ await run('transfer', { id: 12, owner: NEW_OWNER });
 assert.deepStrictEqual(fieldsOf(prompt().embed)[2], [
   'Players',
   '41,000 by its export bans, 39,000 by its settings now'
+]);
+assert.strictEqual(ownerOf(12), NEW_OWNER);
+// While ban lists are paused, the confirmation names them for such a list, as a removal's does.
+reset();
+pausedRows = PAUSED_ROWS;
+addList(12, 'remote', { players: 41000, recount: 43500, problems: [] });
+addSteamUser(NEW_OWNER, 'New Owner');
+await run('transfer', { id: 12, owner: NEW_OWNER });
+assert.deepStrictEqual(fieldsOf(prompt().embed).slice(2, 5), [
+  ['Players', '41,000 by its export bans, 43,500 by its settings now'],
+  PAUSED_FIELD,
+  ['Current owner', '**Owner 12** (`76561198000000012`)']
 ]);
 assert.strictEqual(ownerOf(12), NEW_OWNER);
 reset();

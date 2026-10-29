@@ -633,6 +633,7 @@ await addRefused(1, 3, { activePoints: 101 }, 'Export ban list does not exist!')
 // bans count for nothing and the website leaves it out of its lists. Configs it has are kept.
 const paused = { ...as('adder'), paused: new Set([2]) };
 const before = [writes.length, tested.length, battlemetrics.length];
+lookedUp();
 await assert.rejects(
   Mutation.createExportBanListConfig(
     null,
@@ -643,7 +644,8 @@ await assert.rejects(
   { message: 'That ban list is paused, so no config can be added for it until it counts again.' }
 );
 assert.deepStrictEqual([writes.length, tested.length, battlemetrics.length], before);
-lookedUp();
+// It is refused among the checks, before the config is saved with the list's row locked.
+assert.deepStrictEqual(lookedUp(), ['ExportBanList.findOne', 'BanList.findOne']);
 // A list outside the rules can be given a config with points of at most its defaults, but not one
 // that could make it bigger.
 rows.ExportBanList.push(listOf('adder', 11, { threshold: 3 }));
