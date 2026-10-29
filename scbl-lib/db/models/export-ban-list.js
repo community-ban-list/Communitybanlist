@@ -34,8 +34,19 @@ const TYPE_NAMES = { battlemetrics: 'BattleMetrics', remote: 'remote' };
 // A whole number as the messages write it, with commas: 20,000.
 const formatNumber = (value) => value.toLocaleString('en-US');
 
-// MySQL's error number for a deadlock, after which it has rolled back the whole transaction.
+// MySQL's error numbers for a statement that waited too long for a lock another transaction held,
+// and for a deadlock, after which it has rolled back the whole transaction.
+const LOCK_WAIT_TIMEOUT = 1205;
 const DEADLOCK = 1213;
+
+// How many times inTransaction runs a transaction MySQL ends in a deadlock, in all, and the most it
+// waits before the second, in milliseconds. The wait is random, so transactions that met in a
+// deadlock run again at different times, and its most doubles each time: 0.1, 0.2 and 0.4 s.
+const DEADLOCK_ATTEMPTS = 4;
+const DEADLOCK_WAIT = 100;
+
+// MySQL's error number for an error Sequelize gives, which holds MySQL's own error.
+const errorNumber = (error) => (error?.original ?? error?.parent)?.errno;
 
 // The name of a list's deletion lock, in SQL, from the list's ID, given as a replacement, and the
 // database's name, as MySQL's lock names are shared by the whole server. MySQL takes names of up to
@@ -322,21 +333,42 @@ class ExportBanList extends Sequelize.Model {
   //   (isBeingDeleted).
   // The transactions are short: nothing in them waits for BattleMetrics, Discord or a count of
   // players. They can wait for a statement of the ban importer's export step, which reads every
-  // list, for as long as the statement runs.
+  // list, for as long as the statement runs. Creating a list, and giving one to a user, can also
+  // wait for the importer's recalculation of every player's reputation, but do so before they lock
+  // any list (see lockListsOf).
 
-  // Run work(transaction) in a transaction, and once more if MySQL ends it in a deadlock, which
-  // rolls the whole transaction back. A transfer locks the new owner's lists before the list it
-  // gives them, while the ban importer's export step reads every list in ID order, so the two can
-  // wait for each other. And a list created for a user with none while the bot gives them one
-  // locks the same gap between other users' lists as the transfer. MySQL then rolls one of them
-  // back, and the other goes ahead. Each work reads again what it checks, so running it again is
-  // safe.
+  // Run work(transaction) in a transaction. MySQL ends a transaction in a deadlock, rolling all of
+  // it back, when it and another each wait for a lock the other holds, and lets the other go
+  // ahead. These transactions can meet in one:
+  // - a transfer and the ban importer's export step: the transfer locks the new owner's lists
+  //   before the list it gives them, while the export step reads every list in ID order;
+  // - a list created for a user with none and a list given to them at the same moment, as both
+  //   lock the gap between other users' lists in the index on the owner where the user's lists
+  //   would go (see lockListsOf), and then add a list to it;
+  // - and in the same way two or more users with no lists whose Steam IDs fall in the same gap,
+  //   creating their first lists at the same moment.
+  // So a transaction ended in a deadlock is run again, after a short random wait, up to
+  // DEADLOCK_ATTEMPTS times in all, which lets several such users through one after another. Each
+  // work reads again what it checks, so running it again is safe. When MySQL still ends it in a
+  // deadlock, or a statement in it waits too long for a lock, e.g. while the importer recalculates
+  // every player's reputation, which can take most of a minute, the error is marked busy: nothing
+  // was saved, and the change can be made again shortly, so the website and the bot tell the user
+  // so plainly rather than as a failure. A statement that waited that long is not run again, as it
+  // would only wait as long again.
   static async inTransaction(work) {
-    try {
-      return await sequelize.transaction(work);
-    } catch (error) {
-      if ((error?.original ?? error?.parent)?.errno !== DEADLOCK) throw error;
-      return sequelize.transaction(work);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await sequelize.transaction(work);
+      } catch (error) {
+        const number = errorNumber(error);
+        if (number === DEADLOCK && attempt < DEADLOCK_ATTEMPTS) {
+          const wait = Math.random() * DEADLOCK_WAIT * 2 ** (attempt - 1);
+          await new Promise((resolve) => setTimeout(resolve, wait));
+          continue;
+        }
+        if (number === DEADLOCK || number === LOCK_WAIT_TIMEOUT) error.busy = true;
+        throw error;
+      }
     }
   }
 
@@ -344,7 +376,16 @@ class ExportBanList extends Sequelize.Model {
   // gives a user a list, creating one on the website or a transfer by the bot, does this before it
   // counts their lists, so a list given to them meanwhile waits for the transaction to end, and the
   // count holds until the new list or new owner is written.
+  //
+  // The user's Steam user row is read with a shared lock first. Writing a list for the user takes
+  // that same lock, for the list's foreign key, and the importer locks every Steam user while it
+  // recalculates their reputation. So the transaction waits for the importer here, before it locks
+  // any list, and changes to the user's lists are not held up behind it meanwhile.
   static async lockListsOf(owner, { transaction }) {
+    await sequelize.query('SELECT id FROM SteamUsers WHERE id = ? FOR SHARE', {
+      replacements: [owner],
+      transaction
+    });
     const lists = await ExportBanList.findAll({
       attributes: ['id'],
       where: { owner },

@@ -54,13 +54,14 @@ function gate() {
   return { until, open };
 }
 
-// MySQL's error for a transaction it ended in a deadlock, as Sequelize gives it.
-function deadlock() {
-  const original = Object.assign(new Error('Deadlock found when trying to get lock'), {
-    errno: 1213
-  });
+// MySQL's errors for a transaction it ended in a deadlock, and for a statement that waited too long
+// for a lock, as Sequelize gives them.
+function mysqlError(errno, message) {
+  const original = Object.assign(new Error(message), { errno });
   return Object.assign(new Error(original.message), { original, parent: original });
 }
+const deadlock = () => mysqlError(1213, 'Deadlock found when trying to get lock');
+const lockWaitTimeout = () => mysqlError(1205, 'Lock wait timeout exceeded');
 
 // A stand-in for the database, over rows kept here, that locks as MySQL does for the statements
 // the resolvers and the transfer make. Each lock is held until the transaction that took it ends,
@@ -72,7 +73,8 @@ function deadlock() {
 //   range.
 // A transaction waits for a lock another holds until that one ends. Reading without a lock reads
 // the rows as they are. A transaction that fails is rolled back, and, as the real
-// ExportBanList.inTransaction does, a transaction ended by a deadlock is run once more.
+// ExportBanList.inTransaction does, a transaction ended by a deadlock is run again, up to 4 times
+// in all, and one still ended by a deadlock, or that waited too long for a lock, is marked busy.
 function database() {
   const rows = {
     Organisation: [{ id: 1, name: 'Org' }],
@@ -95,8 +97,10 @@ function database() {
   const beforeDeleting = new Map();
   // Gates each BattleMetrics list's deletion waits for, for its requests to BattleMetrics.
   const battlemetrics = new Map();
-  // How many of the next lock requests MySQL ends in a deadlock.
+  // How many of the next lock requests MySQL ends in a deadlock, and how many it gives up waiting
+  // for.
   const deadlocks = { next: 0 };
+  const timeouts = { next: 0 };
 
   let transactions = 0;
   const newTransaction = () => ({ number: ++transactions, locks: new Set(), undo: [] });
@@ -114,6 +118,10 @@ function database() {
     if (deadlocks.next > 0) {
       deadlocks.next--;
       throw deadlock();
+    }
+    if (timeouts.next > 0) {
+      timeouts.next--;
+      throw lockWaitTimeout();
     }
     const entry = locks.get(name);
     if (!entry) locks.set(name, { holder: transaction, waiting: [] });
@@ -155,7 +163,10 @@ function database() {
       } catch (error) {
         for (const undo of transaction.undo.reverse()) undo();
         release(transaction);
-        if (attempt > 1 || error.original?.errno !== 1213) throw error;
+        const errno = error.original?.errno;
+        if (errno === 1213 && attempt < 4) continue;
+        if (errno === 1213 || errno === 1205) error.busy = true;
+        throw error;
       }
     }
   }
@@ -332,7 +343,17 @@ function database() {
   });
 
   const waiting = (name) => locks.get(name)?.waiting.length ?? 0;
-  return { rows, writes, models, holds, beforeDeleting, battlemetrics, deadlocks, waiting };
+  return {
+    rows,
+    writes,
+    models,
+    holds,
+    beforeDeleting,
+    battlemetrics,
+    deadlocks,
+    timeouts,
+    waiting
+  };
 }
 
 // The bot's transfer once an admin has confirmed it, as transferIfUnchanged makes it: in one
@@ -692,29 +713,47 @@ const LIST_LIMIT = { message: 'You are limited to 4 export ban lists.' };
 }
 
 // 11. A change whose transaction MySQL ends in a deadlock, as it can with the ban importer's export
-// step, which reads every list, is made once more, and saved once. A second deadlock is given to
-// the user, nothing is saved, and the failure is posted.
+// step, which reads every list, or with other users creating their first lists at the same moment,
+// is made again, up to 4 times in all, and saved once.
 {
   const { db, posted, Mutation } = await mutations();
   db.rows.ExportBanList.push(list(5, 'A'));
   const config = (banList) => ({ exportBanList: 5, banList, activePoints: 3, expiredPoints: 1 });
-  db.deadlocks.next = 1;
+  db.deadlocks.next = 3;
   const added = await Mutation.createExportBanListConfig(null, config(1), as('A'), {});
   assert.deepStrictEqual(db.writes, [`create ExportBanListConfig ${added.id}`]);
   assert.strictEqual(posted.length, 1);
   assert.match(posted[0], /^Steam user A added a config to export ban list /);
 
-  db.deadlocks.next = 2;
+  // A change MySQL still ends in a deadlock the fourth time, or that waits too long for a lock, as
+  // while the importer recalculates every player's reputation, is refused plainly: nothing is
+  // saved, so nothing is posted, and a creation or deletion refused this way does not count
+  // towards the user's limit on them, so they can try again.
+  const BUSY = {
+    message: 'The database was busy, so your change was not saved. Please try again in a minute.'
+  };
+  posted.length = 0;
+  db.writes.length = 0;
+  db.deadlocks.next = 4;
+  await assert.rejects(Mutation.createExportBanListConfig(null, config(2), as('A'), {}), BUSY);
+  db.timeouts.next = 1;
   await assert.rejects(
-    Mutation.createExportBanListConfig(null, config(2), as('A'), {}),
-    ({ original }) => original?.errno === 1213
+    Mutation.updateExportBanList(null, { id: 5, name: 'Renamed' }, as('A'), {}),
+    BUSY
   );
-  assert.strictEqual(db.rows.ExportBanListConfig.length, 1);
-  assert.strictEqual(posted.length, 2);
-  assert.match(
-    posted[1],
-    /^Steam user A could not add a config to export ban list .*: Deadlock found when trying to get lock$/
-  );
+  db.deadlocks.next = 4;
+  await assert.rejects(Mutation.deleteExportBanList(null, { id: 5 }, as('A'), {}), BUSY);
+  const newList = { name: 'New', server: 'Server', type: 'remote' };
+  for (const errors of [db.deadlocks, db.timeouts]) {
+    errors.next = errors === db.deadlocks ? 4 : 1;
+    await assert.rejects(Mutation.createExportBanList(null, newList, as('B'), {}), BUSY);
+  }
+  assert.deepStrictEqual(db.writes, []);
+  assert.deepStrictEqual(posted, []);
+  assert.strictEqual(db.rows.ExportBanList.find((row) => row.id === 5).name, 'List 5');
+  // Each user can create or delete 3 lists a minute.
+  for (let i = 0; i < 3; i++) await Mutation.createExportBanList(null, newList, as('B'), {});
+  assert.strictEqual(listsOf(db, 'B').length, 3);
 }
 
 console.log(

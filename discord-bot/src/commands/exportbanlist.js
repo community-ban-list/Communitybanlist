@@ -903,10 +903,10 @@ function transferEmbed(check, newOwner, listCount) {
 //
 // The website changes lists from its own process, so the transfer is one short transaction that
 // locks what it reads, in the order the website does (see ExportBanList.inTransaction): the new
-// owner's lists first, so a list they create on the website meanwhile waits for the transfer, or
-// the transfer for it, and is counted, and then the list itself, so a change its owner is saving on
-// the website lands before the transfer or not at all. A list whose deletion on the website has
-// started is left as it is, as the deletion goes on.
+// owner's lists first (ExportBanList.lockListsOf), so a list they create on the website meanwhile
+// waits for the transfer, or the transfer for it, and is counted, and then the list itself, so a
+// change its owner is saving on the website lands before the transfer or not at all. A list whose
+// deletion on the website has started is left as it is, as the deletion goes on.
 function transferIfUnchanged(exportBanList, newOwner) {
   const name = formatName(exportBanList);
   const to = formatSteamUser(newOwner.id, newOwner.name);
@@ -952,11 +952,13 @@ function afterLastTransfer(makeTransfer) {
 //
 // A transfer does not wait for the ban importer either: nothing the importer or the exports do
 // reads or writes a list's owner, so a run goes on the same whoever owns the list.
-// Like the website's own changes, the update can wait for rows a run has locked, such as the new
-// owner's Steam user while the run recalculates every player's reputation, which can take most of
-// a minute after a big import, and transfers confirmed meanwhile wait for it in turn. If MySQL
-// gives up waiting, nothing is changed. It also waits for a change being saved on the website to
-// the list or the new owner's lists, which takes a moment (see transferIfUnchanged).
+// Like a list created on the website, the transfer can wait for rows a run has locked, such as the
+// new owner's Steam user while the run recalculates every player's reputation, which can take most
+// of a minute after a big import, and transfers confirmed meanwhile wait for it in turn. It waits
+// for that before it locks any list, so changes to lists on the website are not held up behind it.
+// If MySQL gives up waiting, nothing is changed, and the admin is told to try again. It also waits
+// for a change being saved on the website to the list or the new owner's lists, which takes a
+// moment (see transferIfUnchanged).
 async function transfer(interaction) {
   const id = interaction.options.getInteger('id', true);
   const owner = parseSteamID(interaction.options.getString('owner', true));
@@ -1002,7 +1004,21 @@ async function transfer(interaction) {
   );
   if (!confirmed) return;
 
-  const left = await afterLastTransfer(() => transferIfUnchanged(exportBanList, newOwner));
+  let left;
+  try {
+    left = await afterLastTransfer(() => transferIfUnchanged(exportBanList, newOwner));
+  } catch (error) {
+    // MySQL could not make the transfer, as other changes held the rows it needed (see
+    // ExportBanList.inTransaction). Nothing was changed, so the admin is told plainly, to try again.
+    if (error?.busy === true)
+      throw new UserError(
+        truncate(
+          `Export ban list ${name} was not transferred, as the database was busy with other changes, so nothing was changed. Try again in a minute.`,
+          MESSAGE_LENGTH
+        )
+      );
+    throw error;
+  }
   if (left) {
     await interaction.editReply({
       content: truncate(`${left}, so nothing was changed.`, MESSAGE_LENGTH),

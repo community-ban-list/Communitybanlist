@@ -2075,6 +2075,30 @@ assert.deepStrictEqual(audits, [
   `admin (1) transferred export ban list "List 13" (ID: 13, Remote) of Steam user "Owner 13" (ID: ${OWNER_13}) to Steam user "New Owner" (ID: ${NEW_OWNER}).`
 ]);
 
+// A transfer MySQL could not make, as other changes held the rows it needed, which
+// ExportBanList.inTransaction marks busy once it has given up, e.g. after a lock wait timeout or a
+// deadlock met every time it tried, changed nothing, so the admin is told so plainly, to try again,
+// and nothing is logged as a failure.
+reset();
+addList(12, 'remote');
+addSteamUser(NEW_OWNER, 'New Owner');
+beforeUpdate = () => {
+  throw Object.assign(new Error('Lock wait timeout exceeded; try restarting transaction'), {
+    busy: true
+  });
+};
+await assert.rejects(run('transfer', { id: 12, owner: NEW_OWNER }), (err) => {
+  assert.ok(err instanceof UserError);
+  assert.strictEqual(
+    err.message,
+    'Export ban list **List 12** (#12) was not transferred, as the database was busy with other changes, so nothing was changed. Try again in a minute.'
+  );
+  return true;
+});
+assert.strictEqual(ownerOf(12), OWNER_12);
+assert.deepStrictEqual(audits, []);
+assert.ok(calls.some(([call]) => call === 'rollback'));
+
 // A transfer goes ahead while a ban importer run holds its lock, which it does not check: nothing
 // a run does reads or writes a list's owner.
 reset();

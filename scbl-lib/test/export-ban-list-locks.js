@@ -3,8 +3,8 @@ import { readFile } from 'fs/promises';
 import vm from 'vm';
 
 // Check how ExportBanList makes changes from the website and the Discord bot wait for each other in
-// the database: the transactions they run, once more after a deadlock, the lock on a user's lists,
-// and the deletion lock, against stand-ins for Sequelize and MySQL. That MySQL's locks work this way
+// the database: the transactions they run, again after a deadlock, the lock on a user's lists, and
+// the deletion lock, against stand-ins for Sequelize and MySQL. That MySQL's locks work this way
 // across connections is checked against MySQL itself, outside these checks.
 
 // Every query, in order, and what the stand-ins answer.
@@ -86,14 +86,17 @@ async function openConnection() {
 }
 
 // Timers fire at once, recording how long they were set for, so a connection that will not close
-// is closed at once without the checks waiting.
+// is closed at once, and a transaction is run again, without the checks waiting. Math.random gives
+// `random`, so the random waits before a transaction is run again are known.
 const timers = [];
+let random = 0.5;
 const context = vm.createContext({
   setTimeout(callback, ms) {
     timers.push(ms);
     return setTimeout(callback, 0);
   },
-  clearTimeout
+  clearTimeout,
+  Math: Object.assign(Object.create(Math), { random: () => random })
 });
 const dependencies = {
   sequelize: {
@@ -143,6 +146,7 @@ function reset() {
   taken = 1;
   ending = null;
   openFailure = null;
+  random = 0.5;
 }
 // MySQL's errors as Sequelize gives them, with MySQL's own as original and parent.
 const mysqlError = (errno, message) => {
@@ -171,11 +175,13 @@ assert.deepStrictEqual(copied(), [
   ['commit', 1]
 ]);
 
-// A transaction MySQL ends in a deadlock, which rolls all of it back, is run once more, as a whole,
-// whether Sequelize gives MySQL's error as original or only as parent.
+// A transaction MySQL ends in a deadlock, which rolls all of it back, is run again, as a whole,
+// after a random wait of up to 0.1 s, whether Sequelize gives MySQL's error as original or only as
+// parent.
 for (const error of [deadlock(), Object.assign(deadlock(), { original: undefined })]) {
   reset();
   attempts = [error];
+  random = 0.25;
   const ran = [];
   assert.strictEqual(
     await ExportBanList.inTransaction(async (transaction) => {
@@ -191,37 +197,73 @@ for (const error of [deadlock(), Object.assign(deadlock(), { original: undefined
     ['begin', 2],
     ['commit', 2]
   ]);
+  assert.deepStrictEqual(timers, [25]);
+  assert.strictEqual(error.busy, undefined);
 }
 
-// Only once: a second deadlock is given to the caller, as is any other error, at once, such as a
-// lock MySQL gave up waiting for, which would only wait as long again, or the work's own refusal.
+// Several users with no lists, creating their first at the same moment, can each meet the others in
+// a deadlock, so a transaction is run up to 4 times in all, the most it waits doubling each time:
+// 0.1, 0.2 and 0.4 s.
 reset();
-attempts = [deadlock(), deadlock()];
+attempts = [deadlock(), deadlock(), deadlock()];
+random = 0.75;
+assert.strictEqual(await ExportBanList.inTransaction(async () => 'done'), 'done');
+assert.strictEqual(transactions, 4);
+assert.deepStrictEqual(timers, [75, 150, 300]);
+
+// A fourth deadlock is given to the caller, marked busy: nothing was saved, and the change can be
+// made again shortly.
+reset();
+const lastDeadlock = deadlock();
+attempts = [deadlock(), deadlock(), deadlock(), lastDeadlock];
 await assert.rejects(
   ExportBanList.inTransaction(async () => 'done'),
-  ({ original }) => original.errno === 1213
+  (error) => error === lastDeadlock && error.busy === true && error.original.errno === 1213
 );
-assert.strictEqual(transactions, 2);
-for (const error of [lockWaitTimeout(), new Error('Export ban list does not exist!')]) {
-  reset();
-  await assert.rejects(
-    ExportBanList.inTransaction(async () => {
-      throw error;
-    }),
-    (thrown) => thrown === error
-  );
-  assert.strictEqual(transactions, 1);
-}
+assert.strictEqual(transactions, 4);
+assert.deepStrictEqual(timers, [50, 100, 200]);
+
+// A lock MySQL gave up waiting for is given to the caller at once, marked busy too, as running the
+// transaction again would only wait as long again. Any other error, such as the work's own refusal,
+// is given at once as it is.
+reset();
+const timedOut = lockWaitTimeout();
+await assert.rejects(
+  ExportBanList.inTransaction(async () => {
+    throw timedOut;
+  }),
+  (error) => error === timedOut && error.busy === true
+);
+assert.strictEqual(transactions, 1);
+reset();
+const refused = new Error('Export ban list does not exist!');
+await assert.rejects(
+  ExportBanList.inTransaction(async () => {
+    throw refused;
+  }),
+  (error) => error === refused && !('busy' in error)
+);
+assert.strictEqual(transactions, 1);
+assert.deepStrictEqual(timers, []);
 
 // A user's lists are locked by reading only their IDs FOR UPDATE, in the transaction, by owner, so
 // MySQL locks the user's rows of the owner index, and the gap after them, until the transaction
 // ends: another list cannot be given to the user meanwhile. It gives how many lists they have.
+// First, their Steam user row is read with a shared lock, the lock writing a list for them takes for
+// its foreign key, so the transaction waits for the importer's recalculation of every player's
+// reputation, which locks every Steam user, before it locks any of their lists.
 reset();
 lockedLists = [3, 7, 9];
 const transaction = { number: 5 };
 assert.strictEqual(await ExportBanList.lockListsOf('76561198000000001', { transaction }), 3);
-assert.strictEqual(calls.length, 1);
-const [[, options]] = calls;
+assert.deepStrictEqual(
+  calls.map(([call]) => call),
+  ['query', 'findAll']
+);
+const [[, steamUserSQL, steamUserOptions], [, options]] = calls;
+assert.strictEqual(steamUserSQL, 'SELECT id FROM SteamUsers WHERE id = ? FOR SHARE');
+assert.deepStrictEqual([...steamUserOptions.replacements], ['76561198000000001']);
+assert.strictEqual(steamUserOptions.transaction, transaction);
 assert.deepStrictEqual(JSON.parse(JSON.stringify(options.attributes)), ['id']);
 assert.deepStrictEqual({ ...options.where }, { owner: '76561198000000001' });
 assert.strictEqual(options.lock, true);

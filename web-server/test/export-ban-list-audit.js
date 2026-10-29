@@ -326,13 +326,16 @@ const LIMITS = exportListLimits.readLimits({
 }).limits;
 
 // The real ExportBanList, with the real BattleMetrics deletion steps and page reader. Its
-// transactions only run their work, and the deletion lock's connection takes every lock it asks
-// for (export-ban-list-locks.js in scbl-lib checks these).
+// transactions only run their work, its query for a user's Steam user row, as their lists are
+// locked, answers at once, and the deletion lock's connection takes every lock it asks for
+// (export-ban-list-locks.js in scbl-lib checks these).
 const { default: ExportBanList } = await load(
   '../../scbl-lib/db/models/export-ban-list.js',
   {
     sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
-    '../sequelize.js': { default: { models: {}, transaction: (work) => work({}) } },
+    '../sequelize.js': {
+      default: { models: {}, transaction: (work) => work({}), query: async () => [[], {}] }
+    },
     '../open-connection.js': {
       default: async () => ({
         query: async () => [[{ taken: 1 }]],

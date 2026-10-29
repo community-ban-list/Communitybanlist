@@ -24,7 +24,8 @@ import testWebhook from './test-webhook.js';
 // who made it (audit.js). Changes the checks refuse, before anything is saved, a webhook is tested
 // or BattleMetrics is asked for anything, such as a value out of bounds or a list that does not
 // exist, are only shown to the user, as they change nothing. So are changes refused as they are
-// saved, as the list changed after their checks or is no longer the user's (see saveOwnList).
+// saved, as the list changed after their checks or is no longer the user's (see saveOwnList), or
+// as the database was too busy to save them (see inTransaction).
 
 // The settings that decide who is on an export ban list, with its configs: its threshold, default
 // points and max ban age.
@@ -44,6 +45,11 @@ const LIST_LIMIT = `You are limited to ${LISTS_PER_USER} export ban lists.`;
 // its webhook test. Nothing is saved, and the user can try again with the list as it is now.
 const CHANGED =
   'This export ban list was changed while your change was being saved, so your change was not saved. Please reload the page and try again.';
+
+// The refusal for a change MySQL could not save, as other changes held the rows it needed (see
+// inTransaction). Nothing is saved, and the user can try again shortly.
+const DATABASE_BUSY =
+  'The database was busy, so your change was not saved. Please try again in a minute.';
 
 // A list's settings, from its stored row or a change's arguments. Only the arguments given are
 // taken, so a change leaves the others as they are.
@@ -124,6 +130,20 @@ async function loadConfigs(exportBanList, transaction) {
   }));
 }
 
+// Run work(transaction) in a short transaction (ExportBanList.inTransaction). MySQL can end one in a
+// deadlock with another change, e.g. two users with no lists creating their first at the same
+// moment, which inTransaction runs again, or give up waiting for a lock, e.g. while the importer
+// recalculates every player's reputation. When the change still could not be saved, nothing was,
+// so it is refused plainly, and not posted as a failure, and the user can try again.
+async function inTransaction(work) {
+  try {
+    return await ExportBanList.inTransaction(work);
+  } catch (error) {
+    if (error?.busy === true) throw refusal(DATABASE_BUSY);
+    throw error;
+  }
+}
+
 // Save a change to one of the user's lists in a short transaction, with the list's row locked. The
 // Discord bot can give a list to another user from its own process, so guard-changes.js keeping
 // each user's changes in order is not enough: the list is looked up again with its row locked, and
@@ -132,7 +152,7 @@ async function loadConfigs(exportBanList, transaction) {
 // for theirs. save(list, transaction) gets the list as it is now, to check it again and write the
 // change in the transaction.
 function saveOwnList(context, id, save) {
-  return ExportBanList.inTransaction(async (transaction) => {
+  return inTransaction(async (transaction) => {
     const list = await ExportBanList.findOne({
       where: { id, owner: context.user.id },
       lock: true,
@@ -241,7 +261,7 @@ export default {
       // waits for it.
       let exportBanLsit;
       try {
-        exportBanLsit = await ExportBanList.inTransaction(async (transaction) => {
+        exportBanLsit = await inTransaction(async (transaction) => {
           const lists = await ExportBanList.lockListsOf(context.user.id, { transaction });
           if (lists >= LISTS_PER_USER) throw refusal(LIST_LIMIT);
           return ExportBanList.create(
@@ -451,7 +471,7 @@ export default {
         // list is looked up again once the lock is held, with its row locked, so a list given to
         // another user just before is not deleted either.
         outcome = await ExportBanList.whileDeleting(found.id, async () => {
-          exportBanList = await ExportBanList.inTransaction((transaction) =>
+          exportBanList = await inTransaction((transaction) =>
             ExportBanList.findOne({
               where: { id: found.id, owner: context.user.id },
               lock: true,
