@@ -1306,6 +1306,73 @@ assert.strictEqual(
 );
 assert.deepStrictEqual(deleted(), []);
 
+// With many lists in both notes, and a list left for CBL's BattleMetrics key, the notes in full
+// would take the reply past Discord's 2,000 characters. Then they name the lists by ID only, and
+// each attaches its file, with the whole errors, however few lists it names, so the limits used
+// stay in full and no list is lost.
+reset();
+for (let id = 320; id < 327; id++)
+  addList(id, 'remote', { players: 41000, recountError: new Error(TIMED_OUT), problems: [] });
+for (let id = 330; id < 336; id++)
+  addList(id, 'remote', { players: 45000, recount: 300, problems: [] });
+addList(340, 'battlemetrics', { battlemetricsID: 'bm-340' });
+addList(341, 'battlemetrics', { battlemetricsID: 'bm-341', problems: [] });
+addList(342, 'remote');
+visible = new Set(['bm-341']);
+answer = 'cancel';
+await run('remove_outside_limits');
+const longReply = prompt().reply;
+assert.ok(longReply.content.length <= 2000);
+assert.ok(
+  longReply.content.endsWith(
+    `\n${LIMITS_TEXT}\n7 export ban lists over the cap by their export bans could not be counted by their settings now, so whether they are within the cap is not known, and they are left: #320, #321, #322, #323, #324 and 2 more, all in the attached export-ban-lists-not-counted.txt. Run the command again later to check them.\n6 export ban lists are within the cap by their settings now, though their export bans are over it until the importer updates them: #330, #331, #332, #333, #334 and 1 more, all in the attached export-ban-lists-awaiting-the-importer.txt.`
+  )
+);
+assert.deepStrictEqual(
+  longReply.files.map((attached) => attached.name),
+  ['export-ban-lists-not-counted.txt', 'export-ban-lists-awaiting-the-importer.txt']
+);
+const [uncountedFile, updatingFile] = longReply.files.map((attached) =>
+  attached.attachment.toString('utf8').split('\n')
+);
+assert.strictEqual(uncountedFile.length, 8);
+assert.strictEqual(
+  uncountedFile[7],
+  `#326 Remote list "List 326": 41,000 players by its export bans; the count failed: ${TIMED_OUT}`
+);
+assert.strictEqual(updatingFile.length, 7);
+assert.strictEqual(
+  updatingFile[6],
+  '#335 Remote list "List 335": 45,000 players by its export bans, 300 by its settings now'
+);
+assert.deepStrictEqual(deleted(), []);
+
+// A note with five or fewer lists attaches its file too when the reply would be too long, and a
+// long error from BattleMetrics is cut short, so the limits used still stay in full.
+reset();
+for (let id = 320; id < 325; id++)
+  addList(id, 'remote', {
+    players: 41000,
+    recountError: new Error(`${TIMED_OUT} ${'and more '.repeat(100)}`),
+    problems: []
+  });
+for (let id = 330; id < 335; id++)
+  addList(id, 'remote', { players: 45000, recount: 300, problems: [] });
+addList(340, 'battlemetrics', { battlemetricsID: 'bm-340' });
+visible = new Error(`BattleMetrics GET ban-lists failed: ${'HTTP 500 '.repeat(200)}`);
+await run('remove_outside_limits');
+assert.ok(replies[0].content.length <= 2000);
+assert.ok(
+  replies[0].content.endsWith(
+    `\n${LIMITS_TEXT}\n5 export ban lists over the cap by their export bans could not be counted by their settings now, so whether they are within the cap is not known, and they are left: #320, #321, #322, #323 and #324, all in the attached export-ban-lists-not-counted.txt. Run the command again later to check them.\n5 export ban lists are within the cap by their settings now, though their export bans are over it until the importer updates them: #330, #331, #332, #333 and #334, all in the attached export-ban-lists-awaiting-the-importer.txt.`
+  )
+);
+assert.deepStrictEqual(
+  replies[0].files.map((attached) => attached.name),
+  ['export-ban-lists-not-counted.txt', 'export-ban-lists-awaiting-the-importer.txt']
+);
+assert.deepStrictEqual(deleted(), []);
+
 // Checking a list again takes a moment, longer when its players are counted again, so it is read
 // once more just before it is removed. One its owner changed while it was being checked, e.g. by
 // raising its threshold, or deleted, is left, and one that cannot be read once more is left as

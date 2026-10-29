@@ -83,9 +83,10 @@ const DESCRIPTION_LENGTH = 4096;
 const REASON_LENGTH = 300;
 
 // The most lists a note at the end of a reply names (see namedListsNote), so a long list of them
-// leaves room for the rest of the reply. When there are more, an attached file names them all: one
-// for the lists within the cap by their settings now, though their export bans are over it, and one
-// for those whose players could not be counted by their settings now.
+// leaves room for the rest of the reply. When there are more, or the reply would be too long with
+// them, an attached file names them all: one for the lists within the cap by their settings now,
+// though their export bans are over it, and one for those whose players could not be counted by
+// their settings now.
 const NAMED_LISTS = 5;
 const UPDATING_FILE = 'export-ban-lists-awaiting-the-importer.txt';
 const UNCOUNTED_FILE = 'export-ban-lists-not-counted.txt';
@@ -446,7 +447,7 @@ function leftReason(exportBanList, access) {
 function describeAccess(access, left) {
   if (!access) return '';
   if (access.error)
-    return `BattleMetrics could not be asked which ban lists CBL's BattleMetrics key can see (${access.error.message}), so the lists with BattleMetrics ban lists are left. Try again later.`;
+    return `BattleMetrics could not be asked which ban lists CBL's BattleMetrics key can see (${truncate(access.error.message, REASON_LENGTH)}), so the lists with BattleMetrics ban lists are left. Try again later.`;
   const seen = `${describeSeen(access)}.`;
   if (access.seen === 0)
     return `${seen} It may belong to an account outside CBL's organisation, so the lists with BattleMetrics ban lists are left. Check BATTLEMETRICS_API_KEY.`;
@@ -487,18 +488,40 @@ function previewFileEntry({ check, left }) {
 // NAMED_LISTS of them, and when there are more, an attached file names them all, so that however
 // many there are, the limits used before the note are never cut off. sentence(count, named) gives
 // the note's text, with the lists as entry(check) names them, and the file gives title and then a
-// line for each list, as fileEntry(check) gives it. Gives the note, if any, and the files to attach.
+// line for each list, as fileEntry(check) gives it. Gives the note, if any, and the files to attach,
+// and a brief form of them, which names the lists by ID only and always attaches the file, for a
+// reply that would be too long with the full note (see withListNotes).
 function namedListsNote(checks, { sentence, entry, fileName, title, fileEntry }) {
-  if (checks.length === 0) return { note: '', files: [] };
-  const named = checks.slice(0, NAMED_LISTS).map(entry);
-  const more = checks.length - named.length;
-  if (more > 0) named.push(`${more.toLocaleString('en-US')} more, all in the attached ${fileName}`);
-  const note = `\n${sentence(checks.length, joinList(named))}`;
-  if (more === 0) return { note, files: [] };
+  if (checks.length === 0) return { note: '', files: [], brief: { note: '', files: [] } };
+  const named = (format, inFile) => {
+    const names = checks.slice(0, NAMED_LISTS).map(format);
+    const more = checks.length - names.length;
+    if (more > 0)
+      names.push(`${more.toLocaleString('en-US')} more, all in the attached ${fileName}`);
+    else if (inFile)
+      names[names.length - 1] +=
+        `, ${checks.length === 1 ? '' : 'all '}in the attached ${fileName}`;
+    return `\n${sentence(checks.length, joinList(names))}`;
+  };
 
   const text = [`${title}: ${checks.length}`, ...checks.map(fileEntry)].join('\n');
   const file = new AttachmentBuilder(Buffer.from(text, 'utf8'), { name: fileName });
-  return { note, files: [file] };
+  const brief = { note: named(({ exportBanList }) => `#${exportBanList.id}`, true), files: [file] };
+  return { note: named(entry, false), files: checks.length > NAMED_LISTS ? [file] : [], brief };
+}
+
+// The reply's text, followed by the notes (from namedListsNote) and with their files. When the
+// notes in full would take the reply past Discord's limit, they are given in brief, with every list
+// in its attached file, so the text before them, with the limits used, is never cut off, and no
+// list in the notes is lost.
+function withListNotes(text, notes) {
+  const full = `${text}${notes.map(({ note }) => note).join('')}`;
+  if (full.length <= MESSAGE_LENGTH)
+    return { content: full, files: notes.flatMap(({ files }) => files) };
+  return {
+    content: truncate(`${text}${notes.map(({ brief }) => brief.note).join('')}`, MESSAGE_LENGTH),
+    files: notes.flatMap(({ brief }) => brief.files)
+  };
 }
 
 // A list as an attached file names it.
@@ -688,21 +711,18 @@ async function removeAllOutsideLimits(interaction) {
       ? ` ${was(unchecked.length)} not checked, as the limits do not cover ${unchecked.length === 1 ? 'its type' : 'their types'}: ${unchecked.map((check) => `#${check.exportBanList.id}`).join(', ')}.`
       : '';
   const uncounted = describeUncounted(lists, checkedAt);
-  const updating = describeUpdating(lists, checkedAt);
-  const listNotes = `${uncounted.note}${updating.note}`;
-  const listFiles = [...uncounted.files, ...updating.files];
+  const listNotes = [uncounted, describeUpdating(lists, checkedAt)];
   if (outside.length === 0) {
     // With lists that could not be counted, it is not known that none is outside the limits.
     const none = uncounted.note
       ? "No export ban list was found outside today's limits"
       : "No export ban list is outside today's limits";
-    await interaction.editReply({
-      content: truncate(
-        `${none}, so nothing was changed.${uncheckedNote}\n${describeLimits(limits)}${listNotes}`,
-        MESSAGE_LENGTH
-      ),
-      files: listFiles
-    });
+    await interaction.editReply(
+      withListNotes(
+        `${none}, so nothing was changed.${uncheckedNote}\n${describeLimits(limits)}`,
+        listNotes
+      )
+    );
     return;
   }
 
@@ -731,30 +751,31 @@ async function removeAllOutsideLimits(interaction) {
   );
   const notes = [describeAccess(access, left), describeLimits(limits)].filter(Boolean).join('\n');
   const found = `**${plural(outside.length, 'export ban list')} ${outside.length === 1 ? 'is' : 'are'} outside today's limits.**`;
-  const files = [...preview.files, ...listFiles];
 
   if (removable.length === 0) {
+    const reply = withListNotes(
+      `${found} None can be removed now, so nothing was changed.${uncheckedNote}\n${notes}`,
+      listNotes
+    );
     await interaction.editReply({
-      content: truncate(
-        `${found} None can be removed now, so nothing was changed.${uncheckedNote}\n${notes}${listNotes}`,
-        MESSAGE_LENGTH
-      ),
       ...preview,
-      files
+      ...reply,
+      files: [...preview.files, ...reply.files]
     });
     return;
   }
 
   let which = `${removable.length} of them`;
   if (removable.length === outside.length) which = outside.length === 1 ? 'it' : 'them';
+  const question = withListNotes(
+    `${found} Remove ${which}? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.${uncheckedNote}\n${notes}`,
+    listNotes
+  );
   const confirmed = await confirm(
     interaction,
-    truncate(
-      `${found} Remove ${which}? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.${uncheckedNote}\n${notes}${listNotes}`,
-      MESSAGE_LENGTH
-    ),
+    question.content,
     `Remove ${plural(removable.length, 'export ban list')}`,
-    { ...preview, files, timeout: REVIEW_TIMEOUT }
+    { ...preview, files: [...preview.files, ...question.files], timeout: REVIEW_TIMEOUT }
   );
   if (!confirmed) return;
 
