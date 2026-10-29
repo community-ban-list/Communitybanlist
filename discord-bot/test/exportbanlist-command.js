@@ -1185,7 +1185,9 @@ assert.strictEqual(
 );
 
 // Each list is read and checked again just before it is removed, so one whose owner has brought it
-// within the limits, or deleted it, since the preview is left.
+// within the limits, or deleted it, since the preview is left. The summary counts the list now
+// within the limits apart from the one that changed, as a list can also come within them with no
+// change to it (see exportbanlist-limits.js).
 reset();
 for (const id of [80, 81, 82]) addList(id, 'remote');
 whileConfirming = async () => {
@@ -1196,7 +1198,7 @@ await run('remove_outside_limits');
 assert.deepStrictEqual(deleted(), [82]);
 assert.strictEqual(
   replies.at(-1).content,
-  "Removed 1 of the 3 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 2 were not removed, as they had changed."
+  "Removed 1 of the 3 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it is now within today's limits. 1 was not removed, as it had changed."
 );
 assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n').slice(0, 2), [
   "**List 80** (#80): not removed, as it is now within today's limits",
@@ -1614,7 +1616,7 @@ await run('remove_outside_limits');
 assert.deepStrictEqual(deleted(), [83, 84, 87]);
 assert.strictEqual(
   replies.at(-1).content,
-  "Removed 2 of the 5 export ban lists outside today's limits: 1 with its BattleMetrics ban list and 1 with nothing to delete on BattleMetrics. 1 failed. 1 was not removed, as it had changed. 1 was left from the start."
+  "Removed 2 of the 5 export ban lists outside today's limits: 1 with its BattleMetrics ban list and 1 with nothing to delete on BattleMetrics. 1 failed. 1 was not removed, as it is now within today's limits. 1 was left from the start."
 );
 assert.match(
   audits[1],

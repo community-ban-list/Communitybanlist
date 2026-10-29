@@ -659,7 +659,15 @@ async function removeOne(check, access) {
     // whether it is still over its type's cap is not known, and it is left. One that breaks the
     // points rules, which need no count, is removed all the same.
     if (current.recountError) return failed(current, current.recountError);
-    return { check: current, status: 'skipped', reason: "it is now within today's limits" };
+    // It is within the limits now, as its owner has changed it, or with no change to it, e.g. as
+    // the importer has updated its export bans since a ban list was paused, which leaves that ban
+    // list's bans out of them. The summary counts such lists apart (withinLimits).
+    return {
+      check: current,
+      status: 'skipped',
+      reason: "it is now within today's limits",
+      withinLimits: true
+    };
   }
   const left = leftReason(current.exportBanList, access);
   if (left) return { check: current, status: 'skipped', reason: left };
@@ -690,12 +698,22 @@ async function removeOne(check, access) {
   }
 }
 
-// How many lists ended each way.
+// How many lists ended each way. Of the lists not removed (skipped), withinLimits counts those left
+// as they are now within today's limits.
 function countResults(results) {
-  const counts = { removed: 0, deleted: 0, gone: 0, none: 0, failed: 0, skipped: 0 };
-  for (const { status, outcome } of results) {
+  const counts = {
+    removed: 0,
+    deleted: 0,
+    gone: 0,
+    none: 0,
+    failed: 0,
+    skipped: 0,
+    withinLimits: 0
+  };
+  for (const { status, outcome, withinLimits } of results) {
     counts[status]++;
     if (status === 'removed') counts[outcome in OUTCOMES ? outcome : 'none']++;
+    if (withinLimits) counts.withinLimits++;
   }
   return counts;
 }
@@ -719,11 +737,15 @@ function describeSummary(total, results, notTried, left) {
       `${counts.gone} whose BattleMetrics ban ${counts.gone === 1 ? 'list was' : 'lists were'} already gone`,
     counts.none > 0 && `${counts.none} with nothing to delete on BattleMetrics`
   ].filter(Boolean);
-  // The lists not removed, a sentence each.
+  // The lists not removed, a sentence each. Those now within today's limits may not have changed,
+  // e.g. when the importer has updated their export bans since a ban list was paused, so they are
+  // counted apart from those that changed or no longer exist.
+  const changed = counts.skipped - counts.withinLimits;
   const others = [
     counts.failed > 0 && `${counts.failed.toLocaleString('en-US')} failed.`,
-    counts.skipped > 0 &&
-      `${was(counts.skipped)} not removed, as ${counts.skipped === 1 ? 'it' : 'they'} had changed.`,
+    counts.withinLimits > 0 &&
+      `${was(counts.withinLimits)} not removed, as ${counts.withinLimits === 1 ? 'it is' : 'they are'} now within today's limits.`,
+    changed > 0 && `${was(changed)} not removed, as ${changed === 1 ? 'it' : 'they'} had changed.`,
     notTried > 0 && `${was(notTried)} not tried, as the removal stopped.`,
     left > 0 && `${was(left)} left from the start.`
   ].filter(Boolean);
