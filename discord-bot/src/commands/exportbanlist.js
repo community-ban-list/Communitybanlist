@@ -10,6 +10,7 @@ import {
   formatBanListType,
   listEmbed,
   plural,
+  readPaused,
   ReplyUpdater,
   truncate,
   UserError
@@ -252,8 +253,10 @@ function failureReason(error) {
 // For a list counted again by its settings and configs now, as its export bans are over its type's
 // cap (checkLimits' recount), what follows the number of its players, so both are shown: " by its
 // export bans, 1,554 by its settings now". The two differ when the list has changed since the
-// importer last updated its export bans, e.g. as its owner raised its threshold. For a list whose
-// count failed (recountError), it says so. Nothing for a list not counted again.
+// importer last updated its export bans, e.g. as its owner raised its threshold, and while ban
+// lists are paused, whose bans its export bans leave out and the count includes (see
+// describePaused). For a list whose count failed (recountError), it says so. Nothing for a list
+// not counted again.
 function describeRecount({ recount, recountError }) {
   if (recountError) return ' by its export bans; they could not be counted by its settings now';
   return recount == null
@@ -285,6 +288,26 @@ function describeLimits(limits) {
   return `Limits used: ${types.join('; ')}. They come from the bot's EXPORT_* settings, which must match the website's.`;
 }
 
+// The IDs of the ban lists paused now (see /banlist suspend), in order, or none until the ban
+// importer has made its table of them.
+async function readPausedIDs() {
+  return [...(await readPaused()).keys()].sort((a, b) => a - b);
+}
+
+// What the numbers of a list's players mean while ban lists are paused, as remove_outside_limits
+// says after the limits used, or nothing when none is. Their bans count for nothing for now, so the
+// importer leaves them out of export bans, but a count by a list's settings now (checkLimits'
+// recount) includes them, as the website's size check does, so that the list's cap holds once they
+// count again. Only a list over the cap by its export bans is counted again, so one within it only
+// while a ban list is paused is left, until that list counts again and the importer has updated
+// the list's export bans.
+function describePaused(paused) {
+  if (paused.length === 0) return '';
+  const lists = joinList(paused.map((id) => `#${id}`));
+  const one = paused.length === 1;
+  return `${one ? `Ban list ${lists} is` : `Ban lists ${lists} are`} paused: ${one ? 'its' : 'their'} bans count for nothing for now. The ban importer leaves them out of export bans, but a count by settings now includes them, as the website's size check does, so that a list's cap holds once they count again. So a list within the cap by its export bans only while ${one ? 'it is' : 'they are'} paused is not counted again, and is left until then.`;
+}
+
 // The list's BattleMetrics ban list, and whether CBL's BattleMetrics key can see it.
 function describeBattlemetricsBanList(exportBanList, access) {
   if (!exportBanList.battlemetricsID) return 'None';
@@ -295,10 +318,12 @@ function describeBattlemetricsBanList(exportBanList, access) {
   return `${id}, which CBL's BattleMetrics key ${keySees(exportBanList.battlemetricsID, access) ? 'can' : 'cannot'} see.`;
 }
 
-// An embed for the list, with its ID, type and players.
-function listDetailsEmbed(check) {
+// An embed for the list, with its ID, type and players. For a list counted again by its settings
+// now while ban lists are paused (paused, their IDs), it says what its two numbers mean (see
+// describePaused).
+function listDetailsEmbed(check, paused = []) {
   const { exportBanList, players } = check;
-  return listEmbed(truncate(exportBanList.name || 'Unnamed', 256), null).addFields(
+  const embed = listEmbed(truncate(exportBanList.name || 'Unnamed', 256), null).addFields(
     { name: 'ID', value: String(exportBanList.id), inline: true },
     { name: 'Type', value: formatBanListType(exportBanList.type), inline: true },
     {
@@ -307,11 +332,24 @@ function listDetailsEmbed(check) {
       inline: true
     }
   );
+  if (check.recount != null && paused.length > 0)
+    embed.addFields({
+      name: 'Paused ban lists',
+      value: truncate(
+        `${joinList(paused.map((id) => `#${id}`))}, whose bans count for nothing for now. The ban importer leaves them out of the list's export bans, but its count by its settings now includes them, as the website's size check does.`,
+        1024
+      )
+    });
+  return embed;
 }
 
-function exportBanListEmbed(check, access = null) {
+// The ban lists paused now, for the embed of a list counted again by its settings now, or none for
+// another list, whose embed does not need them.
+const pausedFor = async (check) => (check.recount == null ? [] : readPausedIDs());
+
+function exportBanListEmbed(check, access = null, paused = []) {
   const { exportBanList } = check;
-  const embed = listDetailsEmbed(check).addFields({
+  const embed = listDetailsEmbed(check, paused).addFields({
     name: 'Owner',
     value: truncate(formatOwner(exportBanList), 1024)
   });
@@ -362,6 +400,7 @@ async function remove(interaction) {
   const access = hasBattlemetricsBanList(exportBanList)
     ? await checkBattlemetricsAccess(await findRecordedBanLists())
     : null;
+  const paused = await pausedFor(check);
 
   const confirmed = await confirm(
     interaction,
@@ -370,7 +409,7 @@ async function remove(interaction) {
       MESSAGE_LENGTH
     ),
     'Remove export ban list',
-    { embeds: [exportBanListEmbed(check, access)] }
+    { embeds: [exportBanListEmbed(check, access, paused)] }
   );
   if (!confirmed) return;
 
@@ -711,6 +750,11 @@ async function removeAllOutsideLimits(interaction) {
   // count that fails holds up no other list (see describeUncounted).
   const { limits, lists } = await ExportBanList.checkLimits({ keepRecountErrors: true });
   const checkedAt = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+  // The limits used, and what the numbers of players mean while ban lists are paused, which every
+  // reply and the preview's file give in full.
+  const limitsUsed = [describeLimits(limits), describePaused(await readPausedIDs())]
+    .filter(Boolean)
+    .join('\n');
   const outside = lists.filter((check) => check.problems.length > 0);
   const unchecked = lists.filter((check) => !check.checked);
   const uncheckedNote =
@@ -725,10 +769,7 @@ async function removeAllOutsideLimits(interaction) {
       ? "No export ban list was found outside today's limits"
       : "No export ban list is outside today's limits";
     await interaction.editReply(
-      withListNotes(
-        `${none}, so nothing was changed.${uncheckedNote}\n${describeLimits(limits)}`,
-        listNotes
-      )
+      withListNotes(`${none}, so nothing was changed.${uncheckedNote}\n${limitsUsed}`, listNotes)
     );
     return;
   }
@@ -751,12 +792,12 @@ async function removeAllOutsideLimits(interaction) {
     'export-ban-lists-outside-limits.txt',
     [
       `Export ban lists outside today's limits, checked ${checkedAt}: ${outside.length}`,
-      describeLimits(limits),
+      limitsUsed,
       '',
       ...plan.map(previewFileEntry)
     ].join('\n')
   );
-  const notes = [describeAccess(access, left), describeLimits(limits)].filter(Boolean).join('\n');
+  const notes = [describeAccess(access, left), limitsUsed].filter(Boolean).join('\n');
   const found = `**${plural(outside.length, 'export ban list')} ${outside.length === 1 ? 'is' : 'are'} outside today's limits.**`;
 
   if (removable.length === 0) {
@@ -884,9 +925,10 @@ function formatNewOwner(newOwner) {
   return `${user}\n**Has not signed in to the website yet**, so check the Steam ID is theirs. They see the list once they sign in.`;
 }
 
-// The list, its owner, the new owner and how many export ban lists the new owner has.
-function transferEmbed(check, newOwner, listCount) {
-  return listDetailsEmbed(check).addFields(
+// The list, its owner, the new owner and how many export ban lists the new owner has, with the ban
+// lists paused now for a list counted again by its settings now (see listDetailsEmbed).
+function transferEmbed(check, newOwner, listCount, paused = []) {
+  return listDetailsEmbed(check, paused).addFields(
     { name: 'Current owner', value: truncate(formatOwner(check.exportBanList), 1024) },
     { name: 'New owner', value: truncate(formatNewOwner(newOwner), 1024) },
     {
@@ -980,6 +1022,7 @@ async function transfer(interaction) {
     );
 
   const { kept, shown } = transferTerms(exportBanList);
+  const paused = await pausedFor(check);
   const confirmed = await confirm(
     interaction,
     truncate(
@@ -987,7 +1030,7 @@ async function transfer(interaction) {
       MESSAGE_LENGTH
     ),
     'Transfer export ban list',
-    { embeds: [transferEmbed(check, newOwner, listCount)] }
+    { embeds: [transferEmbed(check, newOwner, listCount, paused)] }
   );
   if (!confirmed) return;
 
