@@ -170,12 +170,30 @@ try {
   refuses(withApp({ lib: '1.0.0', b: '^2.0.0', e: '^5.0.0' }), missing);
   refuses({ ...imageOnly, ...withApp({ lib: '1.0.0', b: '^2.0.0', e: '^5.0.0' }) }, missing);
   refuses(
-    { 'lib/package.json': { name: 'lib', dependencies: { '@scope/a': '^1.2.0' } } },
+    {
+      'lib/package.json': { name: 'lib', version: '1.0.0', dependencies: { '@scope/a': '^1.2.0' } }
+    },
     'lib/package.json asks for @scope/a ^1.2.0, which yarn.lock does not list.'
   );
   refuses(
     withRoot({ devDependencies: { f: '^6.0.0' } }),
     'package.json asks for f ^6.0.0, which yarn.lock does not list.'
+  );
+
+  // Yarn installs a workspace that another one asks for from its folder only when the workspace's
+  // version is inside the range asked for, and otherwise takes that name from the registry. So a
+  // range the workspace's version is outside fails it, in an image too, as does a workspace with no
+  // version.
+  passes(withApp({ lib: '^1.0.0', b: '^2.0.0' }));
+  const elsewhere =
+    'app/package.json asks for lib 1.0.1, but the lib workspace is 1.0.0, so Yarn would take lib ' +
+    'from the registry.';
+  refuses(withApp({ lib: '1.0.1', b: '^2.0.0' }), elsewhere);
+  refuses({ ...imageOnly, ...withApp({ lib: '1.0.1', b: '^2.0.0' }) }, elsewhere);
+  refuses(
+    { 'lib/package.json': { name: 'lib', dependencies: { '@scope/a': '^1.1.0' } } },
+    'app/package.json asks for lib 1.0.0, but the lib workspace is not versioned, so Yarn would ' +
+      'take lib from the registry.'
   );
 
   // So does a missing yarn.lock, which Yarn would install without.
@@ -441,6 +459,21 @@ try {
   refuses(
     replacing('    b "^2.0.0"', '    "" "^2.0.0"'),
     `Line 10 of yarn.lock is not in Yarn's format: "    \\"\\" \\"^2.0.0\\""`
+  );
+  // So does a field Yarn writes only for packages from elsewhere, such as name, which makes it
+  // install the entry under that name, or uid, or a block it does not write.
+  refuses(
+    replacing('  version "2.0.1"', '  name d\n  version "2.0.1"'),
+    'Line 13 of yarn.lock is "  name d", a field Yarn does not write for a package from the npm ' +
+      'registry.'
+  );
+  refuses(
+    replacing('  version "2.0.1"\n', '  version "2.0.1"\n  uid "2.0.0"\n'),
+    'Line 14 of yarn.lock is "  uid \\"2.0.0\\"", a field Yarn does not write'
+  );
+  refuses(
+    replacing('  optionalDependencies:', '  peerDependencies:'),
+    'Line 16 of yarn.lock is "  peerDependencies:", a field Yarn does not write'
   );
   // Yarn keeps the line endings a yarn.lock has, so Windows ones pass.
   passes({ 'yarn.lock': lockfile.replace(/\n/g, '\r\n') });
