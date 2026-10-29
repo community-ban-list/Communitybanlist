@@ -12,9 +12,11 @@ import sequelize, { QueryTypes } from './sequelize.js';
 //   has none or the config's value is NULL. With several configs for one ban list, the largest
 //   active points count, and the expired points of every one are added up.
 // - A player whose points from every ban list reach the list's threshold is on it.
-// - The bans of paused ban lists count for nothing (see ban-list-suspensions.js). Each statement is
-//   given their IDs (excludedBanLists), as the caller read them, and with none to leave out it is
-//   the statement it was before lists could be paused.
+// - The bans of paused ban lists count for nothing (see ban-list-suspensions.js). The importer's
+//   statement is given their IDs (excludedBanLists), as the importer read them. A count leaves out
+//   only the lists it is given, none by default, as a list's size cap must hold once paused lists
+//   count again. With none to leave out, each statement is the one from before lists could be
+//   paused.
 
 // The columns of an export ban list that decide who is on it. Its configs are the only other input.
 export const SCORING_FIELDS = [
@@ -168,13 +170,19 @@ function qualifyingPlayers(settings, configs, timeLimit, excludedBanLists) {
 // - configs are the list's configs as stored, duplicates and NULLs included, with a change applied:
 //   plus a new config, or minus a deleted one. A new list has none.
 // - timeLimit is how long MySQL may take, in milliseconds.
-// - excludedBanLists are the IDs of the ban lists whose bans are left out, [] for none. It must be
-//   given: undefined throws a TypeError.
+// - excludedBanLists are the IDs of the ban lists whose bans are left out, none by default: the
+//   website's size check counts paused lists' bans too, so a list cannot be given more points while
+//   a large list is paused and go over its cap when that list counts again, as the importer never
+//   refuses players for the cap. The importer's own count leaves them out.
 // The count is one statement outside any transaction, so it reads a consistent snapshot and takes
 // no locks: in the importer's SERIALIZABLE transaction it would lock every ban it reads. Errors,
 // such as MySQL's ER_QUERY_TIMEOUT when the time limit is reached, are passed on as Sequelize
 // gives them.
-export async function countMembers(settings, configs, { timeLimit = 3000, excludedBanLists } = {}) {
+export async function countMembers(
+  settings,
+  configs,
+  { timeLimit = 3000, excludedBanLists = [] } = {}
+) {
   const { hints, sql, replacements } = qualifyingPlayers(
     settings,
     configs,
@@ -192,7 +200,11 @@ export async function countMembers(settings, configs, { timeLimit = 3000, exclud
 }
 
 // The Steam IDs of the players countMembers counts, as it would count them.
-export async function findMembers(settings, configs, { timeLimit = 3000, excludedBanLists } = {}) {
+export async function findMembers(
+  settings,
+  configs,
+  { timeLimit = 3000, excludedBanLists = [] } = {}
+) {
   const { hints, sql, replacements } = qualifyingPlayers(
     settings,
     configs,

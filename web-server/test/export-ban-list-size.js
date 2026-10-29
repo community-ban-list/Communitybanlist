@@ -216,9 +216,7 @@ assert.ok(COUNTS_PERIOD > (COUNTS_PER_USER + 1) * SECOND, 'The checks need a lon
 assert.ok(COUNTS_WAITING > COUNTS_PER_USER, 'The checks need room for more counts to wait.');
 assert.strictEqual(TIME_LIMIT, 3000, 'Each count stops after 3 seconds.');
 assert.ok(ANSWER_LIMIT > TIME_LIMIT, 'MySQL stops a count before the web server gives up on it.');
-// Every ban list's bans are counted, those of paused lists too, so the cap holds once they count
-// again.
-const counting = { timeLimit: TIME_LIMIT, excludedBanLists: [] };
+const counting = { timeLimit: TIME_LIMIT };
 const twoBans = { bans: 2, options: counting };
 const rateLimit = (wait) =>
   `Saving this change needs a count of the players it would list, and each user can run ${COUNTS_PER_USER} counts every ${COUNTS_PERIOD / SECOND} seconds. Please try again in ${wait}.`;

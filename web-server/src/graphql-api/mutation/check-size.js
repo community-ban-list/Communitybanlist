@@ -135,13 +135,8 @@ async function countPlayers(user, { type, exportBanList, before, after }, now) {
   try {
     return await oneAtATime(async () => {
       startCount(user, now());
-      // Every ban list's bans are counted, those of paused lists too, so the cap holds once they
-      // count again: a list could otherwise be given more points while a large list is paused,
-      // and go over the cap when it is resumed, as the importer never refuses players for it.
       const count = (list) =>
-        answerInTime(
-          countMembers(list.settings, list.configs, { timeLimit: TIME_LIMIT, excludedBanLists: [] })
-        );
+        answerInTime(countMembers(list.settings, list.configs, { timeLimit: TIME_LIMIT }));
       const players = await count(after);
       if (!before || players <= EXPORT_LIST_LIMITS[type].maxPlayers) return { players };
       return { players, current: await count(before) };
@@ -218,7 +213,7 @@ function playersWithTwoBans(now) {
 
   populationCountedAt = time;
   populationCount = oneAtATime(() =>
-    answerInTime(countPlayersWithBans(2, { timeLimit: TIME_LIMIT, excludedBanLists: [] }))
+    answerInTime(countPlayersWithBans(2, { timeLimit: TIME_LIMIT }))
   )
     .then(
       (players) => {

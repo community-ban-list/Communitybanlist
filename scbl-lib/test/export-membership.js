@@ -359,20 +359,32 @@ answer = () => [{ players: 3 }];
 await countPlayersWithBans(2, { excludedBanLists: [46, 7] });
 assert.strictEqual(times(queries[3].sql, PAUSED), 1);
 
-// The lists to leave out must be given, [] for none, as a caller that forgot them would count the
-// bans of paused lists, and must be positive whole IDs, each once. Each is checked after the other
-// arguments, and throws before anything is asked of the database.
+// The importer's statement must be given the lists to leave out, [] for none, as an importer that
+// forgot them would count the bans of paused lists. A count leaves out none unless it is given
+// some, as the website's size check counts every list's bans, so the cap holds once paused lists
+// count again. The lists must be positive whole IDs, each once, and are checked after the other
+// arguments, before anything is asked of the database.
 queries.length = 0;
 assert.throws(
   () => membershipForPlayers(['76561198000000001'], { transaction }),
   typeError(/excluded ban lists are undefined/)
 );
-await assert.rejects(
-  countMembers(settings, configs),
-  typeError(/excluded ban lists are undefined/)
+assert.strictEqual(queries.length, 0);
+answer = () => [{ players: 1234 }];
+await countMembers(settings, configs);
+await countMembers(settings, configs, { timeLimit: 3000 });
+answer = () => [];
+await findMembers(settings, configs);
+answer = () => [{ players: 13289 }];
+await countPlayersWithBans(2);
+assert.strictEqual(queries[0].sql, count.sql);
+assert.strictEqual(queries[1].sql, count.sql);
+assert.strictEqual(
+  tidy(queries[2].sql),
+  tidy(count.sql).replace('COUNT(*) AS players', 'steamUser')
 );
-await assert.rejects(findMembers(settings, configs), typeError(/excluded ban lists are undefined/));
-await assert.rejects(countPlayersWithBans(2), typeError(/excluded ban lists are undefined/));
+assert.ok(queries.every(({ sql }) => !sql.includes('NOT IN')));
+queries.length = 0;
 for (const excludedBanLists of [null, '7', [0], [-7], [1.5], ['7'], [7, 7], [Number.NaN]])
   await assert.rejects(
     countMembers(settings, configs, { excludedBanLists }),
