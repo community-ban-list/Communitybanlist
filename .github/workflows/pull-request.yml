@@ -2,17 +2,19 @@ name: Pull request checks
 
 # Lint, test and build every pull request, so a change that breaks them shows on the pull request
 # before it is merged, not after. It runs for a pull request into any branch that has this file,
-# such as master or another pull request's branch. The jobs run on the self-hosted dal-1 runner, as
-# the image workflows do. A fork's pull request runs code nobody has reviewed yet, on that runner
-# and with its Docker access, so keep the repository's setting that a fork's runs wait for an
-# admin's approval, and read the code before approving them. The trigger is pull_request, which
-# gives a fork's run no secrets and a read-only token.
+# such as master or another pull request's branch. A pull request from a branch of this repository
+# runs on the self-hosted dal-1 runner, as the image workflows do. A fork's pull request runs code
+# nobody has reviewed yet, so its Lint and Test jobs run on GitHub's own runners instead, never on
+# dal-1, which has Docker access to the host; the repository also makes a fork's runs wait for an
+# admin's approval. The trigger is pull_request, which gives a fork's run no secrets and a read-only
+# token.
 on:
   pull_request:
 
 # A new push to a pull request cancels the checks still running for its earlier commit. The image
 # workflows use another group, so a push to master never cancels these checks or is cancelled by
-# them. Both run on dal-1, though, so each may wait for the runner while the other uses it.
+# them. A pull request from this repository shares dal-1 with them, though, so each may wait for
+# the runner while the other uses it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -23,7 +25,7 @@ permissions:
 jobs:
   lint:
     name: Lint
-    runs-on: dal-1
+    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'dal-1' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -49,7 +51,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: dal-1
+    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'dal-1' || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - name: Checkout
