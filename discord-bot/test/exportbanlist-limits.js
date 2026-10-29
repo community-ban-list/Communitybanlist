@@ -32,8 +32,11 @@ const MEMBERS = new Map([
   [10, 39000]
 ]);
 let duringCount = null;
-async function countMembers(settings) {
+async function countMembers(settings, configs, options) {
   counted.push(settings.threshold);
+  // Like the website's size check, the count leaves out no ban list, so the bans of paused ones
+  // count too.
+  assert.ok(!options?.excludedBanLists?.length, 'The count leaves out no ban list.');
   if (duringCount) await duringCount(settings);
   assert.ok(MEMBERS.has(settings.threshold), `Unexpected count for ${settings.threshold}`);
   const players = MEMBERS.get(settings.threshold);
@@ -170,8 +173,10 @@ await modelModule.link(async (specifier, referencingModule) => {
 await modelModule.evaluate();
 const ExportBanList = modelModule.namespace.default;
 
-// The command, which runs in this test's own context, with what it logs recorded.
+// The command, which runs in this test's own context, with what it logs recorded, and the ban lists
+// paused now, as rows of the importer's table.
 const audits = [];
+let pausedRows = [];
 const stubs = {
   'discord.js': discord,
   axios: { default: { create: () => ({}) } },
@@ -184,7 +189,15 @@ const stubs = {
     ExportBanListConfig: {},
     Organisation: {}
   },
-  'scbl-lib/db/sequelize': { Op: {} },
+  // The paused ban lists, which the replies name. The bot's other commands, which pause and resume
+  // them, are not run here.
+  'scbl-lib/db/ban-list-suspensions': {
+    isMissingTable: () => false,
+    readPausedBanLists: async () => pausedRows,
+    readSettledPausedBanLists: async () => []
+  },
+  'scbl-lib/db/importer-models': { BanListSync: {} },
+  'scbl-lib/db/sequelize': { Op: {}, QueryTypes: { SELECT: 'SELECT' } },
   'scbl-lib/utils': {
     ...scblUtils,
     Logger: {
@@ -490,6 +503,40 @@ assert.ok(
   )
 );
 
+// While a ban list is paused, the importer leaves its bans out of export bans, but a count by a
+// list's settings now includes them, as the website's size check does, so that the list's cap
+// holds once they count again. A list over the cap by its export bans, and by its settings now with
+// the paused list's bans, is removed. One within the cap by its export bans only while the ban list
+// is paused is not counted again, and is left until it counts again. The preview says so after
+// the limits used.
+clear();
+pausedRows = [{ banList: 46, resumedAt: null }];
+MEMBERS.set(15, 43500);
+addList(13, 15, { CREATED: 41000 });
+// 39,000 by its export bans, which the paused list's bans would take over the cap. Its threshold
+// has no count, so a count of it would be named as one that failed.
+addList(14, 16, { CREATED: 39000 });
+await command.execute(interaction(async () => {}));
+pausedRows = [];
+const [pausedPreview] = replies.filter((reply) => reply.components?.length > 0);
+assert.ok(
+  pausedPreview.content.endsWith(
+    "They come from the bot's EXPORT_* settings, which must match the website's.\nBan list #46 is paused: its bans count for nothing for now. The ban importer leaves them out of export bans, but a count by settings now includes them, as the website's size check does, so that a list's cap holds once they count again. So a list within the cap by its export bans only while it is paused is not counted again, and is left until then."
+  )
+);
+assert.strictEqual(
+  pausedPreview.embeds[0].toJSON().description,
+  [
+    '**List 13** (#13) · Remote · owner **Owner 13** (`765611980000000013`) · 41,000 players by its export bans, 43,500 by its settings now',
+    '↳ It has 41,000 players by its export bans and 43,500 by its settings now, both more than the 40,000 a remote export ban list can have.'
+  ].join('\n')
+);
+assert.deepStrictEqual(counted, [15, 15]);
+assert.deepStrictEqual(destroyed, [13]);
+assert.deepStrictEqual([...lists.keys()], [14]);
+assert.deepStrictEqual(lockedReads, [13]);
+assert.deepStrictEqual([...lockedByBot], []);
+
 console.log(
-  'Export ban list limit checks passed: a list its owner has brought within the cap is left though its export bans are not updated yet, one over the cap by both counts is removed, one changed while it is checked just before its removal is left, one whose count fails is left unless it breaks the points rules, and one being deleted on the website, or whose deletion lock cannot be taken, is left.'
+  'Export ban list limit checks passed: a list its owner has brought within the cap is left though its export bans are not updated yet, one over the cap by both counts is removed, one changed while it is checked just before its removal is left, one whose count fails is left unless it breaks the points rules, one being deleted on the website, or whose deletion lock cannot be taken, is left, and paused ban lists are named.'
 );

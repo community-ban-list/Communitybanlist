@@ -217,8 +217,9 @@ class ExportBanList extends Sequelize.Model {
   // export bans waiting to be added or already added (TO_BE_CREATED or CREATED), which
   // /export/:id serves. A list with more of them than its type's cap is counted again by its
   // settings and configs now, and recount is that count, or null for a list not counted again. It
-  // is only over the cap when both are. A list of a type the limits do not cover is not checked,
-  // and has no problems.
+  // is only over the cap when both are. While ban lists are paused, the importer leaves their bans
+  // out of export bans, and the count includes them, as the website's size check does (see below).
+  // A list of a type the limits do not cover is not checked, and has no problems.
   //
   // A count that fails fails the check, as whether the list is over the cap is then not known. A
   // caller that deals with such a list itself, as the Discord bot does, can pass keepRecountErrors
@@ -267,6 +268,12 @@ class ExportBanList extends Sequelize.Model {
     // with more of them than its type's cap is therefore counted again, as the website counts the
     // players a list would hold (countMembers), with its settings and configs as they are now. Only
     // those lists are counted, one at a time, as each count reads every ban.
+    // Like the website's size check, the count leaves out no ban list: the bans of paused ban lists
+    // count too, so that a list's cap holds once they count again, though the importer leaves them
+    // out of export bans (see export-membership.js). So while a ban list is paused, a list's two
+    // numbers can differ with no change to it, and a list within the cap by its export bans only
+    // while one is paused is not counted again, so it has no problem for the cap until that list
+    // counts again.
     const recounts = new Map();
     const recountErrors = new Map();
     for (const exportBanList of exportBanLists) {
