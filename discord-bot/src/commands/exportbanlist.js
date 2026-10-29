@@ -321,9 +321,21 @@ function describeBattlemetricsBanList(exportBanList, access) {
   return `${id}, which CBL's BattleMetrics key ${keySees(exportBanList.battlemetricsID, access) ? 'can' : 'cannot'} see.`;
 }
 
-// An embed for the list, with its ID, type and players. For a list counted again by its settings
-// now while ban lists are paused (paused, their IDs), it says what its two numbers mean (see
-// describePaused).
+// What the ban lists paused now (paused, their IDs) mean for the list's numbers of players, for its
+// embed, as describePaused says for every list in remove_outside_limits. Their bans are left out of
+// its export bans. A list counted again by its settings now has a second number, which includes
+// them, as the website's size check does, so its two numbers can differ with no change to it. A list
+// not counted again, e.g. one within the cap by its export bans only while ban lists are paused, has
+// only the first, so the website's size check can count more players for it.
+function describePausedFor(check, paused) {
+  const named = `${joinList(paused.map((id) => `#${id}`))}, whose bans count for nothing for now.`;
+  if (check.recount != null)
+    return `${named} The ban importer leaves them out of the list's export bans, but its count by its settings now includes them, as the website's size check does.`;
+  return `${named} The ban importer leaves them out of the list's export bans, and so out of its players here, but the website's size check counts them.`;
+}
+
+// An embed for the list, with its ID, type and players, and the ban lists paused now (paused, their
+// IDs), if any, with what they mean for its numbers of players (see describePausedFor).
 function listDetailsEmbed(check, paused = []) {
   const { exportBanList, players } = check;
   const embed = listEmbed(truncate(exportBanList.name || 'Unnamed', 256), null).addFields(
@@ -335,20 +347,13 @@ function listDetailsEmbed(check, paused = []) {
       inline: true
     }
   );
-  if (check.recount != null && paused.length > 0)
+  if (paused.length > 0)
     embed.addFields({
       name: 'Paused ban lists',
-      value: truncate(
-        `${joinList(paused.map((id) => `#${id}`))}, whose bans count for nothing for now. The ban importer leaves them out of the list's export bans, but its count by its settings now includes them, as the website's size check does.`,
-        1024
-      )
+      value: truncate(describePausedFor(check, paused), 1024)
     });
   return embed;
 }
-
-// The ban lists paused now, for the embed of a list counted again by its settings now, or none for
-// another list, whose embed does not need them.
-const pausedFor = async (check) => (check.recount == null ? [] : readPausedIDs());
 
 function exportBanListEmbed(check, access = null, paused = []) {
   const { exportBanList } = check;
@@ -403,7 +408,7 @@ async function remove(interaction) {
   const access = hasBattlemetricsBanList(exportBanList)
     ? await checkBattlemetricsAccess(await findRecordedBanLists())
     : null;
-  const paused = await pausedFor(check);
+  const paused = await readPausedIDs();
 
   const confirmed = await confirm(
     interaction,
@@ -679,7 +684,15 @@ async function removeOne(check, access) {
     // whether it is still over its type's cap is not known, and it is left. One that breaks the
     // points rules, which need no count, is removed all the same.
     if (current.recountError) return notCheckedAgain(current, current.recountError);
-    return { check: current, status: 'skipped', reason: "it is now within today's limits" };
+    // It is within the limits now, as its owner has changed it, or with no change to it, e.g. as
+    // the importer has updated its export bans since a ban list was paused, which leaves that ban
+    // list's bans out of them. The summary counts such lists apart (withinLimits).
+    return {
+      check: current,
+      status: 'skipped',
+      reason: "it is now within today's limits",
+      withinLimits: true
+    };
   }
   const left = leftReason(current.exportBanList, access);
   if (left) return { check: current, status: 'skipped', reason: left };
@@ -744,8 +757,9 @@ async function removeUnchanged(current) {
   }
 }
 
-// How many lists ended each way. Of the lists not removed (skipped), beingDeleted counts those left
-// as their deletion lock was held already.
+// How many lists ended each way. Of the lists not removed (skipped), withinLimits counts those left
+// as they are now within today's limits, and beingDeleted those left as their deletion lock was
+// held already.
 function countResults(results) {
   const counts = {
     removed: 0,
@@ -754,11 +768,13 @@ function countResults(results) {
     none: 0,
     failed: 0,
     skipped: 0,
+    withinLimits: 0,
     beingDeleted: 0
   };
-  for (const { status, outcome, beingDeleted } of results) {
+  for (const { status, outcome, withinLimits, beingDeleted } of results) {
     counts[status]++;
     if (status === 'removed') counts[outcome in OUTCOMES ? outcome : 'none']++;
+    if (withinLimits) counts.withinLimits++;
     if (beingDeleted) counts.beingDeleted++;
   }
   return counts;
@@ -783,10 +799,15 @@ function describeSummary(total, results, notTried, left) {
       `${counts.gone} whose BattleMetrics ban ${counts.gone === 1 ? 'list was' : 'lists were'} already gone`,
     counts.none > 0 && `${counts.none} with nothing to delete on BattleMetrics`
   ].filter(Boolean);
-  // The lists not removed, a sentence each.
-  const changed = counts.skipped - counts.beingDeleted;
+  // The lists not removed, a sentence each. Those now within today's limits may not have changed,
+  // e.g. when the importer has updated their export bans since a ban list was paused, so they are
+  // counted apart from those that changed or no longer exist, and so are those already being
+  // deleted.
+  const changed = counts.skipped - counts.withinLimits - counts.beingDeleted;
   const others = [
     counts.failed > 0 && `${counts.failed.toLocaleString('en-US')} failed.`,
+    counts.withinLimits > 0 &&
+      `${was(counts.withinLimits)} not removed, as ${counts.withinLimits === 1 ? 'it is' : 'they are'} now within today's limits.`,
     changed > 0 && `${was(changed)} not removed, as ${changed === 1 ? 'it' : 'they'} had changed.`,
     counts.beingDeleted > 0 &&
       `${was(counts.beingDeleted)} not removed, as ${counts.beingDeleted === 1 ? 'it was' : 'they were'} already being deleted.`,
@@ -997,7 +1018,7 @@ function formatNewOwner(newOwner) {
 }
 
 // The list, its owner, the new owner and how many export ban lists the new owner has, with the ban
-// lists paused now for a list counted again by its settings now (see listDetailsEmbed).
+// lists paused now, if any (see listDetailsEmbed).
 function transferEmbed(check, newOwner, listCount, paused = []) {
   return listDetailsEmbed(check, paused).addFields(
     { name: 'Current owner', value: truncate(formatOwner(check.exportBanList), 1024) },
@@ -1109,7 +1130,7 @@ async function transfer(interaction) {
     );
 
   const { kept, shown } = transferTerms(exportBanList);
-  const paused = await pausedFor(check);
+  const paused = await readPausedIDs();
   const confirmed = await confirm(
     interaction,
     truncate(
