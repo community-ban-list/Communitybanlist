@@ -79,8 +79,8 @@ jobs:
         run: node scripts/run-tests.mjs
 
   # Each image's build stage installs its dependencies and runs its tests. The base images come from
-  # dhi.io, which needs a login, and a fork's pull request gets no secrets, so only pull requests
-  # from branches of this repository build them. It is one job rather than a matrix: a skipped
+  # dhi.io, which needs a login with the same Docker Hub secrets as the image workflows. A fork's
+  # pull request gets no secrets, so only pull requests from branches of this repository build them. It is one job rather than a matrix: a skipped
   # matrix job reports nothing under its per-image names, so a required check on one of them would
   # wait forever on a fork's pull request, while a skipped job counts as passed.
   image-build:
@@ -94,23 +94,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # A read-only token that can only pull, kept apart from the Docker Hub token that pushes.
-      - name: Check the Docker Hardened Images pull secrets
-        env:
-          DHI_PULL_USERNAME: ${{ secrets.DHI_PULL_USERNAME }}
-          DHI_PULL_TOKEN: ${{ secrets.DHI_PULL_TOKEN }}
-        run: |
-          if [ -z "$DHI_PULL_USERNAME" ] || [ -z "$DHI_PULL_TOKEN" ]; then
-            echo "::error::Set the DHI_PULL_USERNAME and DHI_PULL_TOKEN secrets to a Docker Hub user and a read-only access token that can pull dhi.io images."
-            exit 1
-          fi
-
       - name: Login to Docker Hardened Images
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: dhi.io
-          username: ${{ secrets.DHI_PULL_USERNAME }}
-          password: ${{ secrets.DHI_PULL_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
