@@ -25,6 +25,11 @@ const packages = {
   graphql: { default: graphql },
   jsonwebtoken: { default: jwt },
   'scbl-lib/config': config,
+  // No ban list is paused.
+  'scbl-lib/db/ban-list-suspensions': {
+    readPausedBanLists: async () => [],
+    pausedSets: () => ({ suspended: [], excluded: [] })
+  },
   'scbl-lib/db/sequelize': {
     DATABASE_UNAVAILABLE_MESSAGE: 'The database is unavailable.',
     isDatabaseUnavailable: () => false

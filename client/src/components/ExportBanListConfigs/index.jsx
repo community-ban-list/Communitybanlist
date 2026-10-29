@@ -25,6 +25,7 @@ const GET_EXPORT_BAN_LIST_CONFIGS = gql`
           banList {
             id
             name
+            paused
 
             organisation {
               id
@@ -93,6 +94,12 @@ export default function (props) {
                     <th>
                       {exportBanListConfig.banList.organisation.name}'s{' '}
                       {exportBanListConfig.banList.name}
+                      {exportBanListConfig.banList.paused && (
+                        <div className="small text-muted fw-normal">
+                          Paused: its bans count for nothing until it counts again. This config is
+                          kept.
+                        </div>
+                      )}
                     </th>
                     <td>{exportBanListConfig.activePoints}</td>
                     <td>{exportBanListConfig.expiredPoints}</td>
