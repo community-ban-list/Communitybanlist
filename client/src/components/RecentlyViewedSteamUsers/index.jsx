@@ -38,7 +38,6 @@ export default function () {
         <Col xs="12" className="text-center">
           <h5>Recently Viewed Players</h5>
         </Col>
-        {data && console.log(data.steamUsers)}
         {data &&
           data.steamUsers.edges.map((edge, key) => (
             <Col md="4" className="py-2" key={key}>
