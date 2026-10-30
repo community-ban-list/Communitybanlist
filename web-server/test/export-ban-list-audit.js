@@ -325,6 +325,10 @@ const { default: ExportBanList } = await load(
   {
     sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
     '../sequelize.js': { default: { models: {} } },
+    // Only the bot's check of stored lists against the limits counts their players this way.
+    '../export-membership.js': {
+      countMembers: () => assert.fail('No players are counted here.')
+    },
     '../../apis/index.js': { battlemetrics },
     './battlemetrics.js': { default: battlemetrics },
     '../config.js': { BATTLEMETRICS_ORGANIZATION: ORGANISATION },

@@ -1,6 +1,7 @@
 import Sequelize from 'sequelize';
 
 import sequelize from '../sequelize.js';
+import { countMembers } from '../export-membership.js';
 
 import { battlemetrics } from '../../apis/index.js';
 import {
@@ -18,6 +19,9 @@ const { DataTypes } = Sequelize;
 
 // The settings that decide who is on a list, with its configs.
 const SETTINGS = Object.keys(DEFAULT_SETTINGS);
+
+// The columns of a config that decide who is on its list.
+const CONFIG_SETTINGS = ['banList', 'activePoints', 'expiredPoints'];
 
 // The export bans of the players on a list: those waiting to be added and those already added.
 // /export/:id serves these, and a BattleMetrics list holds them once the importer has added them.
@@ -44,22 +48,36 @@ function describeList(exportBanList) {
   return `${logText(server)}'s List "${logText(name)}" (ID: ${id}, ${TYPE_NAMES[type] ?? type}) of ${steamUser}`;
 }
 
+// A stored list's settings, as the rules and countMembers take them.
+const settingsOf = (exportBanList) =>
+  Object.fromEntries(SETTINGS.map((name) => [name, exportBanList[name]]));
+
+// The most players a list of this type can have under the limits, or 0 for no limit, as for a type
+// the limits do not cover.
+const maxPlayersOf = (type, limits) =>
+  (Object.hasOwn(TYPE_NAMES, type) && limits?.[type]?.maxPlayers) || 0;
+
 // The problems of a stored list under today's limits, or null when its type has none to check it
 // against: those of its settings and configs under its type's points rules, for the whole list, as
-// checkRules gives them, and one when it has more players than its type's cap (0 for none).
-function limitProblems(exportBanList, configs, players, limits) {
+// checkRules gives them, and one when it has more players than its type's cap (0 for none), both by
+// its export bans (players) and by its settings now (recount, see checkLimits).
+function limitProblems(exportBanList, configs, { players, recount }, limits) {
   const { type } = exportBanList;
   if (!Object.hasOwn(TYPE_NAMES, type) || !limits?.[type]) return null;
 
-  const settings = Object.fromEntries(SETTINGS.map((name) => [name, exportBanList[name]]));
-  const problems = [...checkRules(type, { settings, configs }, limits)];
-  const { maxPlayers } = limits[type];
-  if (maxPlayers > 0 && players > maxPlayers)
+  const problems = [...checkRules(type, { settings: settingsOf(exportBanList), configs }, limits)];
+  const maxPlayers = maxPlayersOf(type, limits);
+  if (maxPlayers > 0 && players > maxPlayers && recount > maxPlayers) {
+    const counts =
+      recount === players
+        ? `${formatNumber(players)} players,`
+        : `${formatNumber(players)} players by its export bans and ${formatNumber(recount)} by its settings now, both`;
     problems.push({
       rule: 'max-players',
       field: 'players',
-      message: `It has ${formatNumber(players)} players, more than the ${formatNumber(maxPlayers)} a ${TYPE_NAMES[type]} export ban list can have.`
+      message: `It has ${counts} more than the ${formatNumber(maxPlayers)} a ${TYPE_NAMES[type]} export ban list can have.`
     });
+  }
   return problems;
 }
 
@@ -132,17 +150,26 @@ class ExportBanList extends Sequelize.Model {
   // checks changes to lists against (export-list-limits.js, with the EXPORT_* settings in
   // EXPORT_LIST_LIMITS), e.g. for the Discord bot to remove the lists outside them. Checks every
   // list, or those with the given IDs, and gives the limits and the lists, in ID order, each as
-  // { exportBanList, configs, players, problems, checked }, with the list's owner as
-  // exportBanList.SteamUser.
+  // { exportBanList, configs, players, recount, recountError, problems, checked }, with the list's
+  // owner as exportBanList.SteamUser.
   //
   // A list is outside the limits when it has problems: those of its stored settings and configs
   // under its type's points rules, as checkRules gives them for the whole list, and one when it has
   // more players than its type's cap. Its configs are loaded as the website loads them to check a
   // change, with their ban lists' and organisations' names for the messages. players counts its
   // export bans waiting to be added or already added (TO_BE_CREATED or CREATED), which
-  // /export/:id serves. A list of a type the limits do not cover is not checked, and has no
-  // problems.
-  static async checkLimits({ ids, limits = EXPORT_LIST_LIMITS } = {}) {
+  // /export/:id serves. A list with more of them than its type's cap is counted again by its
+  // settings and configs now, and recount is that count, or null for a list not counted again. It
+  // is only over the cap when both are. While ban lists are paused, the importer leaves their bans
+  // out of export bans, and the count includes them, as the website's size check does (see below).
+  // A list of a type the limits do not cover is not checked, and has no problems.
+  //
+  // A count that fails fails the check, as whether the list is over the cap is then not known. A
+  // caller that deals with such a list itself, as the Discord bot does, can pass keepRecountErrors
+  // instead: a list whose count failed then comes with the error as recountError, a null recount
+  // and no problem for the cap, so it has problems only when it breaks the points rules.
+  // recountError is null for every other list.
+  static async checkLimits({ ids, limits = EXPORT_LIST_LIMITS, keepRecountErrors = false } = {}) {
     if (ids !== undefined && ids.length === 0) return { limits, lists: [] };
     const { BanList, ExportBan, ExportBanListConfig, Organisation, SteamUser } = sequelize.models;
 
@@ -178,21 +205,80 @@ class ExportBanList extends Sequelize.Model {
       counts.map(({ exportBanList, count }) => [exportBanList, Number(count)])
     );
 
+    // Only the importer brings a list's export bans into line with its settings and configs. So a
+    // list its owner has just made smaller on the website, e.g. by raising its threshold, which
+    // the website saves without counting its players, keeps its old export bans until then. A list
+    // with more of them than its type's cap is therefore counted again, as the website counts the
+    // players a list would hold (countMembers), with its settings and configs as they are now. Only
+    // those lists are counted, one at a time, as each count reads every ban.
+    // Like the website's size check, the count leaves out no ban list: the bans of paused ban lists
+    // count too, so that a list's cap holds once they count again, though the importer leaves them
+    // out of export bans (see export-membership.js). So while a ban list is paused, a list's two
+    // numbers can differ with no change to it, and a list within the cap by its export bans only
+    // while one is paused is not counted again, so it has no problem for the cap until that ban
+    // list counts again.
+    const recounts = new Map();
+    const recountErrors = new Map();
+    for (const exportBanList of exportBanLists) {
+      const maxPlayers = maxPlayersOf(exportBanList.type, limits);
+      if (maxPlayers === 0 || (players.get(exportBanList.id) ?? 0) <= maxPlayers) continue;
+      try {
+        recounts.set(
+          exportBanList.id,
+          await countMembers(settingsOf(exportBanList), configs.get(exportBanList.id))
+        );
+      } catch (error) {
+        if (!keepRecountErrors) throw error;
+        recountErrors.set(exportBanList.id, error);
+      }
+    }
+
     return {
       limits,
       lists: exportBanLists.map((exportBanList) => {
         const listConfigs = configs.get(exportBanList.id);
-        const listPlayers = players.get(exportBanList.id) ?? 0;
+        const listPlayers = {
+          players: players.get(exportBanList.id) ?? 0,
+          recount: recounts.get(exportBanList.id) ?? null
+        };
         const problems = limitProblems(exportBanList, listConfigs, listPlayers, limits);
         return {
           exportBanList,
           configs: listConfigs,
-          players: listPlayers,
+          ...listPlayers,
+          recountError: recountErrors.get(exportBanList.id) ?? null,
           problems: problems ?? [],
           checked: problems !== null
         };
       })
     };
+  }
+
+  // What has changed in a list since checkLimits checked it, given the check it gave for the list:
+  // 'deleted' when the list is gone, 'changed' when its settings, its configs or its BattleMetrics
+  // ban list differ from those it was checked with, or null when none of them has. A check takes a
+  // moment, longer for a list whose players it counts again, and the list's owner can change it on
+  // the website meanwhile, so the Discord bot asks this just before it removes a list outside the
+  // limits. Nothing is locked, so a change saved in the moment after this is not seen.
+  static async changeSince({ exportBanList, configs }) {
+    const { ExportBanListConfig } = sequelize.models;
+    const columns = ['battlemetricsID', ...SETTINGS];
+    const current = await ExportBanList.findByPk(exportBanList.id, {
+      attributes: ['id', ...columns]
+    });
+    if (!current) return 'deleted';
+    const currentConfigs = await ExportBanListConfig.findAll({
+      attributes: ['id', ...CONFIG_SETTINGS],
+      where: { exportBanList: exportBanList.id },
+      order: [['id', 'ASC']]
+    });
+    const unchanged =
+      columns.every((name) => current[name] === exportBanList[name]) &&
+      currentConfigs.length === configs.length &&
+      currentConfigs.every((config, index) =>
+        ['id', ...CONFIG_SETTINGS].every((name) => config[name] === configs[index][name])
+      );
+    return unchanged ? null : 'changed';
   }
 
   // The IDs of every BattleMetrics ban list CBL's API key can see. Deleting a list treats a ban
