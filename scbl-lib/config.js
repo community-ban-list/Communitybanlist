@@ -49,17 +49,21 @@ const INTAKE_FORM = CLIENT_CONFIG.INTAKE_FORM || process.env.INTAKE_FORM;
 // EXPORT_BM_MAX_PLAYERS, EXPORT_BM_MIN_THRESHOLD and EXPORT_BM_NEVER_ENOUGH for BattleMetrics lists,
 // and the same with EXPORT_REMOTE_ for remote lists. An empty variable counts as unset, and a value
 // that cannot be used is replaced with the default and listed in EXPORT_LIST_LIMIT_PROBLEMS, which
-// the web server warns about when it starts. Reading them never throws, as every service and the
-// client load this file.
+// the web server and the Discord bot warn about when they start. The unset variables, which take
+// their defaults, are listed in UNSET_EXPORT_LIST_LIMITS, with the defaults, which the bot warns
+// about too, as it must use the web server's limits. Reading them never throws, as every service
+// and the client load this file.
 //
 // In the browser, the limits come from the web server through /config.js, so the forms check
 // changes against the same limits as the web server. Each is read as its variable is, so a limit of
 // 0 players stays 0 (no limit), and one that /config.js left out or gave in a form that cannot be
 // used is the default. When /config.js gave no limits, as when it did not load, the client uses the
 // defaults, as the browser has no environment variables.
-const { limits: limitsFromEnvironment, problems: EXPORT_LIST_LIMIT_PROBLEMS } = readLimits(
-  process.env
-);
+const {
+  limits: limitsFromEnvironment,
+  problems: EXPORT_LIST_LIMIT_PROBLEMS,
+  unset: UNSET_EXPORT_LIST_LIMITS
+} = readLimits(process.env);
 const EXPORT_LIST_LIMITS =
   CLIENT_CONFIG.EXPORT_LIST_LIMITS == null
     ? limitsFromEnvironment
@@ -78,5 +82,6 @@ export {
   DISCORD_INVITE,
   INTAKE_FORM,
   EXPORT_LIST_LIMITS,
-  EXPORT_LIST_LIMIT_PROBLEMS
+  EXPORT_LIST_LIMIT_PROBLEMS,
+  UNSET_EXPORT_LIST_LIMITS
 };

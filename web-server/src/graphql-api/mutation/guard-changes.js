@@ -38,8 +38,11 @@ const REFUSAL_STARTS = [
 //
 // The order of each user's changes and their limits are kept in memory, so the limits start afresh
 // when the web server restarts. That works because production runs a single web server process.
-// Locking the user's rows in the database instead would make changes wait whenever the importer
-// runs, as it keeps players' rows locked for minutes.
+// Locking the user's Steam user row in the database instead would make changes wait whenever the
+// importer runs, as it keeps players' rows locked for minutes. The Discord bot can give a list to
+// another user from its own process, though, so the resolvers also lock a list's row, or a user's
+// lists, for the moment they save a change, in the database (saveOwnList and createExportBanList
+// in resolver.js). The order kept here still keeps each user to one change at a time.
 export default function guardChanges(mutations, now = Date.now) {
   // The last change of each user with changes in progress, by Steam ID, which their next change
   // waits for. A user is forgotten once their changes have all finished.
@@ -109,7 +112,9 @@ export default function guardChanges(mutations, now = Date.now) {
 
       // Checks such as the limit of 4 export ban lists, or of one config for each ban list, look
       // up the user's rows and then change them, so two changes by the user at once could both
-      // pass them. Other users' changes are still made alongside.
+      // pass them. Other users' changes are still made alongside. Two users can only change the
+      // same list when the Discord bot has given it from one to the other meanwhile, and those
+      // changes wait for each other in the database (see above).
       try {
         return await afterLastChange(user, () => mutation(parent, args, context, info));
       } catch (error) {
