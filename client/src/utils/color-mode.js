@@ -1,5 +1,5 @@
 // The site's colour mode: light, dark, or auto, which follows the device's setting. The chosen mode is
-// saved in local storage; public/static/color-mode.js applies it before the page is drawn.
+// saved in local storage; public/color-mode.js applies it before the page is drawn.
 
 export const COLOR_MODE_KEY = 'colorMode';
 

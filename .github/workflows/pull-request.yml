@@ -42,8 +42,12 @@ jobs:
       - name: Install Yarn
         run: npm install --global yarn@1.22.22
 
+      # Install the package versions yarn.lock lists, as the images do. Yarn's --frozen-lockfile
+      # still installs a package that a workspace asks for and yarn.lock does not list, so the
+      # script first checks that yarn.lock lists them all, and nothing else. --all-workspaces makes
+      # a missing workspace fail it, where an image build would leave that workspace's packages out.
       - name: Install dependencies
-        run: yarn install
+        run: node scripts/check-lockfile.mjs --all-workspaces && yarn install --frozen-lockfile
 
       # Unlike yarn lint, this only reports what ESLint and Prettier would change.
       - name: Check the code with ESLint and Prettier
@@ -68,8 +72,9 @@ jobs:
       - name: Install Yarn
         run: npm install --global yarn@1.22.22
 
+      # Install the package versions yarn.lock lists, as in the Lint job.
       - name: Install dependencies
-        run: yarn install
+        run: node scripts/check-lockfile.mjs --all-workspaces && yarn install --frozen-lockfile
 
       # The client is built before the tests run, as in the web server image.
       - name: Build the client
