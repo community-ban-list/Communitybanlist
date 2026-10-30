@@ -42,9 +42,9 @@ const stubs = {
 };
 
 // Each module loads once a page, so every module that imports auth.js shares its state, as in the
-// browser.
+// browser. Each is kept before its file is read, as linking asks for a module's imports at once.
 const modules = new Map();
-async function moduleFor(specifier, url) {
+function moduleFor(specifier, url) {
   if (!modules.has(url)) {
     const exports = stubs[specifier];
     modules.set(
@@ -57,10 +57,9 @@ async function moduleFor(specifier, url) {
             },
             { context }
           )
-        : new vm.SourceTextModule(await readFile(new URL(url), 'utf8'), {
-            context,
-            identifier: url
-          })
+        : readFile(new URL(url), 'utf8').then(
+            (source) => new vm.SourceTextModule(source, { context, identifier: url })
+          )
     );
   }
   return modules.get(url);
