@@ -195,7 +195,7 @@ const ALL = [
 ];
 
 // The columns of BanListHolds, which migration 005 makes.
-const HOLD_COLUMNS = ['banList', 'reason'];
+const HOLD_COLUMNS = ['banList', 'reason', 'storedCount'];
 
 // The columns of BanListSuspensions, which migration 004 makes.
 const SUSPENSION_COLUMNS = ['banList', 'suspendedAt', 'suspendedBy', 'reason', 'resumedAt'];
@@ -327,15 +327,16 @@ const BAN_LIST_SYNC_COLUMNS = [
     'CONSTRAINT BanListSuspensions_banList FOREIGN KEY (banList) REFERENCES BanLists (id) ON DELETE CASCADE )'
   ])
     assert.ok(suspensions.includes(definition), definition);
-  // Why a list's bans are held is keyed by the list, and deleted with it, through a foreign key to
-  // the INT key of BanLists, whose type it has. The reason is text, so a new reason needs no change
-  // to the table.
+  // Why a list's bans are held, and how many bans the list had before the read that began the
+  // hold, is keyed by the list, and deleted with it, through a foreign key to the INT key of
+  // BanLists, whose type it has. The reason is text, so a new reason needs no change to the table.
   const holds = database.statements.find((sql) =>
     sql.startsWith('CREATE TABLE IF NOT EXISTS BanListHolds ')
   );
   for (const definition of [
     'banList int NOT NULL,',
     'reason VARCHAR(16) NOT NULL,',
+    'storedCount INT UNSIGNED NOT NULL,',
     'PRIMARY KEY (banList),',
     'CONSTRAINT BanListHolds_banList FOREIGN KEY (banList) REFERENCES BanLists (id) ON DELETE CASCADE )'
   ])

@@ -143,8 +143,9 @@ const {
   isRetryable,
   LARGE_REMOVAL_BANS,
   LARGE_REMOVAL_SHARE,
+  largeLossBans,
   planRemovals,
-  readHoldReason,
+  readHold,
   readPendingRemovals,
   readStoredBans,
   RECORDED_HOLDS,
@@ -196,6 +197,11 @@ assert.deepStrictEqual(
     [0, 0]
   ].map(([count, stored]) => isLargeLoss(count, stored)),
   [false, true, true, false, true, false, true, false]
+);
+// The fewest that are a large loss: 25 up to 125 bans, and a fifth, rounded up, above that.
+assert.deepStrictEqual(
+  [0, 30, 125, 126, 200, 1000, 1001, 11780].map(largeLossBans),
+  [25, 25, 25, 26, 40, 200, 201, 2356]
 );
 assert.deepStrictEqual(plain(RECORDED_HOLDS), ['full', 'large']);
 assert.deepStrictEqual(plain(COMPARED_FIELDS), [
@@ -617,11 +623,13 @@ assert.deepStrictEqual(plan({ missing: lose(350), stored: 1000, fetched: 650, pe
   held: lose(200, 150),
   released: []
 });
-// The hold lasts, as 'large', while none of its bans has come back, however long they have been
-// missing, and however much the list has grown since, here from 1,000 bans to 2,000. Its other
-// missing bans are removed as usual meanwhile, as those of a list held as it lost all of its bans
-// are: a few at once, and more, even as many as it lost at first, after a confirming read.
-const heldLarge = { held: new Set(lose(300)), heldFor: 'large' };
+// The hold lasts, as 'large', while those of its bans still missing are a large loss of the bans
+// the list had before the read that began it (heldOf), here 300 of 1,000, however long they have
+// been missing, and however much the list has grown since, here to 2,000 bans, of which 300 would
+// no longer be a large loss. Its other missing bans are removed as usual meanwhile, as those of a
+// list held as it lost all of its bans are: a few at once, and more, even as many as it lost at
+// first, after a confirming read.
+const heldLarge = { held: new Set(lose(300)), heldFor: 'large', heldOf: 1000 };
 pending = pendingSince(lose(300), 600);
 assert.deepStrictEqual(
   plan({ missing: lose(300), stored: 2000, fetched: 1700, pending, ...heldLarge }),
@@ -636,17 +644,101 @@ assert.deepStrictEqual(
   { remove: [], wait: lose(300, 300), hold: 'large', held: lose(300), released: [] }
 );
 // Without heldFor, a hold an earlier run began is taken as one of a list that lost all its bans, the
-// only hold an importer recorded before 'large'.
+// only hold an importer recorded before 'large', which ends as soon as one of them comes back.
 assert.strictEqual(
   plan({ missing: lose(300), stored: 1000, fetched: 700, pending, held: heldLarge.held }).hold,
   'full'
 );
-// Once one of them comes back, the hold ends: the rest wait for a later complete read, as if first
-// missing now, however many they are, and are not held again as a large loss, as an earlier read
-// missed them. A large loss in the same read, of bans no read had missed, is held anew.
+assert.deepStrictEqual(
+  plan({ missing: lose(299, 1), stored: 1000, fetched: 701, pending, held: heldLarge.held }),
+  { remove: [], wait: lose(299, 1), hold: null, held: [], released: lose(299, 1) }
+);
+// Those of its bans that come back are no longer held, but the hold goes on while those still
+// missing are a large loss: here 299, and then 200, a fifth of the 1,000 bans the list had when it
+// began, however much the list grew since.
 assert.deepStrictEqual(
   plan({ missing: lose(299, 1), stored: 1000, fetched: 701, pending, ...heldLarge }),
-  { remove: [], wait: lose(299, 1), hold: null, held: [], released: lose(299, 1) }
+  { remove: [], wait: [], hold: 'large', held: lose(299, 1), released: [] }
+);
+assert.deepStrictEqual(
+  plan({ missing: lose(200, 100), stored: 2000, fetched: 1800, pending, ...heldLarge }),
+  { remove: [], wait: [], hold: 'large', held: lose(200, 100), released: [] }
+);
+// A ban that came back, and is missing again later, is no longer held: it is removed as the list's
+// other bans are, here at once, as it is the only one.
+assert.deepStrictEqual(
+  plan({
+    missing: lose(300),
+    stored: 1000,
+    fetched: 700,
+    ...heldLarge,
+    pending: pendingSince(lose(299, 1), 600),
+    held: new Set(lose(299, 1))
+  }),
+  { remove: lose(1), wait: [], hold: 'large', held: lose(299, 1), released: [] }
+);
+// Once fewer are still missing, here 199, the hold ends: the rest wait for a later complete read,
+// as if first missing now, however long they were held, and are not held again as a large loss,
+// as an earlier read missed them, or are removed at once when they are few. A list that had up to
+// 125 bans keeps its hold while 25 are still missing.
+assert.deepStrictEqual(
+  plan({ missing: lose(199, 101), stored: 1000, fetched: 801, pending, ...heldLarge }),
+  { remove: [], wait: lose(199, 101), hold: null, held: [], released: lose(199, 101) }
+);
+assert.deepStrictEqual(
+  plan({ missing: lose(9, 291), stored: 1000, fetched: 991, pending, ...heldLarge }),
+  { remove: lose(9, 291), wait: [], hold: null, held: [], released: lose(9, 291) }
+);
+const heldSmall = { held: new Set(lose(30)), heldFor: 'large', heldOf: 100 };
+assert.deepStrictEqual(
+  plan({ missing: lose(25, 5), stored: 100, fetched: 75, pending, ...heldSmall }).held,
+  lose(25, 5)
+);
+assert.deepStrictEqual(
+  plan({ missing: lose(24, 6), stored: 100, fetched: 76, pending, ...heldSmall }),
+  { remove: [], wait: lose(24, 6), hold: null, held: [], released: lose(24, 6) }
+);
+// A hold whose bans all came back ends with nothing to release.
+assert.deepStrictEqual(plan({ missing: [], stored: 1000, fetched: 1000, pending, ...heldLarge }), {
+  remove: [],
+  wait: [],
+  hold: null,
+  held: [],
+  released: []
+});
+// Without heldOf, as for a hold whose start is not known, those still missing are measured against
+// the bans the list had before the read.
+assert.deepStrictEqual(
+  [1000, 2000].map(
+    (stored) =>
+      plan({
+        missing: lose(300),
+        stored,
+        fetched: stored - 300,
+        pending,
+        held: heldLarge.held,
+        heldFor: 'large'
+      }).hold
+  ),
+  ['large', null]
+);
+// A large loss in the read that ends the hold, of bans no read had missed, is held anew. While the
+// hold goes on, such a loss is not held, and is removed as usual.
+assert.deepStrictEqual(
+  plan({
+    missing: [...lose(199, 101), ...lose(200, 300)],
+    stored: 1000,
+    fetched: 601,
+    pending,
+    ...heldLarge
+  }),
+  {
+    remove: [],
+    wait: lose(199, 101),
+    hold: 'large',
+    held: lose(200, 300),
+    released: lose(199, 101)
+  }
 );
 assert.deepStrictEqual(
   plan({
@@ -656,7 +748,7 @@ assert.deepStrictEqual(
     pending,
     ...heldLarge
   }),
-  { remove: [], wait: lose(299, 1), hold: 'large', held: lose(200, 300), released: lose(299, 1) }
+  { remove: [], wait: lose(200, 300), hold: 'large', held: lose(299, 1), released: [] }
 );
 // The bans of a list whose source was replaced are never held as a large loss, and a hold of its
 // old source's bans ends.
@@ -1006,28 +1098,34 @@ await releaseHeldRemovals(7, { now: new Date(NOW) });
 assert.deepStrictEqual([statements().length, delays], [2, [5000]]);
 
 // A hold for an admin is saved in one transaction, whole or not at all: why the list's bans are
-// held, as the hold begins, then its bans, a statement for each batch, recorded as held from now,
-// unless they already were, which keeps when that began. A hold that begins anew, for another
-// reason, releases the list's held bans first, in the same transaction, so all of its bans are held
-// from now. One that goes on saves its bans alone.
+// held, with how many bans the list had before the read that began the hold, as the hold begins,
+// then its bans, a statement for each batch, recorded as held from now, unless they already were,
+// which keeps when that began. A hold that begins anew, for another reason, releases the list's
+// held bans first, in the same transaction, so all of its bans are held from now. One that goes on
+// saves its bans alone.
 reset();
 const SAVE_HOLD_REASON =
-  'INSERT INTO BanListHolds (banList, reason) VALUES (?, ?) AS new ON DUPLICATE KEY UPDATE reason = new.reason';
-await saveHold(7, ['7,e', '7,f', '7,g'], { reason: 'large', now: new Date(NOW), batchSize: 2 });
-await saveHold(7, ['7,e', '7,f'], { reason: 'full', anew: true, now: new Date(NOW) });
-await saveHold(7, ['7,e'], { now: new Date(NOW) });
+  'INSERT INTO BanListHolds (banList, reason, storedCount) VALUES (?, ?, ?) AS new ON DUPLICATE KEY UPDATE reason = new.reason, storedCount = new.storedCount';
+await saveHold(7, ['7,e', '7,f', '7,g'], {
+  reason: 'large',
+  stored: 12,
+  now: new Date(NOW),
+  batchSize: 2
+});
+await saveHold(7, ['7,e', '7,f'], { reason: 'full', stored: 2, anew: true, now: new Date(NOW) });
+await saveHold(7, ['7,e'], { stored: 30, now: new Date(NOW) });
 assert.deepStrictEqual(
   events.map(([type, sql, replacements, transaction]) =>
     type === 'query' ? [sql, replacements, transaction] : [type, sql]
   ),
   [
     ['begin', 1],
-    [SAVE_HOLD_REASON, [7, 'large'], 1],
+    [SAVE_HOLD_REASON, [7, 'large', 12], 1],
     [SAVE_PENDING(2), [7, '7,e', AT, AT, AT, 7, '7,f', AT, AT, AT], 1],
     [SAVE_PENDING(1), [7, '7,g', AT, AT, AT], 1],
     ['commit', 1],
     ['begin', 2],
-    [SAVE_HOLD_REASON, [7, 'full'], 2],
+    [SAVE_HOLD_REASON, [7, 'full', 2], 2],
     [RELEASE_HELD, [AT, AT, 7], 2],
     [SAVE_PENDING(2), [7, '7,e', AT, AT, AT, 7, '7,f', AT, AT, AT], 2],
     ['commit', 2],
@@ -1075,14 +1173,26 @@ assert.deepStrictEqual(
   [5, 5, 5, 0]
 );
 
-// Why a list's bans are held is read by the list, or none, and forgotten, each with one statement. A
-// lock wait runs the delete again.
+// Why a list's bans are held, and of how many bans, is read by the list, or none, and forgotten,
+// each with one statement. A count MySQL gives as text is a number, and none is null. A lock wait
+// runs the delete again.
 reset();
-const HOLD_REASON = 'SELECT reason FROM BanListHolds WHERE banList = ?';
-selects = { [HOLD_REASON]: [{ reason: 'large' }] };
-assert.strictEqual(await readHoldReason(7), 'large');
+const HOLD_REASON = 'SELECT reason, storedCount FROM BanListHolds WHERE banList = ?';
+selects = { [HOLD_REASON]: [{ reason: 'large', storedCount: 200 }] };
+assert.deepStrictEqual(plain(await readHold(7)), { reason: 'large', stored: 200 });
+for (const [storedCount, stored] of [
+  ['11780', 11780],
+  [null, null],
+  [undefined, null]
+]) {
+  selects = { [HOLD_REASON]: [{ reason: 'full', storedCount }] };
+  assert.deepStrictEqual(plain(await readHold(7)), { reason: 'full', stored }, `${storedCount}`);
+}
 selects = {};
-assert.strictEqual(await readHoldReason(8), null);
+assert.strictEqual(await readHold(8), null);
+events.length = 0;
+await readHold(7);
+await readHold(8);
 await clearHoldReason(7);
 assert.deepStrictEqual(
   events.map(([, sql, replacements, transaction]) => [sql, replacements, transaction]),
@@ -1115,5 +1225,5 @@ assert.deepStrictEqual(batches, [2, 2]);
 assert.strictEqual(events.filter(([type]) => type === 'commit').length, 2);
 
 console.log(
-  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans or a large part of them at once, which last until confirmed or a held ban comes back, batched writes, retries, failed bans, bans written alone, removals, records of missing bans, holds saved whole with why they are held, or not at all, and stops.'
+  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans, which last until confirmed or a held ban comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the bans the list had then are still missing, batched writes, retries, failed bans, bans written alone, removals, records of missing bans, holds saved whole with why they are held and of how many bans, or not at all, and stops.'
 );

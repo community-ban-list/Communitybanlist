@@ -204,11 +204,12 @@ export default [
   {
     // BanListHolds, which keeps why the importer holds a ban list's bans for an admin, one row a
     // list while it does: 'full', as a read found none of the list's bans, or 'large', as a read
-    // lost a large part of them at once. BanListPendingRemovals keeps the held bans themselves, but
-    // not which hold began, so the runs after the one that began it read that here. A list's row
-    // is deleted with the list, so banList has the type of BanLists.id, which its foreign key
-    // needs. The reason is a VARCHAR rather than an ENUM, so a new reason needs no change to the
-    // table.
+    // lost a large part of them at once, with how many bans the list had before that read
+    // (storedCount), which a 'large' hold's bans still missing are measured against.
+    // BanListPendingRemovals keeps the held bans themselves, but not which hold began, so the runs
+    // after the one that began it read that here. A list's row is deleted with the list, so banList
+    // has the type of BanLists.id, which its foreign key needs. The reason is a VARCHAR rather than
+    // an ENUM, so a new reason needs no change to the table.
     id: '005-ban-list-holds',
     async up(query) {
       const options = await tableOptions(query);
@@ -217,6 +218,7 @@ export default [
         `CREATE TABLE IF NOT EXISTS BanListHolds (
           banList ${banListType} NOT NULL,
           reason VARCHAR(16) NOT NULL,
+          storedCount INT UNSIGNED NOT NULL,
           PRIMARY KEY (banList),
           CONSTRAINT BanListHolds_banList FOREIGN KEY (banList) REFERENCES BanLists (id)
             ON DELETE CASCADE

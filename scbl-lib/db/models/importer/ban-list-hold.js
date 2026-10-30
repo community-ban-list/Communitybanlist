@@ -5,9 +5,10 @@ import sequelize from '../../sequelize.js';
 const { DataTypes } = Sequelize;
 
 // Why the ban importer holds a ban list's bans for an admin, one row a list while it does, which
-// the runs after the one that began the hold read to say which hold it is. The held bans themselves
-// are in BanListPendingRemovals. A list's row is deleted with the list. The importer makes this
-// table with its migrations, so the model is never synced, and is the only one that writes it.
+// the runs after the one that began the hold read to say which hold it is, and how long it lasts.
+// The held bans themselves are in BanListPendingRemovals. A list's row is deleted with the list.
+// The importer makes this table with its migrations, so the model is never synced, and is the only
+// one that writes it.
 export default sequelize.define(
   'BanListHold',
   {
@@ -20,6 +21,12 @@ export default sequelize.define(
     // large part of them missing at once.
     reason: {
       type: DataTypes.STRING(16),
+      allowNull: false
+    },
+    // The bans the list had before the read that began the hold. A 'large' hold lasts while its
+    // bans still missing are a large part of them, so the list's growth since never ends it.
+    storedCount: {
+      type: DataTypes.INTEGER.UNSIGNED,
       allowNull: false
     }
   },
