@@ -162,7 +162,7 @@ for (const list of ['/export/7', '/export/7.txt']) {
 // Any other path the client has no page for gets 404 rather than index.html, with Helmet's headers:
 // a missing file, under /static or not, a path under one the server answers itself, such as an
 // unknown sign-in path or an export list URL without its id, and a path whose first part has a
-// dot, as a file name has.
+// dot, as a file name has. Nothing may keep the 404, as the file may be there soon.
 for (const notFound of [
   '/static/missing.js',
   '/static/index-0ld.css',
@@ -186,6 +186,7 @@ for (const notFound of [
   assert.strictEqual(response.status, 404, `${notFound} is not found`);
   assert.strictEqual(response.headers['content-type'], 'text/plain; charset=utf-8', notFound);
   assert.strictEqual(response.text, 'Not Found', notFound);
+  assert.strictEqual(response.headers['cache-control'], 'no-store', notFound);
   assertHelmetHeaders(response, notFound);
 }
 
