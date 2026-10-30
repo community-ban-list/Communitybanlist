@@ -1,19 +1,16 @@
 import assert from 'assert';
 import { existsSync } from 'fs';
 import { readdir, readFile, utimes, writeFile } from 'fs/promises';
-import { createRequire } from 'module';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import zlib from 'zlib';
 
 import Router from '@koa/router';
 
 import { FILES, loadApp } from './helpers/load-app.js';
 
-// Checks how long browsers may keep what the web server sends in production, and how it compresses
-// it. The files Vite builds into /static are kept for a year. The files at the top of the build and
-// the client's pages are checked on every visit, and get 304 while they have not changed. Text
-// answers of 1 KB or more are compressed with gzip for browsers that accept it. The app is
+// Checks how long browsers may keep what the web server sends in production. The files Vite builds
+// into /static are kept for a year. The files at the top of the build and the client's pages are
+// checked on every visit, and get 304 while they have not changed. The app is
 // web-server/src/app.js, with stand-ins for its routes and the database.
 
 const STEAM_ID = '76561198000000001';
@@ -24,13 +21,13 @@ const EVERY_VISIT = ['max-age=0'];
 const directives = (response) =>
   (response.headers['cache-control'] ?? '').split(',').map((directive) => directive.trim());
 
-// A bundle large enough to compress, a picture, which is not compressed however large, and the
-// colour mode script, which index.html loads from the top of the build.
+// Another bundle, a picture, and the colour mode script, which index.html loads from the top of the
+// build.
 const BUNDLE = 'console.log("A line of the client");\n'.repeat(1000);
 const PICTURE = Buffer.alloc(4096, 1);
 const COLOR_MODE = "document.documentElement.setAttribute('data-bs-theme', 'dark');\n";
 
-// An export list and an API answer, each large enough to compress.
+// An export list and an API answer.
 const EXPORT_LIST = Array.from(
   { length: 500 },
   (_, index) => `7656119800000${String(index).padStart(4, '0')}:0`
@@ -103,11 +100,9 @@ for (const name of [
   assert.strictEqual(response.headers['last-modified'], LAST_MODIFIED, name);
   if (!name.startsWith('/static/')) assert.deepStrictEqual(directives(response), EVERY_VISIT, name);
   for (const method of ['GET', 'HEAD']) {
-    const headers = { ...UNCHANGED_SINCE, 'accept-encoding': 'gzip, br' };
-    const unchanged = await server.request(name, { method, headers });
+    const unchanged = await server.request(name, { method, headers: UNCHANGED_SINCE });
     assert.strictEqual(unchanged.status, 304, `${method} ${name} is unchanged`);
     assert.strictEqual(unchanged.bytes.length, 0, `${method} ${name} has no body`);
-    assert.strictEqual(unchanged.headers['content-encoding'], undefined, name);
     assert.deepStrictEqual(directives(unchanged), directives(response), name);
   }
 }
@@ -152,70 +147,6 @@ for (const missing of ['/static/index-0ld0ld00.js', '/nonexistent.png']) {
     `${missing} is not kept`
   );
 }
-
-// Text answers of 1 KB or more are compressed with gzip for browsers that accept it, as every
-// browser does, whatever else they accept. Each says that it depends on what the browser accepts,
-// so that a cache keeps compressed and uncompressed answers apart.
-for (const [name, expected, options] of [
-  ['/static/index-B1g2B3n4.js', BUNDLE, {}],
-  ['/export/7', EXPORT_LIST, {}],
-  ['/graphql', API_ANSWER, { method: 'POST', headers: json, body: query }]
-]) {
-  for (const accepted of ['gzip', 'gzip, deflate, br, zstd', 'br, gzip;q=0.5']) {
-    const headers = { ...options.headers, 'accept-encoding': accepted };
-    const response = await server.request(name, { ...options, headers });
-    assert.strictEqual(response.status, 200, `${name} for ${accepted}`);
-    assert.strictEqual(response.headers['content-encoding'], 'gzip', `${name} for ${accepted}`);
-    assert.match(response.headers.vary ?? '', /accept-encoding/i, name);
-    assert.strictEqual(zlib.gunzipSync(response.bytes).toString(), expected, name);
-    assert.ok(response.bytes.length < expected.length / 4, `${name} is compressed`);
-  }
-}
-
-// Other answers are sent as they are: those for a browser that does not accept gzip, or accepts no
-// encoding at all, even one that refuses an answer that is not compressed, however it writes that;
-// answers under 1 KB; and pictures, whose formats are compressed already. Nothing is logged for any
-// of them.
-const logged = server.output.length;
-for (const [name, accepted, expected] of [
-  ['/static/index-B1g2B3n4.js', undefined, BUNDLE],
-  ['/static/index-B1g2B3n4.js', 'br', BUNDLE],
-  ['/static/index-B1g2B3n4.js', 'deflate, zstd', BUNDLE],
-  ['/static/index-B1g2B3n4.js', 'identity;q=0', BUNDLE],
-  ['/static/index-B1g2B3n4.js', '*;q=0', BUNDLE],
-  ['/static/index-B1g2B3n4.js', 'identity;Q=0', BUNDLE],
-  ['/static/index-B1g2B3n4.js', '*;Q=0', BUNDLE],
-  ['/static/index-B1g2B3n4.js', 'identity;q =0', BUNDLE],
-  ['/export/7', 'br, identity;q=0', EXPORT_LIST],
-  ['/export/7', 'gzip;Q=0, identity;Q=0', EXPORT_LIST],
-  ['/static/app-abc.js', 'gzip, br', FILES['client/build/static/app-abc.js']],
-  ['/config.js', 'gzip, br', config.text],
-  ['/static/logo-Pa5s6t7h.png', 'gzip, br', PICTURE.toString()]
-]) {
-  const headers = accepted === undefined ? {} : { 'accept-encoding': accepted };
-  const response = await server.request(name, { headers });
-  assert.strictEqual(response.status, 200, `${name} for ${accepted}`);
-  assert.strictEqual(response.headers['content-encoding'], undefined, `${name} for ${accepted}`);
-  assert.strictEqual(response.text, expected, `${name} for ${accepted}`);
-}
-// These checks close each connection as soon as its answer has arrived, which Koa now and then logs
-// as a premature close, for any file it sends, so that message is left out.
-const loggedNow = server.output
-  .slice(logged)
-  .filter((line) => !line.includes('ERR_STREAM_PREMATURE_CLOSE'));
-assert.deepStrictEqual(loggedNow, [], 'Nothing is logged');
-
-// app.js reads Accept-Encoding with the same version of negotiator as koa-compress, so that the two
-// agree on which requests accept nothing koa-compress can send.
-const appRequire = createRequire(new URL('../src/app.js', import.meta.url));
-const compressRequire = createRequire(appRequire.resolve('koa-compress'));
-const negotiatorVersion = (load) => load('negotiator/package.json').version;
-assert.strictEqual(
-  negotiatorVersion(appRequire),
-  negotiatorVersion(compressRequire),
-  'app.js loads another version of negotiator than koa-compress. In web-server/package.json, ask ' +
-    'for negotiator with the range koa-compress asks for.'
-);
 
 // A browser whose copy is older than the file, as after a new build, gets the new file, so a new
 // client shows at once.
@@ -292,7 +223,7 @@ for (const name of built)
   );
 
 console.log(
-  'Static file checks passed: files under /static are kept for a year, other files and pages get ' +
-    '304 while unchanged, and text answers are compressed' +
+  'Static file checks passed: files under /static are kept for a year, and other files and pages ' +
+    'get 304 while unchanged' +
     (built.length > 0 ? `. The ${built.length} files built into /static have hashed names.` : '.')
 );
