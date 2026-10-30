@@ -1,5 +1,6 @@
 import { EXPORT_LIST_LIMITS } from 'scbl-lib/config';
 import { countMembers, countPlayersWithBans } from 'scbl-lib/db/export-membership';
+import { createPool, Transaction } from 'scbl-lib/db/sequelize';
 import { checkRules, formatNumber } from 'scbl-lib/export-list-limits';
 
 import refusal from './refusal.js';
@@ -17,11 +18,14 @@ import refusal from './refusal.js';
 //   limit, no list of that type within the rules can pass it, so none needs counting.
 // - Otherwise, when the type's rules are turned off or those players are over its limit, the
 //   players the list would hold are counted. A change that would put the list over the limit and
-//   make it bigger is refused.
-// Counts run one at a time, server-wide, so they use at most one of the web server's database
-// connections, and each user can only start a few. A count the database does not answer in time
-// is given up on, so no change waits for it for good, though its connection stays in use until the
-// database answers (ANSWER_LIMIT).
+//   make it bigger is refused. The list is counted as it would be and as it is in one snapshot of
+//   the database, so bans saved in between cannot make a change look smaller or bigger than it is.
+// Counts run one at a time, server-wide, on a database connection of their own, so they never wait
+// for or take up the connections the web server's requests share, and each user can only start a
+// few. A count that cannot get the connection soon (CONNECTION_WAIT), or that the database does
+// not answer in time (ANSWER_LIMIT), is given up on, so no change waits for it for good. A count
+// given up on starts nothing more, though the connection stays in use until the database answers
+// it, so the counts after it fail rather than pile up on the database.
 
 // How long a count of the players with two or more bans is used for, in milliseconds. In that time,
 // a list within the rules can only pass its limit by the players who get a second ban.
@@ -39,12 +43,19 @@ export const COUNTS_WAITING = 5;
 // How long MySQL may take over each count, in milliseconds.
 export const TIME_LIMIT = 3000;
 
-// How long the web server waits for the answer to each count, in milliseconds, before it gives up
-// on the count as one that failed. MySQL stops a count at TIME_LIMIT, so a count with no answer
-// well after that is on a connection that has stopped answering. Without this, the changes waiting
-// for it, those whose turn comes after it, and the same users' later changes would wait for good.
-// The connection stays in use until the database answers, but the next count can run.
+// How long the web server waits for the answer to each count, in milliseconds, from when the count
+// starts on its connection, before it gives up on the count as one that failed. MySQL stops a
+// count at TIME_LIMIT, so a count with no answer well after that is on a connection that has
+// stopped answering. Without this, the changes waiting for it, those whose turn comes after it, and
+// the same users' later changes would wait for good. The connection stays in use until the
+// database answers, and the next count waits for it for at most CONNECTION_WAIT.
 export const ANSWER_LIMIT = TIME_LIMIT + 2000;
+
+// How long a count waits for the counts' connection, and for its transaction to start there, in
+// milliseconds, before it is given up on as a count that failed. Counts run one at a time, so one
+// only waits that long while the database has not answered a count given up on, which still holds
+// the connection, or while a new connection is slow to open. A count given up on here never runs.
+export const CONNECTION_WAIT = 2000;
 
 const TYPE_NAMES = { battlemetrics: 'BattleMetrics', remote: 'remote' };
 
@@ -86,6 +97,23 @@ const recentCounts = new Map();
 let lastCount = Promise.resolve();
 let unfinished = 0;
 
+// The counts' own pool of database connections, which holds one. A count that asks for it waits at
+// most CONNECTION_WAIT, and then no longer waits, so it cannot take the connection later.
+// If the connection stops answering altogether, e.g. after a network fault that leaves it open with
+// no answer ever coming, the changes that need their list's players counted are refused until the
+// operating system gives up on the connection, which can take many minutes. That is accepted: a
+// new connection in its place could put a second count on the database while the first still
+// runs. The rest of the web server keeps its own connections meanwhile, and other changes are
+// still saved.
+const countPool = createPool({ max: 1, min: 0, acquire: CONNECTION_WAIT });
+
+// Close the counts' connection, as the web server stops. It waits for the database to answer a
+// count still running on it, which may never come (see above), so the stop gives it a time limit
+// of its own, apart from the other database connections'.
+export function closeCountPool() {
+  return countPool.close();
+}
+
 // Check a change that could make an export ban list bigger against its type's limit on players, and
 // refuse it if it would put the list over the limit. check describes the change:
 // - type: the list's type;
@@ -123,7 +151,7 @@ export default async function checkSize(context, check, now = Date.now) {
 
 // Count the players a list would hold after a change, and, when that is over the limit and the
 // list exists, the players it would hold as it is, so a change that leaves it no bigger is
-// allowed. Together they take one of the user's counts and one turn.
+// allowed. Together they take one of the user's counts and one turn, and they read one snapshot.
 async function countPlayers(user, { type, exportBanList, before, after }, now) {
   // A user who has started all the counts they can for now is refused before the change waits for
   // a turn, and so is any change while one count runs and COUNTS_WAITING wait. Neither takes one
@@ -133,13 +161,14 @@ async function countPlayers(user, { type, exportBanList, before, after }, now) {
   if (unfinished > COUNTS_WAITING) throw refusal(BUSY);
 
   try {
-    return await oneAtATime(async () => {
+    return await oneAtATime(() => {
       startCount(user, now());
-      const count = (list) =>
-        answerInTime(countMembers(list.settings, list.configs, { timeLimit: TIME_LIMIT }));
-      const players = await count(after);
-      if (!before || players <= EXPORT_LIST_LIMITS[type].maxPlayers) return { players };
-      return { players, current: await count(before) };
+      return inOneSnapshot(async (nextCount) => {
+        const count = (list) => countMembers(list.settings, list.configs, nextCount());
+        const players = await count(after);
+        if (!before || players <= EXPORT_LIST_LIMITS[type].maxPlayers) return { players };
+        return { players, current: await count(before) };
+      });
     });
   } catch (error) {
     if (error?.refusal === true) throw error;
@@ -187,20 +216,63 @@ function oneAtATime(count) {
   return result;
 }
 
-// A count's answer, or an error when the database has not answered it within ANSWER_LIMIT. A late
-// answer is not used.
-function answerInTime(counting) {
-  let timer;
-  const givenUp = new Promise((resolve, reject) => {
-    timer = setTimeout(
-      () =>
-        reject(
-          new Error(`The database did not answer the count within ${ANSWER_LIMIT / 1000} seconds.`)
-        ),
-      ANSWER_LIMIT
+// Run counts on the counts' connection, in one REPEATABLE READ transaction, so they all read the
+// bans as they were when the first one started, whatever the importer or the bot saves meanwhile,
+// and take no locks. counts(nextCount) runs them, each with the options nextCount() gives: the time
+// limit and the transaction. They give no ban lists to leave out, so, as in every count of the size
+// check, the bans of paused ones count too, as a list's cap must hold once they count again (see
+// countMembers), and the counts in one snapshot all count the bans of the same ban lists. This
+// resolves with what counts resolves with as soon as it does, as the transaction then ends on its
+// own.
+// The counts are given up on, as counts that failed, when the connection is not theirs within
+// CONNECTION_WAIT, or when the database has not answered a count within ANSWER_LIMIT of its start.
+// nextCount() then throws, so they start nothing more, and a late answer is not used.
+function inOneSnapshot(counts) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    let givenUp = false;
+    // Give up on the counts in ms, unless they finish first or this is called again.
+    const giveUpIn = (ms, message) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        givenUp = true;
+        reject(new Error(message));
+      }, ms);
+    };
+    const finish = (settle, value) => {
+      clearTimeout(timer);
+      settle(value);
+    };
+
+    giveUpIn(
+      CONNECTION_WAIT,
+      `The count could not get a database connection within ${CONNECTION_WAIT / 1000} seconds.`
     );
+    countPool
+      .transaction(
+        { isolationLevel: Transaction.ISOLATION_LEVELS.REPEATABLE_READ },
+        async (transaction) => {
+          const nextCount = () => {
+            if (givenUp) throw new Error('The counts were given up on.');
+            giveUpIn(
+              ANSWER_LIMIT,
+              `The database did not answer the count within ${ANSWER_LIMIT / 1000} seconds.`
+            );
+            return { timeLimit: TIME_LIMIT, transaction };
+          };
+          try {
+            finish(resolve, await counts(nextCount));
+          } catch (error) {
+            finish(reject, error);
+            // Sequelize rolls the transaction back.
+            throw error;
+          }
+        }
+      )
+      // Not getting the connection, or the transaction not starting, fails the counts. Once they
+      // are answered, the transaction not ending does not.
+      .catch((error) => finish(reject, error));
   });
-  return Promise.race([counting, givenUp]).finally(() => clearTimeout(timer));
 }
 
 // How many players have two or more bans, counted at most once every POPULATION_KEPT. Changes at
@@ -213,7 +285,7 @@ function playersWithTwoBans(now) {
 
   populationCountedAt = time;
   populationCount = oneAtATime(() =>
-    answerInTime(countPlayersWithBans(2, { timeLimit: TIME_LIMIT }))
+    inOneSnapshot((nextCount) => countPlayersWithBans(2, nextCount()))
   )
     .then(
       (players) => {

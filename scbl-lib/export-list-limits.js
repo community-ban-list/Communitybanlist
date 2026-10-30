@@ -103,11 +103,13 @@ const BOUNDS = {
 };
 
 // Read the limits from environment variables, given as an object like process.env. A variable that
-// is unset or empty keeps its default, and so does one that cannot be used, which is described in
+// is unset or empty keeps its default, and is listed in unset as { variable, value }, with the
+// default as its value. One that cannot be used keeps its default too, and is described in
 // problems. This never throws, as everything that loads scbl-lib/config.js reads them.
 export function readLimits(env) {
   const limits = {};
   const problems = [];
+  const unset = [];
   for (const [type, variables] of Object.entries(VARIABLES)) {
     limits[type] = { ...DEFAULT_LIMITS[type] };
     for (const [limit, variable] of Object.entries(variables)) {
@@ -118,7 +120,10 @@ export function readLimits(env) {
       } catch {
         value = '';
       }
-      if (value === '') continue;
+      if (value === '') {
+        unset.push({ variable, value: limits[type][limit] });
+        continue;
+      }
 
       const read = READERS[limit].read(value);
       if (read !== undefined) limits[type][limit] = read;
@@ -128,7 +133,7 @@ export function readLimits(env) {
         );
     }
   }
-  return { limits, problems };
+  return { limits, problems, unset };
 }
 
 // Read limits given as values rather than environment variables, as the web server gives the

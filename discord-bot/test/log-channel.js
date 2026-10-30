@@ -149,7 +149,7 @@ async function loadBot() {
       GatewayIntentBits: { Guilds: 1 },
       MessageFlags: { Ephemeral: 64 }
     },
-    'scbl-lib/config': { EXPORT_LIST_LIMIT_PROBLEMS: [] },
+    'scbl-lib/config': { EXPORT_LIST_LIMIT_PROBLEMS: [], UNSET_EXPORT_LIST_LIMITS: [] },
     'scbl-lib/db': {
       connect: async () => events.push('connect'),
       disconnect: async () => {
