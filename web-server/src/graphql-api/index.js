@@ -1,15 +1,14 @@
 import { ApolloServer } from '@apollo/server';
-import { unwrapResolverError } from '@apollo/server/errors';
 import { ApolloServerPluginLandingPageDisabled } from '@apollo/server/plugin/disabled';
 import { koaMiddleware } from '@as-integrations/koa';
 import { makeExecutableSchema } from '@graphql-tools/schema';
 
-import { DATABASE_UNAVAILABLE_MESSAGE, isDatabaseUnavailable } from 'scbl-lib/db/sequelize';
-
+import { inDevelopment } from '../production.js';
 import typeDefs from './typedefs.js';
 import resolvers from './resolvers.js';
 import { queryCostRule } from './core/query-cost.js';
 import { directives } from './core/index.js';
+import formatError from './core/format-error.js';
 import { reportRejectedSignInTokens, signInContext } from './core/sign-in.js';
 import pausedBanLists from '../paused-ban-lists.js';
 
@@ -33,17 +32,22 @@ const server = new ApolloServer({
   // so the cost is only worked out for requests of a sensible size.
   maxRecursiveSelections: 1000,
   validationRules: [queryCostRule(schema)],
-  // While the database cannot be reached, e.g. as it restarts, show a general message rather than
-  // the database's own error.
-  formatError: (formattedError, error) =>
-    isDatabaseUnavailable(unwrapResolverError(error))
-      ? { ...formattedError, message: DATABASE_UNAVAILABLE_MESSAGE }
-      : formattedError,
+  // Outside development the API keeps its schema to itself, as the site's own queries need nothing
+  // more: it answers no introspection queries, and its errors for fields and arguments that do not
+  // exist suggest none that do (core/format-error.js does the same for variables). That includes a
+  // NODE_ENV the web server does not expect (production.js). Its errors never say where in the code
+  // they came from.
+  introspection: inDevelopment,
+  hideSchemaDetailsFromClientErrors: !inDevelopment,
+  includeStacktraceInErrorResponses: false,
+  // The client is told what was wrong with a request the API refuses on purpose, and only that the
+  // server had an error when anything else fails, such as a database query (core/format-error.js).
+  formatError,
   plugins: [
     reportRejectedSignInTokens,
     // Apollo Server 2 had no landing page in production, so GET /graphql without a query is still
     // an error there rather than a page that loads Apollo's scripts.
-    ...(process.env.NODE_ENV === 'production' ? [ApolloServerPluginLandingPageDisabled()] : [])
+    ...(inDevelopment ? [] : [ApolloServerPluginLandingPageDisabled()])
   ]
 });
 
