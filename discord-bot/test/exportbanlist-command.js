@@ -44,6 +44,28 @@ const LIMITS = {
 };
 const LIMITS_TEXT =
   "Limits used: BattleMetrics lists have at most 20,000 players and a threshold of at least 4, and one active ban plus one expired ban must never be enough; remote lists have at most 40,000 players and a threshold of at least 4, and one active ban plus one expired ban must never be enough. They come from the bot's EXPORT_* settings, which must match the website's.";
+// What the numbers of players mean while ban lists are paused, which remove_outside_limits says
+// after the limits used, here with ban lists 7 and 46 paused, and with 46 alone.
+const PAUSED_TEXT =
+  "Ban lists #7 and #46 are paused: their bans count for nothing for now. The ban importer leaves them out of export bans, but a count by settings now includes them, as the website's size check does, so that a list's cap holds once they count again. So a list within the cap by its export bans only while they are paused is not counted again, and is left until then.";
+const ONE_PAUSED_TEXT =
+  "Ban list #46 is paused: its bans count for nothing for now. The ban importer leaves them out of export bans, but a count by settings now includes them, as the website's size check does, so that a list's cap holds once they count again. So a list within the cap by its export bans only while #46 is paused is not counted again, and is left until then.";
+// The same for the embed of a list counted again by its settings now, with ban lists 7 and 46
+// paused, and for that of a list not counted again, which shows only its export bans.
+const PAUSED_FIELD = [
+  'Paused ban lists',
+  "#7 and #46, whose bans count for nothing for now. The ban importer leaves them out of the list's export bans, but its count by its settings now includes them, as the website's size check does."
+];
+const PAUSED_UNCOUNTED_FIELD = [
+  'Paused ban lists',
+  "#7 and #46, whose bans count for nothing for now. The ban importer leaves them out of the list's export bans, and so out of its players here, but the website's size check counts them."
+];
+// Ban lists 46, suspended, and 7, resuming, whose bans count for nothing until the importer has
+// caught up with it, as rows of the importer's table, out of order, as the names are sorted.
+const PAUSED_ROWS = [
+  { banList: 46, suspendedBy: 'admin', reason: null, resumedAt: null },
+  { banList: 7, suspendedBy: 'admin', reason: null, resumedAt: new Date('2026-10-28T12:00:00Z') }
+];
 const PROGRESS_NOTE =
   'This reply can only be updated for 15 minutes after the command, so each result and the summary also go to the CBL log channel.';
 // A message from the website's rules, as checkLimits gives them.
@@ -62,6 +84,10 @@ let notifications;
 // removes the list, unless the list's answer in `deletions` is an error.
 let rows;
 let deletions;
+// Runs as checkLimits finishes, with the IDs it was given, e.g. to change a list while its players
+// are counted again. An error in changeErrors for a list fails changeSince for it.
+let duringCheck;
+let changeErrors;
 // The query that loaded each list deleted, in turn, e.g. 'find 12' for findByPk(12), as each query
 // gives instances of its own, as Sequelize's do, and for each, the Steam name of the owner the list
 // had loaded with it, which ExportBanList's lines name, and whether its lines were to be important.
@@ -84,6 +110,16 @@ let steamUsers;
 // Runs as an update starts, with the update's values and options, before it writes anything, e.g.
 // to change a list in the moment after it was read again, or to make the update wait or fail.
 let beforeUpdate;
+// The lists whose deletion lock is held, by a deletion on the website or a removal here, and the
+// transaction in progress. An error in lockErrors for a list fails taking its deletion lock, as
+// when its connection cannot be opened.
+let beingDeleted;
+let transaction;
+let lockErrors;
+// The ban lists paused now, as rows of the importer's table, suspended or resuming, and how many
+// times they were read.
+let pausedRows;
+let pausedReads;
 
 function reset() {
   calls = [];
@@ -92,6 +128,8 @@ function reset() {
   notifications = [];
   rows = new Map();
   deletions = new Map();
+  duringCheck = null;
+  changeErrors = new Map();
   deletedFrom = [];
   deletedWith = [];
   lockAnswers = [];
@@ -101,14 +139,29 @@ function reset() {
   timeouts = [];
   steamUsers = new Map();
   beforeUpdate = null;
+  beingDeleted = new Set();
+  transaction = null;
+  lockErrors = new Map();
+  pausedRows = [];
+  pausedReads = 0;
 }
 
 // Add a list to the database. Reading its Discord webhook, the only way to tell its owner anything,
-// is recorded.
+// is recorded. recount is what checkLimits gives for a list whose export bans are over its type's
+// cap: the players its settings and configs give now, or null for a list not counted again.
+// recountError is the error of a count that failed, which fails checkLimits, unless the caller
+// keeps such errors.
 function addList(
   id,
   type,
-  { battlemetricsID = null, players = 0, problems = [RULE], ...more } = {}
+  {
+    battlemetricsID = null,
+    players = 0,
+    recount = null,
+    recountError = null,
+    problems = [RULE],
+    ...more
+  } = {}
 ) {
   const exportBanList = {
     id,
@@ -126,8 +179,9 @@ function addList(
       return 'https://discord.com/api/webhooks/1/token';
     },
     // Like the shared deletion, a list that is removed no longer records its BattleMetrics ban
-    // list.
+    // list. The bot only deletes a list while it holds its deletion lock.
     async deleteExportBanList(options) {
+      assert.ok(beingDeleted.has(id), 'A list is deleted under its deletion lock.');
       calls.push(['delete', id]);
       deletedFrom.push(this.loadedBy);
       deletedWith.push({
@@ -146,6 +200,8 @@ function addList(
   rows.set(id, {
     exportBanList,
     players,
+    recount,
+    recountError,
     problems: problems.map((message) => ({ rule: 'never-enough', field: 'threshold', message })),
     checked: true
   });
@@ -168,7 +224,7 @@ const hasColumns = (exportBanList, where) =>
   Object.entries(where).every(([column, value]) => exportBanList[column] === value);
 
 const ExportBanList = {
-  async checkLimits({ ids } = {}) {
+  async checkLimits({ ids, keepRecountErrors = false } = {}) {
     calls.push(['check', ids === undefined ? 'all' : [...ids]]);
     const query = `check ${ids === undefined ? 'all' : ids.join(',')}`;
     const lists = [...rows.values()]
@@ -180,16 +236,70 @@ const ExportBanList = {
         configs: [],
         problems: [...row.problems]
       }));
+    // A count that failed fails the check, unless the caller keeps its error with the list.
+    const failed = lists.find((check) => check.recountError);
+    if (failed && !keepRecountErrors) throw failed.recountError;
+    if (duringCheck) await duringCheck(ids);
     return { limits: LIMITS, lists };
   },
-  // Like Sequelize's, it loads the list without its owner's Steam user.
-  async findByPk(id) {
-    calls.push(['find', id]);
+  // Like Sequelize's, it loads the list without its owner's Steam user. A list read with its row
+  // locked is read in the transaction in progress.
+  async findByPk(id, options) {
+    if (options?.lock) assert.ok(transaction && options.transaction === transaction);
+    calls.push(options?.lock ? ['find', id, 'locked'] : ['find', id]);
     const row = rows.get(id);
     if (!row) return null;
     const found = instance(row.exportBanList, `find ${id}`);
     delete found.SteamUser;
     return found;
+  },
+  // A transaction, in which the transfer reads and writes. It ends with a commit once its work is
+  // done, or a rollback when its work fails.
+  async inTransaction(work) {
+    assert.strictEqual(transaction, null, 'One transaction at a time.');
+    transaction = {};
+    calls.push(['begin']);
+    try {
+      const result = await work(transaction);
+      calls.push(['commit']);
+      return result;
+    } catch (error) {
+      calls.push(['rollback']);
+      throw error;
+    } finally {
+      transaction = null;
+    }
+  },
+  // Lock a user's lists in the transaction in progress, and give how many they have.
+  async lockListsOf(owner, options) {
+    assert.ok(transaction && options.transaction === transaction);
+    calls.push(['lock lists', owner]);
+    return [...rows.values()].filter((row) => row.exportBanList.owner === owner).length;
+  },
+  // Whether the list's deletion lock is held, asked in the transaction in progress.
+  async isBeingDeleted(id, options) {
+    assert.ok(transaction && options.transaction === transaction);
+    calls.push(['deleting?', id]);
+    return beingDeleted.has(id);
+  },
+  // Run a deletion while holding the list's deletion lock, which is freed once it ends, or, as
+  // MySQL does, run nothing and throw an error marked beingDeleted while another deletion holds it.
+  async whileDeleting(id, deletion) {
+    if (lockErrors.has(id)) throw lockErrors.get(id);
+    if (beingDeleted.has(id)) {
+      calls.push(['deletion lock held', id]);
+      throw Object.assign(new Error('This export ban list is already being deleted.'), {
+        beingDeleted: true
+      });
+    }
+    calls.push(['deletion lock', id]);
+    beingDeleted.add(id);
+    try {
+      return await deletion();
+    } finally {
+      beingDeleted.delete(id);
+      calls.push(['deletion lock freed', id]);
+    }
   },
   // Only the lists whose columns equal the query's, in ID order. The BattleMetrics ban lists CBL's
   // lists record are read this way, so the query must load each list's type and ban list.
@@ -208,9 +318,10 @@ const ExportBanList = {
     return [...rows.values()].filter((row) => hasColumns(row.exportBanList, where)).length;
   },
   // Write the values to the lists with the columns of the query, and give how many there were, as
-  // Sequelize's update does.
+  // Sequelize's update does, in the transaction in progress.
   async update(values, options) {
-    calls.push(['update', values, options]);
+    assert.ok(transaction && options.transaction === transaction);
+    calls.push(['update', values, { where: options.where }]);
     if (beforeUpdate) await beforeUpdate(values, options);
     const updated = [...rows.values()].filter((row) =>
       hasColumns(row.exportBanList, options.where)
@@ -222,6 +333,27 @@ const ExportBanList = {
     calls.push(['visible']);
     if (visible instanceof Error) throw visible;
     return new Set(visible);
+  },
+  // What has changed in a list since checkLimits gave this check of it, as the real one finds it:
+  // 'deleted' once the list is gone, 'changed' when its settings or its BattleMetrics ban list
+  // differ from those it was checked with, or null. The bot asks only while it holds the list's
+  // deletion lock, so no change is saved to the list after this.
+  async changeSince({ exportBanList }) {
+    assert.ok(beingDeleted.has(exportBanList.id), 'A list is read under its deletion lock.');
+    calls.push(['changed?', exportBanList.id]);
+    if (changeErrors.has(exportBanList.id)) throw changeErrors.get(exportBanList.id);
+    const row = rows.get(exportBanList.id);
+    if (!row) return 'deleted';
+    const columns = [
+      'battlemetricsID',
+      'threshold',
+      'defaultActivePoints',
+      'defaultExpiredPoints',
+      'maxBanAge'
+    ];
+    return columns.some((column) => row.exportBanList[column] !== exportBanList[column])
+      ? 'changed'
+      : null;
   }
 };
 
@@ -255,11 +387,15 @@ const stubs = {
     ExportBanListConfig: {},
     Organisation: {}
   },
-  // No ban list is paused, and the bot's other commands never change that.
+  // The ban lists paused now (pausedRows), which /exportbanlist names where the numbers of a list's
+  // players depend on them. The bot's other commands, which pause and resume them, are not run.
   'scbl-lib/db/ban-list-suspensions': {
     isMissingTable: () => false,
     MAX_REASON_LENGTH: 500,
-    readPausedBanLists: async () => [],
+    async readPausedBanLists() {
+      pausedReads += 1;
+      return pausedRows;
+    },
     readSettledPausedBanLists: async () => [],
     async resumeBanList() {
       throw new Error('Not expected');
@@ -415,12 +551,16 @@ assert.deepStrictEqual(fieldsOf(shown.embed), [
   ["Today's limits", discord.escapeMarkdown(RULE)]
 ]);
 assert.deepStrictEqual(timeouts, [60 * 1000]);
+// Once it is confirmed, the list is read again and deleted while the bot holds its deletion lock,
+// which is freed once the deletion has ended.
 assert.deepStrictEqual(calls, [
   ['check', [12]],
   FIND_RECORDED,
   ['visible'],
+  ['deletion lock', 12],
   ['find', 12],
-  ['delete', 12]
+  ['delete', 12],
+  ['deletion lock freed', 12]
 ]);
 // The list is deleted as it was read after the confirmation, not as the preview showed it, with
 // its owner's Steam user as the preview loaded it, for ExportBanList's lines about the deletion.
@@ -542,7 +682,15 @@ for (const { case: name, key, content, field, gone } of [
     assert.deepStrictEqual(fieldsOf(shown.embed)[4], ['BattleMetrics ID', field], name);
     assert.deepStrictEqual(
       calls,
-      [['check', [21]], FIND_RECORDED, ['visible'], ['find', 21], ['delete', 21]],
+      [
+        ['check', [21]],
+        FIND_RECORDED,
+        ['visible'],
+        ['deletion lock', 21],
+        ['find', 21],
+        ['delete', 21],
+        ['deletion lock freed', 21]
+      ],
       name
     );
     const removed =
@@ -662,6 +810,38 @@ assert.strictEqual(
 assert.deepStrictEqual(deleted(), []);
 assert.deepStrictEqual(audits, []);
 
+// A list whose deletion lock is held once the removal is confirmed, as its owner is deleting it on
+// the website, or another removal is under way, is left as it is, so the two never delete it at
+// once: it is not read again, deleted or logged, and the admin is told.
+reset();
+addList(18, 'battlemetrics', { battlemetricsID: 'bm-18' });
+visible = new Set(['bm-18']);
+whileConfirming = async () => beingDeleted.add(18);
+await run('remove', { id: 18 });
+assert.deepStrictEqual(replies.at(-1), {
+  content: 'Export ban list **List 18** (#18) is already being deleted, so nothing was changed.',
+  embeds: []
+});
+assert.deepStrictEqual(calls, [
+  ['check', [18]],
+  FIND_RECORDED,
+  ['visible'],
+  ['deletion lock held', 18]
+]);
+assert.deepStrictEqual(audits, []);
+assert.ok(rows.has(18));
+
+// A deletion lock that cannot be taken, as when its connection cannot be opened, fails the command
+// as any database error does, with nothing deleted or logged.
+reset();
+addList(18, 'remote');
+const connectionRefused = new Error('connect ECONNREFUSED');
+lockErrors.set(18, connectionRefused);
+await assert.rejects(run('remove', { id: 18 }), (error) => error === connectionRefused);
+assert.deepStrictEqual(deleted(), []);
+assert.deepStrictEqual(audits, []);
+assert.ok(rows.has(18));
+
 // Cancelling, or not answering in time, changes nothing.
 for (const [choice, reply] of [
   ['cancel', 'Cancelled. Nothing was changed.'],
@@ -690,14 +870,124 @@ assert.deepStrictEqual(calls, [
   ['check', [20]],
   FIND_RECORDED,
   ['visible'],
+  ['deletion lock', 20],
   ['find', 20],
-  ['delete', 20]
+  ['delete', 20],
+  ['deletion lock freed', 20]
 ]);
 assert.ok(!rows.has(20));
 assert.strictEqual(
   contentOf(replies.at(-1)),
   'Removed export ban list **List 20** (#20) and its BattleMetrics ban list.'
 );
+
+// A list whose export bans are over its type's cap was counted again by its settings now
+// (checkLimits' recount), and both numbers are shown, so a list whose export bans are out of date,
+// as its owner has made it smaller since the importer last updated them, can be told apart.
+reset();
+addList(27, 'battlemetrics', {
+  battlemetricsID: 'bm-27',
+  players: 28337,
+  recount: 1554,
+  problems: []
+});
+visible = new Set(['bm-27']);
+answer = 'cancel';
+await run('remove', { id: 27 });
+shown = prompt();
+assert.deepStrictEqual(fieldsOf(shown.embed), [
+  ['ID', '27'],
+  ['Type', 'BattleMetrics'],
+  ['Players', '28,337 by its export bans, 1,554 by its settings now'],
+  ['Owner', '**Owner 27** (`76561198000000027`)'],
+  ['BattleMetrics ID', "`bm-27`, which CBL's BattleMetrics key can see."],
+  ["Today's limits", 'Within them.']
+]);
+assert.deepStrictEqual(deleted(), []);
+
+// While ban lists are paused, its export bans leave out their bans, as the importer does, and its
+// count by its settings now includes them, as the website's size check does, so the two numbers can
+// differ with no change to the list. The confirmation then names the paused lists, suspended or
+// resuming, and says so. A list not counted again shows one number, its export bans, which leave
+// out their bans, so the website's size check can count more players for it: the confirmation names
+// the paused lists for it too, and says that, so its number and "Within them" are read rightly.
+reset();
+pausedRows = PAUSED_ROWS;
+const PAUSED_CAP =
+  'It has 41,000 players by its export bans and 43,500 by its settings now, both more than the 40,000 a remote export ban list can have.';
+addList(26, 'remote', { players: 41000, recount: 43500, problems: [PAUSED_CAP] });
+await run('remove', { id: 26 });
+shown = prompt();
+assert.deepStrictEqual(fieldsOf(shown.embed), [
+  ['ID', '26'],
+  ['Type', 'Remote'],
+  ['Players', '41,000 by its export bans, 43,500 by its settings now'],
+  PAUSED_FIELD,
+  ['Owner', '**Owner 26** (`76561198000000026`)'],
+  ["Today's limits", discord.escapeMarkdown(PAUSED_CAP)]
+]);
+assert.strictEqual(pausedReads, 1);
+assert.deepStrictEqual(deleted(), [26]);
+reset();
+pausedRows = PAUSED_ROWS;
+addList(25, 'remote', { players: 39000, problems: [] });
+answer = 'cancel';
+await run('remove', { id: 25 });
+assert.deepStrictEqual(fieldsOf(prompt().embed), [
+  ['ID', '25'],
+  ['Type', 'Remote'],
+  ['Players', '39,000'],
+  PAUSED_UNCOUNTED_FIELD,
+  ['Owner', '**Owner 25** (`76561198000000025`)'],
+  ["Today's limits", 'Within them.']
+]);
+assert.strictEqual(pausedReads, 1);
+assert.deepStrictEqual(deleted(), []);
+// With no ban list paused, nothing is said of them, whether the list was counted again or not.
+for (const counted of [
+  { players: 41000, recount: 43500, problems: [PAUSED_CAP] },
+  { players: 900 }
+]) {
+  reset();
+  addList(24, 'remote', counted);
+  answer = 'cancel';
+  await run('remove', { id: 24 });
+  assert.ok(!fieldsOf(prompt().embed).some(([name]) => name === PAUSED_FIELD[0]));
+  assert.strictEqual(pausedReads, 1);
+}
+
+// The count by its settings now only fills in what the confirmation shows, so a count that fails
+// does not stop the removal: the confirmation says it failed, and whether the list is within its
+// type's cap is not known, and the list can still be removed.
+const TIMED_OUT = 'Query execution was interrupted, maximum statement execution time exceeded';
+reset();
+addList(28, 'remote', { players: 41000, recountError: new Error(TIMED_OUT), problems: [] });
+await run('remove', { id: 28 });
+shown = prompt();
+assert.deepStrictEqual(fieldsOf(shown.embed), [
+  ['ID', '28'],
+  ['Type', 'Remote'],
+  ['Players', '41,000 by its export bans; they could not be counted by its settings now'],
+  ['Owner', '**Owner 28** (`76561198000000028`)'],
+  [
+    "Today's limits",
+    `Within the points rules. Whether it is within its type's cap is not known: its export bans are over it, and its players could not be counted by its settings now (${TIMED_OUT}).`
+  ]
+]);
+assert.deepStrictEqual(deleted(), [28]);
+assert.strictEqual(contentOf(replies.at(-1)), 'Removed export ban list **List 28** (#28).');
+// A list outside the points rules still shows why.
+reset();
+addList(29, 'remote', { players: 41000, recountError: new Error(TIMED_OUT) });
+answer = 'cancel';
+await run('remove', { id: 29 });
+assert.strictEqual(
+  fieldsOf(prompt().embed).at(-1)[1],
+  discord.escapeMarkdown(
+    `${RULE} Whether it is within its type's cap is not known: its export bans are over it, and its players could not be counted by its settings now (${TIMED_OUT}).`
+  )
+);
+assert.deepStrictEqual(deleted(), []);
 
 console.log('Removing one export ban list: checks passed.');
 
@@ -732,18 +1022,30 @@ assert.strictEqual(
 );
 assert.strictEqual(fileOf(shown.reply), undefined);
 assert.deepStrictEqual(timeouts, [5 * 60 * 1000]);
+// Each list is checked again, and then read once more and deleted while the bot holds its deletion
+// lock, which is freed once the deletion has ended.
 assert.deepStrictEqual(calls, [
   ['check', 'all'],
   ['visible'],
   ['check', [30]],
+  ['deletion lock', 30],
+  ['changed?', 30],
   ['delete', 30],
+  ['deletion lock freed', 30],
   ['check', [31]],
+  ['deletion lock', 31],
+  ['changed?', 31],
   ['delete', 31],
+  ['deletion lock freed', 31],
   ['check', [33]],
-  ['delete', 33]
+  ['deletion lock', 33],
+  ['changed?', 33],
+  ['delete', 33],
+  ['deletion lock freed', 33]
 ]);
 // Each list is deleted as it was read again just before, not as the preview showed it, with its
-// owner's Steam user. ExportBanList's lines about each deletion are important, as the bot's are.
+// owner's Steam user, once it is found unchanged since it was read and checked again.
+// ExportBanList's lines about each deletion are important, as the bot's are.
 assert.deepStrictEqual(deletedFrom, ['check 30', 'check 31', 'check 33']);
 assert.deepStrictEqual(deletedWith, [
   { owner: 'Owner 30', important: true },
@@ -792,7 +1094,10 @@ reset();
 addList(34, 'battlemetrics', { battlemetricsID: 'bm-34', problems: [] });
 await run('remove_outside_limits');
 assert.deepStrictEqual(replies, [
-  `No export ban list is outside today's limits, so nothing was changed.\n${LIMITS_TEXT}`
+  {
+    content: `No export ban list is outside today's limits, so nothing was changed.\n${LIMITS_TEXT}`,
+    files: []
+  }
 ]);
 assert.deepStrictEqual(calls, [['check', 'all']]);
 
@@ -997,7 +1302,9 @@ assert.strictEqual(
 );
 
 // Each list is read and checked again just before it is removed, so one whose owner has brought it
-// within the limits, or deleted it, since the preview is left.
+// within the limits, or deleted it, since the preview is left. The summary counts the list now
+// within the limits apart from the one that changed, as a list can also come within them with no
+// change to it (see exportbanlist-limits.js).
 reset();
 for (const id of [80, 81, 82]) addList(id, 'remote');
 whileConfirming = async () => {
@@ -1008,12 +1315,473 @@ await run('remove_outside_limits');
 assert.deepStrictEqual(deleted(), [82]);
 assert.strictEqual(
   replies.at(-1).content,
-  "Removed 1 of the 3 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 2 were not removed, as they had changed."
+  "Removed 1 of the 3 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it is now within today's limits. 1 was not removed, as it had changed."
 );
 assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n').slice(0, 2), [
   "**List 80** (#80): not removed, as it is now within today's limits",
   '**List 81** (#81): not removed, as it no longer exists'
 ]);
+
+// A list whose export bans are over its type's cap was counted again by its settings now
+// (checkLimits' recount), and the preview and the log give both numbers. Lists over the cap by
+// their export bans but not by their settings now are within the limits, as their owners have made
+// them smaller since the importer last updated their export bans, and the reply names them, so the
+// admin knows why they are not removed, in a line after the limits used.
+const CAP_REASON =
+  'It has 41,000 players by its export bans and 40,500 by its settings now, both more than the 40,000 a remote export ban list can have.';
+reset();
+addList(88, 'remote', { players: 41000, recount: 40500, problems: [CAP_REASON] });
+addList(89, 'battlemetrics', {
+  battlemetricsID: 'bm-89',
+  players: 28337,
+  recount: 1554,
+  problems: []
+});
+addList(97, 'remote', { players: 45000, recount: 40000, problems: [] });
+await run('remove_outside_limits');
+shown = prompt();
+assert.strictEqual(
+  contentOf(shown.reply),
+  `**1 export ban list is outside today's limits.** Remove it? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.\n${LIMITS_TEXT}\n2 export ban lists are within the cap by their settings now, though their export bans are over it until the importer updates them: #89 (28,337 players by its export bans, 1,554 by its settings now) and #97 (45,000 players by its export bans, 40,000 by its settings now).`
+);
+assert.strictEqual(
+  shown.embed.description,
+  `**List 88** (#88) · Remote · owner **Owner 88** (\`76561198000000088\`) · 41,000 players by its export bans, 40,500 by its settings now\n↳ ${discord.escapeMarkdown(CAP_REASON)}`
+);
+assert.deepStrictEqual(shown.reply.files, []);
+assert.deepStrictEqual(deleted(), [88]);
+assert.strictEqual(
+  audits[1],
+  `[important] admin (1) removed export ban list "List 88" (ID: 88, Remote) of Steam user "Owner 88" (ID: 76561198000000088), outside today's limits with 41,000 players by its export bans, 40,500 by its settings now: there was nothing to delete on BattleMetrics.`
+);
+
+// When no list is outside the limits, such a list is named too.
+reset();
+addList(89, 'battlemetrics', {
+  battlemetricsID: 'bm-89',
+  players: 28337,
+  recount: 1554,
+  problems: []
+});
+await run('remove_outside_limits');
+assert.deepStrictEqual(replies, [
+  {
+    content: `No export ban list is outside today's limits, so nothing was changed.\n${LIMITS_TEXT}\n1 export ban list is within the cap by its settings now, though its export bans are over it until the importer updates them: #89 (28,337 players by its export bans, 1,554 by its settings now).`,
+    files: []
+  }
+]);
+assert.deepStrictEqual(calls, [['check', 'all']]);
+
+// While ban lists are paused, the importer leaves their bans out of export bans, but a count by a
+// list's settings now includes them, as the website's size check does, so that the list's cap
+// holds once they count again. Every reply says so after the limits used, naming the paused lists,
+// suspended or resuming, so the numbers are read rightly. A list within the cap by its export bans
+// is not counted again, so one within it only while they are paused is left, which it says too.
+reset();
+pausedRows = PAUSED_ROWS;
+addList(88, 'remote', { players: 41000, recount: 43500, problems: [PAUSED_CAP] });
+addList(90, 'remote', { players: 39000, problems: [] });
+await run('remove_outside_limits');
+shown = prompt();
+assert.strictEqual(
+  contentOf(shown.reply),
+  `**1 export ban list is outside today's limits.** Remove it? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.\n${LIMITS_TEXT}\n${PAUSED_TEXT}`
+);
+assert.strictEqual(
+  shown.embed.description,
+  `**List 88** (#88) · Remote · owner **Owner 88** (\`76561198000000088\`) · 41,000 players by its export bans, 43,500 by its settings now\n↳ ${discord.escapeMarkdown(PAUSED_CAP)}`
+);
+assert.strictEqual(pausedReads, 1);
+assert.deepStrictEqual(deleted(), [88]);
+assert.deepStrictEqual([...rows.keys()], [90]);
+// With one paused, and with lists within the cap by their settings now, which the reply names after
+// it, or none outside the limits.
+reset();
+pausedRows = [PAUSED_ROWS[0]];
+addList(89, 'remote', { players: 41000, recount: 39500, problems: [] });
+await run('remove_outside_limits');
+assert.deepStrictEqual(replies, [
+  {
+    content: `No export ban list is outside today's limits, so nothing was changed.\n${LIMITS_TEXT}\n${ONE_PAUSED_TEXT}\n1 export ban list is within the cap by its settings now, though its export bans are over it until the importer updates them: #89 (41,000 players by its export bans, 39,500 by its settings now).`,
+    files: []
+  }
+]);
+// And when none can be removed.
+reset();
+pausedRows = PAUSED_ROWS;
+addList(91, 'battlemetrics', { battlemetricsID: 'bm-91', players: 900 });
+visible = new Set(['partner-list']);
+await run('remove_outside_limits');
+assert.ok(
+  contentOf(replies.at(-1)).endsWith(
+    ` so the lists with BattleMetrics ban lists are left. Check BATTLEMETRICS_API_KEY.\n${LIMITS_TEXT}\n${PAUSED_TEXT}`
+  )
+);
+assert.deepStrictEqual(deleted(), []);
+
+// The reply names at most five of them, and an attached file names them all, so that however many
+// there are, the reply keeps the limits used, which the admin compares with the website's.
+for (const outsideToo of [false, true]) {
+  reset();
+  for (let id = 200; id < 240; id++)
+    addList(id, 'remote', { players: 45000 + id, recount: 300, problems: [] });
+  if (outsideToo) addList(240, 'remote');
+  answer = 'cancel';
+  await run('remove_outside_limits');
+  const reply = outsideToo ? prompt().reply : replies[0];
+  assert.ok(reply.content.length <= 2000);
+  assert.ok(
+    reply.content.endsWith(
+      `\n${LIMITS_TEXT}\n40 export ban lists are within the cap by their settings now, though their export bans are over it until the importer updates them: #200 (45,200 players by its export bans, 300 by its settings now), #201 (45,201 players by its export bans, 300 by its settings now), #202 (45,202 players by its export bans, 300 by its settings now), #203 (45,203 players by its export bans, 300 by its settings now), #204 (45,204 players by its export bans, 300 by its settings now) and 35 more, all in the attached export-ban-lists-awaiting-the-importer.txt.`
+    )
+  );
+  assert.deepStrictEqual(
+    reply.files.map((attached) => attached.name),
+    ['export-ban-lists-awaiting-the-importer.txt']
+  );
+  const lines = reply.files[0].attachment.toString('utf8').split('\n');
+  assert.match(
+    lines[0],
+    /^Export ban lists within the cap by their settings now, though their export bans are over it until the importer updates them, checked \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: 40$/
+  );
+  assert.strictEqual(lines.length, 41);
+  assert.strictEqual(
+    lines[1],
+    '#200 Remote list "List 200": 45,200 players by its export bans, 300 by its settings now'
+  );
+  assert.strictEqual(
+    lines[40],
+    '#239 Remote list "List 239": 45,239 players by its export bans, 300 by its settings now'
+  );
+  assert.deepStrictEqual(deleted(), []);
+}
+
+// A list over its type's cap by its export bans whose players cannot be counted by its settings now
+// may be over the cap or not, so it is never removed for the cap, and it holds up no other list.
+// Within the points rules, it is left, and named after the limits used, with why its count failed.
+// When it breaks the points rules, which need no count, it is outside the limits all the same, and
+// its line in the preview says that the count failed.
+const UNKNOWN_CAP = `Whether it is within its type's cap is not known: its export bans are over it, and its players could not be counted by its settings now (${TIMED_OUT}).`;
+const uncountedNote = (id) =>
+  `1 export ban list over the cap by its export bans could not be counted by its settings now, so whether it is within the cap is not known, and it is left: #${id} (${TIMED_OUT}). Run the command again later to check it.`;
+reset();
+addList(98, 'remote', { players: 41000, recountError: new Error(TIMED_OUT), problems: [] });
+addList(99, 'remote');
+addList(109, 'remote', { players: 42000, recountError: new Error(TIMED_OUT) });
+await run('remove_outside_limits');
+shown = prompt();
+assert.strictEqual(
+  contentOf(shown.reply),
+  `**2 export ban lists are outside today's limits.** Remove them? This deletes each list with its export bans and configs, and a BattleMetrics list's ban list on BattleMetrics, which the organisations subscribed to it lose. Their owners are not told.\n${LIMITS_TEXT}\n${uncountedNote(98)}`
+);
+const [line99, reason99, line109, reason109] = shown.embed.description.split('\n');
+assert.deepStrictEqual(
+  [line99, reason99, line109],
+  [
+    '**List 99** (#99) · Remote · owner **Owner 99** (`76561198000000099`) · 0 players',
+    `↳ ${escapedRule}`,
+    '**List 109** (#109) · Remote · owner **Owner 109** (`765611980000000109`) · 42,000 players by its export bans; they could not be counted by its settings now'
+  ]
+);
+assert.ok(reason109.startsWith(`↳ ${discord.escapeMarkdown(`${RULE} Whether it is within`)}`));
+assert.deepStrictEqual(calls, [
+  ['check', 'all'],
+  ['check', [99]],
+  ['deletion lock', 99],
+  ['changed?', 99],
+  ['delete', 99],
+  ['deletion lock freed', 99],
+  ['check', [109]],
+  ['deletion lock', 109],
+  ['changed?', 109],
+  ['delete', 109],
+  ['deletion lock freed', 109]
+]);
+assert.deepStrictEqual([...rows.keys()], [98]);
+assert.strictEqual(
+  audits[2],
+  `[important] admin (1) removed export ban list "List 109" (ID: 109, Remote) of Steam user "Owner 109" (ID: 765611980000000109), outside today's limits with 42,000 players by its export bans; they could not be counted by its settings now: there was nothing to delete on BattleMetrics.`
+);
+// The preview's attached file gives such a list's whole reason, with its count that failed.
+reset();
+addList(109, 'remote', { players: 42000, recountError: new Error(TIMED_OUT) });
+const longRule = 'A rule that is long. '.repeat(40);
+for (let id = 140; id < 170; id++) addList(id, 'remote', { problems: [longRule] });
+answer = 'cancel';
+await run('remove_outside_limits');
+assert.ok(
+  fileOf(prompt().reply)
+    .attachment.toString('utf8')
+    .includes(
+      `\n#109 Remote list "List 109"\n  Owner: Owner 109 (Steam ID 765611980000000109)\n  Players: 42,000 by its export bans; they could not be counted by its settings now\n  Settings: threshold 5, 5 points for an active ban and 1 for an expired ban, max ban age 0 days (0 for any), 0 configs\n  Outside the limits: ${RULE} ${UNKNOWN_CAP}\n  To be removed.`
+    )
+);
+assert.deepStrictEqual(deleted(), []);
+
+// When no list is found outside the limits, nothing is changed, and the reply says it is not known
+// for the lists that could not be counted.
+reset();
+addList(98, 'remote', { players: 41000, recountError: new Error(TIMED_OUT), problems: [] });
+await run('remove_outside_limits');
+assert.deepStrictEqual(replies, [
+  {
+    content: `No export ban list was found outside today's limits, so nothing was changed.\n${LIMITS_TEXT}\n${uncountedNote(98)}`,
+    files: []
+  }
+]);
+assert.deepStrictEqual(calls, [['check', 'all']]);
+
+// The reply names at most five of them, each with its error cut short, and an attached file names
+// them all, with the whole error, after the limits used and before the lists within the cap by
+// their settings now.
+reset();
+const longError = `${TIMED_OUT} ${'and more '.repeat(20)}`;
+for (let id = 300; id < 307; id++)
+  addList(id, 'remote', {
+    players: 41000 + id,
+    recountError: new Error(id === 300 ? longError : TIMED_OUT),
+    problems: []
+  });
+addList(310, 'remote', { players: 45000, recount: 300, problems: [] });
+addList(311, 'remote');
+answer = 'cancel';
+await run('remove_outside_limits');
+shown = prompt();
+assert.ok(shown.reply.content.length <= 2000);
+assert.ok(
+  shown.reply.content.endsWith(
+    `\n${LIMITS_TEXT}\n7 export ban lists over the cap by their export bans could not be counted by their settings now, so whether they are within the cap is not known, and they are left: #300 (${longError.slice(0, 99)}…), #301 (${TIMED_OUT}), #302 (${TIMED_OUT}), #303 (${TIMED_OUT}), #304 (${TIMED_OUT}) and 2 more, all in the attached export-ban-lists-not-counted.txt. Run the command again later to check them.\n1 export ban list is within the cap by its settings now, though its export bans are over it until the importer updates them: #310 (45,000 players by its export bans, 300 by its settings now).`
+  )
+);
+assert.deepStrictEqual(
+  shown.reply.files.map((attached) => attached.name),
+  ['export-ban-lists-not-counted.txt']
+);
+const uncountedLines = shown.reply.files[0].attachment.toString('utf8').split('\n');
+assert.match(
+  uncountedLines[0],
+  /^Export ban lists over the cap by their export bans that could not be counted by their settings now, and so are left, checked \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: 7$/
+);
+assert.strictEqual(uncountedLines.length, 8);
+assert.strictEqual(
+  uncountedLines[1],
+  `#300 Remote list "List 300": 41,300 players by its export bans; the count failed: ${longError}`
+);
+assert.strictEqual(
+  uncountedLines[7],
+  `#306 Remote list "List 306": 41,306 players by its export bans; the count failed: ${TIMED_OUT}`
+);
+assert.deepStrictEqual(deleted(), []);
+
+// A note naming five or fewer lists attaches its file too when it cuts an error short, so the whole
+// error is never lost.
+reset();
+addList(300, 'remote', { players: 41300, recountError: new Error(longError), problems: [] });
+addList(301, 'remote', { players: 41301, recountError: new Error(TIMED_OUT), problems: [] });
+await run('remove_outside_limits');
+assert.strictEqual(replies.length, 1);
+assert.strictEqual(
+  replies[0].content,
+  `No export ban list was found outside today's limits, so nothing was changed.\n${LIMITS_TEXT}\n2 export ban lists over the cap by their export bans could not be counted by their settings now, so whether they are within the cap is not known, and they are left: #300 (${longError.slice(0, 99)}…) and #301 (${TIMED_OUT}), all in the attached export-ban-lists-not-counted.txt. Run the command again later to check them.`
+);
+assert.deepStrictEqual(
+  replies[0].files.map((attached) => attached.name),
+  ['export-ban-lists-not-counted.txt']
+);
+assert.strictEqual(
+  replies[0].files[0].attachment.toString('utf8').split('\n')[1],
+  `#300 Remote list "List 300": 41,300 players by its export bans; the count failed: ${longError}`
+);
+assert.deepStrictEqual(deleted(), []);
+
+// With many lists in both notes, and a list left for CBL's BattleMetrics key, the notes in full
+// would take the reply past Discord's 2,000 characters. Then they name the lists by ID only, and
+// each attaches its file, with the whole errors, however few lists it names, so the limits used
+// stay in full and no list is lost.
+reset();
+for (let id = 320; id < 327; id++)
+  addList(id, 'remote', { players: 41000, recountError: new Error(TIMED_OUT), problems: [] });
+for (let id = 330; id < 336; id++)
+  addList(id, 'remote', { players: 45000, recount: 300, problems: [] });
+addList(340, 'battlemetrics', { battlemetricsID: 'bm-340' });
+addList(341, 'battlemetrics', { battlemetricsID: 'bm-341', problems: [] });
+addList(342, 'remote');
+visible = new Set(['bm-341']);
+answer = 'cancel';
+await run('remove_outside_limits');
+const longReply = prompt().reply;
+assert.ok(longReply.content.length <= 2000);
+assert.ok(
+  longReply.content.endsWith(
+    `\n${LIMITS_TEXT}\n7 export ban lists over the cap by their export bans could not be counted by their settings now, so whether they are within the cap is not known, and they are left: #320, #321, #322, #323, #324 and 2 more, all in the attached export-ban-lists-not-counted.txt. Run the command again later to check them.\n6 export ban lists are within the cap by their settings now, though their export bans are over it until the importer updates them: #330, #331, #332, #333, #334 and 1 more, all in the attached export-ban-lists-awaiting-the-importer.txt.`
+  )
+);
+assert.deepStrictEqual(
+  longReply.files.map((attached) => attached.name),
+  ['export-ban-lists-not-counted.txt', 'export-ban-lists-awaiting-the-importer.txt']
+);
+const [uncountedFile, updatingFile] = longReply.files.map((attached) =>
+  attached.attachment.toString('utf8').split('\n')
+);
+assert.strictEqual(uncountedFile.length, 8);
+assert.strictEqual(
+  uncountedFile[7],
+  `#326 Remote list "List 326": 41,000 players by its export bans; the count failed: ${TIMED_OUT}`
+);
+assert.strictEqual(updatingFile.length, 7);
+assert.strictEqual(
+  updatingFile[6],
+  '#335 Remote list "List 335": 45,000 players by its export bans, 300 by its settings now'
+);
+assert.deepStrictEqual(deleted(), []);
+
+// A note with five or fewer lists attaches its file too when the reply would be too long, and a
+// long error from BattleMetrics is cut short, so the limits used still stay in full.
+reset();
+for (let id = 320; id < 325; id++)
+  addList(id, 'remote', {
+    players: 41000,
+    recountError: new Error(`${TIMED_OUT} ${'and more '.repeat(100)}`),
+    problems: []
+  });
+for (let id = 330; id < 335; id++)
+  addList(id, 'remote', { players: 45000, recount: 300, problems: [] });
+addList(340, 'battlemetrics', { battlemetricsID: 'bm-340' });
+visible = new Error(`BattleMetrics GET ban-lists failed: ${'HTTP 500 '.repeat(200)}`);
+await run('remove_outside_limits');
+assert.ok(replies[0].content.length <= 2000);
+assert.ok(
+  replies[0].content.endsWith(
+    `\n${LIMITS_TEXT}\n5 export ban lists over the cap by their export bans could not be counted by their settings now, so whether they are within the cap is not known, and they are left: #320, #321, #322, #323 and #324, all in the attached export-ban-lists-not-counted.txt. Run the command again later to check them.\n5 export ban lists are within the cap by their settings now, though their export bans are over it until the importer updates them: #330, #331, #332, #333 and #334, all in the attached export-ban-lists-awaiting-the-importer.txt.`
+  )
+);
+assert.deepStrictEqual(
+  replies[0].files.map((attached) => attached.name),
+  ['export-ban-lists-not-counted.txt', 'export-ban-lists-awaiting-the-importer.txt']
+);
+assert.deepStrictEqual(deleted(), []);
+
+// Checking a list again takes a moment, longer when its players are counted again, so it is read
+// once more just before it is removed. One its owner changed while it was being checked, e.g. by
+// raising its threshold, or deleted, is left, and one that cannot be read once more is left as
+// failed. The others carry on.
+reset();
+for (const id of [120, 121, 122, 123, 124]) addList(id, 'remote');
+duringCheck = (ids) => {
+  if (ids?.[0] === 120) rows.get(120).exportBanList.threshold = 9;
+  if (ids?.[0] === 121) rows.delete(121);
+  if (ids?.[0] === 122) rows.get(122).exportBanList.name = 'Renamed';
+};
+changeErrors.set(123, new Error('Connection lost'));
+await run('remove_outside_limits');
+assert.deepStrictEqual(deleted(), [122, 124]);
+assert.deepStrictEqual(
+  calls.filter(([call]) => call === 'changed?'),
+  [120, 121, 122, 123, 124].map((id) => ['changed?', id])
+);
+assert.strictEqual(
+  replies.at(-1).content,
+  "Removed 2 of the 5 export ban lists outside today's limits: 2 with nothing to delete on BattleMetrics. 1 failed. 2 were not removed, as they had changed."
+);
+assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n'), [
+  '**List 120** (#120): not removed, as it changed while it was being checked',
+  '**List 121** (#121): not removed, as it no longer exists',
+  '**List 122** (#122): removed; there was nothing to delete on BattleMetrics',
+  '**List 123** (#123): failed: It could not be checked again: Connection lost',
+  '**List 124** (#124): removed; there was nothing to delete on BattleMetrics'
+]);
+assert.match(
+  audits.find((line) => line.includes('"List 123"')),
+  /could not remove export ban list "List 123" .*: It could not be checked again: Connection lost$/
+);
+
+// A list whose deletion lock is held once it has been checked again, as its owner is deleting it on
+// the website, is left as it is, so the two never delete it at once, and one whose deletion lock
+// cannot be taken, as its connection cannot be opened, is left as failed, saying so. The others
+// carry on.
+reset();
+for (const id of [125, 126, 127]) addList(id, 'remote');
+duringCheck = (ids) => {
+  if (ids?.[0] === 125) beingDeleted.add(125);
+};
+lockErrors.set(126, new Error('connect ECONNREFUSED'));
+await run('remove_outside_limits');
+assert.deepStrictEqual(deleted(), [127]);
+assert.deepStrictEqual(
+  calls.filter(([call]) => call.startsWith('deletion lock') || call === 'changed?'),
+  [
+    ['deletion lock held', 125],
+    ['deletion lock', 127],
+    ['changed?', 127],
+    ['deletion lock freed', 127]
+  ]
+);
+assert.strictEqual(
+  replies.at(-1).content,
+  "Removed 1 of the 3 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 failed. 1 was not removed, as it was already being deleted."
+);
+assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n'), [
+  '**List 125** (#125): not removed, as it is already being deleted',
+  '**List 126** (#126): failed: Its deletion lock could not be taken: connect ECONNREFUSED',
+  '**List 127** (#127): removed; there was nothing to delete on BattleMetrics'
+]);
+// A list left as it is posts no line of its own, as the summary counts it, and a failure does.
+assert.ok(!audits.some((line) => line.includes('"List 125"')));
+assert.match(
+  audits.find((line) => line.includes('"List 126"')),
+  /could not remove export ban list "List 126" .*: Its deletion lock could not be taken: connect ECONNREFUSED$/
+);
+
+// The summary counts the lists left as they were already being deleted apart from those that had
+// changed, and both apart from those now within today's limits.
+reset();
+for (const id of [140, 141, 142, 143, 144]) addList(id, 'remote');
+whileConfirming = async () => {
+  rows.get(144).problems = [];
+};
+duringCheck = (ids) => {
+  if (ids?.[0] === 140 || ids?.[0] === 141) beingDeleted.add(ids[0]);
+  if (ids?.[0] === 142) rows.get(142).exportBanList.threshold = 9;
+};
+await run('remove_outside_limits');
+assert.deepStrictEqual(deleted(), [143]);
+assert.strictEqual(
+  replies.at(-1).content,
+  "Removed 1 of the 5 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it is now within today's limits. 1 was not removed, as it had changed. 2 were not removed, as they were already being deleted."
+);
+assert.strictEqual(
+  audits.at(-1),
+  "[important] admin (1) removed 1 of the 5 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it is now within today's limits. 1 was not removed, as it had changed. 2 were not removed, as they were already being deleted."
+);
+assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n'), [
+  '**List 140** (#140): not removed, as it is already being deleted',
+  '**List 141** (#141): not removed, as it is already being deleted',
+  '**List 142** (#142): not removed, as it changed while it was being checked',
+  '**List 143** (#143): removed; there was nothing to delete on BattleMetrics',
+  "**List 144** (#144): not removed, as it is now within today's limits"
+]);
+
+// A list whose players cannot be counted by its settings now as it is checked again just before
+// its removal may be over its type's cap or not. It is removed when it breaks the points rules,
+// which need no count, and otherwise left as failed.
+reset();
+addList(130, 'remote', { players: 41000, recount: 40500, problems: [RULE, CAP_REASON] });
+addList(131, 'remote', { players: 41000, recount: 40500, problems: [CAP_REASON] });
+whileConfirming = async () => {
+  Object.assign(rows.get(130), { recount: null, recountError: new Error(TIMED_OUT) });
+  rows.get(130).problems.splice(1);
+  Object.assign(rows.get(131), { recount: null, recountError: new Error(TIMED_OUT), problems: [] });
+};
+await run('remove_outside_limits');
+assert.deepStrictEqual(deleted(), [130]);
+assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n'), [
+  '**List 130** (#130): removed; there was nothing to delete on BattleMetrics',
+  `**List 131** (#131): failed: It could not be checked again: ${TIMED_OUT}`
+]);
+assert.match(
+  audits[1],
+  /^\[important\] admin \(1\) removed export ban list "List 130" .*, outside today's limits with 41,000 players by its export bans; they could not be counted by its settings now: there was nothing to delete on BattleMetrics\.$/
+);
 
 // The summary says how many lists ended each way, and the log has each BattleMetrics list's ban
 // list as it was before the list was removed.
@@ -1035,7 +1803,7 @@ await run('remove_outside_limits');
 assert.deepStrictEqual(deleted(), [83, 84, 87]);
 assert.strictEqual(
   replies.at(-1).content,
-  "Removed 2 of the 5 export ban lists outside today's limits: 1 with its BattleMetrics ban list and 1 with nothing to delete on BattleMetrics. 1 failed. 1 was not removed, as it had changed. 1 was left from the start."
+  "Removed 2 of the 5 export ban lists outside today's limits: 1 with its BattleMetrics ban list and 1 with nothing to delete on BattleMetrics. 1 failed. 1 was not removed, as it is now within today's limits. 1 was left from the start."
 );
 assert.match(
   audits[1],
@@ -1051,6 +1819,10 @@ assert.match(
 reset();
 const long = 'A reason that is long. '.repeat(40);
 for (let id = 100; id < 130; id++) addList(id, 'remote', { problems: [long] });
+// One counted again by its settings now, as its export bans are over the cap. A ban list is paused,
+// which the file says after the limits used, as the reply does.
+Object.assign(rows.get(128), { players: 41000, recount: 40500 });
+pausedRows = [PAUSED_ROWS[0]];
 answer = 'cancel';
 await run('remove_outside_limits');
 shown = prompt();
@@ -1064,10 +1836,15 @@ assert.match(
   text,
   /^Export ban lists outside today's limits, checked \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ: 30\n/
 );
-assert.ok(text.includes(`\n${LIMITS_TEXT}\n`));
+assert.ok(text.includes(`\n${LIMITS_TEXT}\n${ONE_PAUSED_TEXT}\n\n#100 Remote list "List 100"\n`));
 assert.ok(
   text.includes(
     `\n#129 Remote list "List 129"\n  Owner: Owner 129 (Steam ID 765611980000000129)\n  Players: 0\n  Settings: threshold 5, 5 points for an active ban and 1 for an expired ban, max ban age 0 days (0 for any), 0 configs\n  Outside the limits: ${long}\n  To be removed.`
+  )
+);
+assert.ok(
+  text.includes(
+    '\n#128 Remote list "List 128"\n  Owner: Owner 128 (Steam ID 765611980000000128)\n  Players: 41,000 by its export bans, 40,500 by its settings now\n'
   )
 );
 // Each reason is cut short in the embed, and in full in the file.
@@ -1177,9 +1954,11 @@ const ownerOf = (id) => rows.get(id)?.exportBanList.owner;
 
 // Giving a list to another Steam user shows the list's name, ID, type and players, its owner and
 // the new owner, each with their Steam name and Steam ID, and how many export ban lists the new
-// owner has, and asks first, giving a minute to answer. Then the list and the new owner's lists are
-// read again, and only the list's owner is written, and only while it is still the owner shown.
-// The transfer is logged, and no owner is told. Neither the run lock nor BattleMetrics is asked.
+// owner has, and asks first, giving a minute to answer. Then, in one transaction, the new owner's
+// lists are locked and counted again, the list is read again with its row locked, and whether its
+// deletion has started is checked, as the website changes lists from its own process, and only the
+// list's owner is written, and only while it is still the owner shown. The transfer is logged, and
+// no owner is told. Neither the run lock nor BattleMetrics is asked.
 reset();
 addList(12, 'battlemetrics', { battlemetricsID: 'bm-12', players: 1234 });
 addSteamUser(NEW_OWNER, 'New Owner');
@@ -1205,9 +1984,12 @@ assert.deepStrictEqual(calls, [
   ['check', [12]],
   ['user', NEW_OWNER],
   ['count', { owner: NEW_OWNER }],
-  ['find', 12],
-  ['count', { owner: NEW_OWNER }],
-  ['update', { owner: NEW_OWNER }, { where: { id: 12, owner: OWNER_12 } }]
+  ['begin'],
+  ['lock lists', NEW_OWNER],
+  ['find', 12, 'locked'],
+  ['deleting?', 12],
+  ['update', { owner: NEW_OWNER }, { where: { id: 12, owner: OWNER_12 } }],
+  ['commit']
 ]);
 assert.strictEqual(ownerOf(12), NEW_OWNER);
 assert.deepStrictEqual(replies.at(-1), {
@@ -1256,6 +2038,51 @@ await run('transfer', { id: 12, owner: NEW_OWNER });
 assert.deepStrictEqual(fieldsOf(prompt().embed).at(-1), [
   "New owner's export ban lists",
   '3 now, and 4 with this one. A user can have 4.'
+]);
+assert.strictEqual(ownerOf(12), NEW_OWNER);
+assert.match(contentOf(replies.at(-1)), /^Transferred export ban list \*\*List 12\*\* \(#12\) /);
+
+// A list over its type's cap by its export bans is shown with its players by its settings now too,
+// and when that count fails, the confirmation says so, and the list can still be transferred.
+reset();
+addList(12, 'remote', { players: 41000, recount: 39000, problems: [] });
+addSteamUser(NEW_OWNER, 'New Owner');
+await run('transfer', { id: 12, owner: NEW_OWNER });
+assert.deepStrictEqual(fieldsOf(prompt().embed)[2], [
+  'Players',
+  '41,000 by its export bans, 39,000 by its settings now'
+]);
+assert.strictEqual(ownerOf(12), NEW_OWNER);
+// While ban lists are paused, the confirmation names them, as a removal's does, for such a list and
+// for one not counted again, saying what they mean for each list's numbers of players.
+for (const [counted, players, field] of [
+  [
+    { players: 41000, recount: 43500 },
+    '41,000 by its export bans, 43,500 by its settings now',
+    PAUSED_FIELD
+  ],
+  [{ players: 39000 }, '39,000', PAUSED_UNCOUNTED_FIELD]
+]) {
+  reset();
+  pausedRows = PAUSED_ROWS;
+  addList(12, 'remote', { ...counted, problems: [] });
+  addSteamUser(NEW_OWNER, 'New Owner');
+  await run('transfer', { id: 12, owner: NEW_OWNER });
+  assert.deepStrictEqual(fieldsOf(prompt().embed).slice(2, 5), [
+    ['Players', players],
+    field,
+    ['Current owner', '**Owner 12** (`76561198000000012`)']
+  ]);
+  assert.strictEqual(pausedReads, 1);
+  assert.strictEqual(ownerOf(12), NEW_OWNER);
+}
+reset();
+addList(12, 'remote', { players: 41000, recountError: new Error(TIMED_OUT), problems: [] });
+addSteamUser(NEW_OWNER, 'New Owner');
+await run('transfer', { id: 12, owner: NEW_OWNER });
+assert.deepStrictEqual(fieldsOf(prompt().embed)[2], [
+  'Players',
+  '41,000 by its export bans; they could not be counted by its settings now'
 ]);
 assert.strictEqual(ownerOf(12), NEW_OWNER);
 assert.match(contentOf(replies.at(-1)), /^Transferred export ban list \*\*List 12\*\* \(#12\) /);
@@ -1382,14 +2209,16 @@ for (const [choice, reply] of [
 }
 
 // Once the transfer is confirmed, the list and the new owner's lists are read again, and nothing is
-// changed if the list has been deleted, or given to the new owner or to someone else, or the new
-// owner has as many lists as a user can have.
+// changed if the list has been deleted, or given to the new owner or to someone else, or it is
+// being deleted, on the website or by a removal, which can take minutes, or the new owner has as
+// many lists as a user can have.
+const readAgain = [['begin'], ['lock lists', NEW_OWNER], ['find', 12, 'locked']];
 for (const { case: name, change, reply, reads, owner } of [
   {
     case: 'the list was deleted',
     change: () => rows.delete(12),
     reply: 'Export ban list **List 12** (#12) no longer exists, so nothing was changed.',
-    reads: [['find', 12]],
+    reads: [...readAgain, ['commit']],
     owner: undefined
   },
   {
@@ -1398,7 +2227,7 @@ for (const { case: name, change, reply, reads, owner } of [
       rows.get(12).exportBanList.owner = NEW_OWNER;
     },
     reply: `Export ban list **List 12** (#12) already belongs to **New Owner** (\`${NEW_OWNER}\`), so nothing was changed.`,
-    reads: [['find', 12]],
+    reads: [...readAgain, ['commit']],
     owner: NEW_OWNER
   },
   {
@@ -1407,17 +2236,21 @@ for (const { case: name, change, reply, reads, owner } of [
       rows.get(12).exportBanList.owner = OTHER_USER;
     },
     reply: `Export ban list **List 12** (#12) now belongs to \`${OTHER_USER}\`, not **Owner 12** (\`${OWNER_12}\`) as shown, so nothing was changed.`,
-    reads: [['find', 12]],
+    reads: [...readAgain, ['commit']],
     owner: OTHER_USER
+  },
+  {
+    case: 'it is being deleted',
+    change: () => beingDeleted.add(12),
+    reply: 'Export ban list **List 12** (#12) is being deleted, so nothing was changed.',
+    reads: [...readAgain, ['deleting?', 12], ['commit']],
+    owner: OWNER_12
   },
   {
     case: 'the new owner has made lists',
     change: () => giveLists(NEW_OWNER, [31, 32, 33]),
     reply: `**New Owner** (\`${NEW_OWNER}\`) now has 4 export ban lists, and the website lets a user have at most 4, so nothing was changed.`,
-    reads: [
-      ['find', 12],
-      ['count', { owner: NEW_OWNER }]
-    ],
+    reads: [...readAgain, ['deleting?', 12], ['commit']],
     owner: OWNER_12
   }
 ]) {
@@ -1501,8 +2334,12 @@ assert.deepStrictEqual(listsOf(NEW_OWNER), [12, 30, 31, 32]);
 assert.strictEqual(ownerOf(13), OWNER_13);
 assert.deepStrictEqual(calls.slice(calls.findIndex(([call]) => call === 'update')), [
   ['update', { owner: NEW_OWNER }, { where: { id: 12, owner: OWNER_12 } }],
-  ['find', 13],
-  ['count', { owner: NEW_OWNER }]
+  ['commit'],
+  ['begin'],
+  ['lock lists', NEW_OWNER],
+  ['find', 13, 'locked'],
+  ['deleting?', 13],
+  ['commit']
 ]);
 assert.ok(
   replies.some(
@@ -1539,9 +2376,13 @@ await assert.rejects(failing, (error) => error === lockWaitTimeout);
 await waiting;
 assert.deepStrictEqual(calls.slice(calls.findIndex(([call]) => call === 'failed')), [
   ['failed', 12],
-  ['find', 13],
-  ['count', { owner: NEW_OWNER }],
-  ['update', { owner: NEW_OWNER }, { where: { id: 13, owner: OWNER_13 } }]
+  ['rollback'],
+  ['begin'],
+  ['lock lists', NEW_OWNER],
+  ['find', 13, 'locked'],
+  ['deleting?', 13],
+  ['update', { owner: NEW_OWNER }, { where: { id: 13, owner: OWNER_13 } }],
+  ['commit']
 ]);
 assert.strictEqual(ownerOf(12), OWNER_12);
 assert.strictEqual(ownerOf(13), NEW_OWNER);
@@ -1552,6 +2393,30 @@ assert.deepStrictEqual(replies.at(-1), {
 assert.deepStrictEqual(audits, [
   `admin (1) transferred export ban list "List 13" (ID: 13, Remote) of Steam user "Owner 13" (ID: ${OWNER_13}) to Steam user "New Owner" (ID: ${NEW_OWNER}).`
 ]);
+
+// A transfer MySQL could not make, as other changes held the rows it needed, which
+// ExportBanList.inTransaction marks busy once it has given up, e.g. after a lock wait timeout or a
+// deadlock met every time it tried, changed nothing, so the admin is told so plainly, to try again,
+// and nothing is logged as a failure.
+reset();
+addList(12, 'remote');
+addSteamUser(NEW_OWNER, 'New Owner');
+beforeUpdate = () => {
+  throw Object.assign(new Error('Lock wait timeout exceeded; try restarting transaction'), {
+    busy: true
+  });
+};
+await assert.rejects(run('transfer', { id: 12, owner: NEW_OWNER }), (err) => {
+  assert.ok(err instanceof UserError);
+  assert.strictEqual(
+    err.message,
+    'Export ban list **List 12** (#12) was not transferred, as the database was busy with other changes, so nothing was changed. Try again in a minute.'
+  );
+  return true;
+});
+assert.strictEqual(ownerOf(12), OWNER_12);
+assert.deepStrictEqual(audits, []);
+assert.ok(calls.some(([call]) => call === 'rollback'));
 
 // A transfer goes ahead while a ban importer run holds its lock, which it does not check: nothing
 // a run does reads or writes a list's owner.
