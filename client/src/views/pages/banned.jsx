@@ -26,6 +26,21 @@ import classnames from 'classnames';
 
 import { DISCORD_INVITE } from 'scbl-lib/config';
 
+// The partner organisations whose bans a player has, each once, in the order of their bans, and
+// whether all of those bans are on paused ban lists, whose bans count for nothing for now.
+function organisationsToContact(edges) {
+  const organisations = new Map();
+  for (const { node } of edges) {
+    const { organisation } = node.banList;
+    const seen = organisations.get(organisation.id);
+    organisations.set(organisation.id, {
+      organisation,
+      paused: (seen?.paused ?? true) && node.paused === true
+    });
+  }
+  return [...organisations.values()];
+}
+
 const GET_PLAYER = gql`
   query Search($id: String!) {
     steamUser(id: $id) {
@@ -36,6 +51,7 @@ const GET_PLAYER = gql`
           cursor
           node {
             id
+            paused
             banList {
               id
               organisation {
@@ -279,15 +295,22 @@ function GettingUnlistedFromCommunityBanList(props) {
                 organisations. You may click their names to get a link to their Discord server.
               </p>
               <ul>
-                {[
-                  ...new Set(props.steamUser.bans.edges.map((ban) => ban.node.banList.organisation))
-                ].map((organisation, key) => (
-                  <li key={key}>
-                    <a href={organisation.discord} target="_blank" rel="noopener noreferrer">
-                      {organisation.name}
-                    </a>
-                  </li>
-                ))}
+                {organisationsToContact(props.steamUser.bans.edges).map(
+                  ({ organisation, paused }, key) => (
+                    <li key={key}>
+                      <a href={organisation.discord} target="_blank" rel="noopener noreferrer">
+                        {organisation.name}
+                      </a>
+                      {paused && (
+                        <span className="text-muted">
+                          {' '}
+                          (its ban list is paused, so its bans do not count toward
+                          CommunityBanList.com for now)
+                        </span>
+                      )}
+                    </li>
+                  )
+                )}
               </ul>
             </>
           )}
@@ -364,15 +387,22 @@ function GettingUnbannedFromCommunityBanList(props) {
                 organisations. You may click their names to get a link to their Discord server.
               </p>
               <ul>
-                {[
-                  ...new Set(props.steamUser.bans.edges.map((ban) => ban.node.banList.organisation))
-                ].map((organisation, key) => (
-                  <li key={key}>
-                    <a href={organisation.discord} target="_blank" rel="noopener noreferrer">
-                      {organisation.name}
-                    </a>
-                  </li>
-                ))}
+                {organisationsToContact(props.steamUser.bans.edges).map(
+                  ({ organisation, paused }, key) => (
+                    <li key={key}>
+                      <a href={organisation.discord} target="_blank" rel="noopener noreferrer">
+                        {organisation.name}
+                      </a>
+                      {paused && (
+                        <span className="text-muted">
+                          {' '}
+                          (its ban list is paused, so its bans do not count toward
+                          CommunityBanList.com for now)
+                        </span>
+                      )}
+                    </li>
+                  )
+                )}
               </ul>
             </>
           )}

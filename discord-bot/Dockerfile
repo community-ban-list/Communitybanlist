@@ -21,10 +21,8 @@ COPY package.json .
 RUN yarn install --production
 
 # Run the tests, so an image that fails them is never built or pushed.
-RUN for test in scbl-lib/test/*.js discord-bot/test/*.js; do \
-      [ -e "$test" ] || continue; \
-      node --experimental-vm-modules "$test" || exit 1; \
-    done
+COPY scripts/run-tests.mjs ./scripts/
+RUN node scripts/run-tests.mjs scbl-lib discord-bot
 
 
 # Stage 2: Runtime
