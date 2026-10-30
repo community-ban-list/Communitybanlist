@@ -1,0 +1,61 @@
+# Dependabot proposes updates to the packages, the base images and the actions as pull requests,
+# with the matching yarn.lock and digest changes. Each is then checked and reviewed like any other
+# change before a master build deploys it.
+version: 2
+
+# The base images come from Docker Hardened Images, which need a login to read. The two secrets
+# are Dependabot secrets with the same names and values as the Actions secrets the image workflows
+# log in with. Dependabot's pull requests run the pull request checks with Dependabot secrets, not
+# the Actions ones, so the image build job reads the same two.
+registries:
+  dhi:
+    type: docker-registry
+    url: dhi.io
+    username: ${{ secrets.DOCKERHUB_USERNAME }}
+    password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+updates:
+  # The root package.json covers every workspace, and yarn.lock. Minor and patch updates come in one
+  # pull request a week, and each major update in a pull request of its own.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
+  # The base images of the three Dockerfiles, in one pull request, so the images stay on the same
+  # versions. Only new digests of the same tags are proposed, such as security fixes: moving to
+  # another major version of Node.js is a planned change.
+  - package-ecosystem: docker
+    directories:
+      - /web-server
+      - /ban-importer
+      - /discord-bot
+    registries:
+      - dhi
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: '*'
+        update-types:
+          - version-update:semver-major
+    groups:
+      base-images:
+        patterns:
+          - '*'
+
+  # The actions the workflows use, which are pinned by commit, in one pull request.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - '*'

@@ -1,10 +1,15 @@
 # Use multi-stage builds to reduce the final image size
 # Both stages use Docker Hardened Images, which need a `docker login dhi.io` to pull.
 
+# When the image's SBOM is generated, also scan the build context. It is declared before the first
+# FROM, so it applies to the final image's SBOM.
+ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
+
 # Stage 1: Build
 # The dev variant includes the shell and Yarn needed to install dependencies.
-FROM dhi.io/node:26-dev AS build
-ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
+# Both stages' base images are pinned by digest, so every build of a commit starts from the same
+# images. Dependabot proposes newer digests, such as security fixes, as pull requests.
+FROM dhi.io/node:26-dev@sha256:c8939885965365c675a024d062bcb761bda4b47e95ce0323aa998ac9bc312fd6 AS build
 
 WORKDIR /opt/workdir/
 
@@ -12,10 +17,15 @@ WORKDIR /opt/workdir/
 # Keep these commands in this order to ensure dependencies are installed correctly.
 COPY scbl-lib ./scbl-lib
 COPY discord-bot ./discord-bot
-COPY package.json .
+COPY package.json yarn.lock ./
+COPY scripts/check-lockfile.mjs ./scripts/
 
-# Install dependencies
-RUN yarn install --production
+# Install the package versions yarn.lock lists, so every build of a commit installs the same
+# packages. --frozen-lockfile stops Yarn changing yarn.lock, but Yarn still installs a package that
+# a workspace asks for and yarn.lock does not list, so the script first checks that yarn.lock lists
+# them all.
+RUN node scripts/check-lockfile.mjs && \
+    yarn install --production --frozen-lockfile
 
 # Run the tests, so an image that fails them is never built or pushed.
 COPY scripts/run-tests.mjs ./scripts/
@@ -24,7 +34,7 @@ RUN node scripts/run-tests.mjs scbl-lib discord-bot
 
 # Stage 2: Runtime
 # The runtime variant has no shell or package manager and runs as the non-root node user.
-FROM dhi.io/node:26
+FROM dhi.io/node:26@sha256:dc87c509f7279f734d04036f696bf9aad1b8d66f34750f32c30c5b85e033187f
 
 WORKDIR /opt/workdir/
 
