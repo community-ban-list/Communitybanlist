@@ -24,6 +24,8 @@ import {
   paginate,
   parseBanListSource,
   plural,
+  readPaused,
+  readQueueSkips,
   skipCheckOption,
   suggestOrganisations,
   summariseBanListDeletion,
@@ -116,9 +118,10 @@ async function getBanLists(organisation) {
   return BanList.findAll({ where: { organisation: organisation.id }, order: [['name', 'ASC']] });
 }
 
+// The organisation, with its ban lists, each marked when it is paused.
 async function organisationDetails(organisation) {
   const banLists = await getBanLists(organisation);
-  return organisationEmbed(organisation, banLists, await countBans(banLists));
+  return organisationEmbed(organisation, banLists, await countBans(banLists), await readPaused());
 }
 
 async function add(interaction) {
@@ -200,7 +203,9 @@ async function remove(interaction) {
 
   if (!(await confirm(interaction, prompt, 'Remove organisation'))) return;
 
-  await deleteBanLists(banListIDs, organisation);
+  // The players of paused lists are not queued, as their bans count for nothing, once the importer
+  // has settled them (see readQueueSkips).
+  await deleteBanLists(banListIDs, organisation, { paused: await readQueueSkips(banListIDs) });
   audit(interaction, change);
   await interaction.editReply(reply);
 }

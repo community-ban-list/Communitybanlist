@@ -1,3 +1,4 @@
+import { endResumption } from 'scbl-lib/db/ban-list-suspensions';
 import { BanListSync } from 'scbl-lib/db/importer-models';
 import { Ban, BanList, ExportBanList } from 'scbl-lib/db/models';
 import {
@@ -27,6 +28,7 @@ import {
   writeBans
 } from './apply-list.js';
 import BanFetcher from './ban-fetcher.js';
+import pausedBanLists from './paused-lists.js';
 import {
   accessProblem,
   describeAlert,
@@ -193,6 +195,7 @@ function listReport(result) {
   if (result.replace) report.replace = true;
   if (result.sourceChanged) report.sourceChanged = true;
   if (result.massRemoval) report.massRemoval = true;
+  if (result.caughtUp) report.caughtUp = true;
   if (result.error) Object.assign(report, { error: result.error, stage: result.stage });
   if (result.page) report.page = result.page;
   if (first) {
@@ -327,6 +330,11 @@ export default class BanImporter {
     this.accessCheckStartedAt = null;
     this.accessCheckMs = null;
     this.triedBattlemetrics = new Set();
+    // The lists an admin paused, as the run saw them: how many suspended lists it left out, when
+    // each resuming list was resumed, by list, and the resuming lists it caught up with.
+    this.suspendedCount = 0;
+    this.resuming = new Map();
+    this.caughtUp = [];
     this.pendingSyncs = new Map();
     // Whether the warnings about the settings have been posted, which the first import does.
     this.warned = false;
@@ -338,7 +346,7 @@ export default class BanImporter {
   // (cycleSeconds, IMPORTER_CYCLE_SECONDS), whatever IMPORTER_CADENCE_SECONDS says, as that only
   // sets when the service is stale and the Steam step's budget there, and in once mode the run's
   // cadence (cadenceSeconds, IMPORTER_CADENCE_SECONDS), how often the script starts a run.
-  async importBans({ cadenceSeconds = null, cycleSeconds = null } = {}) {
+  async importBans({ cadenceSeconds = null, cycleSeconds = null, startedAt } = {}) {
     // What the last import found and reported is cleared before anything else, so an import that
     // fails before it imports any list, e.g. as the database cannot be read, reports nothing rather
     // than the last one's counts: in loop mode, the importer service imports with the same
@@ -357,6 +365,9 @@ export default class BanImporter {
     this.triedBattlemetrics.clear();
     this.pendingSyncs.clear();
     this.found.clear();
+    this.suspendedCount = 0;
+    this.resuming = new Map();
+    this.caughtUp = [];
 
     // An invalid IMPORTER_DRY_RUN stops the import before it reads anything. Invalid values of the
     // other settings are posted, as the run goes on with the safer choice, which may not be what
@@ -376,10 +387,32 @@ export default class BanImporter {
       );
 
     Logger.verbose('BanImporter', 2, 'Fetching ban lists to import...');
-    const banLists = await retryOperation(() =>
+    const allBanLists = await retryOperation(() =>
       BanList.findAll({ attributes: ['id', 'type', 'source'] })
     );
-    Logger.verbose('BanImporter', 2, `Fetched ${banLists.length} ban lists to import.`);
+    // The lists an admin paused, as the run sees them (see paused-lists.js). A suspended list is
+    // not imported at all: not fetched, given no slot for full reads nor checked for access, so it
+    // is not posted about while it is suspended. A resuming list is imported, read in full until a
+    // read in full has completed since it was resumed (see planFor), and its bans count again once
+    // the importer has caught up with it (see endResumption).
+    const paused = await pausedBanLists({ startedAt });
+    const suspended = new Set(paused.suspended);
+    const banLists = allBanLists.filter(({ id }) => !suspended.has(id));
+    this.suspendedCount = allBanLists.length - banLists.length;
+    this.resuming = new Map(
+      paused.rows
+        .filter(({ resumedAt }) => resumedAt !== null && resumedAt !== undefined)
+        .map(({ banList, resumedAt }) => [banList, resumedAt])
+    );
+    Logger.verbose(
+      'BanImporter',
+      2,
+      `Fetched ${banLists.length} ban lists to import${
+        this.suspendedCount > 0
+          ? `, leaving out ${plural(this.suspendedCount, 'suspended ban list')} (${paused.suspended.filter((id) => allBanLists.some((banList) => banList.id === id)).join(', ')})`
+          : ''
+      }.`
+    );
     if (!this.headPoll)
       Logger.verbose(
         'BanImporter',
@@ -472,7 +505,7 @@ export default class BanImporter {
       reportProgress(0, banLists.length, 'ban lists');
       for (const { id } of order) {
         stopIfRequested();
-        results.push(await this.importBanList(id));
+        results.push(await this.endResumption(await this.importBanList(id)));
         reportProgress(results.length, banLists.length, 'ban lists');
       }
 
@@ -499,7 +532,7 @@ export default class BanImporter {
           try {
             // The second attempt takes the first one's place, and keeps how it ended, so the list's
             // time in the run is that of both of its attempts (see listReport).
-            results[index] = await this.importBanList(failed.id, failed);
+            results[index] = await this.endResumption(await this.importBanList(failed.id, failed));
           } catch (err) {
             // A list whose second attempt is stopped part-way is left out of the summary, as one
             // stopped in the first pass is, since its own line says what the attempt saved. The
@@ -822,8 +855,57 @@ export default class BanImporter {
       now: this.plannedAt,
       headPoll: this.headPoll,
       fullScanMinutes: this.fullScanMinutes,
-      cadenceSeconds: this.cadenceSeconds
+      cadenceSeconds: this.cadenceSeconds,
+      resumedAt: this.resuming.get(banList.id) ?? null
     });
+  }
+
+  // Once the import of a resuming list has caught up with it, delete its row of
+  // BanListSuspensions, so its bans count again from the next run, whose reputation check then
+  // settles its players (see reputation-check.js): it was read in full, completely, since it was
+  // resumed, as the run read it after it saw the list resuming, and that read left no bans waiting
+  // for a later read to confirm that they are gone, and none held for an admin as the list seemed
+  // to have lost all of them. So bans its owner lifted while it was suspended never count again. A
+  // list that imports one of CBL's own export ban lists is never read, so there is nothing to
+  // catch up with, and it is back as it was before it was suspended at once. The row is only
+  // deleted while its resumedAt is the one the run saw, so a list suspended or resumed again since
+  // is left as it is. A dry run deletes nothing. Returns the result, with caughtUp set when the row
+  // was deleted.
+  async endResumption(result) {
+    const resumedAt = this.resuming.get(result.id);
+    if (resumedAt === undefined || this.dryRun || result.gone || result.stopped) return result;
+    const caughtUp =
+      result.selfImport ||
+      (result.read === 'full' &&
+        result.complete === true &&
+        !result.error &&
+        !result.accessLost &&
+        !result.sourceChanged &&
+        (!result.replace || result.replaced) &&
+        !(result.pending > 0) &&
+        !result.hold);
+    if (!caughtUp) return result;
+
+    await checkRunLock();
+    if (!(await retryOperation(() => endResumption(result.id, resumedAt)))) {
+      Logger.verbose(
+        'BanImporter',
+        2,
+        `Ban list (ID: ${result.id}) has caught up since it was resumed, but was suspended or resumed again meanwhile, so it stays paused.`
+      );
+      return result;
+    }
+    this.resuming.delete(result.id);
+    this.caughtUp.push(result.id);
+    result.caughtUp = true;
+    const why = result.selfImport
+      ? "its source is one of CBL's own export ban lists, so it is not read, and there was nothing to catch up with"
+      : 'it was read in full since it was resumed, with no removals left to confirm';
+    Logger.important(
+      'BanImporter',
+      `Ban list (ID: ${result.id}) counts again: ${why}. Its players' reputation points and export bans are recalculated from the next run.`
+    );
+    return result;
   }
 
   // Poll a BattleMetrics list: read its newest page, and the pages after it while they hold only
@@ -1553,6 +1635,8 @@ export default class BanImporter {
       lists: this.listCount,
       imported: this.results.length,
       ...totals(this.results),
+      ...(this.suspendedCount > 0 ? { suspended: this.suspendedCount } : {}),
+      ...(this.caughtUp.length > 0 ? { caughtUp: [...this.caughtUp] } : {}),
       accessCheck: this.accessCheckResult,
       ...(accessCheckMs === null ? {} : { accessCheckSeconds: seconds(accessCheckMs) }),
       requests: { ...this.requests },

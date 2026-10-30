@@ -82,12 +82,16 @@ if (TASKS_TO_COMPLETE.UPDATE_STEAM_USER_INFO && writes)
 if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_POINTS && writes)
   steps.push(
     { name: 'clearOrphanedUsers', run: () => Core.clearOrphanedUsers() },
-    { name: 'updateReputationPoints', run: () => Core.updateReputationPoints() }
+    { name: 'updateReputationPoints', run: (settings) => Core.updateReputationPoints(settings) }
   );
 if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_RANK && writes)
   steps.push({ name: 'updateReputationRank', run: () => Core.updateReputationRank() });
 if (TASKS_TO_COMPLETE.UPDATE_EXPORT_BANS && writes)
-  steps.push(counted('updateExportBans', (counts) => ExportBanManager.updateExportBans(counts)));
+  steps.push(
+    counted('updateExportBans', (counts, settings) =>
+      ExportBanManager.updateExportBans(counts, settings)
+    )
+  );
 if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS && writes)
   steps.push(counted('exportExportBans', (counts) => Core.exportExportBans(counts)));
 

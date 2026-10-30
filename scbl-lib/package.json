@@ -8,6 +8,8 @@
     "./config": "./config.js",
     "./db": "./db/index.js",
     "./db/sequelize": "./db/sequelize.js",
+    "./db/ban-list-suspensions": "./db/ban-list-suspensions.js",
+    "./db/excluded-ban-lists": "./db/excluded-ban-lists.js",
     "./db/export-membership": "./db/export-membership.js",
     "./db/models": "./db/models/index.js",
     "./db/importer-models": "./db/models/importer/index.js",

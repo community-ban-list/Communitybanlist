@@ -15,6 +15,10 @@ export const REASONS = {
   NEW: 'new',
   // Its type or source was changed, so its old source's bans are being replaced.
   SOURCE: 'source',
+  // An admin resumed it after it was suspended, and it has not been read in full since, so the bans
+  // its owner added or lifted meanwhile are found before its bans count again (see
+  // scbl-lib/db/ban-list-suspensions.js).
+  RESUME: 'resume',
   // Bans it no longer had wait for a later complete read to confirm that they are gone, and one is
   // due, or an admin allowed it to lose bans, which a complete read applies.
   REMOVAL: 'removal',
@@ -33,10 +37,11 @@ export const REASONS = {
 };
 
 // The order in which lists are read in full, by their reasons: new or changed sources first, then
-// removals to confirm, drift, overflow, and the periodic reads last.
+// resumed lists and removals to confirm, drift, overflow, and the periodic reads last.
 const PRIORITY = {
   [REASONS.NEW]: 0,
   [REASONS.SOURCE]: 0,
+  [REASONS.RESUME]: 1,
   [REASONS.REMOVAL]: 1,
   [REASONS.DRIFT]: 2,
   [REASONS.OVERFLOW]: 3,
@@ -154,7 +159,8 @@ function removalDue({ row, pending, allowMassRemoval, now }) {
 // with the most urgent of the reasons that apply. A list is due its periodic full read once its
 // row's nextFullScanAt has passed, or it has none, or once its last full read is older than a list
 // may wait (see latestFullScan), so a run every few hours reads every list in full, as runs did
-// before head polls. The other reasons do not wait for a list's slot: each is due at once.
+// before head polls. The other reasons do not wait for a list's slot: each is due at once. A list
+// that is resuming, since resumedAt, is read in full until a read in full has completed since then.
 export function planRead({
   type,
   row = null,
@@ -164,13 +170,16 @@ export function planRead({
   now,
   headPoll = true,
   fullScanMinutes = DEFAULT_FULL_SCAN_MINUTES,
-  cadenceSeconds = null
+  cadenceSeconds = null,
+  resumedAt = null
 }) {
   const full = (reason) => ({ read: 'full', reason });
   if (row && row.sourceKey !== sourceKey) return full(REASONS.SOURCE);
   if (row && Boolean(Number(row.replacePending))) return full(REASONS.SOURCE);
   const lastFullScanAt = timeOf(row?.lastFullScanAt);
   if (!row || lastFullScanAt === null) return full(REASONS.NEW);
+  const resumed = timeOf(resumedAt);
+  if (resumed !== null && lastFullScanAt < resumed) return full(REASONS.RESUME);
   if (removalDue({ row, pending, allowMassRemoval, now })) return full(REASONS.REMOVAL);
   if (type !== 'battlemetrics') return full(REASONS.REMOTE);
 

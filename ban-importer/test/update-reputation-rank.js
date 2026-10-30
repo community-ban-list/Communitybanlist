@@ -32,6 +32,8 @@ for (const [, names, specifier] of source.matchAll(/import\s*\{([^}]*)\}\s*from\
     .split(',')
     .map((name) => name.trim().split(/\s+as\s+/)[0])
     .filter(Boolean);
+for (const [, specifier] of source.matchAll(/import\s+\w+\s+from\s*'([^']+)'/g))
+  imports[specifier] = ['default'];
 
 const context = vm.createContext({});
 const module = new vm.SourceTextModule(source, { context });
