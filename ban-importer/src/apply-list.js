@@ -587,8 +587,8 @@ const CLEAR_HOLD = 'DELETE FROM BanListHolds WHERE banList = ?';
 //   end, and no reason, the list's row there is deleted, as its hold ended;
 // - ids: the hold's bans are recorded as missing from the complete read at now and held, from now
 //   unless they already were, a statement for each batch of batchSize bans (see recordMissing).
-// A run cut short in it, e.g. by a database outage longer than the retries, its stop or the
-// process being killed, writes none of it, so the next complete read finds the list held as it
+// A run cut short in it, e.g. by a database outage longer than the retries or the process being
+// killed, writes none of it, so the next complete read finds the list held as it
 // was, or not held at all. (That read measures the loss again, against a list that includes the
 // bans this read saved before it; see the README.) Written a statement at a
 // time, a hold cut short as it ended could leave a 'large' row with fewer of its bans held than

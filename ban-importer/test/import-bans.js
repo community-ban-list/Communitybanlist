@@ -2510,8 +2510,8 @@ assert.deepStrictEqual(warnings().length, 1);
 const banIDs = (prefix, from, to) => pairs(prefix, from, to).map(([uid]) => `5,${uid}`);
 
 // A hold is ended in one transaction too, with the records of its bans that came back, so a run
-// cut short as it ends one, e.g. by a database outage longer than the retries, its stop or the
-// process being killed, ends none of it. Here a list of 200 held for 80 grew to 500, and a read
+// cut short as it ends one, e.g. by a database outage longer than the retries or the process
+// being killed, ends none of it. Here a list of 200 held for 80 grew to 500, and a read
 // finds 41 of the 80 again, which ends the hold, and loses 120 of the bans it saved since, which
 // begins another. The release fails on every attempt, so the list fails, with its hold, its row and
 // the records of the 41 as they were. The next read does what this one would have: it ends the old
