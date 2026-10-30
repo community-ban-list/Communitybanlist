@@ -25,6 +25,11 @@ const packages = {
   graphql: { default: graphql },
   jsonwebtoken: { default: jwt },
   'scbl-lib/config': config,
+  // No ban list is paused.
+  'scbl-lib/db/ban-list-suspensions': {
+    readPausedBanLists: async () => [],
+    pausedSets: () => ({ suspended: [], excluded: [] })
+  },
   'scbl-lib/db/sequelize': {
     DATABASE_UNAVAILABLE_MESSAGE: 'The database is unavailable.',
     isDatabaseUnavailable: () => false
@@ -35,8 +40,9 @@ const packages = {
 // Other relative imports load the real files.
 async function load(path, stubs, globals = {}) {
   const context = vm.createContext(globals);
+  // Each module is kept before its file is read, as linking asks for a module's imports at once.
   const modules = new Map();
-  async function moduleFor(specifier, referencingURL) {
+  function moduleFor(specifier, referencingURL) {
     const exports = stubs[specifier] || packages[specifier];
     assert.ok(exports || specifier.startsWith('.'), `Unexpected dependency: ${specifier}`);
     const url = exports ? specifier : new URL(specifier, referencingURL).href;
@@ -51,10 +57,9 @@ async function load(path, stubs, globals = {}) {
               },
               { context }
             )
-          : new vm.SourceTextModule(await readFile(new URL(url), 'utf8'), {
-              context,
-              identifier: url
-            })
+          : readFile(new URL(url), 'utf8').then(
+              (source) => new vm.SourceTextModule(source, { context, identifier: url })
+            )
       );
     }
     return modules.get(url);
