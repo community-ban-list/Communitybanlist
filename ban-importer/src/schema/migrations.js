@@ -205,7 +205,8 @@ export default [
     // BanListHolds, which keeps why the importer holds a ban list's bans for an admin, one row a
     // list while it does: 'full', as a read found none of the list's bans, or 'large', as a read
     // lost a large part of them at once, with how many bans the list had before that read
-    // (storedCount), which a 'large' hold's bans still missing are measured against.
+    // (storedCount), which a 'large' hold's bans still missing are measured against, lowered as the
+    // list shrinks while the hold lasts.
     // BanListPendingRemovals keeps the held bans themselves, but not which hold began, so the runs
     // after the one that began it read that here. A list's row is deleted with the list, so banList
     // has the type of BanLists.id, which its foreign key needs. The reason is a VARCHAR rather than
