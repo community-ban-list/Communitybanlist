@@ -338,7 +338,7 @@ async function resume(interaction) {
   const bans = await summariseBanListBans([banList.id]);
   const confirmed = await confirm(
     interaction,
-    `Resume ${listName}? The ban importer reads it in full on its next cycle, and its ${describeBanListDeletion(bans)} count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes at least 10 more minutes when there are any, and longer when it seems to have lost all of them. /banlist status shows when. ${settles(bans.steamUsers, 'the cycle after it counts again')}`,
+    `Resume ${listName}? The ban importer reads it in full on its next cycle, and its ${describeBanListDeletion(bans)} count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes at least 10 more minutes when there are any, and longer when it seems to have lost all of them, or a large part of them at once. /banlist status shows when. ${settles(bans.steamUsers, 'the cycle after it counts again')}`,
     'Resume ban list'
   );
   if (!confirmed) return;

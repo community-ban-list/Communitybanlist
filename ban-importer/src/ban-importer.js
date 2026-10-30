@@ -11,18 +11,22 @@ import {
 import {
   BATCH_SIZE,
   CONFIRM_AFTER,
+  clearHoldReason,
   clearPendingRemovals,
   diffBans,
   flagOf,
   isMissingBanList,
   planRemovals,
+  readHoldReason,
   readPendingRemovals,
   readPendingSummary,
   readStoredBans,
   readStoredBansByID,
+  RECORDED_HOLDS,
   releaseHeldRemovals,
   removeBans,
   retryOperation,
+  saveHoldReason,
   savePendingRemovals,
   timeOf,
   writeBans
@@ -865,12 +869,12 @@ export default class BanImporter {
   // settles its players (see reputation-check.js): it was read in full, completely, since it was
   // resumed, as the run read it after it saw the list resuming, and that read left no bans waiting
   // for a later read to confirm that they are gone, and none held for an admin as the list seemed
-  // to have lost all of them. So bans its owner lifted while it was suspended never count again. A
-  // list that imports one of CBL's own export ban lists is never read, so there is nothing to
-  // catch up with, and it is back as it was before it was suspended at once. The row is only
-  // deleted while its resumedAt is the one the run saw, so a list suspended or resumed again since
-  // is left as it is. A dry run deletes nothing. Returns the result, with caughtUp set when the row
-  // was deleted.
+  // to have lost all of them, or a large part of them at once. So bans its owner lifted while it
+  // was suspended never count again. A list that imports one of CBL's own export ban lists is never
+  // read, so there is nothing to catch up with, and it is back as it was before it was suspended at
+  // once. The row is only deleted while its resumedAt is the one the run saw, so a list suspended
+  // or resumed again since is left as it is. A dry run deletes nothing. Returns the result, with
+  // caughtUp set when the row was deleted.
   async endResumption(result) {
     const resumedAt = this.resuming.get(result.id);
     if (resumedAt === undefined || this.dryRun || result.gone || result.stopped) return result;
@@ -1321,18 +1325,23 @@ export default class BanImporter {
   // allowed to lose all its bans (allowFullRemovalUntil, set for its current source), loses them
   // all at once. The bans kept are counted as held, and those that wait for a later complete read
   // as pending too, which are recorded in BanListPendingRemovals, as are those held for an admin
-  // as the list seemed to have lost all its bans, so that the hold lasts until it is confirmed or
-  // one of them comes back. A recorded ban that came back, or that the list no longer has, loses
-  // its record. A list removed during the run, so that its records cannot be saved, is skipped as
-  // gone.
+  // as the list seemed to have lost all its bans, or a large part of them at once, so that the hold
+  // lasts until it is confirmed or one of them comes back. Which of the two holds it is goes in
+  // BanListHolds as the hold begins, so the runs after this one say it too, and is forgotten once
+  // the hold ends. A recorded ban that came back, or that the list no longer has, loses its record.
+  // A list removed during the run, so that its records cannot be saved, is skipped as gone.
   async removeMissingBans(banList, bans, stored, pending, result) {
     const now = this.clock();
     const found = new Set(bans.map((ban) => ban.id));
     const had = new Set(stored.map((ban) => ban.id));
     const missing = stored.filter((ban) => !found.has(ban.id));
     const cleared = [...pending.keys()].filter((banId) => found.has(banId) || !had.has(banId));
-    // The bans the list still has that an earlier run held for an admin, and since when.
+    // The bans the list still has that an earlier run held for an admin, and since when, and the
+    // hold that run began, which a list held before BanListHolds was made began as 'full'.
     const held = [...pending].filter(([banId, { heldAt }]) => heldAt !== null && had.has(banId));
+    const recorded =
+      held.length > 0 ? await retryOperation(() => readHoldReason(banList.id)) : null;
+    const heldFor = RECORDED_HOLDS.includes(recorded) ? recorded : 'full';
 
     const bySetting = this.allowMassRemoval.has(String(banList.id));
     const confirmed = bySetting || this.fullRemovalAllowed(banList, now);
@@ -1342,6 +1351,7 @@ export default class BanImporter {
       fetched: bans.length,
       pending: new Map([...pending].map(([banId, { firstMissingAt }]) => [banId, firstMissingAt])),
       held: new Set(held.map(([banId]) => banId)),
+      heldFor,
       now,
       replace: result.replace
     };
@@ -1370,9 +1380,17 @@ export default class BanImporter {
           Infinity
         ) + CONFIRM_AFTER;
     }
-    // A 'full' hold that an earlier run began says since when.
-    if (plan.hold === 'full' && held.length > 0)
-      result.heldSince = held.reduce((since, [, { heldAt }]) => Math.min(since, heldAt), Infinity);
+    // A recorded hold that an earlier run began says since when: since the first of its bans was
+    // held.
+    const recordedHold = RECORDED_HOLDS.includes(plan.hold);
+    if (recordedHold) {
+      const heldAt = new Map(held.map(([banId, { heldAt: since }]) => [banId, since]));
+      const since = plan.held.reduce(
+        (first, banId) => (heldAt.has(banId) ? Math.min(first, heldAt.get(banId)) : first),
+        Infinity
+      );
+      if (since !== Infinity) result.heldSince = since;
+    }
     const remove = new Set(plan.remove);
     const removed = missing.filter((ban) => remove.has(ban.id));
 
@@ -1392,14 +1410,23 @@ export default class BanImporter {
             now: new Date(now),
             batchSize: this.batchSize
           });
-        if (plan.hold === 'full')
+        if (recordedHold) {
+          // A hold that begins records why before its bans, so a run cut short between the two
+          // leaves no held bans without their reason. One that goes on is recorded already.
+          if (held.length === 0 || plan.hold !== heldFor)
+            await saveHoldReason(banList.id, plan.hold);
           await savePendingRemovals(banList.id, plan.held, {
             now: new Date(now),
             held: true,
             batchSize: this.batchSize
           });
+        }
         if (removed.length > 0)
           result.removed += await removeBans(banList.id, removed, { batchSize: this.batchSize });
+        // Once none of its bans is held, the list's hold is over, unless a read that found no bans
+        // left them held as they were.
+        if (recorded !== null && !recordedHold && plan.hold !== 'empty')
+          await clearHoldReason(banList.id);
       } catch (err) {
         if ((await this.stopReason(err, banList)) !== LIST_REMOVED) throw err;
         // Its bans went with it, so none of them is kept.
@@ -1543,6 +1570,25 @@ export default class BanImporter {
           `${imported}: ${counts.join(', ')}. Still kept the ${plural(result.held - result.pending, 'ban')} it had when it lost all of its bans at once, held since ${new Date(result.heldSince).toISOString()}, as none of them has come back, which more likely means that its source broke. ${confirm}${waiting}${dryRun}`
         );
       }
+    } else if (result.hold === 'large') {
+      const kept = result.held - result.pending;
+      const confirm = `If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=${result.id} for one run.`;
+      // Its other missing bans, which it did not lose with them, are removed as usual: those that
+      // wait for a confirming read are never fewer than 10.
+      const waiting =
+        result.pending > 0
+          ? ` Of its other bans, ${formatCount(result.pending)} that it no longer has are kept until a later complete read of it confirms they are gone.`
+          : '';
+      if (result.heldSince === undefined)
+        log(
+          true,
+          `${imported}: ${counts.join(', ')}. Kept the ${formatCount(kept)} of its ${formatCount(result.stored)} stored bans that it lost at once, as losing so many at once more likely means that its source broke, or now leaves some bans out, such as its expired ones. They are kept until one of them comes back. ${confirm}${waiting}${dryRun}`
+        );
+      else
+        log(
+          true,
+          `${imported}: ${counts.join(', ')}. Still kept the ${plural(kept, 'ban')} it lost at once, held since ${new Date(result.heldSince).toISOString()}, as none of them has come back, which more likely means that its source broke, or leaves them out. ${confirm}${waiting}${dryRun}`
+        );
     } else if (result.replace && (result.removed > 0 || result.pending > 0)) {
       const waiting =
         result.pending > 0

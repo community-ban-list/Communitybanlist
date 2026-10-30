@@ -182,24 +182,43 @@ export const REMOVE_AT_ONCE_SHARE = 0.05;
 // confirms that it lost them all.
 export const FULL_REMOVAL_BANS = 10;
 
+// A read that finds at least this many of a list's bans missing, of those no earlier read had
+// missed, and at least this share of the bans the list had before the read, keeps them until an
+// admin confirms that the list lost them. A source that starts leaving bans out, e.g. its expired
+// ones, gives a count that drops with them, so the count check still passes, and only the size of
+// the loss shows it. A list loses a handful of bans a day, a few at a time, far fewer than either:
+// the 25 decide for a list of up to 125 bans, and the share for a larger one, e.g. 2,356 bans of
+// 11,780. A smaller loss still waits for a confirming read, as any loss did before.
+export const LARGE_REMOVAL_BANS = 25;
+export const LARGE_REMOVAL_SHARE = 0.2;
+
+// The holds that are recorded in BanListPendingRemovals, as their bans' heldAt, and so last over
+// runs, until an admin confirms them or one of their bans comes back. An 'empty' hold is not
+// recorded, as every read that finds no bans holds the list again.
+export const RECORDED_HOLDS = ['full', 'large'];
+
 // Decide what to do with the bans missing from a complete read of a list: missing is their IDs,
 // stored and fetched the numbers of bans the list had before the read and the read found, pending
 // when each ban recorded as missing before was first missing, in milliseconds, by its ID, held the
-// IDs of the bans the list still has that an earlier run held for an admin, now the time of the
-// read in milliseconds, replace whether the bans are being replaced by those of the list's new
-// source, and confirmed whether the list may lose any number of bans at once. Returns:
+// IDs of the bans the list still has that an earlier run held for an admin, and heldFor the hold
+// that run began, 'full' or 'large', now the time of the read in milliseconds, replace whether the
+// bans are being replaced by those of the list's new source, and confirmed whether the list may
+// lose any number of bans at once. Returns:
 // - remove: the IDs of the bans to remove now;
 // - wait: the IDs of the bans to keep until a later complete read confirms they are gone;
 // - hold: why bans wait for an admin to confirm their removal, or null: 'empty' for a read that
-//   found no bans, and 'full' for one that found none of the bans of a list of at least
-//   FULL_REMOVAL_BANS bans, or none of those an earlier run held for that reason;
+//   found no bans, 'full' for one that found none of the bans of a list of at least
+//   FULL_REMOVAL_BANS bans, and 'large' for one that found at least LARGE_REMOVAL_BANS, and
+//   LARGE_REMOVAL_SHARE of the list, missing that no earlier read had missed; or, for a list an
+//   earlier run held, the hold it began (heldFor), while none of those bans has come back;
 // - held: the IDs of the bans that wait for an admin;
 // - released: the IDs of the bans an earlier run held that no longer wait for an admin, but for a
 //   later complete read, as if first missing now.
 // So with confirmed, every missing ban is removed at once. Otherwise a list that seems to have
-// lost all its bans keeps them, as its source more likely broke, unless its bans are being
-// replaced. A 'full' hold lasts until one of its bans comes back, or the bans are replaced: the
-// bans the list saved since are not its bans from before. Any other missing ban is removed once
+// lost all its bans keeps them, as its source more likely broke, and so does one that lost a large
+// part of them at once while no earlier hold lasts, unless its bans are being replaced. A recorded
+// hold lasts until one of its bans comes back, or the bans are replaced: the bans the list saved
+// since are not the bans it lost. Any other missing ban is removed once
 // complete reads have not had it for CONFIRM_AFTER, and waits until then, but when fewer than
 // REMOVE_AT_ONCE_BANS and REMOVE_AT_ONCE_SHARE of the list would wait, all of them are removed at
 // once.
@@ -209,6 +228,7 @@ export function planRemovals({
   fetched,
   pending = new Map(),
   held = new Set(),
+  heldFor = 'full',
   now = Date.now(),
   replace = false,
   confirmed = false
@@ -226,7 +246,18 @@ export function planRemovals({
   const stillHeld = [...held].filter((id) => isMissing.has(id));
   const holding = !replace && held.size > 0 && stillHeld.length === held.size;
   const released = new Set(holding ? [] : stillHeld);
-  const others = holding ? missing.filter((id) => !held.has(id)) : missing;
+  let others = holding ? missing.filter((id) => !held.has(id)) : missing;
+
+  // A list that is not held, and lost a large part of its bans in this read, holds the bans it
+  // lost. Only bans no earlier read had missed count, and are held: those already recorded wait
+  // for their confirming read as they did, and those an ended hold released are not held again.
+  let lost = [];
+  if (!replace && !holding) {
+    lost = others.filter((id) => !pending.has(id));
+    if (lost.length >= Math.max(LARGE_REMOVAL_BANS, stored * LARGE_REMOVAL_SHARE))
+      others = others.filter((id) => pending.has(id));
+    else lost = [];
+  }
 
   const due = (id) =>
     !released.has(id) && pending.has(id) && now - pending.get(id) >= CONFIRM_AFTER;
@@ -235,9 +266,10 @@ export function planRemovals({
     wait.length < Math.max(REMOVE_AT_ONCE_BANS, stored * REMOVE_AT_ONCE_SHARE)
       ? { remove: [...others], wait: [] }
       : { remove: others.filter(due), wait };
+  if (lost.length > 0) return { ...plan, hold: 'large', held: lost, released: [...released] };
   return {
     ...plan,
-    hold: holding ? 'full' : null,
+    hold: holding ? heldFor : null,
     held: holding ? stillHeld : [],
     released: [...released]
   };
@@ -483,6 +515,34 @@ export async function releaseHeldRemovals(banList, { now }) {
       'UPDATE BanListPendingRemovals SET firstMissingAt = ?, lastMissingAt = ?, heldAt = NULL WHERE banList = ? AND heldAt IS NOT NULL',
       { replacements: [sqlTime(now), sqlTime(now), banList] }
     )
+  );
+}
+
+// The hold the list's held bans were held for, as BanListHolds keeps it, 'full' or 'large', or
+// null when it keeps none: the bans of a list held by an importer from before that table were held
+// as it lost all of them, the only hold that importer recorded.
+export async function readHoldReason(banList) {
+  const [row] = await sequelize.query('SELECT reason FROM BanListHolds WHERE banList = ?', {
+    replacements: [banList],
+    type: QueryTypes.SELECT
+  });
+  return row?.reason ?? null;
+}
+
+// Record the hold the list's bans are held for, from now on, in place of any recorded before.
+export async function saveHoldReason(banList, reason) {
+  await retryOperation(() =>
+    sequelize.query(
+      'INSERT INTO BanListHolds (banList, reason) VALUES (?, ?) AS new ON DUPLICATE KEY UPDATE reason = new.reason',
+      { replacements: [banList, reason] }
+    )
+  );
+}
+
+// Forget the hold the list's bans were held for, once none of them is held any longer.
+export async function clearHoldReason(banList) {
+  await retryOperation(() =>
+    sequelize.query('DELETE FROM BanListHolds WHERE banList = ?', { replacements: [banList] })
   );
 }
 

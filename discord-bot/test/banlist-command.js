@@ -530,7 +530,7 @@ await run('resume', { banlist: '5' });
 assert.deepStrictEqual(prompts, [
   {
     content:
-      "Resume **Org** / **Main**? The ban importer reads it in full on its next cycle, and its 3 bans on 2 players count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes at least 10 more minutes when there are any, and longer when it seems to have lost all of them. /banlist status shows when. Export bans follow from the cycle after it counts again, and players' reputation points within 1 cycle of it.",
+      "Resume **Org** / **Main**? The ban importer reads it in full on its next cycle, and its 3 bans on 2 players count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes at least 10 more minutes when there are any, and longer when it seems to have lost all of them, or a large part of them at once. /banlist status shows when. Export bans follow from the cycle after it counts again, and players' reputation points within 1 cycle of it.",
     confirmLabel: 'Resume ban list'
   }
 ]);
