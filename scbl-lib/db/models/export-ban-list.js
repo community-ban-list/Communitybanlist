@@ -515,7 +515,11 @@ class ExportBanList extends Sequelize.Model {
             action: 'none',
             defaultIdentifiers: ['steamID'],
             defaultReasons: ['Banned by the Community Ban List (communitybanlist.com)'],
-            defaultAutoAddEnabled: true
+            defaultAutoAddEnabled: true,
+            // Each ban is also sent with native bans off (see export-ban.js), which BattleMetrics'
+            // documentation says prevents native bans; each subscriber most likely has its own
+            // defaults.
+            defaultNativeEnabled: false
           },
           relationships: {
             organization: {
