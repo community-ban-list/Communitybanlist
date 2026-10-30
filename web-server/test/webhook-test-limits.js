@@ -225,7 +225,12 @@ const ExportBanList = {
     const list = new Instance({ ...values, id: nextID++ });
     await list.save();
     return list;
-  }
+  },
+  // Changes are saved in transactions, which lock rows these checks never share, and no list is
+  // being deleted meanwhile.
+  inTransaction: (work) => work({}),
+  lockListsOf: (owner) => ExportBanList.count({ where: { owner } }),
+  isBeingDeleted: async () => false
 };
 const listsOf = (user) => [...stored.values()].filter((list) => list.owner === user);
 const mutations = discord();
@@ -247,6 +252,15 @@ const { default: resolver } = await load('../src/graphql-api/mutation/resolver.j
     countPlayersWithBans() {
       throw new Error('Players were counted with no limit on lists.');
     }
+  },
+  // The pool the counts run on, which is never used with no limit.
+  'scbl-lib/db/sequelize': {
+    createPool: () => ({
+      async transaction() {
+        throw new Error('Players were counted with no limit on lists.');
+      }
+    }),
+    Transaction: { ISOLATION_LEVELS: { REPEATABLE_READ: 'REPEATABLE READ' } }
   },
   'scbl-lib/db/models': { BanList: {}, ExportBanList, ExportBanListConfig: {}, Organisation: {} },
   'scbl-lib/utils': mutations.utils

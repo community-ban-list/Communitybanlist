@@ -81,6 +81,26 @@ for (const [model, row] of Object.entries(rows)) {
       return answer(options);
     };
 }
+// Changes to export ban lists are saved in transactions, with rows locked, which these stand-ins
+// only record.
+Object.assign(models.ExportBanList, {
+  async inTransaction(work) {
+    calls.push({ model: 'ExportBanList', method: 'inTransaction' });
+    return work({});
+  },
+  async lockListsOf(owner) {
+    calls.push({ model: 'ExportBanList', method: 'lockListsOf', options: { owner } });
+    return 0;
+  },
+  async whileDeleting(id, deletion) {
+    calls.push({ model: 'ExportBanList', method: 'whileDeleting', options: { id } });
+    return deletion();
+  },
+  async isBeingDeleted(id) {
+    calls.push({ model: 'ExportBanList', method: 'isBeingDeleted', options: { id } });
+    return false;
+  }
+});
 
 // The GraphQL API is loaded from the file the web server runs, with the real schema and resolvers,
 // and stubs for Koa and the database. @apollo/server is the real package, but ApolloServer is a
@@ -134,7 +154,14 @@ const packages = {
   'scbl-lib/db/sequelize': {
     DATABASE_UNAVAILABLE_MESSAGE: 'The database is unavailable.',
     isDatabaseUnavailable: () => false,
-    Op: { ne: Symbol('ne') }
+    Op: { ne: Symbol('ne') },
+    // The pool the counts run on, which is never used with no limit.
+    createPool: () => ({
+      async transaction() {
+        throw new Error('Players were counted with no limit on lists.');
+      }
+    }),
+    Transaction: { ISOLATION_LEVELS: { REPEATABLE_READ: 'REPEATABLE READ' } }
   },
   'scbl-lib/utils': {
     // The mutations post their changes to the log channel, which these checks make none of.
