@@ -75,6 +75,15 @@ const dependencies = {
       throw new Error('Players were counted with no limit on lists.');
     }
   },
+  // The pool the counts run on, which is never used with no limit.
+  'scbl-lib/db/sequelize': {
+    createPool: () => ({
+      async transaction() {
+        throw new Error('Players were counted with no limit on lists.');
+      }
+    }),
+    Transaction: { ISOLATION_LEVELS: { REPEATABLE_READ: 'REPEATABLE READ' } }
+  },
   'scbl-lib/db/models': {
     BanList: {},
     ExportBanListConfig: {},

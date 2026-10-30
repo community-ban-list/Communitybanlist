@@ -444,6 +444,11 @@ async function mutations(env = { EXPORT_BM_MAX_PLAYERS: '0', EXPORT_REMOTE_MAX_P
         countPlayersWithBans: async () => 100
       },
       'scbl-lib/db/models': db.models,
+      // The pool the counts run on, whose transaction only runs them.
+      'scbl-lib/db/sequelize': {
+        createPool: () => ({ transaction: async (options, counts) => counts({}) }),
+        Transaction: { ISOLATION_LEVELS: { REPEATABLE_READ: 'REPEATABLE READ' } }
+      },
       'scbl-lib/export-list-limits': exportListLimits,
       'scbl-lib/utils': {
         // Each line, with the messages of the errors it is posted with.
