@@ -36,6 +36,7 @@ const GET_PLAYER = gql`
           cursor
           node {
             id
+            paused
             banList {
               id
               name
@@ -56,6 +57,7 @@ const GET_PLAYER = gql`
           cursor
           node {
             id
+            paused
             banList {
               id
               name
@@ -74,6 +76,15 @@ const GET_PLAYER = gql`
     }
   }
 `;
+
+// Said of a ban on a ban list that is paused, whose bans count for nothing until it is resumed.
+function PausedBan() {
+  return (
+    <div className="small text-muted">
+      Paused: this ban list's bans do not count toward reputation or export ban lists for now.
+    </div>
+  );
+}
 
 export default function () {
   const { search } = useParams();
@@ -317,7 +328,10 @@ export default function () {
                             {edge.node.banList.organisation.name}
                           </a>
                         </td>
-                        <td>{edge.node.banList.name}</td>
+                        <td>
+                          {edge.node.banList.name}
+                          {edge.node.paused && <PausedBan />}
+                        </td>
                         <td style={{ whiteSpace: 'pre-wrap' }}>
                           {edge.node.reason.replace(/, /g, '\n')}
                         </td>
@@ -391,7 +405,10 @@ export default function () {
                             {edge.node.banList.organisation.name}
                           </a>
                         </td>
-                        <td>{edge.node.banList.name}</td>
+                        <td>
+                          {edge.node.banList.name}
+                          {edge.node.paused && <PausedBan />}
+                        </td>
                         <td style={{ whiteSpace: 'pre-wrap' }}>
                           {edge.node.reason.replace(/, /g, '\n')}
                         </td>

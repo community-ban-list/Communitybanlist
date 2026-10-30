@@ -7,11 +7,14 @@
 // It only reads, outside any transaction, so it takes no locks. A change to the database while it
 // runs shows as a difference, so run it while nothing writes to the database, e.g. on a copy, and
 // never during an importer run. Lists with a maxBanAge count bans by UTC days, so they can also
-// differ when a check runs across midnight UTC; run it again if only those differ then.
+// differ when a check runs across midnight UTC; run it again if only those differ then. The bans of
+// paused ban lists are left out both ways, as the importer leaves them out, with the lists paused
+// when it starts.
 //
 //   DATABASE_URI=mysql://<user>:<password>@<host>:3306/<database> node scripts/compare-export-membership.js
 //
 // It prints each list that differs, and exits with 1 if any does or the check fails.
+import { readExcludedBanLists } from 'scbl-lib/db/ban-list-suspensions';
 import {
   SCORING_FIELDS,
   countMembers,
@@ -51,6 +54,9 @@ async function compare() {
     'SELECT exportBanList, banList, activePoints, expiredPoints FROM ExportBanListConfigs ORDER BY id'
   );
   const steamUsers = await select('SELECT id FROM SteamUsers');
+  const excludedBanLists = await readExcludedBanLists();
+  if (excludedBanLists.length > 0)
+    console.log(`Leaving out the bans of paused ban lists ${excludedBanLists.join(', ')}.`);
 
   // The importer's way: each list's players, from every batch of Steam users.
   const importerStarted = Date.now();
@@ -58,7 +64,7 @@ async function compare() {
   let batches = 0;
   for (let i = 0; i < steamUsers.length; i += BATCH_SIZE) {
     const batch = steamUsers.slice(i, i + BATCH_SIZE).map((steamUser) => steamUser.id);
-    const generated = await membershipForPlayers(batch, { transaction: null });
+    const generated = await membershipForPlayers(batch, { transaction: null, excludedBanLists });
     for (const { steamUser, exportBanList } of generated) {
       if (!fromImporter.has(exportBanList)) fromImporter.set(exportBanList, new Set());
       fromImporter.get(exportBanList).add(steamUser);
@@ -75,13 +81,18 @@ async function compare() {
   for (const list of lists) {
     const listConfigs = configs.filter((config) => config.exportBanList === list.id);
     const countStarted = Date.now();
-    const count = await countMembers(list, listConfigs, { timeLimit: TIME_LIMIT });
+    const count = await countMembers(list, listConfigs, {
+      timeLimit: TIME_LIMIT,
+      excludedBanLists
+    });
     const took = Date.now() - countStarted;
     players += count;
     countTime += took;
     if (!slowest || took > slowest.took) slowest = { id: list.id, took };
 
-    const found = new Set(await findMembers(list, listConfigs, { timeLimit: TIME_LIMIT }));
+    const found = new Set(
+      await findMembers(list, listConfigs, { timeLimit: TIME_LIMIT, excludedBanLists })
+    );
     const importer = fromImporter.get(list.id);
     const onlyFound = [...found].filter((steamUser) => !importer.has(steamUser));
     const onlyImporter = [...importer].filter((steamUser) => !found.has(steamUser));
