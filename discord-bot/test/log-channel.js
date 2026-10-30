@@ -65,16 +65,16 @@ async function loadBot() {
     );
   const modules = new Map();
   // Load a file, with the stubs given for some of its imports, and the real files for the others,
-  // each loaded once.
+  // each loaded once. Each is kept before its file is read, as linking asks for a module's imports
+  // at once.
   async function load(url, stubs) {
-    const moduleAt = async (href) => {
+    const moduleAt = (href) => {
       if (!modules.has(href))
         modules.set(
           href,
-          new vm.SourceTextModule(await readFile(new URL(href), 'utf8'), {
-            context,
-            identifier: href
-          })
+          readFile(new URL(href), 'utf8').then(
+            (source) => new vm.SourceTextModule(source, { context, identifier: href })
+          )
         );
       return modules.get(href);
     };
@@ -119,8 +119,9 @@ async function loadBot() {
       }
     }
   });
-  const logger = modules.get(new URL('../../scbl-lib/utils/logger.js', import.meta.url).href)
-    .namespace.default;
+  const logger = (
+    await modules.get(new URL('../../scbl-lib/utils/logger.js', import.meta.url).href)
+  ).namespace.default;
   assert.strictEqual(logger.postListener, null);
 
   // Discord's client, which logs in and says when it is ready.
