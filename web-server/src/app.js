@@ -151,6 +151,8 @@ if (inProduction) {
   // an export list URL without its id, or for a path whose first part has a dot, as a file name
   // has, is left unanswered, so Koa answers it with 404 rather than a page. The rest of a page's
   // path can hold what a visitor typed, such as a search for a name, so dots there are allowed.
+  // The 404 tells browsers and caches in front of the server, such as Cloudflare, not to keep it,
+  // as the file may be there soon, e.g. a bundle asked for while a new build is being deployed.
   const serverPath = /^\/(static|auth|graphql|export)(\/|$)/i;
   const fileName = /^\/[^/]*\./;
 
@@ -158,6 +160,7 @@ if (inProduction) {
     if (buildFiles.has(ctx.path)) await send(ctx, ctx.path, { root: buildPath });
     else if (!serverPath.test(ctx.path) && !fileName.test(ctx.path))
       await send(ctx, 'index.html', { root: buildPath });
+    else ctx.set('Cache-Control', 'no-store');
   });
 }
 
