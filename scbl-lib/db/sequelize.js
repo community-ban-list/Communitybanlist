@@ -3,7 +3,18 @@ import Sequelize from 'sequelize';
 if (!process.env.DATABASE_URI)
   throw new Error('Environmental variable DATABASE_URI must be provided.');
 
-export default new Sequelize.Sequelize(process.env.DATABASE_URI, { logging: false });
+// The options every pool of connections to the database is made with, so their connections work
+// alike: e.g. Sequelize sets each one's time zone to UTC, the days that bans' ages are counted in.
+const OPTIONS = { logging: false };
+
+export default new Sequelize.Sequelize(process.env.DATABASE_URI, OPTIONS);
+
+// A pool of connections of its own to the same database, with these settings for it (Sequelize's
+// pool option, e.g. { max: 1, acquire: 2000 }), for work that must neither wait for the connections
+// the rest of the process shares nor take them up. Close it with its close().
+export function createPool(pool) {
+  return new Sequelize.Sequelize(process.env.DATABASE_URI, { ...OPTIONS, pool });
+}
 
 const { Op, QueryTypes, Transaction, ForeignKeyConstraintError, ValidationError } = Sequelize;
 
