@@ -1,3 +1,4 @@
+import BanListHold from './ban-list-hold.js';
 import BanListPendingRemoval from './ban-list-pending-removal.js';
 import BanListSuspension from './ban-list-suspension.js';
 import BanListSync from './ban-list-sync.js';
@@ -22,10 +23,12 @@ const IMPORTER_MODELS = [
   ImporterState,
   BanListSync,
   BanListPendingRemoval,
-  BanListSuspension
+  BanListSuspension,
+  BanListHold
 ];
 
 export {
+  BanListHold,
   BanListPendingRemoval,
   BanListSuspension,
   BanListSync,

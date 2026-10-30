@@ -170,6 +170,8 @@ async function loadBanImporter(lists, { onFetch = () => {}, options, syncs = [] 
       events.push(`read missing bans of ${replacements[0]}`);
       return [];
     }
+    // No list's bans are held for an admin.
+    if (sql.startsWith('SELECT reason, storedCount FROM BanListHolds')) return [];
     // No list has bans waiting for a confirming read.
     if (sql.startsWith('SELECT banList, MIN(')) return [];
     if (sql.startsWith('INSERT IGNORE INTO SteamUsers')) {
