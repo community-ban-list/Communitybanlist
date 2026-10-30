@@ -1,6 +1,6 @@
 import { Client, Events, GatewayIntentBits, MessageFlags } from 'discord.js';
 
-import { EXPORT_LIST_LIMIT_PROBLEMS } from 'scbl-lib/config';
+import { EXPORT_LIST_LIMIT_PROBLEMS, UNSET_EXPORT_LIST_LIMITS } from 'scbl-lib/config';
 import { connect, disconnect, recordLogMessages, stopRecordingLogMessages } from 'scbl-lib/db';
 import { describeError, Logger, stackTrace } from 'scbl-lib/utils';
 
@@ -14,6 +14,12 @@ const SHUTDOWN_LOG_TIMEOUT = 5000;
 // Limits on export ban lists set to values that cannot be used, which have their defaults instead.
 // /exportbanlist removes the lists outside the limits, so they must be the web server's.
 for (const problem of EXPORT_LIST_LIMIT_PROBLEMS) console.warn(`Warning: ${problem}`);
+// The limits that are not set, which have their defaults too, in one line, so that one set for the
+// web server but not for the bot does not go unseen.
+if (UNSET_EXPORT_LIST_LIMITS.length > 0)
+  console.warn(
+    `Warning: These EXPORT_* settings are unset, so the bot uses their defaults: ${UNSET_EXPORT_LIST_LIMITS.map(({ variable, value }) => `${variable}=${value}`).join(', ')}. /exportbanlist removes the export ban lists outside these limits, so the bot and the web server must have the same EXPORT_* values.`
+  );
 
 // The newest message the bot posts to the log channel is kept in the database, so the importer
 // service can keep its status message below it. It never holds up or fails a command.

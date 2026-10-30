@@ -174,14 +174,16 @@ function qualifyingPlayers(settings, configs, timeLimit, excludedBanLists) {
 //   website's size check counts paused lists' bans too, so a list cannot be given more points while
 //   a large list is paused and go over its cap when that list counts again, as the importer never
 //   refuses players for the cap. The importer's own count leaves them out.
-// The count is one statement outside any transaction, so it reads a consistent snapshot and takes
-// no locks: in the importer's SERIALIZABLE transaction it would lock every ban it reads. Errors,
-// such as MySQL's ER_QUERY_TIMEOUT when the time limit is reached, are passed on as Sequelize
-// gives them.
+// - transaction, if given, is a REPEATABLE READ transaction to count in, on the connection it
+//   holds, whichever pool that is from, so counts in it all read the same snapshot of the bans.
+// The count is one statement, outside any transaction unless one is given, so it reads a
+// consistent snapshot and takes no locks: in the importer's SERIALIZABLE transaction it would lock
+// every ban it reads. Errors, such as MySQL's ER_QUERY_TIMEOUT when the time limit is reached, are
+// passed on as Sequelize gives them.
 export async function countMembers(
   settings,
   configs,
-  { timeLimit = 3000, excludedBanLists = [] } = {}
+  { timeLimit = 3000, excludedBanLists = [], transaction } = {}
 ) {
   const { hints, sql, replacements } = qualifyingPlayers(
     settings,
@@ -193,7 +195,8 @@ export async function countMembers(
     `SELECT ${hints} COUNT(*) AS players FROM (${sql}) Q`,
     {
       type: QueryTypes.SELECT,
-      replacements
+      replacements,
+      ...(transaction && { transaction })
     }
   );
   return Number(players);
