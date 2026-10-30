@@ -9,6 +9,8 @@ export default gql`
     expired: Boolean
     reason: String
     banList: BanList
+    "Whether the ban is on a ban list that is paused, so it counts for nothing. Only a player's bans say."
+    paused: Boolean
   }
 
   type BanConnection {

@@ -35,6 +35,12 @@ function battlemetricsBanListName() {
 }
 // The list createExportBanList creates, and the one updateExportBanList finds.
 let created;
+// The lists a failed creation deleted, by the where clause it deleted them with, and what the
+// database answers: how many rows it deleted, or an error.
+const deletions = [];
+let deletedRows = 1;
+// The transaction in progress, if any.
+let openTransaction = null;
 const found = {
   id: 11,
   name: 'Old name',
@@ -69,19 +75,51 @@ const dependencies = {
       throw new Error('Players were counted with no limit on lists.');
     }
   },
+  // The pool the counts run on, which is never used with no limit.
+  'scbl-lib/db/sequelize': {
+    createPool: () => ({
+      async transaction() {
+        throw new Error('Players were counted with no limit on lists.');
+      }
+    }),
+    Transaction: { ISOLATION_LEVELS: { REPEATABLE_READ: 'REPEATABLE READ' } }
+  },
   'scbl-lib/db/models': {
     BanList: {},
     ExportBanListConfig: {},
     Organisation: {},
     ExportBanList: {
       count: async () => 0,
-      // A list is never created in a transaction, which its BattleMetrics ban list's save would
-      // wait on.
-      create: async (fields, options) => {
-        assert.strictEqual(options, undefined);
-        return Object.assign(created, fields);
+      async inTransaction(work) {
+        openTransaction = {};
+        try {
+          return await work(openTransaction);
+        } finally {
+          openTransaction = null;
+        }
       },
-      findOne: async () => found
+      lockListsOf: async () => 0,
+      // No list here is being deleted.
+      isBeingDeleted: async () => false,
+      // A list is created in a transaction of its own, which has ended before its BattleMetrics
+      // ban list is made, as making it saves the list, which would wait on the uncommitted row.
+      create: async (fields, options) => {
+        assert.ok(openTransaction && options.transaction === openTransaction);
+        const list = Object.assign(created, fields);
+        const make = list.createBattlemetricsBanList;
+        list.createBattlemetricsBanList = function () {
+          assert.strictEqual(openTransaction, null, "The list's transaction has ended.");
+          return make.call(this);
+        };
+        return list;
+      },
+      findOne: async () => found,
+      async destroy({ where, ...options }) {
+        assert.deepStrictEqual(Object.keys(options), []);
+        deletions.push({ ...where });
+        if (deletedRows instanceof Error) throw deletedRows;
+        return deletedRows;
+      }
     }
   },
   'scbl-lib/utils': { isDiscordWebhookUrl() {}, testDiscordWebhook() {}, Logger, logText }
@@ -142,16 +180,16 @@ const SETTINGS =
 
 // When BattleMetrics fails to create the ban list, the web server logs which list it was and that
 // BattleMetrics may have created a ban list anyway. The list could never be used without one, so
-// it is deleted, without a transaction, and the owner is told that it was not created. One line
-// is posted, saying who, which list, what failed and why, and never the token the error holds. As
-// BattleMetrics may have made a ban list that nothing records, the line says what to look for on
-// BattleMetrics, and is posted as an important line, ahead of others.
+// it is deleted, without a transaction, but only while it is still the user's, as the Discord bot
+// can give it to another user while its ban list is being made, and the owner is told that it was
+// not created. One line is posted, saying who, which list, what failed and why, and never the
+// token the error holds. As BattleMetrics may have made a ban list that nothing records, the line
+// says what to look for on BattleMetrics, and is posted as an important line, ahead of others.
 const listError = apiError(
   'BattleMetrics POST ban-lists failed: HTTP 502 (Bad Gateway), so it may have been carried out',
   502,
   { ambiguous: true }
 );
-const deletions = [];
 created = {
   id: 9,
   battlemetricsID: null,
@@ -159,15 +197,15 @@ created = {
   async createBattlemetricsBanList() {
     throw listError;
   },
-  async destroy(...args) {
-    deletions.push({ id: this.id, args: args.length });
+  async destroy() {
+    assert.fail('The list was deleted by its ID alone.');
   }
 };
 await assert.rejects(create(), {
   message:
     'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.'
 });
-assert.deepStrictEqual(deletions, [{ id: 9, args: 0 }]);
+assert.deepStrictEqual(deletions, [{ id: 9, owner: 'owner' }]);
 assert.deepStrictEqual(logged(), [
   [
     'Failed to create the BattleMetrics ban list for export ban list:',
@@ -188,20 +226,36 @@ assert.deepStrictEqual(posted, [
 ]);
 assert.deepStrictEqual(important, posted);
 
+// A list given to another user while its ban list was being made is theirs now, so it is left as
+// it is, and the line says so. Its owner, who no longer has it, is told it was not created.
+logs.length = 0;
+posted.length = 0;
+important.length = 0;
+deletions.length = 0;
+deletedRows = 0;
+created = { ...created, id: 14 };
+await assert.rejects(create(), {
+  message:
+    'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.'
+});
+assert.deepStrictEqual(deletions, [{ id: 14, owner: 'owner' }]);
+assert.deepStrictEqual(posted, [
+  `[WebServer][1] Steam user owner could not create export ban list Server's List "Test" (ID: 14, BattleMetrics), as making its BattleMetrics ban list failed, and it was no longer theirs, as it had been given to another user or removed meanwhile, so it was left as it is. BattleMetrics may have made the ban list anyway, which nothing records: look for "Community Ban List - Test (ID: 14)" among CBL's ban lists on BattleMetrics, and remove it. ApiError: ${listError.message}`
+]);
+assert.deepStrictEqual(important, posted);
+
 // If the list cannot be deleted either, that is logged too, and the owner is asked to delete it.
 // The one line gives both failures.
 logs.length = 0;
 posted.length = 0;
 important.length = 0;
+deletedRows = new Error('Database unavailable');
 created = {
   id: 13,
   battlemetricsID: null,
   battlemetricsBanListName,
   async createBattlemetricsBanList() {
     throw listError;
-  },
-  async destroy() {
-    throw new Error('Database unavailable');
   }
 };
 await assert.rejects(create(), {
@@ -233,6 +287,7 @@ logs.length = 0;
 posted.length = 0;
 important.length = 0;
 deletions.length = 0;
+deletedRows = 1;
 const inviteError = apiError(
   'BattleMetrics POST ban-lists/list-10/relationships/invites failed after 3 attempts: HTTP 502',
   502,
@@ -246,7 +301,7 @@ created = {
     throw inviteError;
   },
   async destroy() {
-    deletions.push(this.id);
+    assert.fail('The list was deleted.');
   }
 };
 await assert.rejects(create(), (error) => error === inviteError);
