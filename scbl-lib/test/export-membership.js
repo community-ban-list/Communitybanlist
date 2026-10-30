@@ -274,6 +274,20 @@ await countMembers(settings, configs, { timeLimit: 2 ** 32 - 1, ...NONE });
 assert.strictEqual(queries.length, 1);
 assert.ok(tidy(queries[0].sql).includes('MAX_EXECUTION_TIME(4294967295) */ COUNT(*) AS players'));
 
+// A count given a transaction runs in it, on the connection it holds, such as one from the web
+// server's pool for counts, so the counts in it read one snapshot. The count of the players with
+// two or more bans passes it on too. The statement is the same.
+queries.length = 0;
+answer = () => [{ players: 7 }];
+const snapshot = { id: 'one snapshot' };
+assert.strictEqual(await countMembers(settings, configs, { transaction: snapshot }), 7);
+assert.strictEqual(await countPlayersWithBans(2, { timeLimit: 3000, transaction: snapshot }), 7);
+for (const { options } of queries) {
+  assert.deepStrictEqual(Object.keys(options), ['type', 'replacements', 'transaction']);
+  assert.strictEqual(options.transaction, snapshot);
+}
+assert.strictEqual(queries[0].sql, count.sql);
+
 // The database's errors are passed on as they are, e.g. MySQL's when the time limit is reached.
 const timeout = Object.assign(new Error('Query execution was interrupted'), {
   name: 'SequelizeDatabaseError',
@@ -358,6 +372,24 @@ assert.strictEqual(
 answer = () => [{ players: 3 }];
 await countPlayersWithBans(2, { excludedBanLists: [46, 7] });
 assert.strictEqual(times(queries[3].sql, PAUSED), 1);
+// A count in a transaction, such as one in the web server's snapshot for a size check, leaves out
+// the lists it is given, and none when it is given none, as the size check's counts are.
+queries.length = 0;
+answer = () => [{ players: 12 }];
+await countMembers(settings, configs, { transaction: snapshot, excludedBanLists: [46, 7] });
+await countMembers(settings, configs, { transaction: snapshot });
+assert.deepStrictEqual(
+  queries.map(({ options }) => options.transaction),
+  [snapshot, snapshot]
+);
+assert.strictEqual(
+  tidy(queries[0].sql),
+  tidy(count.sql).replace(
+    'DATEDIFF(NOW(), B.created))',
+    `DATEDIFF(NOW(), B.created)) AND ${PAUSED}`
+  )
+);
+assert.strictEqual(queries[1].sql, count.sql);
 
 // The importer's statement must be given the lists to leave out, [] for none, as an importer that
 // forgot them would count the bans of paused lists. A count leaves out none unless it is given

@@ -46,11 +46,14 @@ assert.deepStrictEqual(DEFAULT_LIMITS, {
 // The limits are read once, when scbl-lib/config.js loads, from these environment variables. Each
 // load here is a fresh copy of the file.
 let configLoads = 0;
-async function limitsFrom(env) {
+async function configFrom(env) {
   for (const variable of VARIABLES) delete process.env[variable];
   Object.assign(process.env, env);
   configLoads++;
-  const config = await import(`../config.js?load=${configLoads}`);
+  return import(`../config.js?load=${configLoads}`);
+}
+async function limitsFrom(env) {
+  const config = await configFrom(env);
   return { limits: config.EXPORT_LIST_LIMITS, problems: config.EXPORT_LIST_LIMIT_PROBLEMS };
 }
 const everyVariable = (value) => Object.fromEntries(VARIABLES.map((name) => [name, value]));
@@ -132,6 +135,36 @@ for (const env of [undefined, null, 42, throwing, everyVariable(unprintable)])
 assert.deepStrictEqual(
   readLimits({ EXPORT_BM_MAX_PLAYERS: 30000, EXPORT_BM_MIN_THRESHOLD: 5 }).limits.battlemetrics,
   { maxPlayers: 30000, minThreshold: 5, neverEnough: 'active-plus-expired' }
+);
+
+// The variables that are unset or empty are listed, each with the default used in its place, for
+// the Discord bot to warn about, as it must have the web server's limits. scbl-lib/config.js gives
+// them as UNSET_EXPORT_LIST_LIMITS. One set to a value that cannot be used is a problem instead.
+const EVERY_DEFAULT = [
+  { variable: 'EXPORT_BM_MAX_PLAYERS', value: 20000 },
+  { variable: 'EXPORT_BM_MIN_THRESHOLD', value: 4 },
+  { variable: 'EXPORT_BM_NEVER_ENOUGH', value: 'active-plus-expired' },
+  { variable: 'EXPORT_REMOTE_MAX_PLAYERS', value: 40000 },
+  { variable: 'EXPORT_REMOTE_MIN_THRESHOLD', value: 4 },
+  { variable: 'EXPORT_REMOTE_NEVER_ENOUGH', value: 'active-plus-expired' }
+];
+for (const env of [{}, everyVariable(''), everyVariable('   '), undefined, throwing])
+  assert.deepStrictEqual(readLimits(env).unset, EVERY_DEFAULT);
+assert.deepStrictEqual(
+  readLimits({
+    EXPORT_BM_MAX_PLAYERS: '0',
+    EXPORT_BM_MIN_THRESHOLD: '',
+    EXPORT_REMOTE_MAX_PLAYERS: 'lots',
+    EXPORT_REMOTE_MIN_THRESHOLD: '5'
+  }).unset,
+  [EVERY_DEFAULT[1], EVERY_DEFAULT[2], EVERY_DEFAULT[5]]
+);
+assert.deepStrictEqual(readLimits(everyVariable('5')).unset, []);
+assert.deepStrictEqual((await configFrom({})).UNSET_EXPORT_LIST_LIMITS, EVERY_DEFAULT);
+assert.deepStrictEqual(
+  (await configFrom({ ...everyVariable('5'), EXPORT_REMOTE_NEVER_ENOUGH: ' ' }))
+    .UNSET_EXPORT_LIST_LIMITS,
+  [EVERY_DEFAULT[5]]
 );
 
 // A new list's threshold is the model's default, or a minimum threshold of either type above it.
