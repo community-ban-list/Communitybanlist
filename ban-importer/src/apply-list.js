@@ -192,6 +192,12 @@ export const FULL_REMOVAL_BANS = 10;
 export const LARGE_REMOVAL_BANS = 25;
 export const LARGE_REMOVAL_SHARE = 0.2;
 
+// Whether losing count bans of a list that had stored bans before the read is a large loss, by the
+// numbers above.
+export function isLargeLoss(count, stored) {
+  return count >= Math.max(LARGE_REMOVAL_BANS, stored * LARGE_REMOVAL_SHARE);
+}
+
 // The holds that are recorded in BanListPendingRemovals, as their bans' heldAt, and so last over
 // runs, until an admin confirms them or one of their bans comes back. An 'empty' hold is not
 // recorded, as every read that finds no bans holds the list again.
@@ -254,8 +260,7 @@ export function planRemovals({
   let lost = [];
   if (!replace && !holding) {
     lost = others.filter((id) => !pending.has(id));
-    if (lost.length >= Math.max(LARGE_REMOVAL_BANS, stored * LARGE_REMOVAL_SHARE))
-      others = others.filter((id) => pending.has(id));
+    if (isLargeLoss(lost.length, stored)) others = others.filter((id) => pending.has(id));
     else lost = [];
   }
 
@@ -480,41 +485,76 @@ export async function removeBans(banList, bans, { batchSize = BATCH_SIZE } = {})
   return removed;
 }
 
-// Record that the bans, by ID, were missing from the complete read of the list at now: as first
-// missing then, if they are not recorded yet, and as last missing then. With held, they are held for
-// an admin, from now if they were not already.
-export async function savePendingRemovals(
-  banList,
-  ids,
-  { now, held = false, batchSize = BATCH_SIZE }
-) {
+// Record that a batch of the list's bans, by ID, were missing from the complete read of it at now,
+// with one statement, in the transaction given, if any: as first missing then, if they are not
+// recorded yet, and as last missing then. With held, they are held for an admin, from now if they
+// were not already, which keeps when that began.
+function recordMissing(banList, batch, { now, held, transaction }) {
+  return sequelize.query(
+    `INSERT INTO BanListPendingRemovals (banList, banId, firstMissingAt, lastMissingAt, heldAt) VALUES ${placeholders(batch.length, 5)} AS new ON DUPLICATE KEY UPDATE lastMissingAt = new.lastMissingAt, heldAt = COALESCE(BanListPendingRemovals.heldAt, new.heldAt)`,
+    {
+      replacements: batch.flatMap((id) => [
+        banList,
+        id,
+        sqlTime(now),
+        sqlTime(now),
+        held ? sqlTime(now) : null
+      ]),
+      transaction
+    }
+  );
+}
+
+// Record that the bans, by ID, were missing from the complete read of the list at now, and wait for
+// a later complete read, a statement for each batch of batchSize bans (see recordMissing).
+export async function savePendingRemovals(banList, ids, { now, batchSize = BATCH_SIZE }) {
   for (let i = 0; i < ids.length; i += batchSize) {
     const batch = ids.slice(i, i + batchSize);
-    await retryOperation(() =>
-      sequelize.query(
-        `INSERT INTO BanListPendingRemovals (banList, banId, firstMissingAt, lastMissingAt, heldAt) VALUES ${placeholders(batch.length, 5)} AS new ON DUPLICATE KEY UPDATE lastMissingAt = new.lastMissingAt, heldAt = COALESCE(BanListPendingRemovals.heldAt, new.heldAt)`,
-        {
-          replacements: batch.flatMap((id) => [
-            banList,
-            id,
-            sqlTime(now),
-            sqlTime(now),
-            held ? sqlTime(now) : null
-          ])
-        }
-      )
-    );
+    await retryOperation(() => recordMissing(banList, batch, { now, held: false }));
   }
 }
+
+const RELEASE_HELD =
+  'UPDATE BanListPendingRemovals SET firstMissingAt = ?, lastMissingAt = ?, heldAt = NULL WHERE banList = ? AND heldAt IS NOT NULL';
 
 // Stop holding the list's held bans for an admin: they wait for a later complete read instead, as
 // if first missing at now.
 export async function releaseHeldRemovals(banList, { now }) {
   await retryOperation(() =>
-    sequelize.query(
-      'UPDATE BanListPendingRemovals SET firstMissingAt = ?, lastMissingAt = ?, heldAt = NULL WHERE banList = ? AND heldAt IS NOT NULL',
-      { replacements: [sqlTime(now), sqlTime(now), banList] }
-    )
+    sequelize.query(RELEASE_HELD, { replacements: [sqlTime(now), sqlTime(now), banList] })
+  );
+}
+
+// Save the list's hold for an admin in one transaction, run again as a whole while it fails in a way
+// that could pass, so the hold is saved whole, or not at all: why its bans are held (reason), unless
+// none is given, as the hold goes on as it was, then its bans, by ID, as missing from the complete
+// read at now and held, a statement for each batch of batchSize bans (see recordMissing). With anew,
+// the list's held bans are released first, so that all of the hold's bans are held from now, as for
+// a hold that began for another reason and now begins anew. A run cut short while it saves the hold,
+// e.g. by a database outage, its stop or the process being killed, saves none of it, so the next
+// complete read finds the same loss and holds it again. Part of a hold, saved alone, would have the
+// next read take the list as held and the rest of the bans it lost as missing besides, which wait
+// for a confirming read that removes them.
+export async function saveHold(
+  banList,
+  ids,
+  { reason = null, anew = false, now, batchSize = BATCH_SIZE }
+) {
+  await retryOperation(() =>
+    sequelize.transaction(async (transaction) => {
+      if (reason !== null)
+        await sequelize.query(
+          'INSERT INTO BanListHolds (banList, reason) VALUES (?, ?) AS new ON DUPLICATE KEY UPDATE reason = new.reason',
+          { replacements: [banList, reason], transaction }
+        );
+      if (anew)
+        await sequelize.query(RELEASE_HELD, {
+          replacements: [sqlTime(now), sqlTime(now), banList],
+          transaction
+        });
+      for (let i = 0; i < ids.length; i += batchSize)
+        await recordMissing(banList, ids.slice(i, i + batchSize), { now, held: true, transaction });
+    })
   );
 }
 
@@ -527,16 +567,6 @@ export async function readHoldReason(banList) {
     type: QueryTypes.SELECT
   });
   return row?.reason ?? null;
-}
-
-// Record the hold the list's bans are held for, from now on, in place of any recorded before.
-export async function saveHoldReason(banList, reason) {
-  await retryOperation(() =>
-    sequelize.query(
-      'INSERT INTO BanListHolds (banList, reason) VALUES (?, ?) AS new ON DUPLICATE KEY UPDATE reason = new.reason',
-      { replacements: [banList, reason] }
-    )
-  );
 }
 
 // Forget the hold the list's bans were held for, once none of them is held any longer.

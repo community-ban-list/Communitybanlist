@@ -138,6 +138,7 @@ const {
   diffBans,
   flagOf,
   FULL_REMOVAL_BANS,
+  isLargeLoss,
   isMissingBanList,
   isRetryable,
   LARGE_REMOVAL_BANS,
@@ -152,7 +153,7 @@ const {
   REMOVE_AT_ONCE_BANS,
   REMOVE_AT_ONCE_SHARE,
   retryOperation,
-  saveHoldReason,
+  saveHold,
   savePendingRemovals,
   sqlTime,
   textOf,
@@ -181,6 +182,21 @@ assert.deepStrictEqual(
   [10, 0.05, 10]
 );
 assert.deepStrictEqual([LARGE_REMOVAL_BANS, LARGE_REMOVAL_SHARE], [25, 0.2]);
+// A large loss is at least 25 bans, and a fifth of the list: the 25 decide for a list of up to 125
+// bans, and the fifth above that. None is never one.
+assert.deepStrictEqual(
+  [
+    [24, 30],
+    [25, 30],
+    [25, 125],
+    [25, 126],
+    [26, 126],
+    [2355, 11780],
+    [2356, 11780],
+    [0, 0]
+  ].map(([count, stored]) => isLargeLoss(count, stored)),
+  [false, true, true, false, true, false, true, false]
+);
 assert.deepStrictEqual(plain(RECORDED_HOLDS), ['full', 'large']);
 assert.deepStrictEqual(plain(COMPARED_FIELDS), [
   'steamUser',
@@ -957,9 +973,8 @@ assert.deepStrictEqual(
 );
 
 // Missing bans are recorded with one statement per batch, which keeps when a ban was first missing
-// and updates when it was last, and their records are dropped the same way. Bans held for an admin
-// are recorded as held from now, unless they already were, which keeps when that began. Releasing
-// a list's held bans makes them wait for a later complete read, as if first missing now.
+// and updates when it was last, and their records are dropped the same way. Releasing a list's held
+// bans makes them wait for a later complete read, as if first missing now.
 reset();
 const SAVE_PENDING = (rows) =>
   `INSERT INTO BanListPendingRemovals (banList, banId, firstMissingAt, lastMissingAt, heldAt) VALUES ${Array(
@@ -969,9 +984,10 @@ const SAVE_PENDING = (rows) =>
     .join(
       ', '
     )} AS new ON DUPLICATE KEY UPDATE lastMissingAt = new.lastMissingAt, heldAt = COALESCE(BanListPendingRemovals.heldAt, new.heldAt)`;
+const RELEASE_HELD =
+  'UPDATE BanListPendingRemovals SET firstMissingAt = ?, lastMissingAt = ?, heldAt = NULL WHERE banList = ? AND heldAt IS NOT NULL';
 const AT = '2026-10-21 12:00:00.000';
 await savePendingRemovals(7, ['7,a', '7,b', '7,c'], { now: new Date(NOW), batchSize: 2 });
-await savePendingRemovals(7, ['7,e'], { now: new Date(NOW), held: true });
 await clearPendingRemovals(7, ['7,d'], { batchSize: 2 });
 await releaseHeldRemovals(7, { now: new Date(NOW) });
 assert.deepStrictEqual(
@@ -979,13 +995,8 @@ assert.deepStrictEqual(
   [
     [SAVE_PENDING(2), [7, '7,a', AT, AT, null, 7, '7,b', AT, AT, null], null],
     [SAVE_PENDING(1), [7, '7,c', AT, AT, null], null],
-    [SAVE_PENDING(1), [7, '7,e', AT, AT, AT], null],
     ['DELETE FROM BanListPendingRemovals WHERE banList = ? AND banId IN (?)', [7, ['7,d']], null],
-    [
-      'UPDATE BanListPendingRemovals SET firstMissingAt = ?, lastMissingAt = ?, heldAt = NULL WHERE banList = ? AND heldAt IS NOT NULL',
-      [AT, AT, 7],
-      null
-    ]
+    [RELEASE_HELD, [AT, AT, 7], null]
   ]
 );
 // A deadlock runs a statement again.
@@ -994,33 +1005,97 @@ fail(/^UPDATE BanListPendingRemovals /, deadlock());
 await releaseHeldRemovals(7, { now: new Date(NOW) });
 assert.deepStrictEqual([statements().length, delays], [2, [5000]]);
 
-// Why a list's bans are held is read by the list, or none, saved in place of any saved before, and
-// forgotten, each with one statement. A deadlock or a lock wait runs either write again.
+// A hold for an admin is saved in one transaction, whole or not at all: why the list's bans are
+// held, as the hold begins, then its bans, a statement for each batch, recorded as held from now,
+// unless they already were, which keeps when that began. A hold that begins anew, for another
+// reason, releases the list's held bans first, in the same transaction, so all of its bans are held
+// from now. One that goes on saves its bans alone.
 reset();
-const HOLD_REASON = 'SELECT reason FROM BanListHolds WHERE banList = ?';
 const SAVE_HOLD_REASON =
   'INSERT INTO BanListHolds (banList, reason) VALUES (?, ?) AS new ON DUPLICATE KEY UPDATE reason = new.reason';
+await saveHold(7, ['7,e', '7,f', '7,g'], { reason: 'large', now: new Date(NOW), batchSize: 2 });
+await saveHold(7, ['7,e', '7,f'], { reason: 'full', anew: true, now: new Date(NOW) });
+await saveHold(7, ['7,e'], { now: new Date(NOW) });
+assert.deepStrictEqual(
+  events.map(([type, sql, replacements, transaction]) =>
+    type === 'query' ? [sql, replacements, transaction] : [type, sql]
+  ),
+  [
+    ['begin', 1],
+    [SAVE_HOLD_REASON, [7, 'large'], 1],
+    [SAVE_PENDING(2), [7, '7,e', AT, AT, AT, 7, '7,f', AT, AT, AT], 1],
+    [SAVE_PENDING(1), [7, '7,g', AT, AT, AT], 1],
+    ['commit', 1],
+    ['begin', 2],
+    [SAVE_HOLD_REASON, [7, 'full'], 2],
+    [RELEASE_HELD, [AT, AT, 7], 2],
+    [SAVE_PENDING(2), [7, '7,e', AT, AT, AT, 7, '7,f', AT, AT, AT], 2],
+    ['commit', 2],
+    ['begin', 3],
+    [SAVE_PENDING(1), [7, '7,e', AT, AT, AT], 3],
+    ['commit', 3]
+  ]
+);
+// A failure that could pass, e.g. a deadlock, in any of its statements runs the whole transaction
+// again, and one that lasts, e.g. as the database is down, leaves none of it saved: the batches
+// saved before it are rolled back with it, so no part of the hold is saved without the rest.
+const LAST_BATCH = /^INSERT INTO BanListPendingRemovals .* VALUES \(\?, \?, \?, \?, \?\) AS new /;
+const steps = () =>
+  events.map(([type, sql, replacements, transaction]) =>
+    type === 'query'
+      ? [sql === SAVE_HOLD_REASON ? 'reason' : `held ${replacements.length / 5}`, transaction]
+      : [type, sql]
+  );
+reset();
+fail(LAST_BATCH, deadlock());
+await saveHold(7, ['7,e', '7,f', '7,g'], { reason: 'large', now: new Date(NOW), batchSize: 2 });
+assert.deepStrictEqual(steps(), [
+  ['begin', 1],
+  ['reason', 1],
+  ['held 2', 1],
+  ['held 1', 1],
+  ['rollback', 1],
+  ['begin', 2],
+  ['reason', 2],
+  ['held 2', 2],
+  ['held 1', 2],
+  ['commit', 2]
+]);
+assert.deepStrictEqual(delays, [5000]);
+reset();
+fail(LAST_BATCH, ...Array.from({ length: 5 }, () => new ConnectionError()));
+await assert.rejects(
+  saveHold(7, ['7,e', '7,f', '7,g'], { reason: 'large', now: new Date(NOW), batchSize: 2 }),
+  { name: 'SequelizeConnectionRefusedError' }
+);
+assert.deepStrictEqual(
+  ['begin', 'held 2', 'rollback', 'commit'].map(
+    (step) => steps().filter(([type]) => type === step).length
+  ),
+  [5, 5, 5, 0]
+);
+
+// Why a list's bans are held is read by the list, or none, and forgotten, each with one statement. A
+// lock wait runs the delete again.
+reset();
+const HOLD_REASON = 'SELECT reason FROM BanListHolds WHERE banList = ?';
 selects = { [HOLD_REASON]: [{ reason: 'large' }] };
 assert.strictEqual(await readHoldReason(7), 'large');
 selects = {};
 assert.strictEqual(await readHoldReason(8), null);
-await saveHoldReason(7, 'large');
 await clearHoldReason(7);
 assert.deepStrictEqual(
   events.map(([, sql, replacements, transaction]) => [sql, replacements, transaction]),
   [
     [HOLD_REASON, [7], null],
     [HOLD_REASON, [8], null],
-    [SAVE_HOLD_REASON, [7, 'large'], null],
     ['DELETE FROM BanListHolds WHERE banList = ?', [7], null]
   ]
 );
 reset();
-fail(/^INSERT INTO BanListHolds /, deadlock());
 fail(/^DELETE FROM BanListHolds /, lockWaitTimeout());
-await saveHoldReason(7, 'full');
 await clearHoldReason(7);
-assert.deepStrictEqual([statements().length, delays], [4, [5000, 5000]]);
+assert.deepStrictEqual([statements().length, delays], [2, [5000]]);
 
 // Once the run is asked to stop, the batch under way is finished, and no other is started.
 reset();
@@ -1040,5 +1115,5 @@ assert.deepStrictEqual(batches, [2, 2]);
 assert.strictEqual(events.filter(([type]) => type === 'commit').length, 2);
 
 console.log(
-  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans or a large part of them at once, which last until confirmed or a held ban comes back, batched writes, retries, failed bans, bans written alone, removals, records of missing and held bans and why they are held, and stops.'
+  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans or a large part of them at once, which last until confirmed or a held ban comes back, batched writes, retries, failed bans, bans written alone, removals, records of missing bans, holds saved whole with why they are held, or not at all, and stops.'
 );
