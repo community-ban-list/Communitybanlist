@@ -92,7 +92,9 @@ class Model {
 const dataType = () => dataType;
 
 // BattleMetrics: the bans on each ban list, and every request made. onPost and onDelete decide how
-// a POST or DELETE is answered, and the bans on a list are read 2 to a page.
+// a POST or DELETE is answered, and the bans on a list are read 2 to a page. As BattleMetrics' API
+// documentation describes GET /bans, a read hides the bans whose expiry has passed unless it asks
+// for them with filter[expired], and a page's link to the next repeats the request's query.
 const bmLists = new Map();
 let requests = [];
 let bmBanCount = 0;
@@ -126,6 +128,10 @@ async function battlemetrics(method, endpoint, params, data) {
   if (method === 'get' && endpoint === 'bans') {
     onRead(params);
     let bans = bmLists.get(params['filter[banList]']) || [];
+    if (params['filter[expired]'] !== 'true')
+      bans = bans.filter(
+        ({ attributes: { expires } }) => !expires || new FakeDate(expires).getTime() > clock
+      );
     if (params['filter[search]'])
       bans = bans.filter((ban) =>
         ban.attributes.identifiers.some(({ identifier }) => identifier === params['filter[search]'])
@@ -608,6 +614,8 @@ for (const failure of [
     ]
   );
   assert.ok(reads().every(({ params }) => params['page[size]'] === '100'));
+  // Every page asked for the list's expired bans too: those its links led to as well as the first.
+  assert.ok(reads().every(({ params }) => params['filter[expired]'] === 'true'));
   clock -= 20 * MINUTE;
 }
 
@@ -815,9 +823,9 @@ for (const [missing, result] of [
 }
 
 // With IMPORTER_BM_SEARCH_LOOKUP=1, each claimed export ban's ban is looked for by searching its
-// list for the player, rather than by reading the whole list once.
+// list for the player, expired bans included, rather than by reading the whole list once.
+const SearchingExportBan = await loadExportBan({ IMPORTER_BM_SEARCH_LOOKUP: '1' });
 {
-  const SearchingExportBan = await loadExportBan({ IMPORTER_BM_SEARCH_LOOKUP: '1' });
   reset();
   const bansByList = new Map();
   const first = Object.assign(
@@ -837,14 +845,55 @@ for (const [missing, result] of [
   assert.strictEqual(row(first.id).battlemetricsID, banID);
   assert.strictEqual(await second.createBattlemetricsBan(bansByList), 'created');
   assert.deepStrictEqual(
-    reads().map(({ params }) => [params['filter[banList]'], params['filter[search]']]),
+    reads().map(({ params }) => [
+      params['filter[banList]'],
+      params['filter[search]'],
+      params['filter[expired]']
+    ]),
     [
-      ['bm-7', steamUser(1)],
-      ['bm-7', steamUser(2)]
+      ['bm-7', steamUser(1), 'true'],
+      ['bm-7', steamUser(2), 'true']
     ]
   );
 }
 
+// A claimed export ban's ban that was given an expiry on BattleMetrics, which has passed, is still
+// its ban, so it is found by its note, whether its list is read in full or searched for the player:
+// one to be created records it, rather than making another, and one to be deleted deletes it,
+// rather than leaving it on the list with nothing to record it.
+for (const [Model, lookup] of [
+  [ExportBan, 'read in full'],
+  [SearchingExportBan, 'searched']
+]) {
+  reset();
+  const toCreate = Object.assign(new Model(), exportBan(1, { battlemetricsID: 'pending' }));
+  const toDelete = Object.assign(
+    new Model(),
+    exportBan(2, { status: 'TO_BE_DELETED', battlemetricsID: 'pending' })
+  );
+  const expires = new FakeDate(clock - MINUTE).toISOString();
+  const [created, deleted] = [toCreate, toDelete].map((ban) =>
+    addBan('bm-7', {
+      note: note(ban.id),
+      expires,
+      identifiers: [{ type: 'steamID', identifier: ban.steamUser }]
+    })
+  );
+  assert.strictEqual(await toCreate.createBattlemetricsBan(new Map()), 'found', lookup);
+  assert.strictEqual(row(toCreate.id).battlemetricsID, created, lookup);
+  assert.strictEqual(await toDelete.deleteBattlemetricsBan(new Map()), 'deleted', lookup);
+  assert.deepStrictEqual(
+    requests.map(({ method, endpoint }) => `${method} ${endpoint}`),
+    ['get bans', 'get bans', `delete bans/${deleted}`],
+    lookup
+  );
+  assert.deepStrictEqual(
+    bmLists.get('bm-7').map(({ id }) => id),
+    [created],
+    lookup
+  );
+}
+
 console.log(
-  'Export ban checks passed: claims, notes, lookups of claimed bans, retries after 10 minutes, races with other runs, and deletions.'
+  'Export ban checks passed: claims, notes, lookups of claimed bans, expired ones included, retries after 10 minutes, races with other runs, and deletions.'
 );

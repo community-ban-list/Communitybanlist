@@ -25,6 +25,12 @@ const CLAIM_AGE = 10 * 60 * 1000;
 // run. Whether BattleMetrics' search finds them has not been checked yet, so it is off by default.
 const SEARCH_LOOKUP = process.env.IMPORTER_BM_SEARCH_LOOKUP === '1';
 
+// A ban list's bans are looked for whether they have expired or not. CBL makes its bans with no
+// expiry, but one that was given an expiry on BattleMetrics that has passed is still the export
+// ban's. BattleMetrics' API documentation says that GET /bans hides expired bans unless
+// filter[expired] is true, although without the filter it gives them too, so the filter is sent.
+const EXPIRED_BANS = { 'filter[expired]': 'true' };
+
 // The note on the BattleMetrics ban made for an export ban, by which the ban is found again.
 function battlemetricsNote(exportBan) {
   return `CBL export ${exportBan.id}`;
@@ -53,14 +59,16 @@ async function findBattlemetricsBans(exportBan, battlemetricsBanList, bansByList
     const readAt = Date.now();
     const bans = await readBattlemetricsPages('bans', {
       'filter[banList]': battlemetricsBanList,
+      ...EXPIRED_BANS,
       'filter[search]': exportBan.steamUser
     });
     found = { readAt, notes: bansByNote(bans) };
   } else if (!bansByList.has(battlemetricsBanList)) {
     const readAt = Date.now();
-    const read = readBattlemetricsPages('bans', { 'filter[banList]': battlemetricsBanList }).then(
-      (bans) => ({ readAt, notes: bansByNote(bans) })
-    );
+    const read = readBattlemetricsPages('bans', {
+      'filter[banList]': battlemetricsBanList,
+      ...EXPIRED_BANS
+    }).then((bans) => ({ readAt, notes: bansByNote(bans) }));
     const kept = read.catch(() => null);
     bansByList.set(battlemetricsBanList, kept);
     found = await read;

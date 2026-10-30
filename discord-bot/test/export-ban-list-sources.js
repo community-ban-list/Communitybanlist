@@ -75,7 +75,9 @@ function matches(record, where = {}) {
 }
 
 const writes = [];
+// BattleMetrics requests: each one's path, and its parameters, or null without any.
 const requests = [];
+const requestParams = [];
 const audits = [];
 let exportLookupError = null;
 function banListRecord(values) {
@@ -92,8 +94,9 @@ const stubs = {
   axios: {
     default: {
       create: () => ({
-        async get(path) {
+        async get(path, config) {
           requests.push(path);
+          requestParams.push(config?.params ?? null);
           if (path === 'bans') return { data: { data: [{ type: 'ban' }], links: {} } };
           return { data: { data: { attributes: { name: 'Partner bans' } } } };
         }
@@ -299,6 +302,13 @@ const [fetched] = await run('banlist', 'add', {
 });
 assert.match(fetched.content, /Found 1 ban on the BattleMetrics ban list "Partner bans"\./);
 assert.deepStrictEqual(requests, ['bans', `ban-lists/${OTHER_PARTNER_ID}`]);
+// The test fetch asks for the list's bans as the importer does, 100 to a page and its expired ones
+// too, as BattleMetrics' API documentation says it hides them without filter[expired]. The list's
+// name needs no parameters.
+assert.deepStrictEqual(requestParams, [
+  { 'filter[banList]': OTHER_PARTNER_ID, 'filter[expired]': 'true', 'page[size]': 100 },
+  null
+]);
 await run('banlist', 'update', { banlist: '8', name: 'Mirror (to remove)' });
 // Updates save in a transaction, which would also delete the old bans if the source changed.
 assert.deepStrictEqual(writes, [
