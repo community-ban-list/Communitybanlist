@@ -62,7 +62,11 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
     './src/core.js': {
       default: {
         clearOrphanedUsers: step('clearOrphanedUsers'),
-        updateReputationPoints: step('updateReputationPoints'),
+        // It counts nothing, and is given the run's settings, for the paused lists the run saw.
+        updateReputationPoints: async (given) => {
+          calls.push('updateReputationPoints');
+          if (given) options.push(['updateReputationPoints', { ...given }]);
+        },
         updateReputationRank: step('updateReputationRank'),
         exportExportBans: step('exportExportBans')
       }
@@ -208,7 +212,9 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
   assert.deepStrictEqual(index.options, [
     ['importBans', { cadenceSeconds: 3600, startedAt: START }],
     ['checkReputationPoints', { cadenceSeconds: 3600, startedAt: START }],
-    ['updateSteamUserInfo', { cadenceSeconds: 3600 }]
+    ['updateSteamUserInfo', { cadenceSeconds: 3600 }],
+    ['updateReputationPoints', { cadenceSeconds: 3600, startedAt: START }],
+    ['updateExportBans', { cadenceSeconds: 3600, startedAt: START }]
   ]);
   index.options.length = 0;
   for (const step of [steps[0], steps[3]])

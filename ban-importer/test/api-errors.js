@@ -35,7 +35,8 @@ const dependencies = {
   // The reputation steps' retries are checked in lock-retries.js.
   './apply-list.js': { retryOperation: (operation) => operation() },
   // The reputation points statement is checked in reputation-points.js.
-  './reputation-points.js': { RECALCULATE_POINTS: '' },
+  './paused-lists.js': { default: async () => ({ rows: [], suspended: [], excluded: [] }) },
+  './reputation-points.js': { recalculatePoints: () => '' },
   './run-control.js': {
     checkRunLock: async () => {},
     stopIfRequested() {},

@@ -1,7 +1,8 @@
+import { readPausedBanLists } from 'scbl-lib/db/ban-list-suspensions';
 import { Ban, BanList, Organisation } from 'scbl-lib/db/models';
 import { Op } from 'scbl-lib/db/sequelize';
 
-import { truncate } from './format.js';
+import { pauseState, truncate } from './format.js';
 import UserError from './user-error.js';
 
 // Discord shows at most 25 autocomplete suggestions.
@@ -20,11 +21,11 @@ export function organisationOption(option, description) {
     .setAutocomplete(true);
 }
 
-export function banListOption(option, description) {
+export function banListOption(option, description, { required = true } = {}) {
   return option
     .setName('banlist')
     .setDescription(description)
-    .setRequired(true)
+    .setRequired(required)
     .setAutocomplete(true);
 }
 
@@ -58,11 +59,18 @@ export async function suggestBanLists(interaction) {
     limit: MAX_SUGGESTIONS
   });
 
+  // Paused lists are marked, so they are told apart. Until the ban importer has made the table of
+  // paused lists, none is paused.
+  const paused = new Map((await readPausedBanLists()).map((row) => [row.banList, row]));
   await interaction.respond(
-    banLists.map((banList) => ({
-      name: truncate(`${banList.Organisation.name} / ${banList.name}`, 100),
-      value: String(banList.id)
-    }))
+    banLists.map((banList) => {
+      const state = pauseState(paused.get(banList.id));
+      const mark = state ? ` (${state})` : '';
+      return {
+        name: `${truncate(`${banList.Organisation.name} / ${banList.name}`, 100 - mark.length)}${mark}`,
+        value: String(banList.id)
+      };
+    })
   );
 }
 

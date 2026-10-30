@@ -11,7 +11,8 @@ import {
 import { HOST } from 'scbl-lib/config';
 
 import { retryOperation } from './apply-list.js';
-import { RECALCULATE_POINTS } from './reputation-points.js';
+import pausedBanLists from './paused-lists.js';
+import { recalculatePoints } from './reputation-points.js';
 import { checkRunLock, reportProgress, stopIfRequested } from './run-control.js';
 
 const DISCORD_ALERT_CAP = 50;
@@ -74,12 +75,16 @@ export default class Core {
   }
 
   // The statement is built from the rule in reputation-points.js, as the reputation check is, so
-  // the check always finds the players whose points this would change.
-  static async updateReputationPoints() {
+  // the check always finds the players whose points this would change. It leaves out the bans of
+  // the lists paused as the run saw them (see paused-lists.js), the run that started at startedAt,
+  // as the check of the same run did.
+  static async updateReputationPoints({ startedAt } = {}) {
     Logger.verbose('Core', 2, 'Updating reputation points of outdated Steam users...');
     const profileStartTime = Date.now();
+    const { excluded } = await pausedBanLists({ startedAt });
+    const statement = recalculatePoints(excluded);
     const affectedRows = await retryOperation(() =>
-      sequelize.query(RECALCULATE_POINTS, { type: sequelize.QueryTypes.BULKUPDATE })
+      sequelize.query(statement, { type: sequelize.QueryTypes.BULKUPDATE })
     );
     Logger.verbose(
       'Core',
