@@ -24,6 +24,12 @@ const Logger = {
 };
 let list;
 let lookupError;
+// What the lookup made with the list's row locked finds, when it differs from the first lookup,
+// e.g. null for a list given to another user in between.
+let relookedUp;
+// Each deletion's steps, in order: the lookups, and whether each locked the list's row, in its
+// transaction, the deletion lock being taken and freed, and the shared deletion.
+const steps = [];
 const context = vm.createContext({ console: { error: (...args) => logs.push(args) } });
 const dependencies = {
   // The limits on export ban lists, with no limit on their players.
@@ -44,16 +50,42 @@ const dependencies = {
       throw new Error('Players were counted with no limit on lists.');
     }
   },
+  // The pool the counts run on, which is never used with no limit.
+  'scbl-lib/db/sequelize': {
+    createPool: () => ({
+      async transaction() {
+        throw new Error('Players were counted with no limit on lists.');
+      }
+    }),
+    Transaction: { ISOLATION_LEVELS: { REPEATABLE_READ: 'REPEATABLE READ' } }
+  },
   'scbl-lib/db/models': {
     BanList: {},
     ExportBanListConfig: {},
     Organisation: {},
     ExportBanList: {
-      async findOne({ where }) {
+      async findOne({ where, lock, transaction }) {
         assert.strictEqual(where.id, 42);
         assert.strictEqual(where.owner, 'owner');
+        if (lock) assert.ok(transaction, 'The row is locked in a transaction.');
+        steps.push(lock ? 'locked lookup' : 'lookup');
         if (lookupError) throw lookupError;
-        return list;
+        return lock && relookedUp !== undefined ? relookedUp : list;
+      },
+      async inTransaction(work) {
+        steps.push('begin');
+        const result = await work({});
+        steps.push('commit');
+        return result;
+      },
+      async whileDeleting(id, deletion) {
+        assert.strictEqual(id, 42);
+        steps.push('take the deletion lock');
+        try {
+          return await deletion();
+        } finally {
+          steps.push('free the deletion lock');
+        }
       }
     }
   },
@@ -112,13 +144,29 @@ const BM_LIST = `Server's List "List 42" (ID: 42, BattleMetrics)`;
 const REMOTE_LIST = `Server's List "List 42" (ID: 42, remote)`;
 for (const type of ['battlemetrics', 'remote']) {
   calls.length = 0;
-  list = exportBanList(type, async function () {
-    calls.push('delete');
+  list = exportBanList(type, async function (options) {
+    calls.push(['delete', { ...options }]);
+    steps.push('delete');
     this.battlemetricsID = null;
     return type === 'battlemetrics' ? 'deleted' : 'none';
   });
+  steps.length = 0;
   assert.strictEqual(await remove(), list);
-  assert.deepStrictEqual(calls, ['delete']);
+  // It is deleted for its owner, so its row is deleted only while they still own it, as the
+  // deletion lock can be lost part-way.
+  assert.deepStrictEqual(calls, [['delete', { owner: 'owner' }]]);
+  // The deletion holds the list's deletion lock throughout, so the Discord bot cannot give the
+  // list to another user meanwhile, and once it holds it, the list is looked up again with its row
+  // locked, so a list given away just before is not deleted.
+  assert.deepStrictEqual(steps, [
+    'lookup',
+    'take the deletion lock',
+    'begin',
+    'locked lookup',
+    'commit',
+    'delete',
+    'free the deletion lock'
+  ]);
 }
 assert.strictEqual(logs.length, 0);
 assert.deepStrictEqual(posted, [
@@ -201,6 +249,43 @@ assert.strictEqual(logs.length, 6);
 assert.deepStrictEqual(calls, []);
 // Signing in and looking the list up change nothing, so their failures post nothing.
 assert.strictEqual(posted.length, 3);
+
+// A list given to another user between the first lookup and the deletion lock, e.g. by the Discord
+// bot's /exportbanlist transfer, is not found once the lock is held, so it is not deleted, and
+// nothing is posted. The lock is freed.
+list = exportBanList('battlemetrics', async () => assert.fail('The list was deleted.'));
+relookedUp = null;
+steps.length = 0;
+await assert.rejects(remove(), { message: 'Export ban list does not exist!' });
+assert.deepStrictEqual(steps, [
+  'lookup',
+  'take the deletion lock',
+  'begin',
+  'locked lookup',
+  'commit',
+  'free the deletion lock'
+]);
+assert.strictEqual(logs[6][1].stage, 'lookup');
+assert.strictEqual(posted.length, 3);
+relookedUp = undefined;
+
+// The list deleted is the one the locked lookup found, as it is now, with the BattleMetrics ban
+// list it records now.
+list = exportBanList('battlemetrics', async () => assert.fail('The first lookup was deleted.'));
+relookedUp = {
+  ...exportBanList('battlemetrics', async function () {
+    calls.push('delete');
+    return 'deleted';
+  }),
+  battlemetricsID: 'bm-43'
+};
+calls.length = 0;
+assert.strictEqual(await remove(), relookedUp);
+assert.deepStrictEqual(calls, ['delete']);
+assert.strictEqual(
+  posted.at(-1),
+  `[WebServer][1] Steam user owner deleted export ban list ${BM_LIST} and its BattleMetrics ban list bm-43.`
+);
 
 console.log(
   'Export ban list deletion checks passed: the shared deletion, ownership, and error reporting.'
