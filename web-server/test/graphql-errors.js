@@ -215,7 +215,21 @@ const models = {
       const list = lists.get(where.id);
       return list?.owner === where.owner ? list : null;
     },
-    create: async (values) => createList(values)
+    create: async (values) => createList(values),
+    // A list whose BattleMetrics ban list could not be made is removed by its ID and owner, which
+    // the stand-in passes on to that list's own row.
+    destroy: async ({ where }) => {
+      const list = lists.get(where.id);
+      if (list?.owner !== where.owner) return 0;
+      await list.destroy();
+      return 1;
+    },
+    // Changes are saved in a transaction, with the owner's lists locked, which these stand-ins
+    // only run: no list here is being removed by the Discord bot.
+    inTransaction: (work) => work({}),
+    lockListsOf: async (owner) => listCounts.get(owner) ?? 0,
+    whileDeleting: (id, deletion) => deletion(),
+    isBeingDeleted: async () => false
   },
   ExportBanListConfig: {
     findAll: async () => [],
@@ -269,7 +283,15 @@ const packages = {
     pausedSets: () => ({ suspended: [], excluded: [] })
   },
   'scbl-lib/db/models': models,
-  'scbl-lib/db/sequelize': database,
+  // The real module, except for the pool of their own that export ban list size counts run on,
+  // which runs each count at once here, as the real one would make a connection.
+  'scbl-lib/db/sequelize': {
+    ...database,
+    createPool: () => ({
+      transaction: (options, work) => work({}),
+      close: async () => {}
+    })
+  },
   'scbl-lib/export-list-limits': exportListLimits,
   'scbl-lib/utils': {
     // Changes are posted to the log channel, which these checks do not look at.
