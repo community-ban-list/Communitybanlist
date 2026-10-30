@@ -94,13 +94,15 @@ const dataType = () => dataType;
 // BattleMetrics: the bans on each ban list, and every request made. onPost and onDelete decide how
 // a POST or DELETE is answered, and the bans on a list are read 2 to a page. As BattleMetrics' API
 // documentation describes GET /bans, a read hides the bans whose expiry has passed unless it asks
-// for them with filter[expired], and a page's link to the next repeats the request's query.
+// for them with filter[expired]. A page's link to the next repeats the request's query, except
+// for the parameters linkChanges gives another value, or leaves out with null.
 const bmLists = new Map();
 let requests = [];
 let bmBanCount = 0;
 let onPost;
 let onDelete;
 let onRead = () => {};
+let linkChanges = {};
 const PAGE_SIZE = 2;
 
 // An error as the BattleMetrics client throws one.
@@ -139,6 +141,9 @@ async function battlemetrics(method, endpoint, params, data) {
     const start = Number(params['page[key]'] || 0);
     const next = start + PAGE_SIZE < bans.length;
     const query = new URLSearchParams({ ...params, 'page[key]': start + PAGE_SIZE });
+    for (const [name, value] of Object.entries(linkChanges))
+      if (value === null) query.delete(name);
+      else query.set(name, value);
     return {
       data: {
         data: bans.slice(start, start + PAGE_SIZE),
@@ -254,6 +259,7 @@ function reset() {
   onPost = makeBan;
   onDelete = deleteBan;
   onRead = () => {};
+  linkChanges = {};
 }
 
 // A new export ban is claimed before its ban is made: its battlemetricsID becomes 'pending', if it
@@ -614,7 +620,8 @@ for (const failure of [
     ]
   );
   assert.ok(reads().every(({ params }) => params['page[size]'] === '100'));
-  // Every page asked for the list's expired bans too: those its links led to as well as the first.
+  // Every page asked for the list's expired bans too. These links repeat the filter; the checks at
+  // the end have links that leave it out or give it another value.
   assert.ok(reads().every(({ params }) => params['filter[expired]'] === 'true'));
   clock -= 20 * MINUTE;
 }
@@ -894,6 +901,68 @@ for (const [Model, lookup] of [
   );
 }
 
+// BattleMetrics' links might not repeat a lookup's filters: the only example in its API
+// documentation of a link to the next page of bans gives none. Each page a link leads to still
+// asks for what the lookup asked for, so a claimed export ban's expired ban is found on a later
+// page too: one to be created records it rather than making a second ban, and one to be deleted
+// deletes it. That holds whether the links leave out filter[expired], give it as false or leave
+// out every filter, and whether the list is read in full or searched for the player. Each player
+// has 2 bans that have not expired before the expired one, so it is on a lookup's second page or
+// later.
+for (const changes of [
+  { 'filter[expired]': null },
+  { 'filter[expired]': 'false' },
+  { 'filter[banList]': null, 'filter[expired]': null, 'filter[search]': null }
+]) {
+  for (const [Model, lookup] of [
+    [ExportBan, 'read in full'],
+    [SearchingExportBan, 'searched']
+  ]) {
+    reset();
+    linkChanges = changes;
+    const context = `${lookup}, with links that change ${JSON.stringify(changes)}`;
+    const toCreate = Object.assign(new Model(), exportBan(1, { battlemetricsID: 'pending' }));
+    const toDelete = Object.assign(
+      new Model(),
+      exportBan(2, { status: 'TO_BE_DELETED', battlemetricsID: 'pending' })
+    );
+    const expires = new FakeDate(clock - MINUTE).toISOString();
+    const [created, deleted] = [toCreate, toDelete].map((ban) => {
+      const identifiers = [{ type: 'steamID', identifier: ban.steamUser }];
+      addBan('bm-7', { note: 'Someone else', identifiers });
+      addBan('bm-7', { note: 'Someone else', identifiers });
+      return addBan('bm-7', { note: note(ban.id), expires, identifiers });
+    });
+    assert.strictEqual(await toCreate.createBattlemetricsBan(new Map()), 'found', context);
+    assert.strictEqual(row(toCreate.id).battlemetricsID, created, context);
+    assert.strictEqual(await toDelete.deleteBattlemetricsBan(new Map()), 'deleted', context);
+    assert.deepStrictEqual(
+      requests
+        .filter(({ method }) => method !== 'get')
+        .map(({ method, endpoint }) => `${method} ${endpoint}`),
+      [`delete bans/${deleted}`],
+      context
+    );
+    // Every page of each lookup asked for the list's bans, expired ones included, and a search
+    // for its player's: the pages the links led to as well as the first. A list's 6 bans take 3
+    // pages, and a player's 3 bans 2.
+    const searched = Model === SearchingExportBan;
+    const keys = searched ? ['0', '2'] : ['0', '2', '4'];
+    assert.deepStrictEqual(
+      reads().map(({ params }) => [
+        params['filter[banList]'],
+        params['filter[expired]'],
+        params['filter[search]'],
+        params['page[key]'] || '0'
+      ]),
+      [toCreate, toDelete].flatMap(({ steamUser }) =>
+        keys.map((key) => ['bm-7', 'true', searched ? steamUser : undefined, key])
+      ),
+      context
+    );
+  }
+}
+
 console.log(
-  'Export ban checks passed: claims, notes, lookups of claimed bans, expired ones included, retries after 10 minutes, races with other runs, and deletions.'
+  'Export ban checks passed: claims, notes, lookups of claimed bans, expired ones included on every page, retries after 10 minutes, races with other runs, and deletions.'
 );
