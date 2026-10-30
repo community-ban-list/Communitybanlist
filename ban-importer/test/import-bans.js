@@ -3916,6 +3916,11 @@ const serve = (id, entries) => battlemetricsLists.set(`bm-${id}`, paged(entries)
 // What a run asked BattleMetrics for: each request's list, and its page, or newest for a first page.
 const asked = () =>
   battlemetricsParams.map((params) => [params['filter[banList]'], params['page[key]'] ?? 'newest']);
+// Whether every request a run made asked for the lists' expired bans too, as each must: the pages
+// BattleMetrics' links led to, whose links here leave the filter out, as well as the first.
+const askedForExpired = () =>
+  battlemetricsParams.length > 0 &&
+  battlemetricsParams.every((params) => params['filter[expired]'] === 'true');
 // One run, with what it logged, did and asked for alone, its report for the run record, and when it
 // planned its reads. A run that stops gives the error it stopped with (stopped) instead of its
 // results. An importer loaded on its own (Importer, see loadImporter) runs with its own run control.
@@ -3958,9 +3963,11 @@ assert.deepStrictEqual(
 );
 assert.deepStrictEqual(battlemetricsParams[0], {
   'filter[banList]': 'bm-90',
+  'filter[expired]': 'true',
   sort: '-timestamp',
   'page[size]': 100
 });
+assert.ok(askedForExpired());
 const firstRead = row(90);
 assert.deepStrictEqual(
   [
@@ -4073,6 +4080,7 @@ assert.deepStrictEqual(asked(), [
   ['bm-90', '4'],
   ['bm-91', 'newest']
 ]);
+assert.ok(askedForExpired());
 assert.deepStrictEqual(polled.report.requests, { head: 2, follow: 0, full: 4 });
 assert.deepStrictEqual(removedIDs(), ['90,h15']);
 assert.deepStrictEqual(polled.report.banLists[0], {
@@ -4127,6 +4135,7 @@ assert.deepStrictEqual(asked(), [
   ['bm-90', '1'],
   ['bm-91', 'newest']
 ]);
+assert.ok(askedForExpired());
 assert.deepStrictEqual(polled.report.requests, { head: 2, follow: 1, full: 0 });
 assert.deepStrictEqual(
   [...written()].sort(),
@@ -4324,7 +4333,12 @@ assert.deepStrictEqual(readsOf(polled), [
   [94, 'full', 'every_run'],
   [93, 'full', 'every_run']
 ]);
-assert.deepStrictEqual(battlemetricsParams[0], { 'filter[banList]': 'bm-94', 'page[size]': 100 });
+assert.deepStrictEqual(battlemetricsParams[0], {
+  'filter[banList]': 'bm-94',
+  'filter[expired]': 'true',
+  'page[size]': 100
+});
+assert.ok(askedForExpired());
 assert.deepStrictEqual([row(93).headUids, row(94).headUids], [null, null]);
 assert.strictEqual(
   logged(

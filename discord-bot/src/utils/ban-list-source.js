@@ -83,11 +83,15 @@ async function checkRemoteSource(source) {
   return `Found ${plural(bans, 'ban')}.`;
 }
 
+// The list's expired bans count too, as the importer reads them. BattleMetrics' API documentation
+// says that GET /bans hides expired bans unless filter[expired] is true, although without the
+// filter it gives them too, so the filter is sent, and a list whose bans have all expired is not
+// taken for an empty one.
 async function checkBattlemetricsSource(source) {
   let data;
   try {
     ({ data } = await battlemetrics.get('bans', {
-      params: { 'filter[banList]': source, 'page[size]': 100 }
+      params: { 'filter[banList]': source, 'filter[expired]': 'true', 'page[size]': 100 }
     }));
   } catch (err) {
     throw new UserError(
