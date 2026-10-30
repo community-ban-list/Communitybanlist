@@ -193,9 +193,19 @@ async function battlemetrics(method, endpoint, params) {
   return { data: page };
 }
 
+// The transaction the Discord bot's last read of a list before its removal runs in (changeSince),
+// which only runs its work. Each transaction is recorded among the queries.
+const LAST_READ = { name: 'last read' };
+async function transaction(work) {
+  queries.push(['transaction']);
+  return work(LAST_READ);
+}
+
 const stubs = {
   sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
-  '../sequelize.js': { default: { models } },
+  '../sequelize.js': { default: { models, transaction } },
+  // Deleting a list holds a lock on a connection of its own, which these checks never need.
+  '../open-connection.js': { default: () => assert.fail('A connection was opened.') },
   '../export-membership.js': { countMembers },
   '../../apis/index.js': { battlemetrics },
   '../../utils/index.js': { Logger: { verbose() {} } },
@@ -512,13 +522,16 @@ assert.deepStrictEqual(
 membersByThreshold.set(7, 1554);
 
 // Checking a list takes a moment, longer when it is counted again, and its owner may change it on
-// the website meanwhile. So just before the Discord bot removes a list, it asks what has changed
-// since the check: nothing here. The list is read again, with its settings and BattleMetrics ban
-// list, and so are its configs, in ID order, as checkLimits loads them.
+// the website meanwhile. So just before the Discord bot removes a list, once it holds the list's
+// deletion lock, it asks what has changed since the check: nothing here. The list is read again,
+// with its settings and BattleMetrics ban list, with its row locked, in a transaction, so a change
+// the website is saving to it, which holds the row, is saved first and seen. Its configs are read
+// in the same transaction, in ID order, as checkLimits loads them.
 const [checked12] = (await ExportBanList.checkLimits({ ids: [12] })).lists;
 queries.length = 0;
 assert.strictEqual(await ExportBanList.changeSince(checked12), null);
 assert.deepStrictEqual(queries, [
+  ['transaction'],
   [
     'ExportBanList.findByPk',
     12,
@@ -530,7 +543,9 @@ assert.deepStrictEqual(queries, [
         'defaultActivePoints',
         'defaultExpiredPoints',
         'maxBanAge'
-      ]
+      ],
+      lock: true,
+      transaction: LAST_READ
     }
   ],
   [
@@ -538,7 +553,8 @@ assert.deepStrictEqual(queries, [
     {
       attributes: ['id', 'banList', 'activePoints', 'expiredPoints'],
       where: { exportBanList: 12 },
-      order: [['id', 'ASC']]
+      order: [['id', 'ASC']],
+      transaction: LAST_READ
     }
   ]
 ]);

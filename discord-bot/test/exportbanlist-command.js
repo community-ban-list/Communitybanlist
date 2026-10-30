@@ -110,6 +110,12 @@ let steamUsers;
 // Runs as an update starts, with the update's values and options, before it writes anything, e.g.
 // to change a list in the moment after it was read again, or to make the update wait or fail.
 let beforeUpdate;
+// The lists whose deletion lock is held, by a deletion on the website or a removal here, and the
+// transaction in progress. An error in lockErrors for a list fails taking its deletion lock, as
+// when its connection cannot be opened.
+let beingDeleted;
+let transaction;
+let lockErrors;
 // The ban lists paused now, as rows of the importer's table, suspended or resuming, and how many
 // times they were read.
 let pausedRows;
@@ -133,6 +139,9 @@ function reset() {
   timeouts = [];
   steamUsers = new Map();
   beforeUpdate = null;
+  beingDeleted = new Set();
+  transaction = null;
+  lockErrors = new Map();
   pausedRows = [];
   pausedReads = 0;
 }
@@ -170,8 +179,9 @@ function addList(
       return 'https://discord.com/api/webhooks/1/token';
     },
     // Like the shared deletion, a list that is removed no longer records its BattleMetrics ban
-    // list.
+    // list. The bot only deletes a list while it holds its deletion lock.
     async deleteExportBanList(options) {
+      assert.ok(beingDeleted.has(id), 'A list is deleted under its deletion lock.');
       calls.push(['delete', id]);
       deletedFrom.push(this.loadedBy);
       deletedWith.push({
@@ -232,14 +242,64 @@ const ExportBanList = {
     if (duringCheck) await duringCheck(ids);
     return { limits: LIMITS, lists };
   },
-  // Like Sequelize's, it loads the list without its owner's Steam user.
-  async findByPk(id) {
-    calls.push(['find', id]);
+  // Like Sequelize's, it loads the list without its owner's Steam user. A list read with its row
+  // locked is read in the transaction in progress.
+  async findByPk(id, options) {
+    if (options?.lock) assert.ok(transaction && options.transaction === transaction);
+    calls.push(options?.lock ? ['find', id, 'locked'] : ['find', id]);
     const row = rows.get(id);
     if (!row) return null;
     const found = instance(row.exportBanList, `find ${id}`);
     delete found.SteamUser;
     return found;
+  },
+  // A transaction, in which the transfer reads and writes. It ends with a commit once its work is
+  // done, or a rollback when its work fails.
+  async inTransaction(work) {
+    assert.strictEqual(transaction, null, 'One transaction at a time.');
+    transaction = {};
+    calls.push(['begin']);
+    try {
+      const result = await work(transaction);
+      calls.push(['commit']);
+      return result;
+    } catch (error) {
+      calls.push(['rollback']);
+      throw error;
+    } finally {
+      transaction = null;
+    }
+  },
+  // Lock a user's lists in the transaction in progress, and give how many they have.
+  async lockListsOf(owner, options) {
+    assert.ok(transaction && options.transaction === transaction);
+    calls.push(['lock lists', owner]);
+    return [...rows.values()].filter((row) => row.exportBanList.owner === owner).length;
+  },
+  // Whether the list's deletion lock is held, asked in the transaction in progress.
+  async isBeingDeleted(id, options) {
+    assert.ok(transaction && options.transaction === transaction);
+    calls.push(['deleting?', id]);
+    return beingDeleted.has(id);
+  },
+  // Run a deletion while holding the list's deletion lock, which is freed once it ends, or, as
+  // MySQL does, run nothing and throw an error marked beingDeleted while another deletion holds it.
+  async whileDeleting(id, deletion) {
+    if (lockErrors.has(id)) throw lockErrors.get(id);
+    if (beingDeleted.has(id)) {
+      calls.push(['deletion lock held', id]);
+      throw Object.assign(new Error('This export ban list is already being deleted.'), {
+        beingDeleted: true
+      });
+    }
+    calls.push(['deletion lock', id]);
+    beingDeleted.add(id);
+    try {
+      return await deletion();
+    } finally {
+      beingDeleted.delete(id);
+      calls.push(['deletion lock freed', id]);
+    }
   },
   // Only the lists whose columns equal the query's, in ID order. The BattleMetrics ban lists CBL's
   // lists record are read this way, so the query must load each list's type and ban list.
@@ -258,9 +318,10 @@ const ExportBanList = {
     return [...rows.values()].filter((row) => hasColumns(row.exportBanList, where)).length;
   },
   // Write the values to the lists with the columns of the query, and give how many there were, as
-  // Sequelize's update does.
+  // Sequelize's update does, in the transaction in progress.
   async update(values, options) {
-    calls.push(['update', values, options]);
+    assert.ok(transaction && options.transaction === transaction);
+    calls.push(['update', values, { where: options.where }]);
     if (beforeUpdate) await beforeUpdate(values, options);
     const updated = [...rows.values()].filter((row) =>
       hasColumns(row.exportBanList, options.where)
@@ -275,8 +336,10 @@ const ExportBanList = {
   },
   // What has changed in a list since checkLimits gave this check of it, as the real one finds it:
   // 'deleted' once the list is gone, 'changed' when its settings or its BattleMetrics ban list
-  // differ from those it was checked with, or null.
+  // differ from those it was checked with, or null. The bot asks only while it holds the list's
+  // deletion lock, so no change is saved to the list after this.
   async changeSince({ exportBanList }) {
+    assert.ok(beingDeleted.has(exportBanList.id), 'A list is read under its deletion lock.');
     calls.push(['changed?', exportBanList.id]);
     if (changeErrors.has(exportBanList.id)) throw changeErrors.get(exportBanList.id);
     const row = rows.get(exportBanList.id);
@@ -488,12 +551,16 @@ assert.deepStrictEqual(fieldsOf(shown.embed), [
   ["Today's limits", discord.escapeMarkdown(RULE)]
 ]);
 assert.deepStrictEqual(timeouts, [60 * 1000]);
+// Once it is confirmed, the list is read again and deleted while the bot holds its deletion lock,
+// which is freed once the deletion has ended.
 assert.deepStrictEqual(calls, [
   ['check', [12]],
   FIND_RECORDED,
   ['visible'],
+  ['deletion lock', 12],
   ['find', 12],
-  ['delete', 12]
+  ['delete', 12],
+  ['deletion lock freed', 12]
 ]);
 // The list is deleted as it was read after the confirmation, not as the preview showed it, with
 // its owner's Steam user as the preview loaded it, for ExportBanList's lines about the deletion.
@@ -615,7 +682,15 @@ for (const { case: name, key, content, field, gone } of [
     assert.deepStrictEqual(fieldsOf(shown.embed)[4], ['BattleMetrics ID', field], name);
     assert.deepStrictEqual(
       calls,
-      [['check', [21]], FIND_RECORDED, ['visible'], ['find', 21], ['delete', 21]],
+      [
+        ['check', [21]],
+        FIND_RECORDED,
+        ['visible'],
+        ['deletion lock', 21],
+        ['find', 21],
+        ['delete', 21],
+        ['deletion lock freed', 21]
+      ],
       name
     );
     const removed =
@@ -735,6 +810,38 @@ assert.strictEqual(
 assert.deepStrictEqual(deleted(), []);
 assert.deepStrictEqual(audits, []);
 
+// A list whose deletion lock is held once the removal is confirmed, as its owner is deleting it on
+// the website, or another removal is under way, is left as it is, so the two never delete it at
+// once: it is not read again, deleted or logged, and the admin is told.
+reset();
+addList(18, 'battlemetrics', { battlemetricsID: 'bm-18' });
+visible = new Set(['bm-18']);
+whileConfirming = async () => beingDeleted.add(18);
+await run('remove', { id: 18 });
+assert.deepStrictEqual(replies.at(-1), {
+  content: 'Export ban list **List 18** (#18) is already being deleted, so nothing was changed.',
+  embeds: []
+});
+assert.deepStrictEqual(calls, [
+  ['check', [18]],
+  FIND_RECORDED,
+  ['visible'],
+  ['deletion lock held', 18]
+]);
+assert.deepStrictEqual(audits, []);
+assert.ok(rows.has(18));
+
+// A deletion lock that cannot be taken, as when its connection cannot be opened, fails the command
+// as any database error does, with nothing deleted or logged.
+reset();
+addList(18, 'remote');
+const connectionRefused = new Error('connect ECONNREFUSED');
+lockErrors.set(18, connectionRefused);
+await assert.rejects(run('remove', { id: 18 }), (error) => error === connectionRefused);
+assert.deepStrictEqual(deleted(), []);
+assert.deepStrictEqual(audits, []);
+assert.ok(rows.has(18));
+
 // Cancelling, or not answering in time, changes nothing.
 for (const [choice, reply] of [
   ['cancel', 'Cancelled. Nothing was changed.'],
@@ -763,8 +870,10 @@ assert.deepStrictEqual(calls, [
   ['check', [20]],
   FIND_RECORDED,
   ['visible'],
+  ['deletion lock', 20],
   ['find', 20],
-  ['delete', 20]
+  ['delete', 20],
+  ['deletion lock freed', 20]
 ]);
 assert.ok(!rows.has(20));
 assert.strictEqual(
@@ -913,18 +1022,26 @@ assert.strictEqual(
 );
 assert.strictEqual(fileOf(shown.reply), undefined);
 assert.deepStrictEqual(timeouts, [5 * 60 * 1000]);
+// Each list is checked again, and then read once more and deleted while the bot holds its deletion
+// lock, which is freed once the deletion has ended.
 assert.deepStrictEqual(calls, [
   ['check', 'all'],
   ['visible'],
   ['check', [30]],
+  ['deletion lock', 30],
   ['changed?', 30],
   ['delete', 30],
+  ['deletion lock freed', 30],
   ['check', [31]],
+  ['deletion lock', 31],
   ['changed?', 31],
   ['delete', 31],
+  ['deletion lock freed', 31],
   ['check', [33]],
+  ['deletion lock', 33],
   ['changed?', 33],
-  ['delete', 33]
+  ['delete', 33],
+  ['deletion lock freed', 33]
 ]);
 // Each list is deleted as it was read again just before, not as the preview showed it, with its
 // owner's Steam user, once it is found unchanged since it was read and checked again.
@@ -1370,11 +1487,15 @@ assert.ok(reason109.startsWith(`↳ ${discord.escapeMarkdown(`${RULE} Whether it
 assert.deepStrictEqual(calls, [
   ['check', 'all'],
   ['check', [99]],
+  ['deletion lock', 99],
   ['changed?', 99],
   ['delete', 99],
+  ['deletion lock freed', 99],
   ['check', [109]],
+  ['deletion lock', 109],
   ['changed?', 109],
-  ['delete', 109]
+  ['delete', 109],
+  ['deletion lock freed', 109]
 ]);
 assert.deepStrictEqual([...rows.keys()], [98]);
 assert.strictEqual(
@@ -1574,6 +1695,72 @@ assert.match(
   /could not remove export ban list "List 123" .*: It could not be checked again: Connection lost$/
 );
 
+// A list whose deletion lock is held once it has been checked again, as its owner is deleting it on
+// the website, is left as it is, so the two never delete it at once, and one whose deletion lock
+// cannot be taken, as its connection cannot be opened, is left as failed, saying so. The others
+// carry on.
+reset();
+for (const id of [125, 126, 127]) addList(id, 'remote');
+duringCheck = (ids) => {
+  if (ids?.[0] === 125) beingDeleted.add(125);
+};
+lockErrors.set(126, new Error('connect ECONNREFUSED'));
+await run('remove_outside_limits');
+assert.deepStrictEqual(deleted(), [127]);
+assert.deepStrictEqual(
+  calls.filter(([call]) => call.startsWith('deletion lock') || call === 'changed?'),
+  [
+    ['deletion lock held', 125],
+    ['deletion lock', 127],
+    ['changed?', 127],
+    ['deletion lock freed', 127]
+  ]
+);
+assert.strictEqual(
+  replies.at(-1).content,
+  "Removed 1 of the 3 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 failed. 1 was not removed, as it was already being deleted."
+);
+assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n'), [
+  '**List 125** (#125): not removed, as it is already being deleted',
+  '**List 126** (#126): failed: Its deletion lock could not be taken: connect ECONNREFUSED',
+  '**List 127** (#127): removed; there was nothing to delete on BattleMetrics'
+]);
+// A list left as it is posts no line of its own, as the summary counts it, and a failure does.
+assert.ok(!audits.some((line) => line.includes('"List 125"')));
+assert.match(
+  audits.find((line) => line.includes('"List 126"')),
+  /could not remove export ban list "List 126" .*: Its deletion lock could not be taken: connect ECONNREFUSED$/
+);
+
+// The summary counts the lists left as they were already being deleted apart from those that had
+// changed, and both apart from those now within today's limits.
+reset();
+for (const id of [140, 141, 142, 143, 144]) addList(id, 'remote');
+whileConfirming = async () => {
+  rows.get(144).problems = [];
+};
+duringCheck = (ids) => {
+  if (ids?.[0] === 140 || ids?.[0] === 141) beingDeleted.add(ids[0]);
+  if (ids?.[0] === 142) rows.get(142).exportBanList.threshold = 9;
+};
+await run('remove_outside_limits');
+assert.deepStrictEqual(deleted(), [143]);
+assert.strictEqual(
+  replies.at(-1).content,
+  "Removed 1 of the 5 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it is now within today's limits. 1 was not removed, as it had changed. 2 were not removed, as they were already being deleted."
+);
+assert.strictEqual(
+  audits.at(-1),
+  "[important] admin (1) removed 1 of the 5 export ban lists outside today's limits: 1 with nothing to delete on BattleMetrics. 1 was not removed, as it is now within today's limits. 1 was not removed, as it had changed. 2 were not removed, as they were already being deleted."
+);
+assert.deepStrictEqual(embedOf(replies.at(-1)).description.split('\n'), [
+  '**List 140** (#140): not removed, as it is already being deleted',
+  '**List 141** (#141): not removed, as it is already being deleted',
+  '**List 142** (#142): not removed, as it changed while it was being checked',
+  '**List 143** (#143): removed; there was nothing to delete on BattleMetrics',
+  "**List 144** (#144): not removed, as it is now within today's limits"
+]);
+
 // A list whose players cannot be counted by its settings now as it is checked again just before
 // its removal may be over its type's cap or not. It is removed when it breaks the points rules,
 // which need no count, and otherwise left as failed.
@@ -1767,9 +1954,11 @@ const ownerOf = (id) => rows.get(id)?.exportBanList.owner;
 
 // Giving a list to another Steam user shows the list's name, ID, type and players, its owner and
 // the new owner, each with their Steam name and Steam ID, and how many export ban lists the new
-// owner has, and asks first, giving a minute to answer. Then the list and the new owner's lists are
-// read again, and only the list's owner is written, and only while it is still the owner shown.
-// The transfer is logged, and no owner is told. Neither the run lock nor BattleMetrics is asked.
+// owner has, and asks first, giving a minute to answer. Then, in one transaction, the new owner's
+// lists are locked and counted again, the list is read again with its row locked, and whether its
+// deletion has started is checked, as the website changes lists from its own process, and only the
+// list's owner is written, and only while it is still the owner shown. The transfer is logged, and
+// no owner is told. Neither the run lock nor BattleMetrics is asked.
 reset();
 addList(12, 'battlemetrics', { battlemetricsID: 'bm-12', players: 1234 });
 addSteamUser(NEW_OWNER, 'New Owner');
@@ -1795,9 +1984,12 @@ assert.deepStrictEqual(calls, [
   ['check', [12]],
   ['user', NEW_OWNER],
   ['count', { owner: NEW_OWNER }],
-  ['find', 12],
-  ['count', { owner: NEW_OWNER }],
-  ['update', { owner: NEW_OWNER }, { where: { id: 12, owner: OWNER_12 } }]
+  ['begin'],
+  ['lock lists', NEW_OWNER],
+  ['find', 12, 'locked'],
+  ['deleting?', 12],
+  ['update', { owner: NEW_OWNER }, { where: { id: 12, owner: OWNER_12 } }],
+  ['commit']
 ]);
 assert.strictEqual(ownerOf(12), NEW_OWNER);
 assert.deepStrictEqual(replies.at(-1), {
@@ -2017,14 +2209,16 @@ for (const [choice, reply] of [
 }
 
 // Once the transfer is confirmed, the list and the new owner's lists are read again, and nothing is
-// changed if the list has been deleted, or given to the new owner or to someone else, or the new
-// owner has as many lists as a user can have.
+// changed if the list has been deleted, or given to the new owner or to someone else, or it is
+// being deleted, on the website or by a removal, which can take minutes, or the new owner has as
+// many lists as a user can have.
+const readAgain = [['begin'], ['lock lists', NEW_OWNER], ['find', 12, 'locked']];
 for (const { case: name, change, reply, reads, owner } of [
   {
     case: 'the list was deleted',
     change: () => rows.delete(12),
     reply: 'Export ban list **List 12** (#12) no longer exists, so nothing was changed.',
-    reads: [['find', 12]],
+    reads: [...readAgain, ['commit']],
     owner: undefined
   },
   {
@@ -2033,7 +2227,7 @@ for (const { case: name, change, reply, reads, owner } of [
       rows.get(12).exportBanList.owner = NEW_OWNER;
     },
     reply: `Export ban list **List 12** (#12) already belongs to **New Owner** (\`${NEW_OWNER}\`), so nothing was changed.`,
-    reads: [['find', 12]],
+    reads: [...readAgain, ['commit']],
     owner: NEW_OWNER
   },
   {
@@ -2042,17 +2236,21 @@ for (const { case: name, change, reply, reads, owner } of [
       rows.get(12).exportBanList.owner = OTHER_USER;
     },
     reply: `Export ban list **List 12** (#12) now belongs to \`${OTHER_USER}\`, not **Owner 12** (\`${OWNER_12}\`) as shown, so nothing was changed.`,
-    reads: [['find', 12]],
+    reads: [...readAgain, ['commit']],
     owner: OTHER_USER
+  },
+  {
+    case: 'it is being deleted',
+    change: () => beingDeleted.add(12),
+    reply: 'Export ban list **List 12** (#12) is being deleted, so nothing was changed.',
+    reads: [...readAgain, ['deleting?', 12], ['commit']],
+    owner: OWNER_12
   },
   {
     case: 'the new owner has made lists',
     change: () => giveLists(NEW_OWNER, [31, 32, 33]),
     reply: `**New Owner** (\`${NEW_OWNER}\`) now has 4 export ban lists, and the website lets a user have at most 4, so nothing was changed.`,
-    reads: [
-      ['find', 12],
-      ['count', { owner: NEW_OWNER }]
-    ],
+    reads: [...readAgain, ['deleting?', 12], ['commit']],
     owner: OWNER_12
   }
 ]) {
@@ -2136,8 +2334,12 @@ assert.deepStrictEqual(listsOf(NEW_OWNER), [12, 30, 31, 32]);
 assert.strictEqual(ownerOf(13), OWNER_13);
 assert.deepStrictEqual(calls.slice(calls.findIndex(([call]) => call === 'update')), [
   ['update', { owner: NEW_OWNER }, { where: { id: 12, owner: OWNER_12 } }],
-  ['find', 13],
-  ['count', { owner: NEW_OWNER }]
+  ['commit'],
+  ['begin'],
+  ['lock lists', NEW_OWNER],
+  ['find', 13, 'locked'],
+  ['deleting?', 13],
+  ['commit']
 ]);
 assert.ok(
   replies.some(
@@ -2174,9 +2376,13 @@ await assert.rejects(failing, (error) => error === lockWaitTimeout);
 await waiting;
 assert.deepStrictEqual(calls.slice(calls.findIndex(([call]) => call === 'failed')), [
   ['failed', 12],
-  ['find', 13],
-  ['count', { owner: NEW_OWNER }],
-  ['update', { owner: NEW_OWNER }, { where: { id: 13, owner: OWNER_13 } }]
+  ['rollback'],
+  ['begin'],
+  ['lock lists', NEW_OWNER],
+  ['find', 13, 'locked'],
+  ['deleting?', 13],
+  ['update', { owner: NEW_OWNER }, { where: { id: 13, owner: OWNER_13 } }],
+  ['commit']
 ]);
 assert.strictEqual(ownerOf(12), OWNER_12);
 assert.strictEqual(ownerOf(13), NEW_OWNER);
@@ -2187,6 +2393,30 @@ assert.deepStrictEqual(replies.at(-1), {
 assert.deepStrictEqual(audits, [
   `admin (1) transferred export ban list "List 13" (ID: 13, Remote) of Steam user "Owner 13" (ID: ${OWNER_13}) to Steam user "New Owner" (ID: ${NEW_OWNER}).`
 ]);
+
+// A transfer MySQL could not make, as other changes held the rows it needed, which
+// ExportBanList.inTransaction marks busy once it has given up, e.g. after a lock wait timeout or a
+// deadlock met every time it tried, changed nothing, so the admin is told so plainly, to try again,
+// and nothing is logged as a failure.
+reset();
+addList(12, 'remote');
+addSteamUser(NEW_OWNER, 'New Owner');
+beforeUpdate = () => {
+  throw Object.assign(new Error('Lock wait timeout exceeded; try restarting transaction'), {
+    busy: true
+  });
+};
+await assert.rejects(run('transfer', { id: 12, owner: NEW_OWNER }), (err) => {
+  assert.ok(err instanceof UserError);
+  assert.strictEqual(
+    err.message,
+    'Export ban list **List 12** (#12) was not transferred, as the database was busy with other changes, so nothing was changed. Try again in a minute.'
+  );
+  return true;
+});
+assert.strictEqual(ownerOf(12), OWNER_12);
+assert.deepStrictEqual(audits, []);
+assert.ok(calls.some(([call]) => call === 'rollback'));
 
 // A transfer goes ahead while a ban importer run holds its lock, which it does not check: nothing
 // a run does reads or writes a list's owner.

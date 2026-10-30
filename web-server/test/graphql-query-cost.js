@@ -81,6 +81,26 @@ for (const [model, row] of Object.entries(rows)) {
       return answer(options);
     };
 }
+// Changes to export ban lists are saved in transactions, with rows locked, which these stand-ins
+// only record.
+Object.assign(models.ExportBanList, {
+  async inTransaction(work) {
+    calls.push({ model: 'ExportBanList', method: 'inTransaction' });
+    return work({});
+  },
+  async lockListsOf(owner) {
+    calls.push({ model: 'ExportBanList', method: 'lockListsOf', options: { owner } });
+    return 0;
+  },
+  async whileDeleting(id, deletion) {
+    calls.push({ model: 'ExportBanList', method: 'whileDeleting', options: { id } });
+    return deletion();
+  },
+  async isBeingDeleted(id) {
+    calls.push({ model: 'ExportBanList', method: 'isBeingDeleted', options: { id } });
+    return false;
+  }
+});
 
 // The GraphQL API is loaded from the file the web server runs, with the real schema and resolvers,
 // and stubs for Koa and the database. @apollo/server is the real package, but ApolloServer is a

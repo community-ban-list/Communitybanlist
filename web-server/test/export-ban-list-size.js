@@ -740,6 +740,17 @@ function database() {
     ExportBanListConfig: model('ExportBanListConfig'),
     Organisation: model('Organisation')
   };
+  // Changes are saved in transactions, with the rows they check locked, which these stand-ins only
+  // record, as each list here has one user, and none is being deleted meanwhile.
+  Object.assign(models.ExportBanList, {
+    inTransaction: (work) => work({}),
+    async lockListsOf(owner) {
+      queries.push('ExportBanList.lockListsOf');
+      return rows.ExportBanList.filter((row) => row.owner === owner).length;
+    },
+    whileDeleting: (id, deletion) => deletion(),
+    isBeingDeleted: async () => false
+  });
   return { rows, queries, writes, battlemetrics, models };
 }
 

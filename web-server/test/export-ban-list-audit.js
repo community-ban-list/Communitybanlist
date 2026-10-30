@@ -228,6 +228,12 @@ class Model {
     return row ? Object.assign(new this(), row) : null;
   }
 
+  static async findAll({ where }) {
+    return rows.ExportBanList.filter((list) => matches(list, where)).map((row) =>
+      Object.assign(new this(), row)
+    );
+  }
+
   async save() {
     failure('ExportBanList.save');
     const row = rows.ExportBanList.find(({ id }) => id === this.id);
@@ -243,6 +249,17 @@ class Model {
     rows.ExportBanListConfig = rows.ExportBanListConfig.filter(
       (config) => config.exportBanList !== this.id
     );
+  }
+
+  // The website deletes a list only while its user owns it, and gives how many rows it deleted.
+  static async destroy({ where }) {
+    failure('ExportBanList.destroy');
+    const deleted = rows.ExportBanList.filter((row) => matches(row, where));
+    rows.ExportBanList = rows.ExportBanList.filter((row) => !deleted.includes(row));
+    rows.ExportBanListConfig = rows.ExportBanListConfig.filter(
+      (config) => !deleted.some(({ id }) => id === config.exportBanList)
+    );
+    return deleted.length;
   }
 }
 const dataType = () => dataType;
@@ -319,12 +336,29 @@ const LIMITS = exportListLimits.readLimits({
   EXPORT_REMOTE_MAX_PLAYERS: '0'
 }).limits;
 
-// The real ExportBanList, with the real BattleMetrics deletion steps and page reader.
+// The real ExportBanList, with the real BattleMetrics deletion steps and page reader. Its
+// transactions only run their work, its query for a user's Steam user row, as their lists are
+// locked, answers at once, no connection holds a list's deletion lock when it asks, and the
+// deletion lock's connection takes every lock it asks for (export-ban-list-locks.js in scbl-lib
+// checks these).
 const { default: ExportBanList } = await load(
   '../../scbl-lib/db/models/export-ban-list.js',
   {
     sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
-    '../sequelize.js': { default: { models: {} } },
+    '../sequelize.js': {
+      default: {
+        models: {},
+        transaction: (work) => work({}),
+        query: async (sql, options) => (options?.plain ? { holder: null } : [[], {}])
+      }
+    },
+    '../open-connection.js': {
+      default: async () => ({
+        query: async () => [[{ taken: 1 }]],
+        end: async () => {},
+        destroy() {}
+      })
+    },
     // Only the bot's check of stored lists against the limits counts their players this way.
     '../export-membership.js': {
       countMembers: () => assert.fail('No players are counted here.')
@@ -336,7 +370,7 @@ const { default: ExportBanList } = await load(
     '../../utils/index.js': { Logger },
     '../../config.js': { BATTLEMETRICS_ORGANIZATION: ORGANISATION, EXPORT_LIST_LIMITS: LIMITS }
   },
-  vm.createContext({ URL })
+  vm.createContext({ URL, setTimeout, clearTimeout })
 );
 models.ExportBanList = ExportBanList;
 
@@ -772,7 +806,66 @@ await refused(
   'Export ban list config does not exist!',
   BOB
 );
+// So is a config for a ban list paused as the request read them, among the checks, before the list
+// is locked to save it.
+rows.BanList.push({ id: 5, name: 'Paused Bans', organisation: 1 });
+now += 60 * 1000;
+await assert.rejects(
+  Mutation.createExportBanListConfig(
+    null,
+    { ...configArgs, banList: 5 },
+    { ...as(ALICE), paused: new Set([5]) }
+  ),
+  { message: 'That ban list is paused, so no config can be added for it until it counts again.' }
+);
 assert.deepStrictEqual(take(), []);
+// A config whose ban list an admin removes after its checks, e.g. with the Discord bot's /banlist
+// remove, fails as it is saved: MySQL refuses it for its foreign key to the ban list, and Sequelize
+// gives MySQL's error, which names the database's tables. Nothing was saved, so it is refused as a
+// ban list that does not exist, as the checks refuse one, and posts nothing.
+rows.BanList.push({ id: 6, name: 'Removed Bans', organisation: 1 });
+const noBanList = Object.assign(
+  new Error(
+    'Cannot add or update a child row: a foreign key constraint fails (`cbl`.`ExportBanListConfigs`, CONSTRAINT `ExportBanListConfigs_ibfk_1` FOREIGN KEY (`banList`) REFERENCES `BanLists` (`id`) ON DELETE CASCADE ON UPDATE CASCADE)'
+  ),
+  { errno: 1452, code: 'ER_NO_REFERENCED_ROW_2' }
+);
+failures.set('ExportBanListConfig.create', [
+  Object.assign(new Error(noBanList.message), {
+    name: 'SequelizeForeignKeyConstraintError',
+    parent: noBanList,
+    original: noBanList,
+    table: 'BanLists',
+    fields: ['banList']
+  })
+]);
+await refused(
+  'createExportBanListConfig',
+  { ...configArgs, banList: 6 },
+  'Ban list does not exist!'
+);
+assert.deepStrictEqual(failures.get('ExportBanListConfig.create'), []);
+assert.deepStrictEqual(take(), []);
+assert.ok(!rows.ExportBanListConfig.some(({ banList }) => banList === 6));
+// Other errors saving a config are not taken for a missing ban list: a lock wait that times out is
+// refused as the database being busy, as before, and any other error is posted, with the error, as
+// a failure.
+failures.set('ExportBanListConfig.create', [
+  Object.assign(new Error('Lock wait timeout exceeded'), {
+    parent: { errno: 1205 },
+    original: { errno: 1205 }
+  })
+]);
+await refused(
+  'createExportBanListConfig',
+  { ...configArgs, banList: 6 },
+  'The database was busy, so your change was not saved. Please try again in a minute.'
+);
+failures.set('ExportBanListConfig.create', [new Error('Database unavailable')]);
+await refused('createExportBanListConfig', { ...configArgs, banList: 6 }, 'Database unavailable');
+assert.deepStrictEqual(take(), [
+  `[WebServer][1] ${ALICE_TEXT} could not add a config to export ban list ${keptList} (ban list "Removed Bans" (ID: 6) of organisation "Partner Org", 2 points for an active ban and 1 for an expired ban): Error: Database unavailable`
+]);
 for (let i = 0; i < 3; i++)
   await change('createExportBanList', { name: `List ${i}`, server: 'Server', type: 'remote' });
 take();

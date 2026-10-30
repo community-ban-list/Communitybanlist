@@ -53,6 +53,8 @@ const Logger = {
 const dependencies = {
   sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
   '../sequelize.js': { default: {} },
+  // Deleting a list holds a lock on a connection of its own, which export-ban-list-locks.js checks.
+  '../open-connection.js': { default: () => assert.fail('A connection was opened.') },
   '../../apis/index.js': { battlemetrics },
   // Deleting lists is checked in delete-export-ban-list.js, and checking stored lists against the
   // limits, which counts the players of those over a cap, in check-stored-export-ban-lists.js.

@@ -556,8 +556,8 @@ function database(pause = async () => {}) {
       await pause();
       return rows[name].filter((row) => matches(row, where)).length;
     },
-    async findOne({ where, include }) {
-      queries.push([`${name}.findOne`, { ...where }]);
+    async findOne({ where, include, lock }) {
+      queries.push([`${name}.findOne`, { ...where }, ...(lock ? ['locked'] : [])]);
       if ('$ExportBanList.owner$' in where)
         assert.ok(include && include.includes(models.ExportBanList), 'The list is included.');
       await pause();
@@ -589,6 +589,20 @@ function database(pause = async () => {}) {
     ExportBanListConfig: model('ExportBanListConfig'),
     Organisation: model('Organisation')
   };
+  // Changes are saved in transactions, with the rows they check locked, which these stand-ins only
+  // record: each user here only changes their own lists, none of which the Discord bot is removing
+  // (export-ban-list-transfers.js checks changes to a list from the website and the Discord bot at
+  // once).
+  Object.assign(models.ExportBanList, {
+    inTransaction: (work) => work({}),
+    async lockListsOf(owner) {
+      queries.push(['ExportBanList.lockListsOf', { owner }]);
+      await pause();
+      return rows.ExportBanList.filter((row) => row.owner === owner).length;
+    },
+    whileDeleting: (id, deletion) => deletion(),
+    isBeingDeleted: async () => false
+  });
   return { rows, queries, writes, models };
 }
 
@@ -671,7 +685,8 @@ db.rows.ExportBanListConfig.push({
   expiredPoints: 1
 });
 
-// Saving a list looks it up by its ID and the user's Steam ID.
+// Saving a list looks it up by its ID and the user's Steam ID, and again the same way, with its row
+// locked, as the change is saved.
 await assert.rejects(Resolvers.updateExportBanList(null, { id: 7, name: 'Taken' }, other), {
   message: 'Export ban list does not exist!'
 });
@@ -681,7 +696,10 @@ assert.strictEqual(
   (await Resolvers.updateExportBanList(null, { id: 7, name: 'Renamed' }, owner)).name,
   'Renamed'
 );
-assert.deepStrictEqual(lastQuery(), ['ExportBanList.findOne', { id: 7, owner: 'owner' }]);
+assert.deepStrictEqual(db.queries.slice(-2), [
+  ['ExportBanList.findOne', { id: 7, owner: 'owner' }],
+  ['ExportBanList.findOne', { id: 7, owner: 'owner' }, 'locked']
+]);
 assert.strictEqual(stored('ExportBanList', 7).name, 'Renamed');
 
 // Adding a config looks its list up the same way.
@@ -728,7 +746,11 @@ await assert.rejects(Resolvers.createExportBanList(null, newList, other), { mess
 assert.deepStrictEqual(lastQuery(), ['ExportBanList.count', { owner: 'other' }]);
 for (let i = 0; i < 3; i++) {
   const created = await Resolvers.createExportBanList(null, newList, owner);
-  assert.deepStrictEqual(lastQuery(), ['ExportBanList.count', { owner: 'owner' }]);
+  // The user's lists are counted again, once they are locked, just before the list is created.
+  assert.deepStrictEqual(db.queries.slice(-2), [
+    ['ExportBanList.count', { owner: 'owner' }],
+    ['ExportBanList.lockListsOf', { owner: 'owner' }]
+  ]);
   assert.strictEqual(stored('ExportBanList', created.id).owner, 'owner');
 }
 await assert.rejects(Resolvers.createExportBanList(null, newList, owner), { message: LIST_LIMIT });
