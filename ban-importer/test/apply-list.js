@@ -159,6 +159,7 @@ const {
   sqlTime,
   textOf,
   timeOf,
+  whyHeld,
   writeBans
 } = module.namespace;
 const control = runControl.namespace;
@@ -722,6 +723,26 @@ assert.deepStrictEqual(
   ),
   ['large', null]
 );
+// A read that finds none of the bans of a list held as it lost a large part of them, while that
+// hold lasts, holds them all as 'large' still, so the hold goes on by its own rule, measured as
+// before, here against 1,000 bans however much the list has grown, rather than as 'full', which
+// would end as soon as one of them came back. So does one of a list whose only bans are those it
+// holds. A list whose hold no longer lasts, here as fewer than a fifth of the 2,000 bans it had
+// are held, and one held as it lost all of its bans, are held as 'full', as any list is.
+assert.deepStrictEqual(
+  plan({ missing: lose(2000), stored: 2000, fetched: 50, pending, ...heldLarge }),
+  { remove: [], wait: [], hold: 'large', held: lose(2000), released: [] }
+);
+assert.deepStrictEqual(
+  plan({ missing: lose(300), stored: 300, fetched: 50, pending, ...heldLarge }),
+  { remove: [], wait: [], hold: 'large', held: lose(300), released: [] }
+);
+assert.deepStrictEqual(
+  [{ ...heldLarge, heldOf: 2000 }, { held: heldLarge.held }].map(
+    (hold) => plan({ missing: lose(1000), stored: 1000, fetched: 50, pending, ...hold }).hold
+  ),
+  ['full', 'full']
+);
 // A large loss in the read that ends the hold, of bans no read had missed, is held anew. While the
 // hold goes on, such a loss is not held, and is removed as usual.
 assert.deepStrictEqual(
@@ -1100,9 +1121,10 @@ assert.deepStrictEqual([statements().length, delays], [2, [5000]]);
 // A hold for an admin is saved in one transaction, whole or not at all: why the list's bans are
 // held, with how many bans the list had before the read that began the hold, as the hold begins,
 // then its bans, a statement for each batch, recorded as held from now, unless they already were,
-// which keeps when that began. A hold that begins anew, for another reason, releases the list's
-// held bans first, in the same transaction, so all of its bans are held from now. One that goes on
-// saves its bans alone.
+// which keeps when that began. A hold that begins anew, as a list held as it lost a large part of
+// its bans now lost all of them, releases the list's held bans first, in the same transaction, so
+// all of its bans are held from now, and keeps why they are held. One that goes on saves its bans
+// alone.
 reset();
 const SAVE_HOLD_REASON =
   'INSERT INTO BanListHolds (banList, reason, storedCount) VALUES (?, ?, ?) AS new ON DUPLICATE KEY UPDATE reason = new.reason, storedCount = new.storedCount';
@@ -1112,7 +1134,7 @@ await saveHold(7, ['7,e', '7,f', '7,g'], {
   now: new Date(NOW),
   batchSize: 2
 });
-await saveHold(7, ['7,e', '7,f'], { reason: 'full', stored: 2, anew: true, now: new Date(NOW) });
+await saveHold(7, ['7,e', '7,f'], { stored: 2, anew: true, now: new Date(NOW) });
 await saveHold(7, ['7,e'], { stored: 30, now: new Date(NOW) });
 assert.deepStrictEqual(
   events.map(([type, sql, replacements, transaction]) =>
@@ -1125,7 +1147,6 @@ assert.deepStrictEqual(
     [SAVE_PENDING(1), [7, '7,g', AT, AT, AT], 1],
     ['commit', 1],
     ['begin', 2],
-    [SAVE_HOLD_REASON, [7, 'full', 2], 2],
     [RELEASE_HELD, [AT, AT, 7], 2],
     [SAVE_PENDING(2), [7, '7,e', AT, AT, AT, 7, '7,f', AT, AT, AT], 2],
     ['commit', 2],
@@ -1207,6 +1228,37 @@ fail(/^DELETE FROM BanListHolds /, lockWaitTimeout());
 await clearHoldReason(7);
 assert.deepStrictEqual([statements().length, delays], [2, [5000]]);
 
+// The hold a list's held bans are taken for, by why they are held, how many of them there are and
+// how many bans the list had before the read. A 'large' hold, with the count it was saved with, as
+// long as at least a large loss of that count is held: 40 of 200, and with no count, of the list
+// before the read, 25 of 100 or 200 of 1,000. It always starts a read with at least that many, so
+// with fewer, its reason outlived it, and they are taken as 'full', as are those held with no
+// reason, as by an importer from before BanListHolds, or with any other.
+assert.deepStrictEqual(
+  [
+    [{ reason: 'large', stored: 200 }, 40, 2000],
+    [{ reason: 'large', stored: 200 }, 39, 100],
+    [{ reason: 'large', stored: null }, 25, 100],
+    [{ reason: 'large', stored: null }, 24, 100],
+    [{ reason: 'large', stored: null }, 200, 1000],
+    [{ reason: 'large', stored: null }, 199, 1000],
+    [{ reason: 'full', stored: 30 }, 30, 30],
+    [null, 30, 30],
+    [{ reason: 'empty', stored: 30 }, 30, 30]
+  ].map(([recorded, held, stored]) => plain(whyHeld(recorded, held, stored))),
+  [
+    { heldFor: 'large', heldOf: 200 },
+    { heldFor: 'full', heldOf: null },
+    { heldFor: 'large', heldOf: null },
+    { heldFor: 'full', heldOf: null },
+    { heldFor: 'large', heldOf: null },
+    { heldFor: 'full', heldOf: null },
+    { heldFor: 'full', heldOf: null },
+    { heldFor: 'full', heldOf: null },
+    { heldFor: 'full', heldOf: null }
+  ]
+);
+
 // Once the run is asked to stop, the batch under way is finished, and no other is started.
 reset();
 batches.length = 0;
@@ -1225,5 +1277,5 @@ assert.deepStrictEqual(batches, [2, 2]);
 assert.strictEqual(events.filter(([type]) => type === 'commit').length, 2);
 
 console.log(
-  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans, which last until confirmed or a held ban comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the bans the list had then are still missing, batched writes, retries, failed bans, bans written alone, removals, records of missing bans, holds saved whole with why they are held and of how many bans, or not at all, and stops.'
+  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans, which last until confirmed or a held ban comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the bans the list had then are still missing, also once such a list loses all of its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals, records of missing bans, holds saved whole with why they are held and of how many bans, or not at all, and stops.'
 );
