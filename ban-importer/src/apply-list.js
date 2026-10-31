@@ -594,10 +594,12 @@ const SAVE_HOLD =
   'INSERT INTO BanListHolds (banList, reason, storedCount) VALUES (?, ?, ?) AS new ON DUPLICATE KEY UPDATE reason = new.reason, storedCount = new.storedCount';
 const CLEAR_HOLD = 'DELETE FROM BanListHolds WHERE banList = ?';
 
-// Write what a complete read changes of the list's hold for an admin in one transaction, run again
-// as a whole while it fails in a way that could pass, so all of it is written, or none of it, in
-// this order:
-// - back: the held bans, by ID, that the read found again, lose their records;
+// Write what a read changes of the list's hold for an admin in one transaction, run again as a
+// whole while it fails in a way that could pass, so all of it is written, or none of it, in this
+// order:
+// - back: the bans, by ID, that the read found again lose their records: the held bans that came
+//   back, and those that waited for a confirming read, which a read of the list drops before its
+//   bans are saved, also with no hold to write, as for a read that is not complete;
 // - release: the list's held bans no longer wait for an admin, but for a later complete read, as
 //   if first missing at now, as its hold ended, or begins anew (see planRemovals);
 // - reason: why its bans are held, with the bans a 'large' hold is measured against (stored), is
@@ -609,7 +611,7 @@ const CLEAR_HOLD = 'DELETE FROM BanListHolds WHERE banList = ?';
 // killed, writes none of it, so the next complete read finds the list held as it was, or not held
 // at all. A hold that keeps bans is written before the read's new and changed bans are saved, so
 // that read finds the same loss, against the same bans, and one that only ends once they are, as it
-// lets bans go, so a run cut short before then leaves it as it was (see holdMissingBans in
+// lets bans go, so a run cut short before then leaves it as it was (see keepMissingBans in
 // ban-importer.js). Written a statement at a time, a hold cut short as it ended could leave a
 // 'large' row with fewer of its bans held than such a hold keeps, and one cut short as it began
 // could leave part of its bans held, so that the next read took the list as held, and the rest of
