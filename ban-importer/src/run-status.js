@@ -139,6 +139,25 @@ export function shortSha(gitSha) {
 // A phase's name, as the embed shows it.
 export const label = (name) => plain(cut(LABELS[name] ?? String(name), MAX_LABEL));
 
+// The types of export ban lists, as the embed names them, in the order it gives them.
+const LIST_TYPES = [
+  ['battlemetrics', 'BattleMetrics'],
+  ['remote', 'remote']
+];
+
+// Of the export bans counted as what, e.g. created, how many were on each type of list, naming
+// only the types that had any, e.g. " (1 BattleMetrics, 1 remote)", from counts that hold each
+// type's own, as the export push's do. Counts without them, e.g. those of a run from before they
+// were kept, give nothing.
+export function describeListTypes(counts, what) {
+  const types = LIST_TYPES.map(([type, name]) => [counts?.[type]?.[what], name]).filter(
+    ([count]) => isCount(count) && count > 0
+  );
+  return types.length > 0
+    ? ` (${types.map(([count, name]) => `${formatCount(count)} ${name}`).join(', ')})`
+    : '';
+}
+
 // How far a step has got, e.g. 7 / 20 ban lists, with a bar for the step under way.
 export function describeProgress(progress, { bar = false } = {}) {
   if (!progress || !isCount(progress.done) || !isCount(progress.total)) return null;
@@ -245,11 +264,16 @@ const DETAILS = {
       ? `${formatCount(players)} of ${plural(progress.total, 'player')}`
       : plural(players, 'player');
   },
-  exportExportBans: ({ queued, created, deleted, failed }) => {
+  // The export bans created, deleted and failed, each with how many were on BattleMetrics and
+  // remote lists when it is not 0.
+  exportExportBans: (counts) => {
+    const { queued, created, deleted, failed } = counts;
     if (![queued, created, deleted].every(isCount)) return null;
     if (queued === 0) return 'nothing to export';
-    const failures = isCount(failed) && failed > 0 ? `, ${formatCount(failed)} failed` : '';
-    return `${formatCount(created)} created, ${formatCount(deleted)} deleted${failures} of ${plural(queued, 'export ban')}`;
+    const count = (value, what) =>
+      `${formatCount(value)} ${what}${describeListTypes(counts, what)}`;
+    const failures = isCount(failed) && failed > 0 ? `, ${count(failed, 'failed')}` : '';
+    return `${count(created, 'created')}, ${count(deleted, 'deleted')}${failures} of ${plural(queued, 'export ban')}`;
   }
 };
 

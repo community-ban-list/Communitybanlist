@@ -945,6 +945,60 @@ const exportBanModel = (rows) => ({
   ]);
 }
 
+// What the export did before it stopped is counted, in all and on BattleMetrics and remote lists
+// apart, as the run's record keeps it: the export ban whose BattleMetrics request was under way,
+// but not the one after it. The remote list deletes one more ban than the BattleMetrics list, so
+// counts that mixed up the two types would not match.
+{
+  const events = [];
+  const [create, , remove] = exportBans(events, (id) => {
+    if (id === 3) core.control.requestStop('it received SIGTERM');
+  });
+  const remoteList = { id: 2, type: 'remote', name: 'Remote', discordWebhook: null };
+  const remote = (id, status) => ({
+    id,
+    status,
+    ExportBanList: remoteList,
+    SteamUser: { id: `7656119800000000${id}`, name: 'Player' },
+    async save() {
+      events.push(`save ${id}`);
+    },
+    async destroy() {
+      events.push(`destroy ${id}`);
+    }
+  });
+  const rows = [
+    create,
+    remote(4, 'TO_BE_DELETED'),
+    remote(5, 'TO_BE_CREATED'),
+    remote(7, 'TO_BE_DELETED'),
+    remove,
+    remote(6, 'TO_BE_CREATED')
+  ];
+  const core = await loadCore({ ExportBan: exportBanModel(rows) });
+  core.control.setRunLock(heldLock);
+  const counts = {};
+  const error = await ended(core.exports.exportExportBans(counts), 'the export');
+  assert.strictEqual(error.name, 'RunStopped');
+  assert.deepStrictEqual(events, [
+    'create 1 on BattleMetrics',
+    'save 1',
+    'destroy 4',
+    'save 5',
+    'destroy 7',
+    'delete 3 on BattleMetrics',
+    'destroy 3'
+  ]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(counts)), {
+    queued: 6,
+    created: 2,
+    deleted: 3,
+    failed: 0,
+    remote: { created: 1, deleted: 2, failed: 0 },
+    battlemetrics: { created: 1, deleted: 1, failed: 0 }
+  });
+}
+
 // Nothing reaches BattleMetrics without the run lock: once the run has lost it, or if it never
 // took it.
 for (const lock of [lostLock, null]) {
