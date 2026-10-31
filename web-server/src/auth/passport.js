@@ -4,6 +4,7 @@ import SteamStrategy from 'passport-steam';
 import { HOST } from 'scbl-lib/config';
 import { SteamUser } from 'scbl-lib/db/models';
 
+import { inProduction } from '../production.js';
 import getSteamProfile from './steam-profile.js';
 
 // The OpenID identifier of a player signing in with Steam, which the OpenID library has confirmed
@@ -16,7 +17,7 @@ const PROFILE_FIELDS = ['name', 'avatar', 'avatarMedium', 'avatarFull'];
 // Steam sends players back to the site's /login page after they sign in, and shows them the
 // site's address, so both come from HOST. Signing in cannot work without the right address, so the
 // web server says so when it starts.
-const { returnURL, realm, problem } = signInAddresses(HOST, process.env.NODE_ENV === 'production');
+const { returnURL, realm, problem } = signInAddresses(HOST, inProduction);
 if (problem) console.warn(`Warning: ${problem}`);
 
 passport.use(

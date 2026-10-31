@@ -12,7 +12,7 @@ Requests to `/graphql`, `/auth/` and `/export/` are proxied to the web server on
 
 ### `yarn build`
 
-Builds the app for production into the `build` folder, which the web server serves when `NODE_ENV` is set.
+Builds the app for production into the `build` folder, which the web server serves when `NODE_ENV` is `production`.
 
 ### `yarn preview`
 

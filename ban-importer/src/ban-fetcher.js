@@ -23,6 +23,14 @@ const MAX_LAST_MODIFIED_LENGTH = 64;
 const BATTLEMETRICS_BANS = new URL('https://api.battlemetrics.com/bans');
 const BATTLEMETRICS_PAGE_SIZE = 100;
 
+// Every page of a read asks BattleMetrics for the list's expired bans as well as its running ones.
+// BattleMetrics' API documentation says that GET /bans hides expired bans unless filter[expired] is
+// true, although without the filter it gives them too. A read without them would make the list's
+// expired bans look removed, and as BattleMetrics' count of the list's bans would then leave them
+// out as well, the count check would not notice. So the filter is sent, on the first page and on
+// each page a link leads to, whatever the link gives for it.
+const BATTLEMETRICS_EXPIRED_BANS = { 'filter[expired]': 'true' };
+
 // BattleMetrics answers a page of bans in about half a second as a rule, but at times not at all:
 // in production, a few pages of large lists got no answer, not even its headers, at about half of
 // the attempts at them, while an attempt at them that was answered was answered within a second, as
@@ -401,13 +409,13 @@ export default class BanFetcher {
   }
 
   // Begin a read of a BattleMetrics list, which readBattlemetricsPage then reads a page at a time,
-  // from its first page: 100 bans of the list, expired or not, the newest first with newestFirst.
-  // BattleMetrics' links lead from each page to the bans after its last one, so a page read later
-  // still follows on from the one before it. The read keeps the pages read, BattleMetrics' counts of
-  // the list's bans, the next page to read, the pages it has been to, so it never reads one twice,
-  // and how many pages it may read.
+  // from its first page: 100 bans of the list, expired or not (see BATTLEMETRICS_EXPIRED_BANS), the
+  // newest first with newestFirst. BattleMetrics' links lead from each page to the bans after its
+  // last one, so a page read later still follows on from the one before it. The read keeps the
+  // pages read, BattleMetrics' counts of the list's bans, the next page to read, the pages it has
+  // been to, so it never reads one twice, and how many pages it may read.
   startBattlemetricsRead(banList) {
-    const params = { 'filter[banList]': banList.source };
+    const params = { 'filter[banList]': banList.source, ...BATTLEMETRICS_EXPIRED_BANS };
     if (this.newestFirst) params.sort = '-timestamp';
     params['page[size]'] = BATTLEMETRICS_PAGE_SIZE;
     return {
@@ -564,11 +572,13 @@ export default class BanFetcher {
     }
 
     // Store the parameters for the next page fetch, unless this is the last page. The link must
-    // stay on the list's bans and must not lead back to a page already fetched.
+    // stay on the list's bans and must not lead back to a page already fetched. The next page asks
+    // for the list's expired bans too, whatever the link gives for that, so a link back to a page
+    // already fetched is recognised whether or not it repeats the filter.
     const next = data.links.next;
     if (next) {
       const link = new URL(typeof next === 'string' ? next : next.href, BATTLEMETRICS_BANS);
-      const params = Object.fromEntries(link.searchParams);
+      const params = { ...Object.fromEntries(link.searchParams), ...BATTLEMETRICS_EXPIRED_BANS };
       const address = pageAddress(params);
       if (
         link.origin !== BATTLEMETRICS_BANS.origin ||

@@ -9,10 +9,12 @@ import Logger from 'koa-logger';
 import serve from 'koa-static';
 import mount from 'koa-mount';
 import { send } from '@koa/send';
+import { STATUS_CODES } from 'http';
 
 import bodyParser from './body-parser.js';
 import { passport, routes as routesAuth } from './auth/index.js';
 import clientConfig from './client-config.js';
+import { inProduction, nodeEnvProblem } from './production.js';
 import GraphQL from './graphql-api/index.js';
 import ExportBanLists from './export-ban-lists.js';
 import { isShuttingDown } from './shutting-down.js';
@@ -21,10 +23,24 @@ import { DISCORD_INVITE, EXPORT_LIST_LIMIT_PROBLEMS, INTAKE_FORM } from 'scbl-li
 import { sequelize } from 'scbl-lib/db';
 import { DATABASE_UNAVAILABLE_MESSAGE, isDatabaseUnavailable } from 'scbl-lib/db/sequelize';
 
-const inProduction = process.env.NODE_ENV;
+// The site is served only when NODE_ENV is exactly production (production.js), so a value the web
+// server does not expect, such as prod, is warned about.
+if (nodeEnvProblem) console.warn(`Warning: ${nodeEnvProblem}`);
 
 const app = new Koa();
 const router = new Router();
+
+// Headers that describe the answer a route meant to give, such as a file name to save it under or
+// when it last changed, which an error answered in its place must not carry.
+const ANSWER_HEADERS = [
+  'Content-Disposition',
+  'Content-Encoding',
+  'Content-Language',
+  'ETag',
+  'Expires',
+  'Last-Modified',
+  'Location'
+];
 
 app.use(async (ctx, next) => {
   try {
@@ -39,10 +55,27 @@ app.use(async (ctx, next) => {
       return;
     }
 
-    // Koa 2 answered with 404 when a request failed because a file was missing. Koa 3 answers with
-    // 500, so keep the old behaviour for the routes that read files.
-    if (err.code === 'ENOENT') err.status = 404;
-    throw err;
+    // Once the answer has started, it can no longer be changed, so leave the error to Koa.
+    if (ctx.headerSent || !ctx.writable) throw err;
+
+    // Answer the error here rather than passing it on: Koa first removes every header set so far,
+    // so its answers lacked Helmet's headers. Keep those and the CORS headers, remove the ones about
+    // the answer the route meant to give, and tell browsers and caches not to keep the error.
+    for (const header of ANSWER_HEADERS) ctx.remove(header);
+    ctx.set('Cache-Control', 'no-store');
+    ctx.set(err.headers);
+    // Koa 2 answered with 404 when a request failed because a file was missing, which @koa/send
+    // tells by these codes. Koa 3 answers with 500, so keep the old behaviour for the routes that
+    // read files.
+    const missingFile = ['ENOENT', 'ENAMETOOLONG', 'ENOTDIR'].includes(err.code);
+    const status = missingFile ? 404 : err.status || err.statusCode;
+    ctx.status = Number.isInteger(status) && status >= 400 && STATUS_CODES[status] ? status : 500;
+    ctx.type = 'text';
+    // Show only messages meant for the client. A system error's is not, as it has a file's path or
+    // an address, even when @koa/send passes a missing file on as meant for the client.
+    ctx.body = err.expose && !err.syscall ? err.message : ctx.message;
+    // Koa logs the errors it answers, apart from those meant for the client, so log server errors.
+    if (ctx.status >= 500) ctx.app.emit('error', err, ctx);
   }
 });
 
@@ -111,8 +144,8 @@ if (inProduction) {
   const buildPath = path.join(clientPath, '/build');
 
   // Vite copies client/public (favicon, logos, manifest, robots.txt) to the root of the build, next
-  // to index.html. Serve those files by their exact path and answer every other path with
-  // index.html, so the client can route it.
+  // to index.html. Serve those files by their exact path and answer the client's pages with
+  // index.html, so the client can route them.
   const buildFiles = new Set(
     fs
       .readdirSync(buildPath, { withFileTypes: true })
@@ -120,8 +153,22 @@ if (inProduction) {
       .map((entry) => `/${entry.name}`)
   );
 
+  // The client has no pages under the paths the server answers itself, and each of its pages
+  // starts with a name without a dot, such as /search. A request that gets this far for a path
+  // under one the server answers, such as a missing file under /static, an unknown sign-in path or
+  // an export list URL without its id, or for a path whose first part has a dot, as a file name
+  // has, is left unanswered, so Koa answers it with 404 rather than a page. The rest of a page's
+  // path can hold what a visitor typed, such as a search for a name, so dots there are allowed.
+  // The 404 tells browsers and caches in front of the server, such as Cloudflare, not to keep it,
+  // as the file may be there soon, e.g. a bundle asked for while a new build is being deployed.
+  const serverPath = /^\/(static|auth|graphql|export)(\/|$)/i;
+  const fileName = /^\/[^/]*\./;
+
   router.get('{/*path}', async (ctx) => {
-    await send(ctx, buildFiles.has(ctx.path) ? ctx.path : 'index.html', { root: buildPath });
+    if (buildFiles.has(ctx.path)) await send(ctx, ctx.path, { root: buildPath });
+    else if (!serverPath.test(ctx.path) && !fileName.test(ctx.path))
+      await send(ctx, 'index.html', { root: buildPath });
+    else ctx.set('Cache-Control', 'no-store');
   });
 }
 

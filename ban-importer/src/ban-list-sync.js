@@ -23,7 +23,9 @@ export const STATES = {
   SELF_IMPORT: 'self_import',
   // It was imported, but some of the bans it no longer has were kept for now: until a later
   // complete read of the list confirms that they are gone, or, for a list that lost all of its
-  // bans, until an admin confirms it.
+  // bans, until an admin confirms it or one of them comes back, and for one that lost a large part
+  // of them at once, until an admin confirms it or those still missing are no longer a large part
+  // of the bans it had then, or has, if fewer.
   HELD: 'held'
 };
 

@@ -49,6 +49,9 @@ const steamUsers = new Map();
 const bans = new Map();
 // The bans recorded as missing, by `${banList},${banId}`.
 const pendingRows = new Map();
+// Why each list's held bans are held, and how many bans the list had before the read that began
+// the hold, by list, as { reason, storedCount }.
+const holdRows = new Map();
 const events = [];
 const logs = [];
 const delays = [];
@@ -63,7 +66,18 @@ let onCount = null;
 // Errors for the next statement that records missing bans, and the next that removes bans, to fail
 // with.
 let pendingError = null;
+// Called with the IDs of the bans each statement that holds bans for an admin holds, before it
+// holds them: what it throws fails the statement.
+let onHold = null;
 let removeError = null;
+// Errors for the statements that remove bans, or change a list's hold or its recorded missing bans,
+// to fail with, by the event each records, e.g. 'release held', in order, one each time such a
+// statement runs, before it changes anything: a null lets that one run.
+const statementErrors = new Map();
+function failIfAsked(type) {
+  const error = statementErrors.get(type)?.shift();
+  if (error) throw error;
+}
 let transactions = 0;
 // Lines for the log channel must be logged as important, which none of the importer's level-1
 // lines may skip.
@@ -230,6 +244,7 @@ async function runStatement(sql, replacements, transaction) {
   }
   if (sql === 'DELETE FROM Bans WHERE banList = ? AND id IN (?)') {
     const [list, ids] = replacements;
+    failIfAsked('remove');
     if (removeError) {
       const error = removeError;
       removeError = null;
@@ -246,6 +261,7 @@ async function runStatement(sql, replacements, transaction) {
   }
   if (sql === 'DELETE FROM BanListPendingRemovals WHERE banList = ? AND banId IN (?)') {
     const [list, ids] = replacements;
+    failIfAsked('clear pending');
     events.push(['clear pending', [...ids], tx]);
     for (const id of ids) pendingRows.delete(`${list},${id}`);
     return [{ affectedRows: 0 }, { affectedRows: 0 }];
@@ -258,6 +274,7 @@ async function runStatement(sql, replacements, transaction) {
     const rows = rowsOf(replacements, 5);
     const held = rows.some(([, , , , heldAt]) => heldAt !== null);
     events.push([held ? 'save held' : 'save pending', rows.map(([, id]) => id), tx]);
+    if (held && onHold) onHold(rows.map(([, id]) => id));
     if (pendingError) {
       const error = pendingError;
       pendingError = null;
@@ -288,6 +305,7 @@ async function runStatement(sql, replacements, transaction) {
     'UPDATE BanListPendingRemovals SET firstMissingAt = ?, lastMissingAt = ?, heldAt = NULL WHERE banList = ? AND heldAt IS NOT NULL'
   ) {
     const [first, last, list] = replacements;
+    failIfAsked('release held');
     const released = [...pendingRows.values()].filter(
       (row) => row.banList === list && row.heldAt !== null
     );
@@ -300,6 +318,29 @@ async function runStatement(sql, replacements, transaction) {
       });
     return [{ affectedRows: released.length }, { affectedRows: released.length }];
   }
+  if (sql === 'SELECT reason, storedCount FROM BanListHolds WHERE banList = ?') {
+    events.push(['read hold reason', replacements[0]]);
+    return holdRows.has(replacements[0]) ? [{ ...holdRows.get(replacements[0]) }] : [];
+  }
+  if (
+    sql ===
+    'INSERT INTO BanListHolds (banList, reason, storedCount) VALUES (?, ?, ?) AS new ON DUPLICATE KEY UPDATE reason = new.reason, storedCount = new.storedCount'
+  ) {
+    const [list, reason, storedCount] = replacements;
+    failIfAsked('save hold reason');
+    events.push(['save hold reason', [list, reason, storedCount], tx]);
+    if (!banLists.has(list)) throw new ForeignKeyConstraintError('banList');
+    if (!Number.isInteger(storedCount) || storedCount < 0)
+      throw new DatabaseError(`Column 'storedCount' cannot be ${storedCount}`);
+    holdRows.set(list, { reason, storedCount });
+    return [0, 1];
+  }
+  if (sql === 'DELETE FROM BanListHolds WHERE banList = ?') {
+    failIfAsked('clear hold reason');
+    events.push(['clear hold reason', [replacements[0]], tx]);
+    const had = holdRows.delete(replacements[0]) ? 1 : 0;
+    return [{ affectedRows: had }, { affectedRows: had }];
+  }
   throw new Error(`Unexpected statement: ${sql}`);
 }
 
@@ -307,13 +348,15 @@ async function runStatement(sql, replacements, transaction) {
 const snapshot = () => ({
   steamUsers: new Map([...steamUsers].map(([id, user]) => [id, { ...user }])),
   bans: new Map([...bans].map(([id, ban]) => [id, { ...ban }])),
-  pendingRows: new Map([...pendingRows].map(([key, row]) => [key, { ...row }]))
+  pendingRows: new Map([...pendingRows].map(([key, row]) => [key, { ...row }])),
+  holdRows: new Map([...holdRows].map(([list, row]) => [list, { ...row }]))
 });
 function restore(saved) {
   for (const [store, copy] of [
     [steamUsers, saved.steamUsers],
     [bans, saved.bans],
-    [pendingRows, saved.pendingRows]
+    [pendingRows, saved.pendingRows],
+    [holdRows, saved.holdRows]
   ]) {
     store.clear();
     for (const [key, value] of copy) store.set(key, value);
@@ -613,6 +656,8 @@ function newUser(id) {
   };
 }
 const steamID = (n) => `7656119800${String(n).padStart(7, '0')}`;
+// Why a list's held bans are held, by its BanListHolds row, or undefined when it has none.
+const holdReason = (list) => holdRows.get(list)?.reason;
 
 function reset() {
   for (const store of [
@@ -620,7 +665,9 @@ function reset() {
     steamUsers,
     bans,
     pendingRows,
+    holdRows,
     writeErrors,
+    statementErrors,
     remoteLists,
     battlemetricsLists,
     battlemetricsTotals,
@@ -647,6 +694,7 @@ function reset() {
   onBattlemetrics = null;
   onBanListsRead = null;
   pendingError = null;
+  onHold = null;
   removeError = null;
   syncError = null;
   visibleBanLists = null;
@@ -737,6 +785,10 @@ function plainReport(importer) {
   }
   return report;
 }
+// What a list's entry in the report says about bans held for an admin: those of its fields that it
+// has, of held, pending, hold, holdEnded, cameBack and massRemoval.
+const holdFields = ({ held, pending, hold, holdEnded, cameBack, massRemoval }) =>
+  JSON.parse(JSON.stringify({ held, pending, hold, holdEnded, cameBack, massRemoval }));
 // What the import wrote: the IDs of the bans written, the bans removed, and the players queued.
 const written = () => events.filter(([type]) => type === 'write').flatMap(([, ids]) => ids);
 const removedIDs = () => events.filter(([type]) => type === 'remove').flatMap(([, ids]) => ids);
@@ -749,6 +801,8 @@ const writes = () =>
       'save held',
       'clear pending',
       'release held',
+      'save hold reason',
+      'clear hold reason',
       'flags',
       'add users'
     ].includes(type)
@@ -865,8 +919,8 @@ assert.strictEqual(
   'Got 1 deleted ban. Imported 2 ban lists: 4 bans fetched, 1 new, 0 updated, 1 removed, 0 held, 1 list failed.'
 );
 
-// A second run with nothing changed reads each list's stored bans and its missing bans, and
-// writes nothing at all: no ban, no player and no record of a missing ban.
+// A second run with nothing changed reads each list's stored bans, its missing bans and why its bans
+// are held, if they are, and writes nothing at all: no ban, no player and no record of a missing ban.
 events.length = 0;
 logs.length = 0;
 battlemetricsLists.set('bm-1', [pairs('a', 0, 5)]);
@@ -881,8 +935,10 @@ assert.deepStrictEqual(
   [
     ['select', 1],
     ['select pending', 1],
+    ['read hold reason', 1],
     ['select', 2],
-    ['select pending', 2]
+    ['select pending', 2],
+    ['read hold reason', 2]
   ]
 );
 assert.strictEqual(
@@ -1422,7 +1478,8 @@ for (const [stored, others] of [
     );
     assert.match(summary(), new RegExp(`, 0 removed, ${stored} held, `), at);
   }
-  // Named in IMPORTER_ALLOW_MASS_REMOVAL, it loses them, with their records.
+  // Named in IMPORTER_ALLOW_MASS_REMOVAL, it loses them, with their records, and its line says which
+  // hold that ended.
   env.IMPORTER_ALLOW_MASS_REMOVAL = '5';
   logs.length = 0;
   const [confirmed] = await run();
@@ -1432,17 +1489,17 @@ for (const [stored, others] of [
     label
   );
   assert.deepStrictEqual([pendingIDs(5), row(5).state], [[], 'ok'], label);
-  assert.strictEqual(
-    logged(
-      1,
-      new RegExp(`^Imported ban list \\(ID: 5\\): .*, ${stored} removed, as IMPORTER_ALLOW_MASS`)
-    ).length,
-    1,
+  assert.deepStrictEqual(
+    warnings().map(({ message }) => message),
+    [
+      `Imported ban list (ID: 5): ${others} bans fetched, 0 new, 0 updated, ${stored} removed, as IMPORTER_ALLOW_MASS_REMOVAL names the list, which ended its hold of the ${stored} bans it had when it lost all of its bans at once, held since ${since.toISOString()}. Remove it from the setting once the removal is done.`
+    ],
     label
   );
 }
 // Bans the held list saved since, that it no longer has, are removed as usual while it stays held:
-// a few at once, and more once a later complete read confirms they are gone. The line says so.
+// a few at once, and more, up to one fewer than a large loss of the list, here 84 of 425, once a
+// later complete read confirms they are gone. The line says so.
 reset();
 battlemetricsList(5, pairs('e', 0, 30), [pairs('n', 1000, 1400)]);
 await run();
@@ -1452,35 +1509,44 @@ assert.deepStrictEqual(
   [results[0].hold, results[0].removed, results[0].held, storedIDs(5).length],
   ['full', 5, 30, 425]
 );
-battlemetricsLists.set('bm-5', [pairs('n', 1105, 1400)]);
+battlemetricsLists.set('bm-5', [pairs('n', 1089, 1400)]);
 logs.length = 0;
 results = await run();
 assert.deepStrictEqual(
   [results[0].hold, results[0].removed, results[0].held, results[0].pending],
-  ['full', 0, 130, 100]
+  ['full', 0, 114, 84]
 );
-assert.deepStrictEqual([heldIDs(5).length, pendingIDs(5).length], [30, 130]);
+assert.deepStrictEqual([heldIDs(5).length, pendingIDs(5).length, holdReason(5)], [30, 114, 'full']);
 assert.match(
   warnings()[0].message,
-  /^Imported ban list \(ID: 5\): 295 bans fetched, 0 new, 0 updated\. Still kept the 30 bans it had when .* for one run\. Of the bans it saved since, 100 that it no longer has are kept until a later complete read of it confirms they are gone\.$/
+  /^Imported ban list \(ID: 5\): 311 bans fetched, 0 new, 0 updated\. Still kept the 30 bans it had when .* for one run\. Of the bans it saved since, 84 that it no longer has are kept until a later complete read of it confirms they are gone\.$/
 );
 age(5, 10);
 results = await run();
 assert.deepStrictEqual(
   [results[0].hold, results[0].removed, results[0].held, storedIDs(5).length],
-  ['full', 100, 30, 325]
+  ['full', 84, 30, 341]
 );
 // Once one of its held bans comes back, the hold ends: that ban loses its record, and the others
 // wait for a later complete read, as if first missing now, however long they were held, so they
-// are not removed until then. It is then a list whose missing bans wait, which is not posted.
+// are not removed until then, though they are still a large part of the bans the list had. The
+// line of the read that ended the hold is posted, as the list's earlier lines said they were kept
+// until one came back, and says when the rest are removed, and the list's record says which hold
+// ended.
 reset();
 battlemetricsList(5, pairs('e', 0, 30), [pairs('n', 1000, 1400)]);
 await run();
+assert.deepStrictEqual(holdRows.get(5), { reason: 'full', storedCount: 30 });
 age(5, 600);
+const fullSince = new Date(pendingRows.get('5,5,e0').heldAt).toISOString();
 battlemetricsLists.set('bm-5', [[...pairs('e', 0, 1), ...pairs('n', 1000, 1400)]]);
 events.length = 0;
 logs.length = 0;
-results = await run();
+const fullImport = new BanImporter();
+results = await fullImport.importBans();
+assert.deepStrictEqual(plainReport(fullImport).banLists.map(holdFields), [
+  { held: 29, pending: 29, holdEnded: 'full', cameBack: 1 }
+]);
 assert.deepStrictEqual(
   [results[0].hold, results[0].removed, results[0].pending, results[0].held],
   [null, 0, 29, 29]
@@ -1500,10 +1566,17 @@ assert.deepStrictEqual(
     ['save pending', 29]
   ]
 );
-assert.deepStrictEqual(warnings(), []);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 401 bans fetched, 0 new, 0 updated. Stopped holding the 30 bans it had when it lost all of its bans at once, held since ${fullSince}, as 1 of them came back. The other 29, which it still does not have, are removed once a complete read of it at least 10 minutes from now still does not have them.`
+  ]
+);
+// Removing them, 29 of 430, is not a large part of the list, so it is not posted.
 age(5, 10);
+logs.length = 0;
 results = await run();
-assert.deepStrictEqual([results[0].removed, storedIDs(5).length], [29, 401]);
+assert.deepStrictEqual([results[0].removed, storedIDs(5).length, warnings()], [29, 401, []]);
 // A read that is not complete does not end the hold, though it finds a held ban: the ban keeps its
 // record, so the next complete read finds that it came back.
 reset();
@@ -1604,6 +1677,1411 @@ for (const [hours, removes] of [
     removes ? 1 : 0
   );
 }
+
+// A list that loses a large part of its bans at once keeps them for an admin, though its read is
+// complete: here 80 of 200, the expired ones, which its source now leaves out, as BattleMetrics
+// would if it hid expired bans that it is not asked for, as its documentation describes its
+// filter. Its count of the list's bans drops with them, so the count check passes. At least 25
+// bans, and a fifth of the list, are held as 'large': recorded as held, with why and how many bans
+// the list had, in one transaction, the list held, its line posted, with how many of them must
+// still be missing for the hold to last, and its bans counted as held. None of their players is
+// queued, so their reputation points and export bans stay as they are.
+const expire = (list, uids) => {
+  for (const uid of uids)
+    Object.assign(bans.get(`${list},${uid}`), {
+      expires: new Date('2026-06-01T00:00:00.000Z'),
+      expired: true
+    });
+};
+const lostLarge = pairs('e', 0, 80).map(([uid]) => `5,${uid}`);
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+expire(
+  5,
+  pairs('e', 0, 80).map(([uid]) => uid)
+);
+const largeImporter = new BanImporter();
+[result] = await largeImporter.importBans();
+assert.deepStrictEqual(
+  [result.complete, result.hold, result.held, result.pending, result.removed, result.stored],
+  [true, 'large', 80, 0, 0, 200]
+);
+assert.deepStrictEqual(
+  [storedIDs(5).length, heldIDs(5).sort(), holdRows.get(5), row(5).state],
+  [200, [...lostLarge].sort(), { reason: 'large', storedCount: 200 }, 'held']
+);
+const holdTx = writes()[0]?.[2];
+assert.deepStrictEqual(writes(), [
+  ['save hold reason', [5, 'large', 200], holdTx],
+  ['save held', lostLarge, holdTx]
+]);
+assert.deepStrictEqual(inTransaction(holdTx), ['begin', 'save hold reason', 'save held', 'commit']);
+assert.ok(
+  lostLarge.every(
+    (id) => steamUsers.get(bans.get(id).steamUser).lastRefreshedReputationPoints === FRESH
+  )
+);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    'Imported ban list (ID: 5): 120 bans fetched, 0 new, 0 updated. Kept the 80 of its 200 stored bans that it lost at once, as losing so many at once more likely means that its source broke, or now leaves some bans out, such as its expired ones. They are kept until fewer than 40 of them are missing, and any that comes back is no longer held. If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.'
+  ]
+);
+assert.match(summary(), /, 0 removed, 80 held, 0 lists failed\.$/);
+// The run's record gives the hold and the held bans, which its status message, and a cycle's embed,
+// count as held.
+assert.deepStrictEqual(
+  [plainReport(largeImporter).held, plainReport(largeImporter).banLists],
+  [
+    80,
+    [
+      {
+        id: 5,
+        fetched: 120,
+        new: 0,
+        updated: 0,
+        removed: 0,
+        held: 80,
+        read: 'full',
+        reason: 'new',
+        stored: 200,
+        hold: 'large',
+        state: 'held'
+      }
+    ]
+  ]
+);
+// It stays held, as 'large', on every run until an admin confirms it, however long its bans have
+// been missing, and its line is posted on every run, with since when, and how many of them must
+// still be missing for the hold to last. Why it is held is read, and was saved as the hold began,
+// and again only as the list shrank, here to 197 bans, which it is measured against from then.
+// The bans it loses meanwhile are removed as usual: a few at once, and more, up to one ban fewer
+// than a large loss of the list, once a later complete read confirms they are gone.
+const heldSince = new Date(pendingRows.get(`5,${lostLarge[0]}`).heldAt);
+for (const [again, served, removedNow, waiting, of] of [
+  [1, pairs('e', 80, 200), 0, 0, 200],
+  [2, pairs('e', 83, 200), 3, 0, 200],
+  [3, pairs('e', 122, 200), 0, 39, 197]
+]) {
+  age(5, 60);
+  heldSince.setTime(heldSince.getTime() - 60 * 60 * 1000);
+  battlemetricsLists.set('bm-5', [served]);
+  events.length = 0;
+  logs.length = 0;
+  [result] = await run();
+  const at = `run ${again + 1}`;
+  assert.deepStrictEqual(
+    [result.hold, result.held, result.pending, result.removed],
+    ['large', 80 + waiting, waiting, removedNow],
+    at
+  );
+  assert.deepStrictEqual(
+    [heldIDs(5).sort(), holdRows.get(5)],
+    [[...lostLarge].sort(), { reason: 'large', storedCount: of }],
+    at
+  );
+  assert.deepStrictEqual(
+    events.filter(([type]) => type.endsWith('hold reason')).map(([type, ids]) => [type, ids]),
+    of === 200
+      ? [['read hold reason', 5]]
+      : [
+          ['read hold reason', 5],
+          ['save hold reason', [5, 'large', 197]]
+        ],
+    at
+  );
+  const others =
+    waiting > 0
+      ? ` Of its other bans, ${waiting} that it no longer has are kept until a later complete read of it confirms they are gone.`
+      : '';
+  assert.deepStrictEqual(
+    warnings().map(({ message }) => message),
+    [
+      `Imported ban list (ID: 5): ${served.length} bans fetched, 0 new, 0 updated${removedNow > 0 ? `, ${removedNow} removed` : ''}. Still kept the 80 bans it lost at once, held since ${heldSince.toISOString()}, as losing so many at once more likely means that its source broke, or leaves them out. They are kept until fewer than 40 of them are missing. If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.${others}`
+    ],
+    at
+  );
+}
+age(5, 10);
+heldSince.setTime(heldSince.getTime() - 10 * 60 * 1000);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.removed, storedIDs(5).length],
+  ['large', 80, 39, 158]
+);
+// Named in IMPORTER_ALLOW_MASS_REMOVAL, it loses them on its next read, with their records and why
+// they were held, and their players are queued, as an admin confirmed the loss. Its line says which
+// hold that ended, as its earlier lines said it was held, and so does its record.
+env.IMPORTER_ALLOW_MASS_REMOVAL = '5';
+events.length = 0;
+logs.length = 0;
+const confirmImporter = new BanImporter();
+[result] = await confirmImporter.importBans();
+assert.deepStrictEqual(
+  [result.removed, result.held, result.hold, result.massRemoval, storedIDs(5).length],
+  [80, 0, null, true, 78]
+);
+assert.deepStrictEqual(plainReport(confirmImporter).banLists.map(holdFields), [
+  { held: 0, holdEnded: 'large', massRemoval: true }
+]);
+assert.deepStrictEqual([pendingIDs(5), holdRows.has(5), row(5).state], [[], false, 'ok']);
+assert.deepStrictEqual(
+  events.filter(([type]) => type.endsWith('hold reason')).map(([type, ids]) => [type, ids]),
+  [
+    ['read hold reason', 5],
+    ['clear hold reason', [5]]
+  ]
+);
+assert.ok(lostLarge.every((id) => !bans.has(id)));
+assert.ok(
+  lostLarge.every((id, n) => steamUsers.get(steamID(n)).lastRefreshedReputationPoints === null),
+  'their players are queued'
+);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 78 bans fetched, 0 new, 0 updated, 80 removed, as IMPORTER_ALLOW_MASS_REMOVAL names the list, which ended its hold of the 80 bans it lost at once, held since ${heldSince.toISOString()}. Remove it from the setting once the removal is done.`
+  ]
+);
+
+// One ban fewer than a fifth of the list, 39 of 200, is not held: it waits for a later complete
+// read, which removes it at least 10 minutes on, as before, and nothing is posted.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 39, 200)]);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.pending, result.removed],
+  [null, 39, 39, 0]
+);
+assert.deepStrictEqual([heldIDs(5), holdRows.has(5), warnings()], [[], false, []]);
+age(5, 10);
+[result] = await run();
+assert.deepStrictEqual([result.removed, result.held, storedIDs(5).length], [39, 0, 161]);
+
+// A held ban that comes back is no longer held, but the hold goes on while those still missing are a
+// large loss of the 200 bans the list had when it began, at least 40, however much the list has
+// grown since: the ban loses its record, the others stay held, as they were, and why the list is
+// held stays saved. The read posts its line, with how many came back, and its record says so.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+age(5, 600);
+const largeSince = new Date(pendingRows.get('5,5,e1').heldAt).toISOString();
+const stillHeld = (from) => pairs('e', from, 80).map(([uid]) => `5,${uid}`);
+const grown = pairs('n', 1000, 1300);
+battlemetricsLists.set('bm-5', [[...pairs('e', 0, 1), ...pairs('e', 80, 200), ...grown]]);
+events.length = 0;
+logs.length = 0;
+let largeImport = new BanImporter();
+[result] = await largeImport.importBans();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.pending, result.removed, result.heldSince],
+  ['large', 79, 0, 0, Date.parse(largeSince)]
+);
+assert.deepStrictEqual(
+  [heldIDs(5).sort(), pendingRows.has('5,5,e0'), holdRows.get(5)],
+  [stillHeld(1).sort(), false, { reason: 'large', storedCount: 200 }]
+);
+assert.deepStrictEqual(
+  writes()
+    .filter(([type]) => !['write', 'flags', 'add users'].includes(type))
+    .map(([type, ids]) => [type, ids.length]),
+  [
+    ['clear pending', 1],
+    ['save held', 79]
+  ]
+);
+assert.deepStrictEqual(plainReport(largeImport).banLists.map(holdFields), [
+  { held: 79, hold: 'large', cameBack: 1 }
+]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 421 bans fetched, 300 new, 0 updated. Still kept the 79 bans it lost at once, held since ${largeSince}, as losing so many at once more likely means that its source broke, or leaves them out. 1 of the bans it held came back, and is no longer held. The rest are kept until fewer than 40 of them are missing. If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.`
+  ]
+);
+// The list now has 500 bans, of which 79 are less than a fifth, but they are still measured against
+// the 200 it had when the hold began.
+logs.length = 0;
+largeImport = new BanImporter();
+[result] = await largeImport.importBans();
+assert.deepStrictEqual(
+  [result.stored, result.hold, result.held, result.removed, heldIDs(5).length],
+  [500, 'large', 79, 0, 79]
+);
+assert.deepStrictEqual(plainReport(largeImport).banLists.map(holdFields), [
+  { held: 79, hold: 'large' }
+]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 421 bans fetched, 0 new, 0 updated. Still kept the 79 bans it lost at once, held since ${largeSince}, as losing so many at once more likely means that its source broke, or leaves them out. They are kept until fewer than 40 of them are missing. If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.`
+  ]
+);
+// So does a read in which 39 come back, which leaves 40 missing.
+battlemetricsLists.set('bm-5', [[...pairs('e', 0, 40), ...pairs('e', 80, 200), ...grown]]);
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.cameBack, heldIDs(5).sort()],
+  ['large', 40, 39, stillHeld(40).sort()]
+);
+assert.match(
+  warnings()[0]?.message ?? '',
+  / as losing so many at once more likely means that its source broke, or leaves them out\. 39 of the bans it held came back, and are no longer held\. The rest are kept until fewer than 40 of them are missing\. /
+);
+// Once fewer are still missing, the hold ends: the 39 still missing wait for a later complete read,
+// as if first missing now, however long they were held, and are not held again as a large loss. Why
+// it was held is forgotten. All of that, with the record of the ban that came back, is written in
+// one transaction. The read that ended the hold posts its line, with how many came back, which few
+// are still missing, and when they are removed, and its record says which hold ended.
+battlemetricsLists.set('bm-5', [[...pairs('e', 0, 41), ...pairs('e', 80, 200), ...grown]]);
+events.length = 0;
+logs.length = 0;
+largeImport = new BanImporter();
+[result] = await largeImport.importBans();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.pending, result.removed],
+  [null, 39, 39, 0]
+);
+assert.deepStrictEqual(
+  [heldIDs(5), pendingIDs(5).sort(), holdRows.has(5), row(5).state],
+  [[], stillHeld(41).sort(), false, 'held']
+);
+assert.ok(pendingRows.get('5,5,e41').firstMissingAt >= Date.now() - 60 * 1000);
+const endTx = writes().find(([type]) => type === 'release held')[2];
+assert.deepStrictEqual(
+  writes().map(([type, ids, tx]) => [type, ids.length, tx === endTx]),
+  [
+    ['clear pending', 1, true],
+    ['release held', 39, true],
+    ['clear hold reason', 1, true],
+    ['save pending', 39, false]
+  ]
+);
+assert.deepStrictEqual(inTransaction(endTx), [
+  'begin',
+  'clear pending',
+  'release held',
+  'clear hold reason',
+  'commit'
+]);
+assert.deepStrictEqual(plainReport(largeImport).banLists.map(holdFields), [
+  { held: 39, pending: 39, holdEnded: 'large', cameBack: 1 }
+]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 461 bans fetched, 0 new, 0 updated. Stopped holding the 40 bans it lost at once, held since ${largeSince}, as 1 of them came back, which leaves fewer than 40 missing. The other 39, which it still does not have, are removed once a complete read of it at least 10 minutes from now still does not have them.`
+  ]
+);
+// The read 10 minutes on removes them, which is not a large part of the list, so is not posted.
+age(5, 10);
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.removed, result.hold, result.held, storedIDs(5).length, warnings()],
+  [39, null, 0, 461, []]
+);
+// A hold whose bans all came back ends too, which is posted, and leaves nothing to remove. When few
+// are still missing, here 5, they are removed at once.
+for (const [served, why, removedNow, rest] of [
+  [pairs('e', 0, 200), 'all of them came back', 0, ''],
+  [
+    [...pairs('e', 0, 75), ...pairs('e', 80, 200)],
+    '75 of them came back, which leaves fewer than 40 missing',
+    5,
+    ' The other 5, which it still does not have, were removed.'
+  ]
+]) {
+  reset();
+  battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+  await run();
+  const since = new Date(pendingRows.get('5,5,e0').heldAt).toISOString();
+  battlemetricsLists.set('bm-5', [served]);
+  logs.length = 0;
+  [result] = await run();
+  assert.deepStrictEqual(
+    [result.hold, result.held, result.removed, pendingIDs(5), holdRows.has(5)],
+    [null, 0, removedNow, [], false],
+    why
+  );
+  assert.deepStrictEqual(
+    warnings().map(({ message }) => message),
+    [
+      `Imported ban list (ID: 5): ${served.length} bans fetched, 0 new, 0 updated${removedNow > 0 ? `, ${removedNow} removed` : ''}. Stopped holding the 80 bans it lost at once, held since ${since}, as ${why}.${rest}`
+    ],
+    why
+  );
+}
+// An admin's confirmation is said to have ended a hold only when the hold would otherwise have gone
+// on. Here all 80 came back by the read that IMPORTER_ALLOW_MASS_REMOVAL names the list for: none
+// is removed, and the line says the hold ended as they came back, as it would without the setting.
+// Then 41 come back, which ends the hold without the setting too: the line says so, and that the
+// confirmation, by the setting or in the database, removed the other 39 at once, which would
+// otherwise have waited for a confirming read.
+for (const [back, by, why, rest] of [
+  [80, 'setting', 'all of them came back', ''],
+  [
+    41,
+    'setting',
+    '41 of them came back, which leaves fewer than 40 missing',
+    ' The other 39, which it still does not have, were removed. As IMPORTER_ALLOW_MASS_REMOVAL names the list, the bans it no longer has were removed at once. Remove it from the setting once the removal is done.'
+  ],
+  [
+    41,
+    'row',
+    '41 of them came back, which leaves fewer than 40 missing',
+    ' The other 39, which it still does not have, were removed. As an admin confirmed that it may lose them all, the bans it no longer has were removed at once.'
+  ]
+]) {
+  const served = [...pairs('e', 0, back), ...pairs('e', 80, 200)];
+  const removedNow = 80 - back;
+  reset();
+  battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+  await run();
+  const since = new Date(pendingRows.get('5,5,e0').heldAt).toISOString();
+  battlemetricsLists.set('bm-5', [served]);
+  if (by === 'setting') env.IMPORTER_ALLOW_MASS_REMOVAL = '5';
+  else syncRows.get(5).allowFullRemovalUntil = new Date(Date.now() + 2 * 60 * 60 * 1000);
+  logs.length = 0;
+  largeImport = new BanImporter();
+  [result] = await largeImport.importBans();
+  const label = `${back} back, confirmed by the ${by}`;
+  assert.deepStrictEqual(
+    [result.removed, pendingIDs(5), holdRows.has(5), storedIDs(5).length],
+    [removedNow, [], false, 200 - removedNow],
+    label
+  );
+  assert.deepStrictEqual(
+    plainReport(largeImport).banLists.map(holdFields),
+    [
+      {
+        held: 0,
+        holdEnded: 'large',
+        cameBack: back,
+        ...(removedNow > 0 ? { massRemoval: true } : {})
+      }
+    ],
+    label
+  );
+  assert.deepStrictEqual(
+    warnings().map(({ message }) => message),
+    [
+      `Imported ban list (ID: 5): ${served.length} bans fetched, 0 new, 0 updated${removedNow > 0 ? `, ${removedNow} removed` : ''}. Stopped holding the 80 bans it lost at once, held since ${since}, as ${why}.${rest}`
+    ],
+    label
+  );
+}
+
+// A read that ends a large hold, as enough of its bans came back, here 41 of 80, and loses a large
+// part of the list's other bans at once, holds those as a hold that begins, with no since when, as
+// none of them was held before, and says what becomes of the bans of the hold that ended, which
+// wait for a confirming read, as if first missing now. Here the list grew from 200 bans to 500
+// while the first hold lasted, so the hold that begins is of the 500: it lost 120 of them, and its
+// bans are kept until fewer than 100 of them are missing, while the hold that ended was measured
+// against the 200 it had when it began. Why the list is held is saved again, with the 500 bans the
+// list had before this read, in the transaction that ends the old hold and holds them.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+battlemetricsLists.set('bm-5', [[...pairs('e', 80, 200), ...pairs('n', 1000, 1300)]]);
+await run();
+age(5, 600);
+const endedSince = new Date(pendingRows.get('5,5,e0').heldAt).toISOString();
+battlemetricsLists.set('bm-5', [
+  [...pairs('e', 0, 41), ...pairs('e', 80, 200), ...pairs('n', 1120, 1300)]
+]);
+events.length = 0;
+logs.length = 0;
+largeImport = new BanImporter();
+[result] = await largeImport.importBans();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.pending, result.removed, result.heldSince],
+  ['large', 159, 39, 0, undefined]
+);
+assert.deepStrictEqual(
+  [heldIDs(5), pendingIDs(5).length, holdRows.get(5)],
+  [pairs('n', 1000, 1120).map(([uid]) => `5,${uid}`), 159, { reason: 'large', storedCount: 500 }]
+);
+const againTx = writes().find(([type]) => type === 'save hold reason')[2];
+assert.deepStrictEqual(
+  writes()
+    .filter(([type]) => !['write', 'flags', 'add users'].includes(type))
+    .map(([type, ids, tx]) => [type, ids.length, tx === againTx]),
+  [
+    ['clear pending', 41, true],
+    ['release held', 39, true],
+    ['save hold reason', 3, true],
+    ['save held', 120, true],
+    ['save pending', 39, false]
+  ]
+);
+assert.deepStrictEqual(
+  writes().find(([type]) => type === 'save hold reason'),
+  ['save hold reason', [5, 'large', 500], againTx]
+);
+assert.deepStrictEqual(plainReport(largeImport).banLists.map(holdFields), [
+  { held: 159, pending: 39, hold: 'large', holdEnded: 'large', cameBack: 41 }
+]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 341 bans fetched, 0 new, 0 updated. Kept the 120 of its 500 stored bans that it lost at once, as losing so many at once more likely means that its source broke, or now leaves some bans out, such as its expired ones. They are kept until fewer than 100 of them are missing, and any that comes back is no longer held. If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run. Stopped holding the 80 bans it lost at once, held since ${endedSince}, as 41 of them came back, which leaves fewer than 40 missing. The other 39, which it still does not have, are removed once a complete read of it at least 10 minutes from now still does not have them.`
+  ]
+);
+
+// A list held as it lost a large part of its bans that then loses all of them keeps that hold,
+// which takes them all in: all of its bans are held anew, from then, in one transaction, why it is
+// held, and of how many bans, stays as it was, and its line says so as a hold that begins, kept
+// until fewer than 40 of them are missing, as for the large loss of the 200 bans it had then,
+// though it has 230 now. The lines after it say since then, not since the large loss. Held as one
+// that lost all of its bans, they would all be let go once one of them came back, to be removed 10
+// minutes later: here an admin re-activates one of the expired bans, and the other 229, of which
+// 79 are the large loss, stay held, and are not removed 10 minutes on. Once the source gives the
+// list's other bans again, the 79 are still held.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+battlemetricsLists.set('bm-5', [[...pairs('e', 80, 200), ...pairs('n', 1000, 1030)]]);
+await run();
+age(5, 600);
+battlemetricsLists.set('bm-5', [pairs('n', 2000, 2030)]);
+events.length = 0;
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.pending, result.heldSince, holdRows.get(5)],
+  ['large', 230, 0, undefined, { reason: 'large', storedCount: 200 }]
+);
+const anewAt = pendingRows.get('5,5,e0').heldAt;
+assert.ok(anewAt >= Date.now() - 60 * 1000);
+assert.deepStrictEqual(
+  [heldIDs(5).length, [...pendingRows.values()].filter(({ heldAt }) => heldAt === anewAt).length],
+  [230, 230]
+);
+const anewTx = writes().find(([type]) => type === 'release held')[2];
+assert.deepStrictEqual(inTransaction(anewTx), ['begin', 'release held', 'save held', 'commit']);
+assert.deepStrictEqual(
+  writes().filter(([type]) => type.endsWith('hold reason')),
+  []
+);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    'Imported ban list (ID: 5): 30 bans fetched, 30 new, 0 updated. Kept all 230 of its stored bans, as it no longer has any of them, which more likely means that its source broke, or leaves them out. It was already held as it lost a large part of them, so they are kept until fewer than 40 of them are missing, as for that hold, and any that comes back is no longer held. If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.'
+  ]
+);
+age(5, 60);
+logs.length = 0;
+[result] = await run();
+const anewSince = new Date(anewAt - 60 * 60 * 1000).toISOString();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.heldSince, holdRows.get(5)],
+  ['large', 230, anewAt - 60 * 60 * 1000, { reason: 'large', storedCount: 200 }]
+);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 30 bans fetched, 0 new, 0 updated. Still kept the 230 bans it lost at once, held since ${anewSince}, as losing so many at once more likely means that its source broke, or leaves them out. They are kept until fewer than 40 of them are missing. If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.`
+  ]
+);
+battlemetricsLists.set('bm-5', [[...pairs('e', 0, 1), ...pairs('n', 2000, 2030)]]);
+logs.length = 0;
+largeImport = new BanImporter();
+[result] = await largeImport.importBans();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.pending, result.removed, heldIDs(5).length],
+  ['large', 229, 0, 0, 229]
+);
+assert.deepStrictEqual(plainReport(largeImport).banLists.map(holdFields), [
+  { held: 229, hold: 'large', cameBack: 1 }
+]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 31 bans fetched, 0 new, 0 updated. Still kept the 229 bans it lost at once, held since ${anewSince}, as losing so many at once more likely means that its source broke, or leaves them out. 1 of the bans it held came back, and is no longer held. The rest are kept until fewer than 40 of them are missing. If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.`
+  ]
+);
+age(5, 11);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.removed, storedIDs(5).length],
+  ['large', 229, 0, 260]
+);
+battlemetricsLists.set('bm-5', [
+  [
+    ...pairs('e', 0, 1),
+    ...pairs('e', 80, 200),
+    ...pairs('n', 1000, 1030),
+    ...pairs('n', 2000, 2030)
+  ]
+]);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.cameBack, result.removed, heldIDs(5).sort()],
+  ['large', 79, 150, 0, stillHeld(1).sort()]
+);
+// A list whose only bans are those it holds as a large loss, whose read finds none of them, keeps
+// its hold as it was: none of them is released, and its line says since when. Here the list shrank
+// to those 50 since the hold began, as other bans of it were removed, so it is measured against the
+// 50 from now, in the transaction that goes on with the hold, and kept while 25 are missing.
+reset();
+battlemetricsList(5, pairs('e', 0, 50), [pairs('n', 1000, 1010)]);
+const largeBefore = Date.now() - 3 * 60 * 60 * 1000;
+for (const [uid] of pairs('e', 0, 50))
+  pendingRows.set(`5,5,${uid}`, {
+    banList: 5,
+    banId: `5,${uid}`,
+    firstMissingAt: largeBefore,
+    lastMissingAt: largeBefore,
+    heldAt: largeBefore
+  });
+holdRows.set(5, { reason: 'large', storedCount: 200 });
+events.length = 0;
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.heldSince, heldIDs(5).length, holdRows.get(5)],
+  ['large', 50, largeBefore, 50, { reason: 'large', storedCount: 50 }]
+);
+const shrankTx = writes().find(([type]) => type === 'save held')[2];
+assert.deepStrictEqual(
+  writes()
+    .filter(([type]) => !['write', 'flags', 'add users'].includes(type))
+    .map(([type, ids, tx]) => [type, ids.length, tx === shrankTx]),
+  [
+    ['save hold reason', 3, true],
+    ['save held', 50, true]
+  ]
+);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 10 bans fetched, 10 new, 0 updated. Still kept the 50 bans it lost at once, held since ${new Date(largeBefore).toISOString()}, as losing so many at once more likely means that its source broke, or leaves them out. They are kept until fewer than 25 of them are missing. If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.`
+  ]
+);
+
+// A row that says 'large' while fewer of the list's bans are held than a large loss of the bans it
+// names outlived its hold: here the previous image, which deletes no row, ended a 'large' hold of
+// the list when it had 120 bans, then held its 20 bans as 'full', as it lost all of them, and the
+// list saved 5 since. Taken as 'large', measured against 120, the hold would end with none of them
+// back, and its bans would be removed 10 minutes later. They are taken as 'full', as they are: the
+// hold goes on, its line says so, and the row is deleted, so the next read takes them so too, with
+// no row, and removes none of them.
+reset();
+battlemetricsList(5, [...pairs('e', 0, 20), ...pairs('n', 1000, 1005)], [pairs('n', 1000, 1005)]);
+const fullBefore = Date.now() - 3 * 60 * 60 * 1000;
+for (const [uid] of pairs('e', 0, 20))
+  pendingRows.set(`5,5,${uid}`, {
+    banList: 5,
+    banId: `5,${uid}`,
+    firstMissingAt: fullBefore,
+    lastMissingAt: fullBefore,
+    heldAt: fullBefore
+  });
+holdRows.set(5, { reason: 'large', storedCount: 120 });
+events.length = 0;
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.pending, result.heldSince, heldIDs(5).length, holdRows.has(5)],
+  ['full', 20, 0, fullBefore, 20, false]
+);
+assert.deepStrictEqual(
+  events.filter(([type]) => type.endsWith('hold reason')).map(([type]) => type),
+  ['read hold reason', 'clear hold reason']
+);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 5 bans fetched, 0 new, 0 updated. Still kept the 20 bans it had when it lost all of its bans at once, held since ${new Date(fullBefore).toISOString()}, as none of them has come back, which more likely means that its source broke. If the list really replaced all of its bans, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.`
+  ]
+);
+age(5, 11);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.removed, storedIDs(5).length, holdRows.has(5)],
+  ['full', 20, 0, 25, false]
+);
+// Such a hold ends as one of its bans comes back. A large loss of the list's other bans in the
+// same read is held, as a hold that begins, whose row is kept.
+reset();
+battlemetricsList(
+  5,
+  [...pairs('e', 0, 20), ...pairs('n', 1000, 1200)],
+  [[...pairs('e', 0, 1), ...pairs('n', 1100, 1200)]]
+);
+for (const [uid] of pairs('e', 0, 20))
+  pendingRows.set(`5,5,${uid}`, {
+    banList: 5,
+    banId: `5,${uid}`,
+    firstMissingAt: fullBefore,
+    lastMissingAt: fullBefore,
+    heldAt: fullBefore
+  });
+holdRows.set(5, { reason: 'large', storedCount: 1000 });
+logs.length = 0;
+largeImport = new BanImporter();
+[result] = await largeImport.importBans();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.pending, heldIDs(5).length, holdRows.get(5)],
+  ['large', 119, 19, 100, { reason: 'large', storedCount: 220 }]
+);
+assert.deepStrictEqual(plainReport(largeImport).banLists.map(holdFields), [
+  { held: 119, pending: 19, hold: 'large', holdEnded: 'full', cameBack: 1 }
+]);
+
+// A read that finds no bans at all while a list is held as a large loss keeps the list held, as it
+// keeps any list, and keeps why: the next read that finds bans says it is still held as one.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+battlemetricsLists.set('bm-5', [[]]);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, heldIDs(5).length, holdReason(5), storedIDs(5).length],
+  ['empty', 80, 'large', 200]
+);
+battlemetricsLists.set('bm-5', [pairs('e', 80, 200)]);
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual([result.hold, result.held, holdReason(5)], ['large', 80, 'large']);
+assert.match(
+  warnings()[0]?.message ?? '',
+  /^Imported ban list \(ID: 5\): 120 bans fetched, 0 new, 0 updated\. Still kept the 80 bans it lost at once, held since /
+);
+
+// A hold is saved whole, with why, or not at all. Here the database goes away while the second
+// batch of the hold's bans is saved, on every attempt, so the list fails, and none of the hold is
+// saved: neither its first batch nor why. The next complete read finds the same loss, and holds all
+// of it as a hold that begins, and the read 10 minutes on removes none of it. Had the first batch
+// been saved alone, the next read would have taken the list as held, and the rest of the bans it
+// lost, too few to be held on their own, as missing besides, which a confirming read removes.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+onHold = (ids) => {
+  if (ids.includes('5,e50')) throw new ConnectionError();
+};
+events.length = 0;
+[result] = await run({ batchSize: 50 });
+assert.deepStrictEqual(
+  [result.stage, result.error, heldIDs(5), pendingIDs(5), holdRows.has(5), storedIDs(5).length],
+  [
+    'removing the bans it no longer has',
+    'SequelizeConnectionRefusedError: connect ECONNREFUSED 10.0.0.2:3306',
+    [],
+    [],
+    false,
+    200
+  ]
+);
+assert.deepStrictEqual(
+  ['begin', 'rollback', 'commit'].map((step) => events.filter(([type]) => type === step).length),
+  [5, 5, 0]
+);
+onHold = null;
+logs.length = 0;
+[result] = await run({ batchSize: 50 });
+assert.deepStrictEqual(
+  [result.hold, result.held, result.pending, heldIDs(5).length, holdReason(5)],
+  ['large', 80, 0, 80, 'large']
+);
+assert.match(
+  warnings()[0]?.message ?? '',
+  /^Imported ban list \(ID: 5\): 120 bans fetched, 0 new, 0 updated\. Kept the 80 of its 200 stored bans that it lost at once, /
+);
+age(5, 10);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.removed, storedIDs(5).length],
+  ['large', 80, 0, 200]
+);
+
+// Why a list's bans are held is forgotten once they no longer are, also when the hold ended without
+// the importer: here /banlist update gives a held list a new source, and deletes its bans, so the
+// next read, of its new source, finds no held bans, and deletes the row. So does the next complete
+// read of a list whose hold the previous image ended, which did not know the row.
+reset();
+battlemetricsList(93, pairs('o', 0, 200), [pairs('o', 80, 200)]);
+await run();
+assert.deepStrictEqual([heldIDs(93).length, holdReason(93)], [80, 'large']);
+banLists.set(93, { ...banLists.get(93), source: 'bm-93-new' });
+for (const id of storedIDs(93)) bans.delete(id);
+battlemetricsLists.set('bm-93-new', [pairs('p', 0, 50)]);
+events.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.replace, result.hold, result.held, pendingIDs(93), holdRows.has(93), row(93).state],
+  [true, null, 0, [], false, 'ok']
+);
+assert.deepStrictEqual(
+  events.filter(([type]) => type.endsWith('hold reason')),
+  [
+    ['read hold reason', 93],
+    ['clear hold reason', [93], null]
+  ]
+);
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+for (const id of pendingIDs(5)) pendingRows.delete(`5,${id}`);
+assert.deepStrictEqual([pendingIDs(5), holdReason(5)], [[], 'large']);
+battlemetricsLists.set('bm-5', [pairs('e', 0, 200)]);
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, holdRows.has(5), warnings()],
+  [null, 0, false, []]
+);
+
+// A large loss of a list whose source was changed since it was last imported is never held, as its
+// new source's bans replace its old ones, and a hold of the old source's bans ends, though as many
+// of them as when it began are still missing, which the list's record says.
+reset();
+battlemetricsList(93, pairs('o', 0, 200), [pairs('o', 80, 200)], 'bm-93-new');
+syncRows.set(93, {
+  banList: 93,
+  sourceKey: createHash('sha256')
+    .update(JSON.stringify(['battlemetrics', 'bm-93']))
+    .digest('hex'),
+  state: 'ok'
+});
+[result] = await run();
+assert.deepStrictEqual(
+  [result.replace, result.hold, result.pending, heldIDs(93), holdRows.has(93)],
+  [true, null, 80, [], false]
+);
+reset();
+battlemetricsList(93, pairs('o', 0, 200), [pairs('o', 80, 200)]);
+await run();
+assert.deepStrictEqual([heldIDs(93).length, holdReason(93)], [80, 'large']);
+const replacedSince = new Date(pendingRows.get('93,93,o0').heldAt).toISOString();
+banLists.set(93, { ...banLists.get(93), source: 'bm-93-new' });
+battlemetricsLists.set('bm-93-new', [pairs('o', 80, 200)]);
+logs.length = 0;
+largeImport = new BanImporter();
+[result] = await largeImport.importBans();
+assert.deepStrictEqual(
+  [result.replace, result.hold, result.pending, heldIDs(93), holdRows.has(93)],
+  [true, null, 80, [], false]
+);
+assert.deepStrictEqual(plainReport(largeImport).banLists.map(holdFields), [
+  { held: 80, pending: 80, holdEnded: 'large' }
+]);
+// Its line says that the hold ended with the old source's bans, as its earlier lines said they
+// were held. So does that of a list whose new source gives all of the bans it held, so that none
+// of them is removed or waits.
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 93): 120 bans fetched, 0 new, 0 updated. Its type or source was changed since it was last imported, so the bans of its old source are being replaced: 0 were removed, and 80 more are kept until a later complete read of it confirms they are gone. That ended its hold of the 80 bans it lost at once, held since ${replacedSince}.`
+  ]
+);
+reset();
+battlemetricsList(93, pairs('o', 0, 200), [pairs('o', 80, 200)]);
+await run();
+const sameSince = new Date(pendingRows.get('93,93,o0').heldAt).toISOString();
+banLists.set(93, { ...banLists.get(93), source: 'bm-93-new' });
+battlemetricsLists.set('bm-93-new', [pairs('o', 0, 200)]);
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.replace, result.removed, result.pending, heldIDs(93), holdRows.has(93)],
+  [true, 0, 0, [], false]
+);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 93): 200 bans fetched, 0 new, 0 updated. Its type or source was changed since it was last imported, so the bans of its old source are being replaced: 0 were removed. That ended its hold of the 80 bans it lost at once, held since ${sameSince}.`
+  ]
+);
+
+// A dry run says it would hold them, and writes nothing: no record of them, nor why.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+env.IMPORTER_DRY_RUN = '1';
+[result] = await run();
+assert.deepStrictEqual([result.hold, result.held, result.removed], ['large', 80, 0]);
+assert.deepStrictEqual([pendingIDs(5), holdRows.has(5), writes()], [[], false, []]);
+assert.deepStrictEqual(warnings().length, 1);
+
+// The IDs of list 5's bans with the uids given, as they are stored.
+const banIDs = (prefix, from, to) => pairs(prefix, from, to).map(([uid]) => `5,${uid}`);
+
+// A hold is ended in one transaction too, with the records of its bans that came back, so a run
+// cut short as it ends one, e.g. by a database outage longer than the retries or the process
+// being killed, ends none of it. Here a list of 200 held for 80 grew to 500, and a read
+// finds 41 of the 80 again, which ends the hold, and loses 120 of the bans it saved since, which
+// begins another. The release fails on every attempt, so the list fails, with its hold, its row and
+// the records of the 41 as they were. The next read does what this one would have: it ends the old
+// hold, holds the 120, and says so, as holds of large losses, not as one of a list that lost all
+// of its bans, and the read 11 minutes later removes none of the 120.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+battlemetricsLists.set('bm-5', [[...pairs('e', 80, 200), ...pairs('n', 1000, 1300)]]);
+await run();
+age(5, 600);
+const cutSince = new Date(pendingRows.get('5,5,e0').heldAt).toISOString();
+battlemetricsLists.set('bm-5', [
+  [...pairs('e', 0, 41), ...pairs('e', 80, 200), ...pairs('n', 1120, 1300)]
+]);
+statementErrors.set(
+  'release held',
+  Array.from({ length: 5 }, () => new ConnectionError())
+);
+events.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.stage, result.error, heldIDs(5).length, pendingRows.has('5,5,e0'), holdRows.get(5)],
+  [
+    'removing the bans it no longer has',
+    'SequelizeConnectionRefusedError: connect ECONNREFUSED 10.0.0.2:3306',
+    80,
+    true,
+    { reason: 'large', storedCount: 200 }
+  ]
+);
+assert.deepStrictEqual(
+  ['begin', 'clear pending', 'rollback', 'commit'].map(
+    (step) => events.filter(([type]) => type === step).length
+  ),
+  [5, 5, 5, 0]
+);
+logs.length = 0;
+largeImport = new BanImporter();
+[result] = await largeImport.importBans();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.pending, result.removed, heldIDs(5).sort(), holdRows.get(5)],
+  ['large', 159, 39, 0, banIDs('n', 1000, 1120).sort(), { reason: 'large', storedCount: 500 }]
+);
+assert.deepStrictEqual(plainReport(largeImport).banLists.map(holdFields), [
+  { held: 159, pending: 39, hold: 'large', holdEnded: 'large', cameBack: 41 }
+]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 341 bans fetched, 0 new, 0 updated. Kept the 120 of its 500 stored bans that it lost at once, as losing so many at once more likely means that its source broke, or now leaves some bans out, such as its expired ones. They are kept until fewer than 100 of them are missing, and any that comes back is no longer held. If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run. Stopped holding the 80 bans it lost at once, held since ${cutSince}, as 41 of them came back, which leaves fewer than 40 missing. The other 39, which it still does not have, are removed once a complete read of it at least 10 minutes from now still does not have them.`
+  ]
+);
+age(5, 11);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.removed, heldIDs(5).length, storedIDs(5).length],
+  ['large', 120, 39, 120, 461]
+);
+
+// So does the end of a hold cut short alone. The read after it ends the hold, as 41 of its bans
+// came back, and the 39 still missing wait for a confirming read, which its line says, rather than
+// being kept as the bans of a list that lost all of its bans. A large loss of the list's other bans
+// after that is held, as a hold that begins, and the read 11 minutes on removes the 39, but none of
+// that loss.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+age(5, 60);
+const cutAloneSince = new Date(pendingRows.get('5,5,e0').heldAt).toISOString();
+battlemetricsLists.set('bm-5', [[...pairs('e', 0, 41), ...pairs('e', 80, 200)]]);
+statementErrors.set(
+  'release held',
+  Array.from({ length: 5 }, () => new ConnectionError())
+);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.stage, heldIDs(5).length, pendingIDs(5).length, holdRows.get(5)],
+  ['removing the bans it no longer has', 80, 80, { reason: 'large', storedCount: 200 }]
+);
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.pending, heldIDs(5), pendingIDs(5).length, holdRows.has(5)],
+  [null, 39, 39, [], 39, false]
+);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 161 bans fetched, 0 new, 0 updated. Stopped holding the 80 bans it lost at once, held since ${cutAloneSince}, as 41 of them came back, which leaves fewer than 40 missing. The other 39, which it still does not have, are removed once a complete read of it at least 10 minutes from now still does not have them.`
+  ]
+);
+battlemetricsLists.set('bm-5', [[...pairs('e', 0, 41), ...pairs('e', 130, 200)]]);
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.pending, heldIDs(5).sort(), holdRows.get(5)],
+  ['large', 89, 39, banIDs('e', 80, 130).sort(), { reason: 'large', storedCount: 200 }]
+);
+assert.match(
+  warnings()[0]?.message ?? '',
+  /^Imported ban list \(ID: 5\): 111 bans fetched, 0 new, 0 updated\. Kept the 50 of its 200 stored bans that it lost at once, .* Of its other bans, 39 that it no longer has are kept until a later complete read of it confirms they are gone\.$/
+);
+age(5, 11);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.removed, heldIDs(5).length, storedIDs(5).length],
+  ['large', 50, 39, 50, 161]
+);
+
+// An admin's confirmation that ends a hold releases its bans, and forgets why they were held, in
+// one transaction, before any of them is removed. So a removal cut short after its first batch
+// leaves the rest waiting for a confirming read, whose removal the admin confirmed already,
+// rather than held, by a row that no longer fits them. Its line says how many it removed. The next
+// read keeps the rest until then, and its line only goes to the console; the read 11 minutes on
+// removes them, posted as a large part of the list.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+env.IMPORTER_ALLOW_MASS_REMOVAL = '5';
+statementErrors.set('remove', [null, ...Array.from({ length: 5 }, () => new ConnectionError())]);
+events.length = 0;
+logs.length = 0;
+[result] = await run({ batchSize: 50 });
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    'Failed to import ban list (ID: 5) while removing the bans it no longer has, after removing 50 of its bans (120 bans fetched, 0 new, 0 updated, 50 removed). SequelizeConnectionRefusedError: connect ECONNREFUSED 10.0.0.2:3306'
+  ]
+);
+assert.deepStrictEqual(
+  [
+    result.stage,
+    result.removed,
+    storedIDs(5).length,
+    heldIDs(5),
+    pendingIDs(5).length,
+    holdRows.has(5)
+  ],
+  ['removing the bans it no longer has', 50, 150, [], 30, false]
+);
+const releaseTx = writes().find(([type]) => type === 'release held')[2];
+assert.deepStrictEqual(inTransaction(releaseTx), [
+  'begin',
+  'release held',
+  'clear hold reason',
+  'commit'
+]);
+assert.ok(
+  writes().findIndex(([type]) => type === 'release held') <
+    writes().findIndex(([type]) => type === 'remove')
+);
+delete env.IMPORTER_ALLOW_MASS_REMOVAL;
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.pending, result.removed, heldIDs(5), warnings()],
+  [null, 30, 30, 0, [], []]
+);
+age(5, 11);
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual([result.removed, storedIDs(5).length, pendingIDs(5)], [30, 120, []]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    'Imported ban list (ID: 5): 120 bans fetched, 0 new, 0 updated, 30 removed. That is a large part of its 150 stored bans, removed as complete reads of it at least 10 minutes apart did not have them.'
+  ]
+);
+
+// While a list is held as it lost a large part of its bans, a read that loses a large part of its
+// other bans too, of those no earlier read had missed, holds every missing ban, as a hold that
+// begins anew, in one transaction, still measured against the 200 bans it had. Here a source that
+// left out 80 of 200 leaves out 160. Its line says so. The read 11 minutes on removes none of them,
+// and once 41 of them come back, the other 119 are still held, and none of them is removed 11
+// minutes later either.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+age(5, 30);
+battlemetricsLists.set('bm-5', [pairs('e', 160, 200)]);
+events.length = 0;
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [
+    result.hold,
+    result.held,
+    result.pending,
+    result.removed,
+    result.heldSince,
+    heldIDs(5).sort(),
+    holdRows.get(5)
+  ],
+  ['large', 160, 0, 0, undefined, banIDs('e', 0, 160).sort(), { reason: 'large', storedCount: 200 }]
+);
+const takenInTx = writes().find(([type]) => type === 'release held')[2];
+assert.deepStrictEqual(inTransaction(takenInTx), ['begin', 'release held', 'save held', 'commit']);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    'Imported ban list (ID: 5): 40 bans fetched, 0 new, 0 updated. Kept the 160 of its 200 stored bans that it no longer has, as it lost a large part of them at once again, which more likely means that its source broke, or leaves them out. It was already held as it lost a large part of them, so they are kept until fewer than 40 of them are missing, as for that hold, and any that comes back is no longer held. If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.'
+  ]
+);
+age(5, 11);
+[result] = await run();
+assert.deepStrictEqual([result.hold, result.held, result.removed], ['large', 160, 0]);
+battlemetricsLists.set('bm-5', [[...pairs('e', 0, 41), ...pairs('e', 160, 200)]]);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.cameBack, result.removed],
+  ['large', 119, 41, 0]
+);
+age(5, 11);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.removed, storedIDs(5).length],
+  ['large', 119, 0, 200]
+);
+
+// So does a read whose source gives only the bans the list saved while it was held: here 30, of a
+// list grown to 230, which is not a read that found none of its bans. Some of its held bans that
+// came back in the same read are no longer held, and its line says so.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+battlemetricsLists.set('bm-5', [[...pairs('e', 80, 200), ...pairs('n', 1000, 1030)]]);
+await run();
+battlemetricsLists.set('bm-5', [[...pairs('e', 0, 10), ...pairs('n', 1000, 1030)]]);
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [
+    result.hold,
+    result.held,
+    result.pending,
+    result.removed,
+    result.cameBack,
+    heldIDs(5).length,
+    holdRows.get(5)
+  ],
+  ['large', 190, 0, 0, 10, 190, { reason: 'large', storedCount: 200 }]
+);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    'Imported ban list (ID: 5): 40 bans fetched, 0 new, 0 updated. Kept the 190 of its 230 stored bans that it no longer has, as it lost a large part of them at once again, which more likely means that its source broke, or leaves them out. 10 of the bans it held came back, and are no longer held. It was already held as it lost a large part of them, so they are kept until fewer than 40 of them are missing, as for that hold, and any that comes back is no longer held. If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.'
+  ]
+);
+age(5, 11);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.removed, storedIDs(5).length],
+  ['large', 190, 0, 230]
+);
+
+// A read that would hold all of a list's missing bans anew, cut short as it saves them, saves none
+// of that, though the bans it fetched were saved already: here a list held for 80 of its 200 bans
+// whose source gives none of them, but 30 others. The next read, which no longer finds that the
+// list has none of its bans, as it has the 30, still holds every missing ban, as the 120 of them
+// that no earlier read had missed are a large loss, and the read 11 minutes on removes none.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+battlemetricsLists.set('bm-5', [pairs('n', 1000, 1030)]);
+onHold = (ids) => {
+  if (ids.includes('5,e150')) throw new ConnectionError();
+};
+[result] = await run({ batchSize: 50 });
+assert.deepStrictEqual(
+  [result.stage, storedIDs(5).length, heldIDs(5).length, holdRows.get(5)],
+  ['removing the bans it no longer has', 230, 80, { reason: 'large', storedCount: 200 }]
+);
+onHold = null;
+[result] = await run({ batchSize: 50 });
+assert.deepStrictEqual(
+  [result.hold, result.held, result.heldAnew, heldIDs(5).length, holdRows.get(5)],
+  ['large', 200, 'large', 200, { reason: 'large', storedCount: 200 }]
+);
+age(5, 11);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.removed, storedIDs(5).length],
+  ['large', 200, 0, 230]
+);
+
+// A confirmed read that ends a hold as its bans came back, and in which a large loss of the list's
+// other bans would, without the confirmation, begin a new hold, says that the hold ended as its
+// bans came back: the confirmation then removed the rest, and the 50 others, at once.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+const confirmedSince = new Date(pendingRows.get('5,5,e0').heldAt).toISOString();
+battlemetricsLists.set('bm-5', [[...pairs('e', 0, 41), ...pairs('e', 130, 200)]]);
+env.IMPORTER_ALLOW_MASS_REMOVAL = '5';
+logs.length = 0;
+largeImport = new BanImporter();
+[result] = await largeImport.importBans();
+assert.deepStrictEqual(
+  [
+    result.removed,
+    result.holdEnded.by,
+    result.holdEnded.removed,
+    pendingIDs(5),
+    holdRows.has(5),
+    storedIDs(5).length
+  ],
+  [89, 'read', true, [], false, 111]
+);
+assert.deepStrictEqual(plainReport(largeImport).banLists.map(holdFields), [
+  { held: 0, holdEnded: 'large', cameBack: 41, massRemoval: true }
+]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 111 bans fetched, 0 new, 0 updated, 89 removed. Stopped holding the 80 bans it lost at once, held since ${confirmedSince}, as 41 of them came back, which leaves fewer than 40 missing. The other 39, which it still does not have, were removed. As IMPORTER_ALLOW_MASS_REMOVAL names the list, the bans it no longer has were removed at once. Remove it from the setting once the removal is done.`
+  ]
+);
+delete env.IMPORTER_ALLOW_MASS_REMOVAL;
+
+// A held list that shrinks, as its owner lifts other bans of it, has its hold measured against the
+// bans it has, as a hold that began on the smaller list would be: here 60 other bans are lifted, 5
+// at a time, each removed at once, so the list has 140, and its row follows. Once 41 of the 80 come
+// back, the 39 still missing are a large loss of the 140, at least 28, so the hold goes on, and
+// the read 11 minutes on removes none of them. However much the list grows back after that, they
+// are still measured against the 140, so its growth never ends the hold.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+for (let lifted = 5; lifted <= 60; lifted += 5) {
+  battlemetricsLists.set('bm-5', [pairs('e', 80 + lifted, 200)]);
+  [result] = await run();
+  assert.deepStrictEqual(
+    [result.hold, result.held, result.removed],
+    ['large', 80, 5],
+    `${lifted} lifted`
+  );
+}
+assert.deepStrictEqual(
+  [storedIDs(5).length, holdRows.get(5)],
+  [140, { reason: 'large', storedCount: 145 }]
+);
+battlemetricsLists.set('bm-5', [[...pairs('e', 0, 41), ...pairs('e', 140, 200)]]);
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.cameBack, heldIDs(5).length, holdRows.get(5)],
+  ['large', 39, 41, 39, { reason: 'large', storedCount: 140 }]
+);
+assert.match(
+  warnings()[0]?.message ?? '',
+  / 41 of the bans it held came back, and are no longer held\. The rest are kept until fewer than 28 of them are missing\. /
+);
+age(5, 11);
+[result] = await run();
+assert.deepStrictEqual([result.hold, result.held, result.removed], ['large', 39, 0]);
+battlemetricsLists.set('bm-5', [
+  [...pairs('e', 0, 41), ...pairs('e', 140, 200), ...pairs('n', 1000, 1100)]
+]);
+await run();
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.stored, result.hold, result.held, result.removed, holdRows.get(5)],
+  [240, 'large', 39, 0, { reason: 'large', storedCount: 140 }]
+);
+assert.match(
+  warnings()[0]?.message ?? '',
+  / They are kept until fewer than 28 of them are missing\. /
+);
+
+// A hold whose list shrank since the read before is measured against the bans it has, before its
+// row says so: here 5 other bans of a list of 200 held for 80 are removed at once, so 39 still
+// missing of the 195 it then has keep the hold, and 38, as 42 of the 80 come back, end it, posted
+// with how few would have kept it.
+for (const back of [41, 42]) {
+  reset();
+  battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+  await run();
+  const since = new Date(pendingRows.get('5,5,e0').heldAt).toISOString();
+  battlemetricsLists.set('bm-5', [pairs('e', 85, 200)]);
+  [result] = await run();
+  assert.deepStrictEqual(
+    [result.removed, holdRows.get(5)],
+    [5, { reason: 'large', storedCount: 200 }],
+    `${back} back`
+  );
+  battlemetricsLists.set('bm-5', [[...pairs('e', 0, back), ...pairs('e', 85, 200)]]);
+  logs.length = 0;
+  [result] = await run();
+  if (back === 41)
+    assert.deepStrictEqual(
+      [result.hold, result.held, holdRows.get(5)],
+      ['large', 39, { reason: 'large', storedCount: 195 }]
+    );
+  else {
+    assert.deepStrictEqual([result.hold, result.pending, holdRows.has(5)], [null, 38, false]);
+    assert.deepStrictEqual(
+      warnings().map(({ message }) => message),
+      [
+        `Imported ban list (ID: 5): 157 bans fetched, 0 new, 0 updated. Stopped holding the 80 bans it lost at once, held since ${since}, as 42 of them came back, which leaves fewer than 39 missing. The other 38, which it still does not have, are removed once a complete read of it at least 10 minutes from now still does not have them.`
+      ]
+    );
+  }
+}
+
+// A list held as it lost all of its bans, here 30, that loses a large part of the bans it saved
+// since, here 100 of the 400, holds every missing ban as 'large' from then, measured against the
+// 30 it held: the release, why it is held with that count, and the 130 bans, in one transaction.
+// Its line says so. Kept as 'full', the 130 would all have been let go as soon as any one of them
+// came back. Once the 100 come back, the 30 are still held, as they are at least 25, a large loss
+// of 30, and so are the 29 still missing once one of the 30 comes back too, which would have ended
+// the 'full' hold. The read 11 minutes on removes none of them.
+reset();
+battlemetricsList(5, pairs('e', 0, 30), [pairs('n', 1000, 1400)]);
+await run();
+battlemetricsLists.set('bm-5', [pairs('n', 1100, 1400)]);
+events.length = 0;
+logs.length = 0;
+largeImport = new BanImporter();
+[result] = await largeImport.importBans();
+assert.deepStrictEqual(
+  [
+    result.hold,
+    result.held,
+    result.pending,
+    result.removed,
+    result.heldAnew,
+    heldIDs(5).length,
+    holdRows.get(5)
+  ],
+  ['large', 130, 0, 0, 'full', 130, { reason: 'large', storedCount: 30 }]
+);
+const fullTakenInTx = writes().find(([type]) => type === 'release held')[2];
+assert.deepStrictEqual(inTransaction(fullTakenInTx), [
+  'begin',
+  'release held',
+  'save hold reason',
+  'save held',
+  'commit'
+]);
+assert.deepStrictEqual(plainReport(largeImport).banLists.map(holdFields), [
+  { held: 130, hold: 'large' }
+]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    'Imported ban list (ID: 5): 300 bans fetched, 0 new, 0 updated. Kept the 130 of its 430 stored bans that it no longer has, as it lost a large part of them at once, which more likely means that its source broke, or leaves them out. It was already held as it lost all of its bans at once, and now holds all of them as a large loss instead: they are kept until fewer than 25 of them are missing, rather than until one of the bans it had then comes back, and any that comes back is no longer held. If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.'
+  ]
+);
+battlemetricsLists.set('bm-5', [pairs('n', 1000, 1400)]);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.cameBack, heldIDs(5).sort()],
+  ['large', 30, 100, banIDs('e', 0, 30).sort()]
+);
+battlemetricsLists.set('bm-5', [[...pairs('e', 0, 1), ...pairs('n', 1000, 1400)]]);
+[result] = await run();
+assert.deepStrictEqual([result.hold, result.held, result.cameBack], ['large', 29, 1]);
+age(5, 11);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.removed, storedIDs(5).length],
+  ['large', 29, 0, 430]
+);
+
+// A read that removes a large part of a list's bans after a confirming read says so in whatever
+// line it posts, right after its counts. Here two losses of the list's bans, each too small to be a
+// large loss on its own, are removed together, 11 minutes after the second: 30 and 30 of a list of
+// 200, while it is held for 80 others as a large loss, and while a hold of them ends as 41 of the
+// 80 come back; 80 and 80 of a list of 430, while it is held as it lost all of its 30 bans; and of a
+// list whose source was replaced, its old source's 80 of 200. Of a read an admin confirmed, only
+// the bans it would have removed without the confirmation count, which its line says.
+const twoLosses = async (list, kept) => {
+  for (const served of kept) {
+    battlemetricsLists.set('bm-5', [served]);
+    await run();
+  }
+  age(list, 11);
+  logs.length = 0;
+};
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+const manySince = new Date(pendingRows.get('5,5,e0').heldAt - 11 * 60 * 1000).toISOString();
+await twoLosses(5, [pairs('e', 110, 200), pairs('e', 140, 200)]);
+[result] = await run();
+assert.deepStrictEqual([result.hold, result.held, result.removed], ['large', 80, 60]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 60 bans fetched, 0 new, 0 updated, 60 removed. That is a large part of its 200 stored bans, removed as complete reads of it at least 10 minutes apart did not have them. Still kept the 80 bans it lost at once, held since ${manySince}, as losing so many at once more likely means that its source broke, or leaves them out. They are kept until fewer than 40 of them are missing. If the list really lost them, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.`
+  ]
+);
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+const endedManySince = new Date(pendingRows.get('5,5,e0').heldAt - 11 * 60 * 1000).toISOString();
+await twoLosses(5, [pairs('e', 110, 200), pairs('e', 140, 200)]);
+battlemetricsLists.set('bm-5', [[...pairs('e', 0, 41), ...pairs('e', 140, 200)]]);
+[result] = await run();
+assert.deepStrictEqual([result.hold, result.removed, result.pending], [null, 60, 39]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 101 bans fetched, 0 new, 0 updated, 60 removed. That is a large part of its 200 stored bans, removed as complete reads of it at least 10 minutes apart did not have them. Stopped holding the 80 bans it lost at once, held since ${endedManySince}, as 41 of them came back, which leaves fewer than 40 missing. The other 39, which it still does not have, are removed once a complete read of it at least 10 minutes from now still does not have them.`
+  ]
+);
+reset();
+battlemetricsList(5, pairs('e', 0, 30), [pairs('n', 1000, 1400)]);
+await run();
+const fullManySince = new Date(pendingRows.get('5,5,e0').heldAt - 11 * 60 * 1000).toISOString();
+await twoLosses(5, [pairs('n', 1080, 1400), pairs('n', 1160, 1400)]);
+[result] = await run();
+assert.deepStrictEqual([result.hold, result.held, result.removed], ['full', 30, 160]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 240 bans fetched, 0 new, 0 updated, 160 removed. That is a large part of its 430 stored bans, removed as complete reads of it at least 10 minutes apart did not have them. Still kept the 30 bans it had when it lost all of its bans at once, held since ${fullManySince}, as none of them has come back, which more likely means that its source broke. If the list really replaced all of its bans, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.`
+  ]
+);
+reset();
+battlemetricsList(93, pairs('o', 0, 200), [pairs('o', 80, 200)], 'bm-93-new');
+syncRows.set(93, {
+  banList: 93,
+  sourceKey: createHash('sha256')
+    .update(JSON.stringify(['battlemetrics', 'bm-93']))
+    .digest('hex'),
+  state: 'ok'
+});
+[result] = await run();
+assert.deepStrictEqual([result.replace, result.pending], [true, 80]);
+age(93, 11);
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual([result.replace, result.removed], [true, 80]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    'Imported ban list (ID: 93): 120 bans fetched, 0 new, 0 updated, 80 removed. That is a large part of its 200 stored bans, removed as complete reads of it at least 10 minutes apart did not have them. Its type or source was changed since it was last imported, so the bans of its old source are being replaced: 80 were removed.'
+  ]
+);
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 30, 200)]);
+await run();
+await twoLosses(5, [pairs('e', 60, 200)]);
+battlemetricsLists.set('bm-5', [pairs('e', 90, 200)]);
+env.IMPORTER_ALLOW_MASS_REMOVAL = '5';
+[result] = await run();
+assert.deepStrictEqual([result.removed, result.massRemoval], [90, true]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    "Imported ban list (ID: 5): 110 bans fetched, 0 new, 0 updated, 90 removed, as IMPORTER_ALLOW_MASS_REMOVAL names the list. Remove it from the setting once the removal is done. Of them, 60, a large part of its 200 stored bans, would have been removed without an admin's confirmation too, as complete reads of it at least 10 minutes apart did not have them."
+  ]
+);
+delete env.IMPORTER_ALLOW_MASS_REMOVAL;
+// So does the line of a hold that begins: here the two losses of 30 of a list of 200 are removed as
+// it loses 40 others at once.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 30, 200)]);
+await run();
+await twoLosses(5, [pairs('e', 60, 200)]);
+battlemetricsLists.set('bm-5', [pairs('e', 100, 200)]);
+[result] = await run();
+assert.deepStrictEqual([result.hold, result.held, result.removed], ['large', 40, 60]);
+assert.match(
+  warnings()[0]?.message ?? '',
+  /^Imported ban list \(ID: 5\): 100 bans fetched, 0 new, 0 updated, 60 removed\. That is a large part of its 200 stored bans, removed as complete reads of it at least 10 minutes apart did not have them\. Kept the 40 of its 200 stored bans that it lost at once, /
+);
 
 reset();
 battlemetricsList(5, pairs('e', 0, 2600), [pairs('e', 0, 50)]);
@@ -1921,7 +3399,7 @@ battlemetricsList(21, pairs('p', 0, 10), [
     ['p21', steamID(21)]
   ]
 ]);
-battlemetricsList(22, pairs('q', 0, 30), [pairs('q', 0, 2)]);
+battlemetricsList(22, pairs('q', 0, 30), [pairs('q', 0, 10)]);
 battlemetricsList(23, pairs('r', 0, 2), [httpError(404)]);
 battlemetricsList(24, pairs('s', 0, 3), [[]]);
 await run();
@@ -1940,7 +3418,7 @@ assert.strictEqual(
 );
 assert.strictEqual(
   summary(),
-  'Got 1 deleted ban. Imported 4 ban lists: 13 bans fetched, 2 new, 1 updated, 1 removed, 31 held, 1 list failed.'
+  'Got 1 deleted ban. Imported 4 ban lists: 21 bans fetched, 2 new, 1 updated, 1 removed, 23 held, 1 list failed.'
 );
 
 // A list given a new type or source while its bans are being saved, with its bans deleted in the
@@ -2077,7 +3555,7 @@ reset();
 battlemetricsList(1, pairs('a', 0, 3), [pairs('a', 0, 4)]);
 battlemetricsTotals.set('bm-1', 4);
 battlemetricsList(2, pairs('b', 0, 2), [httpError(503)]);
-battlemetricsList(3, pairs('c', 0, 30), [pairs('c', 0, 2)]);
+battlemetricsList(3, pairs('c', 0, 30), [pairs('c', 0, 10)]);
 remoteList(4, [1, 2], `${steamID(1)}:0 //Cheating\n${steamID(2)}:0 //Cheating`);
 battlemetricsList(5, pairs('e', 0, 1), [
   () => {
@@ -3794,6 +5272,36 @@ assert.strictEqual(
 );
 assert.deepStrictEqual([plainReport(removedMeanwhile).failedLists, syncRows.has(130)], [0, false]);
 assert.match(summary(), /, 0 held, 0 lists failed\.$/);
+// So is a list held as it lost a large part of its bans, whose read ended its hold, as 41 of the 80
+// came back: its bans went with it, so its record says that none of them is kept, and neither that
+// a hold ended nor that any came back.
+reset();
+battlemetricsList(133, pairs('j', 0, 200), [pairs('j', 80, 200)]);
+await run();
+battlemetricsLists.set('bm-133', [[...pairs('j', 0, 41), ...pairs('j', 80, 200)]]);
+BanList.findByPk = async (id, options) => {
+  const list = await readBeforeRemoval(id, options);
+  if (options?.attributes?.includes('source')) {
+    banLists.delete(id);
+    for (const banID of storedIDs(id)) bans.delete(banID);
+  }
+  return list;
+};
+const heldRemovedMeanwhile = new BanImporter();
+results = await heldRemovedMeanwhile.importBans();
+BanList.findByPk = readBeforeRemoval;
+assert.deepStrictEqual(
+  [results[0].gone, results[0].error, results[0].held, results[0].pending],
+  [true, undefined, 0, 0]
+);
+assert.deepStrictEqual(
+  plainReport(heldRemovedMeanwhile).banLists.map(({ id, gone, ...rest }) => [
+    id,
+    gone,
+    holdFields(rest)
+  ]),
+  [[133, true, { held: 0 }]]
+);
 // The same error while the list is still there fails it, as any other failure would.
 reset();
 battlemetricsList(131, pairs('i', 0, 30), [pairs('i', 0, 15)]);
@@ -3916,6 +5424,11 @@ const serve = (id, entries) => battlemetricsLists.set(`bm-${id}`, paged(entries)
 // What a run asked BattleMetrics for: each request's list, and its page, or newest for a first page.
 const asked = () =>
   battlemetricsParams.map((params) => [params['filter[banList]'], params['page[key]'] ?? 'newest']);
+// Whether every request a run made asked for the lists' expired bans too, as each must: the pages
+// BattleMetrics' links led to, whose links here leave the filter out, as well as the first.
+const askedForExpired = () =>
+  battlemetricsParams.length > 0 &&
+  battlemetricsParams.every((params) => params['filter[expired]'] === 'true');
 // One run, with what it logged, did and asked for alone, its report for the run record, and when it
 // planned its reads. A run that stops gives the error it stopped with (stopped) instead of its
 // results. An importer loaded on its own (Importer, see loadImporter) runs with its own run control.
@@ -3958,9 +5471,11 @@ assert.deepStrictEqual(
 );
 assert.deepStrictEqual(battlemetricsParams[0], {
   'filter[banList]': 'bm-90',
+  'filter[expired]': 'true',
   sort: '-timestamp',
   'page[size]': 100
 });
+assert.ok(askedForExpired());
 const firstRead = row(90);
 assert.deepStrictEqual(
   [
@@ -4073,6 +5588,7 @@ assert.deepStrictEqual(asked(), [
   ['bm-90', '4'],
   ['bm-91', 'newest']
 ]);
+assert.ok(askedForExpired());
 assert.deepStrictEqual(polled.report.requests, { head: 2, follow: 0, full: 4 });
 assert.deepStrictEqual(removedIDs(), ['90,h15']);
 assert.deepStrictEqual(polled.report.banLists[0], {
@@ -4127,6 +5643,7 @@ assert.deepStrictEqual(asked(), [
   ['bm-90', '1'],
   ['bm-91', 'newest']
 ]);
+assert.ok(askedForExpired());
 assert.deepStrictEqual(polled.report.requests, { head: 2, follow: 1, full: 0 });
 assert.deepStrictEqual(
   [...written()].sort(),
@@ -4324,7 +5841,12 @@ assert.deepStrictEqual(readsOf(polled), [
   [94, 'full', 'every_run'],
   [93, 'full', 'every_run']
 ]);
-assert.deepStrictEqual(battlemetricsParams[0], { 'filter[banList]': 'bm-94', 'page[size]': 100 });
+assert.deepStrictEqual(battlemetricsParams[0], {
+  'filter[banList]': 'bm-94',
+  'filter[expired]': 'true',
+  'page[size]': 100
+});
+assert.ok(askedForExpired());
 assert.deepStrictEqual([row(93).headUids, row(94).headUids], [null, null]);
 assert.strictEqual(
   logged(
@@ -4605,6 +6127,64 @@ assert.deepStrictEqual(polled.report.banLists, [
   }
 ]);
 assert.deepStrictEqual([written(), removedIDs(), pendingIDs(134).length], [['134,yn1'], [], 10]);
+
+// A source that starts leaving out bans throughout the list, as BattleMetrics would its expired
+// bans, here 2 of every 5, drops its count with them: a poll finds the drift, and the list is read
+// in full, completely, as the count dropped too. The 80 of its 200 bans it lost at once are held for
+// an admin, and the hold is posted. Polls after it remove nothing and post nothing, and count them
+// as held. Named in IMPORTER_ALLOW_MASS_REMOVAL, the list is read in full on the next run, for the
+// removal, which removes them, with their records and why they were held.
+reset();
+delete env.IMPORTER_HEAD_POLL;
+let hiding = pairs('v', 0, 200);
+battlemetricsList(136, [], paged(hiding));
+await pollRun();
+hiding = hiding.filter((_, n) => n % 5 >= 2);
+serve(136, hiding);
+polled = await pollRun();
+assert.deepStrictEqual(polled.report.banLists, [
+  {
+    id: 136,
+    fetched: 120,
+    new: 0,
+    updated: 0,
+    removed: 0,
+    held: 80,
+    read: 'full',
+    reason: 'drift',
+    drift: { total: 120, expected: 200 },
+    stored: 200,
+    hold: 'large',
+    state: 'held'
+  }
+]);
+assert.deepStrictEqual(
+  [removedIDs(), heldIDs(136).length, holdReason(136), row(136).state],
+  [[], 80, 'large', 'held']
+);
+assert.match(
+  warnings()[0]?.message ?? '',
+  /^Imported ban list \(ID: 136\): 120 bans fetched, 0 new, 0 updated\. Kept the 80 of its 200 stored bans that it lost at once, /
+);
+polled = await pollRun();
+assert.deepStrictEqual(
+  [polled.report.banLists, removedIDs(), warnings()],
+  [
+    [
+      { id: 136, fetched: 5, new: 0, updated: 0, removed: 0, held: 80, read: 'head', state: 'held' }
+    ],
+    [],
+    []
+  ]
+);
+env.IMPORTER_ALLOW_MASS_REMOVAL = '136';
+polled = await pollRun();
+assert.deepStrictEqual(readsOf(polled), [[136, 'full', 'removal']]);
+assert.deepStrictEqual(
+  [removedIDs().length, polled.report.banLists[0].massRemoval, heldIDs(136), holdRows.has(136)],
+  [80, true, [], false]
+);
+assert.deepStrictEqual([storedIDs(136).length, row(136).state], [120, 'ok']);
 
 // With runs less than IMPORTER_FULL_SCAN_MINUTES apart, as the importer service's cycles every 10
 // minutes, a list's next periodic read falls at its slot, wherever in its cycle it was read: a list
@@ -5683,5 +7263,5 @@ assert.strictEqual(
 assert.strictEqual(verboseLevelOneLines, 0, 'Lines for the log channel are logged as important');
 
 console.log(
-  "Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed or a held ban comes back, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, second attempts, retries, sync state, the access check, lost access, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, also as the run stops, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming reads, periodic full reads at each list's slot, by the lists' pages and the cycle, cycles whose full reads spread out after the first, held counts of polled lists, the switches, stops, also during a poll, and the list a stop came in, each list's seconds without the access check, the page a failed or stopped read was on, but no count of the old source's for a changed one, how a list's first attempt ended, the list under way and the access check while it is read, runs an interval apart, the loop's cycle, the oldest periodic reads first, and the run summary."
+  "Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed, of lists that lost all their bans, until a held ban comes back, or a large part of them at once, until fewer than a large part of the bans the list had then are still missing, also as the list grows, with those that come back no longer held, and once it loses all of its bans, or another large part of them, measured against fewer bans as the list shrinks, holds of lists that lost all their bans that take in a large loss, holds ended, begun or taken in whole, or not at all, as a run is cut short, confirmations said to end only the holds they ended, also as a large loss would begin another, large removals said in every line, the holds replaced sources ended, reasons that outlived their holds, also found by a poll's drift, without queueing their players, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, second attempts, retries, sync state, the access check, lost access, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, also as the run stops, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming reads, periodic full reads at each list's slot, by the lists' pages and the cycle, cycles whose full reads spread out after the first, held counts of polled lists, the switches, stops, also during a poll, and the list a stop came in, each list's seconds without the access check, the page a failed or stopped read was on, but no count of the old source's for a changed one, how a list's first attempt ended, the list under way and the access check while it is read, runs an interval apart, the loop's cycle, the oldest periodic reads first, and the run summary."
 );

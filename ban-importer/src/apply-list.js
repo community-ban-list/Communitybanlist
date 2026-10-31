@@ -182,33 +182,88 @@ export const REMOVE_AT_ONCE_SHARE = 0.05;
 // confirms that it lost them all.
 export const FULL_REMOVAL_BANS = 10;
 
+// A read that finds at least this many of a list's bans missing, of those no earlier read had
+// missed, and at least this share of the bans the list had before the read, keeps them until an
+// admin confirms that the list lost them. A source that starts leaving bans out, e.g. its expired
+// ones, gives a count that drops with them, so the count check still passes, and only the size of
+// the loss shows it. A list loses a handful of bans a day, a few at a time, far fewer than either:
+// the 25 decide for a list of up to 125 bans, and the share for a larger one, e.g. 2,356 bans of
+// 11,780. A smaller loss still waits for a confirming read, as any loss did before.
+export const LARGE_REMOVAL_BANS = 25;
+export const LARGE_REMOVAL_SHARE = 0.2;
+
+// The fewest missing bans that are a large loss of a list that had stored bans, by the numbers
+// above: 25 for a list of up to 125 bans, and a fifth of a larger one, rounded up, e.g. 40 of 200.
+export function largeLossBans(stored) {
+  return Math.max(LARGE_REMOVAL_BANS, Math.ceil(stored * LARGE_REMOVAL_SHARE));
+}
+
+// Whether losing count bans of a list that had stored bans before the read is a large loss.
+export function isLargeLoss(count, stored) {
+  return count >= largeLossBans(stored);
+}
+
+// The fewest of a 'large' hold's bans still missing that keep it, of the bans it is measured
+// against (of, see planRemovals): a large loss of them, or all of them when they are fewer than
+// LARGE_REMOVAL_BANS, as for a hold that took in that of a list that lost all of its fewer than 25
+// bans, which would otherwise end with none of those back.
+export function fewestHeld(of) {
+  return Math.min(largeLossBans(of), Math.max(of, 1));
+}
+
+// The holds that are recorded in BanListPendingRemovals, as their bans' heldAt, and so last over
+// runs, until an admin confirms them or their bans come back: any one of them for 'full', and for
+// 'large', enough that fewer than fewestHeld are still missing. An 'empty' hold is not recorded, as
+// every read that finds no bans holds the list again.
+export const RECORDED_HOLDS = ['full', 'large'];
+
 // Decide what to do with the bans missing from a complete read of a list: missing is their IDs,
 // stored and fetched the numbers of bans the list had before the read and the read found, pending
 // when each ban recorded as missing before was first missing, in milliseconds, by its ID, held the
-// IDs of the bans the list still has that an earlier run held for an admin, now the time of the
-// read in milliseconds, replace whether the bans are being replaced by those of the list's new
-// source, and confirmed whether the list may lose any number of bans at once. Returns:
+// IDs of the bans the list still has that an earlier run held for an admin, heldFor the hold that
+// run began, 'full' or 'large', and heldOf, for 'large', the bans it is measured against, as its
+// BanListHolds row keeps them, or null when that is not known, now the time of the read in
+// milliseconds, replace whether the bans are being replaced by those of the list's new source, and
+// confirmed whether the list may lose any number of bans at once. Returns:
 // - remove: the IDs of the bans to remove now;
 // - wait: the IDs of the bans to keep until a later complete read confirms they are gone;
 // - hold: why bans wait for an admin to confirm their removal, or null: 'empty' for a read that
-//   found no bans, and 'full' for one that found none of the bans of a list of at least
-//   FULL_REMOVAL_BANS bans, or none of those an earlier run held for that reason;
+//   found no bans, 'full' for one that found none of the bans of a list of at least
+//   FULL_REMOVAL_BANS bans, and 'large' for one that found at least LARGE_REMOVAL_BANS, and
+//   LARGE_REMOVAL_SHARE of the list, missing that no earlier read had missed; or, for a list an
+//   earlier run held, the hold it began (heldFor), while that hold lasts, or 'large' as that hold
+//   takes in all of the list's missing bans (below);
 // - held: the IDs of the bans that wait for an admin;
 // - released: the IDs of the bans an earlier run held that no longer wait for an admin, but for a
-//   later complete read, as if first missing now.
+//   later complete read, as if first missing now;
+// - heldOf, for 'large' only: the bans the hold is measured against from now, which BanListHolds
+//   keeps.
 // So with confirmed, every missing ban is removed at once. Otherwise a list that seems to have
-// lost all its bans keeps them, as its source more likely broke, unless its bans are being
-// replaced. A 'full' hold lasts until one of its bans comes back, or the bans are replaced: the
-// bans the list saved since are not its bans from before. Any other missing ban is removed once
-// complete reads have not had it for CONFIRM_AFTER, and waits until then, but when fewer than
-// REMOVE_AT_ONCE_BANS and REMOVE_AT_ONCE_SHARE of the list would wait, all of them are removed at
-// once.
+// lost all its bans keeps them, as its source more likely broke, and so does one that lost a large
+// part of them at once, unless its bans are being replaced. A recorded hold lasts until its bans
+// are replaced, as the bans the list saved since are not the bans it lost, or until they come back:
+// for 'full', any one of them, and for 'large', enough of them that fewer than fewestHeld of the
+// bans it is measured against are still missing, those that come back being no longer held. A
+// 'large' hold is measured against the fewer of heldOf and the bans the list had before this read,
+// and against the latter when heldOf is not known: so the list's growth never ends it, and a hold
+// of a list that shrank lasts as a hold that began on the smaller list would. Once that is saved
+// as its heldOf, it never grows again. While a hold lasts, a read that loses a large part of the
+// list's other bans, of those no earlier read had missed, holds every missing ban as 'large' from
+// now, and so does one that finds none of the list's bans while it is held as 'large': a 'large'
+// hold takes them in, measured as before, and a 'full' one becomes 'large', measured against the
+// bans it held, which keeps those at least until one of them comes back, as the 'full' hold would
+// have. Kept as 'full', it would let the large loss go as soon as any one of its bans came back.
+// Any other missing ban is removed once complete reads have not had it for CONFIRM_AFTER, and
+// waits until then, but when fewer than REMOVE_AT_ONCE_BANS and REMOVE_AT_ONCE_SHARE of the list
+// would wait, all of them are removed at once.
 export function planRemovals({
   missing,
   stored,
   fetched,
   pending = new Map(),
   held = new Set(),
+  heldFor = 'full',
+  heldOf = null,
   now = Date.now(),
   replace = false,
   confirmed = false
@@ -217,16 +272,42 @@ export function planRemovals({
   if (missing.length === 0) return none;
   if (confirmed) return { ...none, remove: [...missing] };
   if (!replace && fetched === 0) return { ...none, hold: 'empty', held: [...missing] };
-  if (!replace && missing.length >= stored && stored >= FULL_REMOVAL_BANS)
-    return { ...none, hold: 'full', held: [...missing] };
 
-  // A list an earlier run held stays held while none of the bans held has come back. The other
-  // missing bans, which it saved since, are removed as usual.
+  // A list an earlier run held stays held while its hold lasts: one held as it lost all its bans
+  // while none of them has come back, and one held as it lost a large part of them while at least
+  // fewestHeld of the bans it is measured against (of) are still missing. Those that came back are
+  // no longer held.
   const isMissing = new Set(missing);
   const stillHeld = [...held].filter((id) => isMissing.has(id));
-  const holding = !replace && held.size > 0 && stillHeld.length === held.size;
+  const of = heldFor === 'large' ? Math.min(heldOf ?? stored, stored) : held.size;
+  const lasts =
+    heldFor === 'large' ? stillHeld.length >= fewestHeld(of) : stillHeld.length === held.size;
+  const holding = !replace && held.size > 0 && lasts;
+
+  // While the hold lasts, the list's other missing bans are removed as usual, unless those of them
+  // no earlier read had missed are a large loss, or the read found none of the list's bans while
+  // it is held as 'large': the hold then takes in every missing ban, as 'large', from now. A 'full'
+  // hold that took them in would end as soon as any one of them came back, and the large loss
+  // would then be removed after a confirming read, with no admin. A read that found none of the
+  // list's bans otherwise holds them all as 'full'.
+  const lostAll = !replace && missing.length >= stored && stored >= FULL_REMOVAL_BANS;
+  const fresh = missing.filter((id) => !pending.has(id) && !held.has(id));
+  if (holding && (isLargeLoss(fresh.length, stored) || (lostAll && heldFor === 'large')))
+    return { ...none, hold: 'large', held: [...missing], heldOf: of };
+  if (lostAll) return { ...none, hold: 'full', held: [...missing] };
   const released = new Set(holding ? [] : stillHeld);
-  const others = holding ? missing.filter((id) => !held.has(id)) : missing;
+  let others = holding ? missing.filter((id) => !held.has(id)) : missing;
+
+  // A list that is not held, and lost a large part of its bans in this read, holds the bans it
+  // lost. Only bans no earlier read had missed count, and are held: those already recorded wait
+  // for their confirming read as they did, and those a hold that ended released are not held
+  // again.
+  let lost = [];
+  if (!replace && !holding) {
+    lost = others.filter((id) => !pending.has(id));
+    if (isLargeLoss(lost.length, stored)) others = others.filter((id) => pending.has(id));
+    else lost = [];
+  }
 
   const due = (id) =>
     !released.has(id) && pending.has(id) && now - pending.get(id) >= CONFIRM_AFTER;
@@ -235,9 +316,13 @@ export function planRemovals({
     wait.length < Math.max(REMOVE_AT_ONCE_BANS, stored * REMOVE_AT_ONCE_SHARE)
       ? { remove: [...others], wait: [] }
       : { remove: others.filter(due), wait };
+  if (lost.length > 0)
+    return { ...plan, hold: 'large', held: lost, released: [...released], heldOf: stored };
+  if (holding && heldFor === 'large')
+    return { ...plan, hold: 'large', held: stillHeld, released: [], heldOf: of };
   return {
     ...plan,
-    hold: holding ? 'full' : null,
+    hold: holding ? heldFor : null,
     held: holding ? stillHeld : [],
     released: [...released]
   };
@@ -417,8 +502,13 @@ export async function writeBans(
 // Remove bans from the list, each given as { id, steamUser }, and optionally the player it had
 // before (previousSteamUser), in transactions of batchSize bans, each of which also queues the bans'
 // players for an update, as they lost a ban, and drops the bans' records in BanListPendingRemovals.
-// Resolves with the number of bans removed.
-export async function removeBans(banList, bans, { batchSize = BATCH_SIZE } = {}) {
+// onRemoved is given how many bans each transaction removed once it is committed, so a removal cut
+// short part-way still counts those it made. Resolves with the number of bans removed.
+export async function removeBans(
+  banList,
+  bans,
+  { batchSize = BATCH_SIZE, onRemoved = () => {} } = {}
+) {
   let removed = 0;
   for (let i = 0; i < bans.length; i += batchSize) {
     const batch = bans.slice(i, i + batchSize);
@@ -430,7 +520,7 @@ export async function removeBans(banList, bans, { batchSize = BATCH_SIZE } = {})
         )
       )
     ];
-    removed += await retryOperation(() =>
+    const count = await retryOperation(() =>
       sequelize.transaction(async (transaction) => {
         await sequelize.query(QUEUE_PLAYERS, { replacements: [players], transaction });
         const result = await sequelize.query('DELETE FROM Bans WHERE banList = ? AND id IN (?)', {
@@ -444,56 +534,148 @@ export async function removeBans(banList, bans, { batchSize = BATCH_SIZE } = {})
         return affectedRows(result);
       })
     );
+    removed += count;
+    onRemoved(count);
   }
   return removed;
 }
 
-// Record that the bans, by ID, were missing from the complete read of the list at now: as first
-// missing then, if they are not recorded yet, and as last missing then. With held, they are held for
-// an admin, from now if they were not already.
-export async function savePendingRemovals(
-  banList,
-  ids,
-  { now, held = false, batchSize = BATCH_SIZE }
-) {
+// Record that a batch of the list's bans, by ID, were missing from the complete read of it at now,
+// with one statement, in the transaction given, if any: as first missing then, if they are not
+// recorded yet, and as last missing then. With held, they are held for an admin, from now if they
+// were not already, which keeps when that began.
+function recordMissing(banList, batch, { now, held, transaction }) {
+  return sequelize.query(
+    `INSERT INTO BanListPendingRemovals (banList, banId, firstMissingAt, lastMissingAt, heldAt) VALUES ${placeholders(batch.length, 5)} AS new ON DUPLICATE KEY UPDATE lastMissingAt = new.lastMissingAt, heldAt = COALESCE(BanListPendingRemovals.heldAt, new.heldAt)`,
+    {
+      replacements: batch.flatMap((id) => [
+        banList,
+        id,
+        sqlTime(now),
+        sqlTime(now),
+        held ? sqlTime(now) : null
+      ]),
+      transaction
+    }
+  );
+}
+
+// Record that the bans, by ID, were missing from the complete read of the list at now, and wait for
+// a later complete read, a statement for each batch of batchSize bans (see recordMissing).
+export async function savePendingRemovals(banList, ids, { now, batchSize = BATCH_SIZE }) {
   for (let i = 0; i < ids.length; i += batchSize) {
     const batch = ids.slice(i, i + batchSize);
-    await retryOperation(() =>
-      sequelize.query(
-        `INSERT INTO BanListPendingRemovals (banList, banId, firstMissingAt, lastMissingAt, heldAt) VALUES ${placeholders(batch.length, 5)} AS new ON DUPLICATE KEY UPDATE lastMissingAt = new.lastMissingAt, heldAt = COALESCE(BanListPendingRemovals.heldAt, new.heldAt)`,
-        {
-          replacements: batch.flatMap((id) => [
-            banList,
-            id,
-            sqlTime(now),
-            sqlTime(now),
-            held ? sqlTime(now) : null
-          ])
-        }
-      )
-    );
+    await retryOperation(() => recordMissing(banList, batch, { now, held: false }));
   }
 }
 
-// Stop holding the list's held bans for an admin: they wait for a later complete read instead, as
-// if first missing at now.
-export async function releaseHeldRemovals(banList, { now }) {
+const CLEAR_PENDING = 'DELETE FROM BanListPendingRemovals WHERE banList = ? AND banId IN (?)';
+const RELEASE_HELD =
+  'UPDATE BanListPendingRemovals SET firstMissingAt = ?, lastMissingAt = ?, heldAt = NULL WHERE banList = ? AND heldAt IS NOT NULL';
+const SAVE_HOLD =
+  'INSERT INTO BanListHolds (banList, reason, storedCount) VALUES (?, ?, ?) AS new ON DUPLICATE KEY UPDATE reason = new.reason, storedCount = new.storedCount';
+const CLEAR_HOLD = 'DELETE FROM BanListHolds WHERE banList = ?';
+
+// Write what a complete read changes of the list's hold for an admin in one transaction, run again
+// as a whole while it fails in a way that could pass, so all of it is written, or none of it, in
+// this order:
+// - back: the held bans, by ID, that the read found again, lose their records;
+// - release: the list's held bans no longer wait for an admin, but for a later complete read, as
+//   if first missing at now, as its hold ended, or begins anew (see planRemovals);
+// - reason: why its bans are held, with the bans a 'large' hold is measured against (stored), is
+//   saved in BanListHolds, for a hold that begins, or one whose reason or count changes; or with
+//   end, and no reason, the list's row there is deleted, as its hold ended;
+// - ids: the hold's bans are recorded as missing from the complete read at now and held, from now
+//   unless they already were, a statement for each batch of batchSize bans (see recordMissing).
+// A run cut short in it, e.g. by a database outage longer than the retries or the process being
+// killed, writes none of it, so the next complete read finds the list held as it
+// was, or not held at all. (That read measures the loss again, against a list that includes the
+// bans this read saved before it; see the README.) Written a statement at a
+// time, a hold cut short as it ended could leave a 'large' row with fewer of its bans held than
+// such a hold keeps, and one cut short as it began could leave part of its bans held, so that the
+// next read took the list as held, and the rest of the bans it lost as missing besides, which
+// would wait for a confirming read that removes them.
+export async function saveHold(
+  banList,
+  ids,
+  {
+    back = [],
+    release = false,
+    reason = null,
+    stored = null,
+    end = false,
+    now,
+    batchSize = BATCH_SIZE
+  }
+) {
   await retryOperation(() =>
-    sequelize.query(
-      'UPDATE BanListPendingRemovals SET firstMissingAt = ?, lastMissingAt = ?, heldAt = NULL WHERE banList = ? AND heldAt IS NOT NULL',
-      { replacements: [sqlTime(now), sqlTime(now), banList] }
-    )
+    sequelize.transaction(async (transaction) => {
+      for (let i = 0; i < back.length; i += batchSize)
+        await sequelize.query(CLEAR_PENDING, {
+          replacements: [banList, back.slice(i, i + batchSize)],
+          transaction
+        });
+      if (release)
+        await sequelize.query(RELEASE_HELD, {
+          replacements: [sqlTime(now), sqlTime(now), banList],
+          transaction
+        });
+      if (reason !== null)
+        await sequelize.query(SAVE_HOLD, { replacements: [banList, reason, stored], transaction });
+      else if (end) await sequelize.query(CLEAR_HOLD, { replacements: [banList], transaction });
+      for (let i = 0; i < ids.length; i += batchSize)
+        await recordMissing(banList, ids.slice(i, i + batchSize), { now, held: true, transaction });
+    })
   );
+}
+
+// The hold the list's held bans were held for, as BanListHolds keeps it: why, 'full' or 'large'
+// (reason), and the bans a 'large' hold is measured against (stored): those the list had before
+// the read that began it, or fewer, as the list shrank since, or for one that took in a 'full'
+// hold, the bans that hold held. Or null when it keeps none: the bans of a list held by an
+// importer from before that table were held as it lost all of them, the only hold that importer
+// recorded.
+export async function readHold(banList) {
+  const [row] = await sequelize.query(
+    'SELECT reason, storedCount FROM BanListHolds WHERE banList = ?',
+    { replacements: [banList], type: QueryTypes.SELECT }
+  );
+  if (!row) return null;
+  const stored = Number(row.storedCount ?? NaN);
+  return { reason: row.reason, stored: Number.isFinite(stored) ? stored : null };
+}
+
+// Why the list's held bans are held, as planRemovals takes it, from the hold readHold gives
+// (recorded), how many of the bans the list still has are held (held), and the bans the list had
+// before the read (stored): heldFor, 'full' or 'large', and for 'large', heldOf, the bans it is
+// measured against, or null when that is not known. Bans held with no reason recorded were held by
+// an importer from before BanListHolds, as the list lost all of them, the only hold it recorded,
+// so they are taken as 'full', as are those of any reason but 'large'. So are those of a list
+// whose reason says 'large' while fewer of its bans are held than fewestHeld, measured as
+// planRemovals measures it. This importer never leaves a 'large' hold so: the held bans that come
+// back while it lasts lose their records in the transaction that goes on with the rest, or that
+// ends it, and the count it is measured against only ever drops, with the list, in the same
+// transaction (see saveHold). So such a reason outlived its hold, e.g. as the previous image, which
+// deletes none, ended it, and then held the list as it lost all of its bans, or someone deleted
+// held bans by hand. Taken as 'large', the hold would end with none of its bans back.
+export function whyHeld(recorded, held, stored) {
+  if (
+    recorded?.reason === 'large' &&
+    held >= fewestHeld(Math.min(recorded.stored ?? stored, stored))
+  )
+    return { heldFor: 'large', heldOf: recorded.stored };
+  return { heldFor: 'full', heldOf: null };
+}
+
+// Forget the hold the list's bans were held for, once none of them is held any longer.
+export async function clearHoldReason(banList) {
+  await retryOperation(() => sequelize.query(CLEAR_HOLD, { replacements: [banList] }));
 }
 
 // Drop the records of bans, by ID, that a read found again, or that the list no longer has.
 export async function clearPendingRemovals(banList, ids, { batchSize = BATCH_SIZE } = {}) {
   for (let i = 0; i < ids.length; i += batchSize) {
     const batch = ids.slice(i, i + batchSize);
-    await retryOperation(() =>
-      sequelize.query('DELETE FROM BanListPendingRemovals WHERE banList = ? AND banId IN (?)', {
-        replacements: [banList, batch]
-      })
-    );
+    await retryOperation(() => sequelize.query(CLEAR_PENDING, { replacements: [banList, batch] }));
   }
 }
