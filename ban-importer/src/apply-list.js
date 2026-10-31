@@ -571,11 +571,18 @@ function recordMissing(banList, batch, { now, held, transaction }) {
 }
 
 // Record that the bans, by ID, were missing from the complete read of the list at now, and wait for
-// a later complete read, a statement for each batch of batchSize bans (see recordMissing).
-export async function savePendingRemovals(banList, ids, { now, batchSize = BATCH_SIZE }) {
+// a later complete read, a statement for each batch of batchSize bans (see recordMissing). onSaved
+// is given how many bans each statement recorded once it has, so records cut short part-way still
+// count those that were saved.
+export async function savePendingRemovals(
+  banList,
+  ids,
+  { now, batchSize = BATCH_SIZE, onSaved = () => {} }
+) {
   for (let i = 0; i < ids.length; i += batchSize) {
     const batch = ids.slice(i, i + batchSize);
     await retryOperation(() => recordMissing(banList, batch, { now, held: false }));
+    onSaved(batch.length);
   }
 }
 

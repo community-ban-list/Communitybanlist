@@ -1273,6 +1273,24 @@ reset();
 fail(/^DELETE FROM BanListPendingRemovals /, deadlock());
 await clearPendingRemovals(7, ['7,d']);
 assert.deepStrictEqual([statements().length, delays], [2, [5000]]);
+// Each statement's bans are counted once they are recorded, so records cut short after the first
+// statement, as the database stays unavailable, count only those it recorded.
+reset();
+let inserts = 0;
+fail(
+  { test: (sql) => /^INSERT INTO BanListPendingRemovals /.test(sql) && ++inserts > 1 },
+  ...Array.from({ length: 5 }, () => new ConnectionError())
+);
+const recorded = [];
+await assert.rejects(
+  savePendingRemovals(7, ['7,a', '7,b', '7,c'], {
+    now: new Date(NOW),
+    batchSize: 2,
+    onSaved: (count) => recorded.push(count)
+  }),
+  { name: 'SequelizeConnectionRefusedError' }
+);
+assert.deepStrictEqual([recorded, statements().length], [[2], 6]);
 
 // What a read changes of a hold for an admin is written in one transaction, whole or not at all.
 // A hold that begins saves why the list's bans are held, with the bans a 'large' hold is measured
@@ -1514,5 +1532,5 @@ assert.deepStrictEqual(batches, [2, 2]);
 assert.strictEqual(events.filter(([type]) => type === 'commit').length, 2);
 
 console.log(
-  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, records of missing bans, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
+  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, records of missing bans, counted a statement at a time, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
 );

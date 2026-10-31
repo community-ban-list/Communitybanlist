@@ -1392,15 +1392,20 @@ export default class BanImporter {
       // logResult).
       result.removedAsUsual = unconfirmed.remove.length;
     }
-    result.hold = plan.hold;
-    result.held = plan.held.length + plan.wait.length;
-    result.pending = plan.wait.length;
+    // What the read's result says of the list's hold, once what the read changes of it is written,
+    // so that a list that fails part-way says only what it wrote: why its bans are held (hold), how
+    // many are (held), and the rest below. The bans that wait for a later complete read are added
+    // to held, and counted as pending, as each batch of them is recorded. A list that fails before
+    // its hold is written keeps that hold as it was, and its result says none of it, as for any list
+    // that fails. A dry run's says what it would have written.
+    const fields = { hold: plan.hold, held: plan.held.length };
     // The first of the bans that wait for a later complete read is due to be confirmed as gone
     // CONFIRM_AFTER after it was first missing, which is now for a ban first missing now, or no
     // longer held for an admin, so the list is read in full again then.
+    let confirmAt = null;
     if (plan.wait.length > 0) {
       const released = new Set(plan.released);
-      result.confirmAt =
+      confirmAt =
         plan.wait.reduce(
           (first, banId) =>
             Math.min(
@@ -1422,17 +1427,17 @@ export default class BanImporter {
       plan.hold === 'large' && keeps && plan.held.some((banId) => !rules.held.has(banId));
     const goesOn = recordedHold && keeps && !anew;
     if (goesOn)
-      result.heldSince = plan.held.reduce(
+      fields.heldSince = plan.held.reduce(
         (first, banId) => (heldAt.has(banId) ? Math.min(first, heldAt.get(banId)) : first),
         Infinity
       );
-    if (anew) result.heldAnew = heldFor;
+    if (anew) fields.heldAnew = heldFor;
     // A 'large' hold lasts while at least this many of its bans are still missing, of the bans it
     // is measured against from now (see logResult).
-    if (plan.hold === 'large') result.fewest = fewestHeld(plan.heldOf);
+    if (plan.hold === 'large') fields.fewest = fewestHeld(plan.heldOf);
     // The held bans that came back, which are no longer held, whether or not their hold goes on.
     const back = held.filter(([banId]) => found.has(banId)).map(([banId]) => banId);
-    if (back.length > 0) result.cameBack = back.length;
+    if (back.length > 0) fields.cameBack = back.length;
     // A hold an earlier run began that this read ended, and what ended it (by): the list's source
     // was replaced ('replace'), an admin confirmed it, without which it would have gone on
     // ('confirmation'), or its bans came back ('read'): for 'full', any one of those it began with,
@@ -1445,7 +1450,7 @@ export default class BanImporter {
     if (ended) {
       const stillMissing = held.length - back.length;
       const wouldKeep = unconfirmed?.held.some((banId) => rules.held.has(banId));
-      result.holdEnded = {
+      fields.holdEnded = {
         hold: heldFor,
         by: result.replace ? 'replace' : wouldKeep ? 'confirmation' : 'read',
         since: began,
@@ -1455,7 +1460,7 @@ export default class BanImporter {
         removed: stillMissing > 0 && plan.wait.length === 0
       };
       if (heldFor === 'large')
-        result.holdEnded.fewest = fewestHeld(Math.min(heldOf ?? stored.length, stored.length));
+        fields.holdEnded.fewest = fewestHeld(Math.min(heldOf ?? stored.length, stored.length));
     }
     // What the list's BanListHolds row says from now, when that changes: why its bans are held, and
     // the bans a 'large' hold is measured against, saved as a hold begins, and again as a 'large'
@@ -1477,7 +1482,12 @@ export default class BanImporter {
     const removed = missing.filter((ban) => remove.has(ban.id));
 
     if (this.dryRun) {
-      result.removed = removed.length;
+      Object.assign(result, fields, {
+        held: fields.held + plan.wait.length,
+        pending: plan.wait.length,
+        removed: removed.length
+      });
+      if (confirmAt !== null) result.confirmAt = confirmAt;
       logEach(
         removed,
         (ban) => `Would remove ban (ID: ${ban.id}) from ban list (ID: ${banList.id}).`
@@ -1509,12 +1519,20 @@ export default class BanImporter {
             batchSize: this.batchSize
           });
         else if (end) await clearHoldReason(banList.id);
-        if (plan.wait.length > 0)
+        Object.assign(result, fields);
+        // Counted as each batch is recorded, and removed, so the result of a list whose records or
+        // removals are cut short says how many it made, and its line how many it removed.
+        if (plan.wait.length > 0) {
           await savePendingRemovals(banList.id, plan.wait, {
             now: new Date(now),
-            batchSize: this.batchSize
+            batchSize: this.batchSize,
+            onSaved: (count) => {
+              result.held += count;
+              result.pending += count;
+            }
           });
-        // Counted as each batch is removed, so the line of a removal cut short says how many it made.
+          result.confirmAt = confirmAt;
+        }
         if (removed.length > 0)
           await removeBans(banList.id, removed, {
             batchSize: this.batchSize,
@@ -1526,8 +1544,8 @@ export default class BanImporter {
         if ((await this.stopReason(err, banList)) !== LIST_REMOVED) throw err;
         // Its bans went with it, so none of them is kept, and no hold of them ended here.
         Object.assign(result, { gone: true, hold: null, held: 0, pending: 0 });
-        delete result.holdEnded;
-        delete result.cameBack;
+        for (const field of ['holdEnded', 'cameBack', 'heldAnew', 'heldSince', 'fewest'])
+          delete result[field];
         return;
       }
     }
