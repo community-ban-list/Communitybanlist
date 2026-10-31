@@ -8,6 +8,7 @@
 
 import {
   cutLines,
+  describeListTypes,
   describeProgress,
   describeReason,
   discordTime,
@@ -58,7 +59,8 @@ const DESCRIPTION_LENGTH = 3500;
 // - added, updated, removed: the bans the import saved and removed. A SteamID move that is applied
 //   updates its ban, so it is counted there; one that is only counted changed nothing;
 // - expired: the bans marked expired;
-// - created, deleted: the export bans pushed;
+// - created, deleted: the export bans pushed, and in exportsByType, how many of them were on each
+//   type of list, as { battlemetrics: { created, deleted }, remote: { created, deleted } };
 // - reputationQueued: the players the reputation check queued, as their reputation points did not
 //   match their bans;
 // - failedLists: the ban lists whose import failed;
@@ -73,13 +75,22 @@ export function cycleNumbers(record, { battlemetricsRequests = 0 } = {}) {
     counts.importBans && typeof counts.importBans === 'object' ? counts.importBans : {};
   const count = (value) => (isCount(value) ? value : 0);
   const banLists = Array.isArray(imports.banLists) ? imports.banLists : [];
+  const exports =
+    counts.exportExportBans && typeof counts.exportExportBans === 'object'
+      ? counts.exportExportBans
+      : {};
+  const typeCounts = (type) => ({
+    created: count(exports[type]?.created),
+    deleted: count(exports[type]?.deleted)
+  });
   return {
     added: count(imports.new),
     updated: count(imports.updated),
     removed: count(imports.removed),
     expired: count(counts.expireBans?.expired),
-    created: count(counts.exportExportBans?.created),
-    deleted: count(counts.exportExportBans?.deleted),
+    created: count(exports.created),
+    deleted: count(exports.deleted),
+    exportsByType: { battlemetrics: typeCounts('battlemetrics'), remote: typeCounts('remote') },
     reputationQueued: count(counts.checkReputationPoints?.queued),
     failedLists: count(imports.failedLists),
     held: banLists
@@ -116,6 +127,11 @@ export function newTotals(since) {
     expired: 0,
     created: 0,
     deleted: 0,
+    // How many of the export bans created and deleted were on each type of list.
+    exportsByType: {
+      battlemetrics: { created: 0, deleted: 0 },
+      remote: { created: 0, deleted: 0 }
+    },
     // The players the reputation check queued, as their points did not match their bans.
     reputationQueued: 0,
     failedLists: 0,
@@ -135,6 +151,9 @@ export function addCycle(totals, record, numbers) {
   const fields = ['expired', 'created', 'deleted', 'failedLists', 'battlemetricsRequests'];
   if (!numbers.dryRun) fields.push('added', 'updated', 'removed');
   for (const field of fields) totals[field] += numbers[field];
+  for (const [type, typeTotals] of Object.entries(totals.exportsByType))
+    for (const what of ['created', 'deleted'])
+      typeTotals[what] += numbers.exportsByType?.[type]?.[what] ?? 0;
   totals.steamUpdated += numbers.steamUpdated;
   totals.reputationQueued += numbers.reputationQueued ?? 0;
   const seconds = isCount(record.seconds) ? record.seconds : 0;
@@ -143,8 +162,14 @@ export function addCycle(totals, record, numbers) {
   return totals;
 }
 
-// What a cycle changed, in a line, e.g. "3 bans added, 2 expired · 4 export bans created · 2
-// players queued by the reputation check", or that it changed nothing.
+// How many export bans were created or deleted, as what says, with how many of them were on
+// BattleMetrics and remote lists when it is not 0, e.g. "2 created (1 BattleMetrics, 1 remote)",
+// or, with the noun, "2 export bans created (1 BattleMetrics, 1 remote)".
+const exportCount = (numbers, what, noun) =>
+  `${noun ? plural(numbers[what], noun) : formatCount(numbers[what])} ${what}${describeListTypes(numbers.exportsByType, what)}`;
+
+// What a cycle changed, in a line, e.g. "3 bans added, 2 expired · 4 export bans created (4
+// BattleMetrics) · 2 players queued by the reputation check", or that it changed nothing.
 function describeChanges(numbers) {
   const bans = [
     [numbers.added, 'added'],
@@ -152,10 +177,7 @@ function describeChanges(numbers) {
     [numbers.removed, 'removed'],
     [numbers.expired, 'expired']
   ].filter(([value]) => value > 0);
-  const exports = [
-    [numbers.created, 'created'],
-    [numbers.deleted, 'deleted']
-  ].filter(([value]) => value > 0);
+  const exports = ['created', 'deleted'].filter((what) => numbers[what] > 0);
   const parts = [];
   if (bans.length > 0)
     parts.push(
@@ -166,10 +188,9 @@ function describeChanges(numbers) {
     );
   if (exports.length > 0)
     parts.push(
-      `${plural(exports[0][0], 'export ban')} ${exports[0][1]}${exports
-        .slice(1)
-        .map(([value, what]) => `, ${formatCount(value)} ${what}`)
-        .join('')}`
+      exports
+        .map((what, index) => exportCount(numbers, what, index === 0 ? 'export ban' : null))
+        .join(', ')
     );
   if (numbers.reputationQueued > 0)
     parts.push(`${plural(numbers.reputationQueued, 'player')} queued by the reputation check`);
@@ -188,7 +209,7 @@ function describeTotals(totals) {
   const parts = [
     `${plural(totals.cycles, 'cycle')}${failures.length > 0 ? ` (${failures.join(', ')})` : ''}`,
     `bans ${formatCount(totals.added)} added, ${formatCount(totals.updated)} updated, ${formatCount(totals.removed)} removed, ${formatCount(totals.expired)} expired`,
-    `export bans ${formatCount(totals.created)} created, ${formatCount(totals.deleted)} deleted`,
+    `export bans ${exportCount(totals, 'created')}, ${exportCount(totals, 'deleted')}`,
     totals.reputationQueued > 0
       ? `${plural(totals.reputationQueued, 'player')} queued by the reputation check`
       : null,
@@ -304,7 +325,7 @@ export function renderHourlySummary(totals, until) {
       totals.failedLists > 0 ? ` · ${plural(totals.failedLists, 'list')} failed` : ''
     }`,
     `**Bans** ${formatCount(totals.added)} added · ${formatCount(totals.updated)} updated · ${formatCount(totals.removed)} removed · ${formatCount(totals.expired)} expired`,
-    `**Export bans** ${formatCount(totals.created)} created · ${formatCount(totals.deleted)} deleted`,
+    `**Export bans** ${exportCount(totals, 'created')} · ${exportCount(totals, 'deleted')}`,
     ...(totals.reputationQueued > 0
       ? [`**Reputation check** ${plural(totals.reputationQueued, 'player')} queued`]
       : []),

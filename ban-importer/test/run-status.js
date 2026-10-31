@@ -444,8 +444,8 @@ for (const phase of ['expireBans', 'updateSteamUserInfo']) {
 // The steps' counts are described in their own words: the import as in its summary line, also when
 // it stopped part-way, the bans marked expired and the players queued for them, the Steam profiles
 // updated, and those Steam did not have, that were skipped, not saved or left for later runs, the
-// players recalculated and the export bans created and deleted. Other counts are listed as they
-// are.
+// players recalculated and the export bans created and deleted, with how many were on each type of
+// list. Other counts are listed as they are.
 for (const [name, counts, expected, progress] of [
   [
     'importBans',
@@ -525,6 +525,45 @@ for (const [name, counts, expected, progress] of [
     'exportExportBans',
     { queued: 1200, created: 1000, deleted: 150, failed: 2 },
     '1,000 created, 150 deleted, 2 failed of 1,200 export bans'
+  ],
+  // Each count that is not 0 says how many of its export bans were on BattleMetrics and remote
+  // lists, naming only the types that had any. Counts from before these were kept, as above, and
+  // any that are not counts, give the totals alone.
+  [
+    'exportExportBans',
+    {
+      queued: 5,
+      created: 2,
+      deleted: 3,
+      failed: 0,
+      remote: { created: 1, deleted: 3, failed: 0 },
+      battlemetrics: { created: 1, deleted: 0, failed: 0 }
+    },
+    '2 created (1 BattleMetrics, 1 remote), 3 deleted (3 remote) of 5 export bans'
+  ],
+  [
+    'exportExportBans',
+    {
+      queued: 1200,
+      created: 1000,
+      deleted: 0,
+      failed: 2,
+      remote: { created: 0, deleted: 0, failed: 0 },
+      battlemetrics: { created: 1000, deleted: 0, failed: 2 }
+    },
+    '1,000 created (1,000 BattleMetrics), 0 deleted, 2 failed (2 BattleMetrics) of 1,200 export bans'
+  ],
+  [
+    'exportExportBans',
+    {
+      queued: 4,
+      created: 2,
+      deleted: 1,
+      failed: 1,
+      remote: { created: 'x', deleted: -1, failed: 1 },
+      battlemetrics: null
+    },
+    '2 created, 1 deleted, 1 failed (1 remote) of 4 export bans'
   ],
   ['exportExportBans', { queued: 0, created: 0, deleted: 0, failed: 0 }, 'nothing to export'],
   ['clearOrphanedUsers', { cleared: 12, note: 'x' }, '12 cleared'],
