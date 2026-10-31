@@ -4324,6 +4324,64 @@ assert.deepStrictEqual(
 );
 assert.deepStrictEqual(alerts(), []);
 
+// Nor does the read of a list CBL cannot read hold any of its bans for an admin, or drop a record of
+// one, though what a complete read holds is written before its bans are saved: here a list of 200
+// that is not among the BattleMetrics lists CBL can see, whose complete read gives 120 of them, so
+// it lost 80 at once, a large loss, and one whose record waits for a confirming read; and the same
+// list as one CBL had lost access to, in a run whose access check fails, so it cannot tell whether
+// CBL can read it again. Each keeps all of its bans and their records, holds none of them, and its
+// entry in the run's record gives no hold.
+for (const [label, visible, before] of [
+  ['not visible', ['bm-other'], null],
+  [
+    'unconfirmed',
+    new Error('BattleMetrics GET ban-lists failed after 3 attempts: HTTP 503'),
+    {
+      banList: 56,
+      sourceKey: sha256('battlemetrics', 'bm-56'),
+      state: 'access_lost',
+      lastAttemptAt: new Date('2026-10-16T06:00:00.000Z'),
+      lastSuccessAt: new Date('2026-10-16T06:00:00.000Z'),
+      consecutiveFailures: 0,
+      lastError: UNLISTED_ERROR,
+      storedCount: 200,
+      headTotal: 200
+    }
+  ]
+]) {
+  reset();
+  battlemetricsList(56, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+  pendingRows.set('56,56,e100', {
+    banList: 56,
+    banId: '56,e100',
+    firstMissingAt: Date.now() - 60 * 60 * 1000,
+    lastMissingAt: Date.now() - 60 * 60 * 1000,
+    heldAt: null
+  });
+  if (before) syncRows.set(56, before);
+  visibleBanLists = visible;
+  const unreadable = new BanImporter();
+  [result] = await unreadable.importBans();
+  assert.deepStrictEqual(
+    [
+      Boolean(result.accessLost),
+      result.hold,
+      result.held,
+      storedIDs(56).length,
+      pendingIDs(56),
+      heldIDs(56),
+      holdRows.has(56)
+    ],
+    [true, undefined, 0, 200, ['56,e100'], [], false],
+    label
+  );
+  assert.deepStrictEqual(
+    plainReport(unreadable).banLists.map((list) => ({ ...holdFields(list), state: list.state })),
+    [{ held: 0, state: 'access_lost' }],
+    label
+  );
+}
+
 // IMPORTER_ACCESS_CHECK turns the check off with 0, false, off or no, and the import then reads no
 // list of ban lists and marks no list for it. It is on by default, and an invalid value leaves it
 // on, with a warning posted to the log channel. A run without BattleMetrics lists has no need to
@@ -7584,5 +7642,5 @@ assert.strictEqual(
 assert.strictEqual(verboseLevelOneLines, 0, 'Lines for the log channel are logged as important');
 
 console.log(
-  "Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed, of lists that lost all their bans, until one of the bans they began with comes back, those they saved since held with them, whatever the clock says, or a large part of them at once, until fewer than a large part of the bans the list had then are still missing, also as the list grows, with those that come back no longer held, and once it loses all of its bans, or another large part of them, measured against fewer bans as the list shrinks, holds of lists that lost all their bans that take in a large loss, holds ended, begun or taken in whole, or not at all, as a run is cut short, holds that keep bans written before the bans a read saves, so a cut or stop then never holds less, also without the run lock or as the list is removed, and those that only end after them, and in the run record only once written, confirmations said to end only the holds they ended, also as a large loss would begin another, large removals said in every line, the holds replaced sources ended, reasons that outlived their holds, also found by a poll's drift, without queueing their players, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, second attempts, retries, sync state, the access check, lost access, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, also as the run stops, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming reads, periodic full reads at each list's slot, by the lists' pages and the cycle, cycles whose full reads spread out after the first, held counts of polled lists, the switches, stops, also during a poll, and the list a stop came in, each list's seconds without the access check, the page a failed or stopped read was on, but no count of the old source's for a changed one, how a list's first attempt ended, the list under way and the access check while it is read, runs an interval apart, the loop's cycle, the oldest periodic reads first, and the run summary."
+  "Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed, of lists that lost all their bans, until one of the bans they began with comes back, those they saved since held with them, whatever the clock says, or a large part of them at once, until fewer than a large part of the bans the list had then are still missing, also as the list grows, with those that come back no longer held, and once it loses all of its bans, or another large part of them, measured against fewer bans as the list shrinks, holds of lists that lost all their bans that take in a large loss, holds ended, begun or taken in whole, or not at all, as a run is cut short, holds that keep bans written before the bans a read saves, so a cut or stop then never holds less, also without the run lock or as the list is removed, and those that only end after them, and in the run record only once written, confirmations said to end only the holds they ended, also as a large loss would begin another, large removals said in every line, the holds replaced sources ended, reasons that outlived their holds, also found by a poll's drift, without queueing their players, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, second attempts, retries, sync state, the access check, lost access, also with no hold written before the bans are saved, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, also as the run stops, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming reads, periodic full reads at each list's slot, by the lists' pages and the cycle, cycles whose full reads spread out after the first, held counts of polled lists, the switches, stops, also during a poll, and the list a stop came in, each list's seconds without the access check, the page a failed or stopped read was on, but no count of the old source's for a changed one, how a list's first attempt ended, the list under way and the access check while it is read, runs an interval apart, the loop's cycle, the oldest periodic reads first, and the run summary."
 );
