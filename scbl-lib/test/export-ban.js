@@ -298,7 +298,7 @@ function reset() {
             autoAddEnabled: true,
             expires: null,
             identifiers: [{ type: 'steamID', identifier: steamUser(1), manual: true }],
-            nativeEnabled: null,
+            nativeEnabled: false,
             note: `CBL export ${steamUser(1)},7`,
             reason: 'Kicked via communitybanlist.com/banned'
           },

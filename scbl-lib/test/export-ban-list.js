@@ -9,12 +9,17 @@ import logText from '../utils/log-text.js';
 // to the log channel, without a database or network requests.
 const calls = [];
 let reply;
-// The name each new BattleMetrics ban list was asked for.
+// The name each new BattleMetrics ban list was asked for, and its other settings.
 const banListNames = [];
+const banListSettings = [];
 async function battlemetrics(method, endpoint, params, data, priority, options) {
   // The options come from the module's own context, so they are copied before comparing.
   calls.push({ method, endpoint, priority, options: options && { ...options } });
-  if (endpoint === 'ban-lists') banListNames.push(data.data.attributes.name);
+  if (endpoint === 'ban-lists') {
+    const { name, ...settings } = data.data.attributes;
+    banListNames.push(name);
+    banListSettings.push(JSON.parse(JSON.stringify(settings)));
+  }
   return reply(endpoint);
 }
 
@@ -112,6 +117,7 @@ const reset = () => {
   posted.length = 0;
   saveFailures.length = 0;
   banListNames.length = 0;
+  banListSettings.length = 0;
 };
 // The list as the lines name it, with its owner by Steam ID, as nothing is looked up for a line.
 const LIST = `Server's List "Test" (ID: 7, BattleMetrics) of Steam user ${OWNER}`;
@@ -167,6 +173,18 @@ assert.deepStrictEqual(posted, [
 checkNoSecrets();
 // The ban list is named after the list, as an admin can look it up on BattleMetrics.
 assert.deepStrictEqual(banListNames, ['Community Ban List - Test (ID: 7)']);
+// It takes no action of its own, and asks for native bans off as its default, most likely only
+// CBL's own setting for the list. Each ban is also sent with native bans off (see export-ban.js),
+// which BattleMetrics' documentation says prevents native bans.
+assert.deepStrictEqual(banListSettings, [
+  {
+    action: 'none',
+    defaultIdentifiers: ['steamID'],
+    defaultReasons: ['Banned by the Community Ban List (communitybanlist.com)'],
+    defaultAutoAddEnabled: true,
+    defaultNativeEnabled: false
+  }
+]);
 assert.strictEqual(list.battlemetricsBanListName(), 'Community Ban List - Test (ID: 7)');
 
 // A list loaded with its owner, as checkLimits loads it, names the owner by their Steam name too.
