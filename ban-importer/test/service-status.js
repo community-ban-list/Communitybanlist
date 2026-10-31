@@ -95,9 +95,9 @@ const imported = (counts = {}, banLists = []) => ({
 });
 
 // What a cycle did, from its counts: the bans it added, updated, removed and marked expired, the
-// export bans it created and deleted, in all and on each type of list, the players the reputation check queued, the lists that
-// failed, the bans held by the lists it read in full, and the Steam profiles it updated. Counts a
-// step did not give, or that are not counts, are none.
+// export bans it created and deleted, in all and on each type of list, the players the reputation
+// check queued, the lists that failed, the bans held by the lists it read in full, and the Steam
+// profiles it updated. Counts a step did not give, or that are not counts, are none.
 {
   const numbers = copy(
     cycleNumbers(
@@ -226,9 +226,9 @@ const imported = (counts = {}, banLists = []) => ({
 }
 
 // The totals sum up the cycles that ended: how many, how many failed and were stopped, the bans
-// and export bans, in all and on each type of list, the players the reputation check queued, the lists that failed, the
-// BattleMetrics requests and Steam profiles, and the slowest cycle. A dry run's bans were not
-// written, so they are not counted.
+// and export bans, in all and on each type of list, the players the reputation check queued, the
+// lists that failed, the BattleMetrics requests and Steam profiles, and the slowest cycle. A dry
+// run's bans were not written, so they are not counted.
 {
   const totals = newTotals(START);
   const add = (cycle) =>

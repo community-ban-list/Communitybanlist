@@ -528,7 +528,7 @@ for (const [name, counts, expected, progress] of [
   ],
   // Each count that is not 0 says how many of its export bans were on BattleMetrics and remote
   // lists, naming only the types that had any. Counts from before these were kept, as above, and
-  // any that are not counts, give the totals alone.
+  // any that are not counts, even those above 0 such as '1' or Infinity, give the totals alone.
   [
     'exportExportBans',
     {
@@ -560,8 +560,8 @@ for (const [name, counts, expected, progress] of [
       created: 2,
       deleted: 1,
       failed: 1,
-      remote: { created: 'x', deleted: -1, failed: 1 },
-      battlemetrics: null
+      remote: { created: '1', deleted: Infinity, failed: 1 },
+      battlemetrics: { created: 'x', deleted: -1, failed: null }
     },
     '2 created, 1 deleted, 1 failed (1 remote) of 4 export bans'
   ],
