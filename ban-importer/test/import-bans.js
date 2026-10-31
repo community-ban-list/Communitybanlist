@@ -2978,6 +2978,84 @@ assert.deepStrictEqual(
   ['large', 29, 0, 430]
 );
 
+// A list held as it lost all of its bans, here 30, that then loses all of the 35 it has, too few of
+// them saved since to be a large loss, holds the 5 it saved since with its 30, from then, as 'full'
+// still, and only one of the 30 coming back ends the hold. Here one of the 5 comes back, and none
+// of the 30: that ban is no longer held, and loses its record, the hold goes on, and its line says
+// so. The read 11 minutes on removes none of them. Once one of the 30 comes back, the hold ends,
+// and the other 33 still missing, the 4 it saved since among them, wait for a later complete read,
+// which removes them.
+const fullSinceOf = () => new Date(pendingRows.get('5,5,e1').heldAt).toISOString();
+reset();
+battlemetricsList(5, pairs('e', 0, 30), [pairs('n', 1000, 1005)]);
+await run();
+age(5, 60);
+battlemetricsLists.set('bm-5', [pairs('x', 2000, 2001)]);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.heldSince, heldIDs(5).length, holdRows.get(5)],
+  ['full', 35, Date.parse(fullSinceOf()), 35, { reason: 'full', storedCount: 30 }]
+);
+battlemetricsLists.set('bm-5', [[...pairs('n', 1000, 1001), ...pairs('x', 2000, 2001)]]);
+logs.length = 0;
+largeImport = new BanImporter();
+[result] = await largeImport.importBans();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.removed, heldIDs(5).sort(), pendingRows.has('5,5,n1000')],
+  ['full', 34, 0, [...banIDs('e', 0, 30), ...banIDs('n', 1001, 1005)].sort(), false]
+);
+assert.deepStrictEqual(plainReport(largeImport).banLists.map(holdFields), [
+  { held: 34, hold: 'full', cameBack: 1 }
+]);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 2 bans fetched, 0 new, 0 updated. Still kept the 34 bans it had when it lost all of its bans at once, held since ${fullSinceOf()}, as none of them has come back, which more likely means that its source broke. 1 ban it saved since, and held with them, came back, and is no longer held. If the list really replaced all of its bans, set IMPORTER_ALLOW_MASS_REMOVAL=5 for one run.`
+  ]
+);
+age(5, 11);
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.held, result.removed, storedIDs(5).length],
+  ['full', 34, 0, 36]
+);
+battlemetricsLists.set('bm-5', [
+  [...pairs('e', 0, 1), ...pairs('n', 1000, 1001), ...pairs('x', 2000, 2001)]
+]);
+const fullEndedSince = fullSinceOf();
+logs.length = 0;
+[result] = await run();
+assert.deepStrictEqual(
+  [result.hold, result.pending, heldIDs(5), pendingIDs(5).length, holdRows.has(5)],
+  [null, 33, [], 33, false]
+);
+assert.deepStrictEqual(
+  warnings().map(({ message }) => message),
+  [
+    `Imported ban list (ID: 5): 3 bans fetched, 0 new, 0 updated. Stopped holding the 34 bans it had when it lost all of its bans at once, held since ${fullEndedSince}, as 1 of them came back. The other 33, which it still does not have, are removed once a complete read of it at least 10 minutes from now still does not have them.`
+  ]
+);
+age(5, 11);
+[result] = await run();
+assert.deepStrictEqual([result.removed, storedIDs(5).length], [33, 3]);
+// The bans it saved since are held after its own whatever the clock says, as those it began with
+// are told by when they were held: here the read that holds the 5 tells a time an hour before the
+// read that began the hold, as when the clock went back between them, and they are still held a
+// millisecond after the 30, so one of them that comes back does not end the hold.
+reset();
+const clockAt = Date.now();
+battlemetricsList(5, pairs('e', 0, 30), [pairs('n', 1000, 1005)]);
+await run({ clock: () => clockAt });
+battlemetricsLists.set('bm-5', [pairs('x', 2000, 2001)]);
+await run({ clock: () => clockAt - 60 * 60 * 1000 });
+assert.deepStrictEqual(
+  [pendingRows.get('5,5,e0').heldAt, pendingRows.get('5,5,n1000').heldAt],
+  [clockAt, clockAt + 1]
+);
+battlemetricsLists.set('bm-5', [[...pairs('n', 1000, 1001), ...pairs('x', 2000, 2001)]]);
+[result] = await run();
+assert.deepStrictEqual([result.hold, result.held, result.cameBack], ['full', 34, 1]);
+
 // A read that removes a large part of a list's bans after a confirming read says so in whatever
 // line it posts, right after its counts. Here two losses of the list's bans, each too small to be a
 // large loss on its own, are removed together, 11 minutes after the second: 30 and 30 of a list of
@@ -7263,5 +7341,5 @@ assert.strictEqual(
 assert.strictEqual(verboseLevelOneLines, 0, 'Lines for the log channel are logged as important');
 
 console.log(
-  "Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed, of lists that lost all their bans, until a held ban comes back, or a large part of them at once, until fewer than a large part of the bans the list had then are still missing, also as the list grows, with those that come back no longer held, and once it loses all of its bans, or another large part of them, measured against fewer bans as the list shrinks, holds of lists that lost all their bans that take in a large loss, holds ended, begun or taken in whole, or not at all, as a run is cut short, confirmations said to end only the holds they ended, also as a large loss would begin another, large removals said in every line, the holds replaced sources ended, reasons that outlived their holds, also found by a poll's drift, without queueing their players, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, second attempts, retries, sync state, the access check, lost access, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, also as the run stops, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming reads, periodic full reads at each list's slot, by the lists' pages and the cycle, cycles whose full reads spread out after the first, held counts of polled lists, the switches, stops, also during a poll, and the list a stop came in, each list's seconds without the access check, the page a failed or stopped read was on, but no count of the old source's for a changed one, how a list's first attempt ended, the list under way and the access check while it is read, runs an interval apart, the loop's cycle, the oldest periodic reads first, and the run summary."
+  "Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed, of lists that lost all their bans, until one of the bans they began with comes back, those they saved since held with them, whatever the clock says, or a large part of them at once, until fewer than a large part of the bans the list had then are still missing, also as the list grows, with those that come back no longer held, and once it loses all of its bans, or another large part of them, measured against fewer bans as the list shrinks, holds of lists that lost all their bans that take in a large loss, holds ended, begun or taken in whole, or not at all, as a run is cut short, confirmations said to end only the holds they ended, also as a large loss would begin another, large removals said in every line, the holds replaced sources ended, reasons that outlived their holds, also found by a poll's drift, without queueing their players, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, second attempts, retries, sync state, the access check, lost access, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, also as the run stops, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming reads, periodic full reads at each list's slot, by the lists' pages and the cycle, cycles whose full reads spread out after the first, held counts of polled lists, the switches, stops, also during a poll, and the list a stop came in, each list's seconds without the access check, the page a failed or stopped read was on, but no count of the old source's for a changed one, how a list's first attempt ended, the list under way and the access check while it is read, runs an interval apart, the loop's cycle, the oldest periodic reads first, and the run summary."
 );

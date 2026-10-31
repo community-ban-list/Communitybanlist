@@ -212,19 +212,21 @@ export function fewestHeld(of) {
 }
 
 // The holds that are recorded in BanListPendingRemovals, as their bans' heldAt, and so last over
-// runs, until an admin confirms them or their bans come back: any one of them for 'full', and for
-// 'large', enough that fewer than fewestHeld are still missing. An 'empty' hold is not recorded, as
-// every read that finds no bans holds the list again.
+// runs, until an admin confirms them or their bans come back: for 'full', any one of those it began
+// with, and for 'large', enough that fewer than fewestHeld are still missing. An 'empty' hold is
+// not recorded, as every read that finds no bans holds the list again.
 export const RECORDED_HOLDS = ['full', 'large'];
 
 // Decide what to do with the bans missing from a complete read of a list: missing is their IDs,
 // stored and fetched the numbers of bans the list had before the read and the read found, pending
 // when each ban recorded as missing before was first missing, in milliseconds, by its ID, held the
-// IDs of the bans the list still has that an earlier run held for an admin, heldFor the hold that
-// run began, 'full' or 'large', and heldOf, for 'large', the bans it is measured against, as its
-// BanListHolds row keeps them, or null when that is not known, now the time of the read in
-// milliseconds, replace whether the bans are being replaced by those of the list's new source, and
-// confirmed whether the list may lose any number of bans at once. Returns:
+// IDs of the bans the list still has that an earlier run held for an admin, firstHeld, for 'full',
+// those of them the hold began with, which are all of them unless it held bans the list saved
+// since (below), heldFor the hold that run began, 'full' or 'large', and heldOf, for 'large', the
+// bans it is measured against, as its BanListHolds row keeps them, or null when that is not known,
+// now the time of the read in milliseconds, replace whether the bans are being replaced by those of
+// the list's new source, and confirmed whether the list may lose any number of bans at once.
+// Returns:
 // - remove: the IDs of the bans to remove now;
 // - wait: the IDs of the bans to keep until a later complete read confirms they are gone;
 // - hold: why bans wait for an admin to confirm their removal, or null: 'empty' for a read that
@@ -242,17 +244,21 @@ export const RECORDED_HOLDS = ['full', 'large'];
 // lost all its bans keeps them, as its source more likely broke, and so does one that lost a large
 // part of them at once, unless its bans are being replaced. A recorded hold lasts until its bans
 // are replaced, as the bans the list saved since are not the bans it lost, or until they come back:
-// for 'full', any one of them, and for 'large', enough of them that fewer than fewestHeld of the
-// bans it is measured against are still missing, those that come back being no longer held. A
-// 'large' hold is measured against the fewer of heldOf and the bans the list had before this read,
-// and against the latter when heldOf is not known: so the list's growth never ends it, and a hold
-// of a list that shrank lasts as a hold that began on the smaller list would. Once that is saved
-// as its heldOf, it never grows again. While a hold lasts, a read that loses a large part of the
-// list's other bans, of those no earlier read had missed, holds every missing ban as 'large' from
-// now, and so does one that finds none of the list's bans while it is held as 'large': a 'large'
-// hold takes them in, measured as before, and a 'full' one becomes 'large', measured against the
-// bans it held, which keeps those at least until one of them comes back, as the 'full' hold would
-// have. Kept as 'full', it would let the large loss go as soon as any one of its bans came back.
+// for 'full', any one of those it began with, and for 'large', enough of them that fewer than
+// fewestHeld of the bans it is measured against are still missing, those that come back being no
+// longer held. A 'full' hold whose list loses all of its bans again, with too few of them saved
+// since to be a large loss (below), holds those it saved since with its own: only one of its own
+// coming back ends it, and those it saved since that come back meanwhile are no longer held, as
+// for 'large'. A 'large' hold is measured against the fewer of heldOf and the bans the list had
+// before this read, and against the latter when heldOf is not known: so the list's growth never
+// ends it, and a hold of a list that shrank lasts as a hold that began on the smaller list would.
+// Once that is saved as its heldOf, it never grows again. While a hold lasts, a read that loses a
+// large part of the list's other bans, of those no earlier read had missed, holds every missing
+// ban as 'large' from now, and so does one that finds none of the list's bans while it is held as
+// 'large': a 'large' hold takes them in, measured as before, and a 'full' one becomes 'large',
+// measured against the bans it held, which keeps those at least until one of them comes back, as
+// the 'full' hold would have. Kept as 'full', it would let the large loss go as soon as any one of
+// the bans it began with came back.
 // Any other missing ban is removed once complete reads have not had it for CONFIRM_AFTER, and
 // waits until then, but when fewer than REMOVE_AT_ONCE_BANS and REMOVE_AT_ONCE_SHARE of the list
 // would wait, all of them are removed at once.
@@ -262,6 +268,7 @@ export function planRemovals({
   fetched,
   pending = new Map(),
   held = new Set(),
+  firstHeld = held,
   heldFor = 'full',
   heldOf = null,
   now = Date.now(),
@@ -274,22 +281,25 @@ export function planRemovals({
   if (!replace && fetched === 0) return { ...none, hold: 'empty', held: [...missing] };
 
   // A list an earlier run held stays held while its hold lasts: one held as it lost all its bans
-  // while none of them has come back, and one held as it lost a large part of them while at least
-  // fewestHeld of the bans it is measured against (of) are still missing. Those that came back are
-  // no longer held.
+  // while none of those it began with has come back, and one held as it lost a large part of them
+  // while at least fewestHeld of the bans it is measured against (of) are still missing. Those
+  // that came back are no longer held.
   const isMissing = new Set(missing);
   const stillHeld = [...held].filter((id) => isMissing.has(id));
   const of = heldFor === 'large' ? Math.min(heldOf ?? stored, stored) : held.size;
   const lasts =
-    heldFor === 'large' ? stillHeld.length >= fewestHeld(of) : stillHeld.length === held.size;
+    heldFor === 'large'
+      ? stillHeld.length >= fewestHeld(of)
+      : [...firstHeld].every((id) => isMissing.has(id));
   const holding = !replace && held.size > 0 && lasts;
 
   // While the hold lasts, the list's other missing bans are removed as usual, unless those of them
   // no earlier read had missed are a large loss, or the read found none of the list's bans while
   // it is held as 'large': the hold then takes in every missing ban, as 'large', from now. A 'full'
-  // hold that took them in would end as soon as any one of them came back, and the large loss
-  // would then be removed after a confirming read, with no admin. A read that found none of the
-  // list's bans otherwise holds them all as 'full'.
+  // hold that took them in would end as soon as any one of those it began with came back, and the
+  // large loss would then be removed after a confirming read, with no admin. A read that found none
+  // of the list's bans otherwise holds them all as 'full': as a hold that begins, or, while a
+  // 'full' hold lasts, with it, which still ends only as one of those it began with comes back.
   const lostAll = !replace && missing.length >= stored && stored >= FULL_REMOVAL_BANS;
   const fresh = missing.filter((id) => !pending.has(id) && !held.has(id));
   if (holding && (isLargeLoss(fresh.length, stored) || (lostAll && heldFor === 'large')))

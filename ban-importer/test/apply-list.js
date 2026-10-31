@@ -796,7 +796,8 @@ assert.deepStrictEqual(
 // would end as soon as one of them came back. So does one of a list whose only bans are those it
 // holds, measured against the 300 it has. A list whose hold no longer lasts, here as fewer than a
 // fifth of the 1,000 bans it is measured against are held, and one held as it lost all of its
-// bans, whose other bans are too few to be a large loss, are held as 'full', as any list is.
+// bans, whose other bans are too few to be a large loss, are held as 'full', as any list is: all
+// of their bans, the 10 the second saved since among them.
 assert.deepStrictEqual(
   plan({ missing: lose(2000), stored: 2000, fetched: 50, pending, ...heldLarge }),
   { remove: [], wait: [], hold: 'large', held: lose(2000), released: [], heldOf: 1000 }
@@ -807,9 +808,35 @@ assert.deepStrictEqual(
 );
 assert.deepStrictEqual(
   [{ ...heldLarge, held: new Set(lose(199)), heldOf: 2000 }, { held: new Set(lose(990)) }].map(
-    (hold) => plan({ missing: lose(1000), stored: 1000, fetched: 50, pending, ...hold }).hold
+    (hold) => plan({ missing: lose(1000), stored: 1000, fetched: 50, pending, ...hold })
   ),
-  ['full', 'full']
+  [
+    { remove: [], wait: [], hold: 'full', held: lose(1000), released: [] },
+    { remove: [], wait: [], hold: 'full', held: lose(1000), released: [] }
+  ]
+);
+// Only one of the bans a 'full' hold began with ends it as it comes back (firstHeld): here a list
+// held as it lost all of its 30 bans, which then lost all of the 35 it had, too few of them saved
+// since to be a large loss, so it holds the 5 it saved since with its 30. One of the 5 that comes
+// back is no longer held, and the hold goes on with the rest, as it does once all 5 came back, and
+// once one of the 30 comes back, the hold ends: the rest wait for a later complete read, the 4 it
+// saved since among them. Without firstHeld, all of its held bans are those it began with, as for
+// a hold whose bans were all held in one read, and any one of them ends it.
+const heldAgain = { held: new Set(lose(35)), firstHeld: new Set(lose(30)) };
+pending = pendingSince(lose(35), 600);
+assert.deepStrictEqual(
+  [
+    plan({ missing: lose(34), stored: 36, fetched: 2, pending, ...heldAgain }),
+    plan({ missing: lose(30), stored: 36, fetched: 6, pending, ...heldAgain }),
+    plan({ missing: lose(34, 1), stored: 36, fetched: 2, pending, ...heldAgain }),
+    plan({ missing: lose(34), stored: 36, fetched: 2, pending, held: heldAgain.held })
+  ],
+  [
+    { remove: [], wait: [], hold: 'full', held: lose(34), released: [] },
+    { remove: [], wait: [], hold: 'full', held: lose(30), released: [] },
+    { remove: [], wait: lose(34, 1), hold: null, held: [], released: lose(34, 1) },
+    { remove: [], wait: lose(34), hold: null, held: [], released: lose(34) }
+  ]
 );
 // A list held as it lost all of its bans, here 20, whose read loses a large part of the bans it
 // saved since, here 100 of the 400 it saved, or all of them, holds every missing ban as 'large'
@@ -1487,5 +1514,5 @@ assert.deepStrictEqual(batches, [2, 2]);
 assert.strictEqual(events.filter(([type]) => type === 'commit').length, 2);
 
 console.log(
-  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans, which last until confirmed or a held ban comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, records of missing bans, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
+  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, records of missing bans, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
 );

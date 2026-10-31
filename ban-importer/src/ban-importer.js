@@ -1330,15 +1330,16 @@ export default class BanImporter {
   // all at once. The bans kept are counted as held, and those that wait for a later complete read
   // as pending too, which are recorded in BanListPendingRemovals, as are those held for an admin
   // as the list seemed to have lost all its bans, or a large part of them at once, so that the hold
-  // lasts until it is confirmed or its bans come back: any one of them, for a list that lost all of
-  // them, and for one that lost a large part of them, enough that fewer than fewestHeld are still
-  // missing, those that come back being no longer held. Which of the two holds it is goes in
-  // BanListHolds as the hold begins, with the bans a 'large' hold is measured against, so the runs
-  // after this one say it too, and is forgotten once the hold ends. What a read changes of a hold,
-  // as it begins, goes on, takes in the list's other missing bans, or ends, is written whole, in
-  // one transaction, or not at all (see saveHold), before any of the bans that the hold no longer
-  // keeps are removed. A recorded ban that came back, or that the list no longer has, loses its
-  // record. A list removed during the run, so that its records cannot be saved, is skipped as gone.
+  // lasts until it is confirmed or its bans come back: for a list that lost all of them, any one of
+  // those it began with, and for one that lost a large part of them, enough that fewer than
+  // fewestHeld are still missing, those that come back being no longer held. Which of the two holds
+  // it is goes in BanListHolds as the hold begins, with the bans a 'large' hold is measured
+  // against, so the runs after this one say it too, and is forgotten once the hold ends. What a
+  // read changes of a hold, as it begins, goes on, takes in the list's other missing bans, or ends,
+  // is written whole, in one transaction, or not at all (see saveHold), before any of the bans that
+  // the hold no longer keeps are removed. A recorded ban that came back, or that the list no longer
+  // has, loses its record. A list removed during the run, so that its records cannot be saved, is
+  // skipped as gone.
   async removeMissingBans(banList, bans, stored, pending, result) {
     const now = this.clock();
     const found = new Set(bans.map((ban) => ban.id));
@@ -1357,6 +1358,13 @@ export default class BanImporter {
     const recorded = await retryOperation(() => readHold(banList.id));
     const { heldFor, heldOf } = whyHeld(recorded, held.length, stored.length);
     const stale = recorded?.reason === 'large' && heldFor !== 'large' && held.length > 0;
+    // The held bans the hold began with: those held since the first of them was. A ban keeps when
+    // it was first held while it stays held (see saveHold), so those are all of them, unless a
+    // 'full' hold held bans the list saved since, as it lost all of its bans again, which were held
+    // from then. A hold that takes in more holds all of its bans from then, as 'large'.
+    const heldAt = new Map(held.map(([banId, { heldAt: since }]) => [banId, since]));
+    const began = [...heldAt.values()].reduce((first, since) => Math.min(first, since), Infinity);
+    const firstHeld = [...heldAt].filter(([, since]) => since === began).map(([banId]) => banId);
 
     const bySetting = this.allowMassRemoval.has(String(banList.id));
     const confirmed = bySetting || this.fullRemovalAllowed(banList, now);
@@ -1365,7 +1373,8 @@ export default class BanImporter {
       stored: stored.length,
       fetched: bans.length,
       pending: new Map([...pending].map(([banId, { firstMissingAt }]) => [banId, firstMissingAt])),
-      held: new Set(held.map(([banId]) => banId)),
+      held: new Set(heldAt.keys()),
+      firstHeld: new Set(firstHeld),
       heldFor,
       heldOf,
       now,
@@ -1412,7 +1421,6 @@ export default class BanImporter {
     const anew =
       plan.hold === 'large' && keeps && plan.held.some((banId) => !rules.held.has(banId));
     const goesOn = recordedHold && keeps && !anew;
-    const heldAt = new Map(held.map(([banId, { heldAt: since }]) => [banId, since]));
     if (goesOn)
       result.heldSince = plan.held.reduce(
         (first, banId) => (heldAt.has(banId) ? Math.min(first, heldAt.get(banId)) : first),
@@ -1427,12 +1435,12 @@ export default class BanImporter {
     if (back.length > 0) result.cameBack = back.length;
     // A hold an earlier run began that this read ended, and what ended it (by): the list's source
     // was replaced ('replace'), an admin confirmed it, without which it would have gone on
-    // ('confirmation'), or its bans came back ('read'): any one of them for 'full', and for
-    // 'large', enough that fewer than its fewest were still missing, whether or not an admin also
-    // confirmed the list. It says so, and what becomes of the bans still missing, which wait for a
-    // confirming read, or are removed at once (see logResult): which hold it was, since when, of how
-    // many bans, how many came back, how many are still missing, whether those were removed, and
-    // for 'large', the fewest still missing that would have kept it.
+    // ('confirmation'), or its bans came back ('read'): for 'full', any one of those it began with,
+    // and for 'large', enough that fewer than its fewest were still missing, whether or not an admin
+    // also confirmed the list. It says so, and what becomes of the bans still missing, which wait
+    // for a confirming read, or are removed at once (see logResult): which hold it was, since when,
+    // of how many bans, how many came back, how many are still missing, whether those were removed,
+    // and for 'large', the fewest still missing that would have kept it.
     const ended = held.length > 0 && !keeps;
     if (ended) {
       const stillMissing = held.length - back.length;
@@ -1440,7 +1448,7 @@ export default class BanImporter {
       result.holdEnded = {
         hold: heldFor,
         by: result.replace ? 'replace' : wouldKeep ? 'confirmation' : 'read',
-        since: [...heldAt.values()].reduce((first, since) => Math.min(first, since), Infinity),
+        since: began,
         held: held.length,
         back: back.length,
         missing: stillMissing,
@@ -1486,7 +1494,10 @@ export default class BanImporter {
         // bans it no longer holds wait or are removed: the records of its held bans that came back
         // are dropped, the rest are released, as it ends, also as an admin confirmed it, or as it
         // begins anew, its row is saved or deleted, and its bans are held. Cut short, none of it
-        // is, so no hold is left with fewer of its bans held than it keeps, or held in part.
+        // is, so no hold is left with fewer of its bans held than it keeps, or held in part. The
+        // bans a hold that goes on holds from now, as a 'full' hold whose list lost all of its bans
+        // again, are held at least a millisecond after those it began with, which are told by when
+        // they were held, whatever the clock did meanwhile.
         if (recordedHold || ended)
           await saveHold(banList.id, recordedHold ? plan.held : [], {
             back,
@@ -1494,7 +1505,7 @@ export default class BanImporter {
             reason: row?.reason ?? null,
             stored: row?.stored ?? null,
             end,
-            now: new Date(now),
+            now: new Date(goesOn ? Math.max(now, began + 1) : now),
             batchSize: this.batchSize
           });
         else if (end) await clearHoldReason(banList.id);
@@ -1621,10 +1632,10 @@ export default class BanImporter {
     let endedLine = '';
     let releasedWaiting = 0;
     if (endedByRead) {
-      // Any one of a 'full' hold's bans ends it as it comes back, and a 'large' hold ends once fewer
-      // than its fewest are still missing, which takes some of them coming back, as a list whose
-      // row says 'large' while fewer than that are held is taken as held as one that lost all of
-      // its bans (see whyHeld).
+      // Any one of the bans a 'full' hold began with ends it as it comes back, and a 'large' hold
+      // ends once fewer than its fewest are still missing, which takes some of them coming back, as
+      // a list whose row says 'large' while fewer than that are held is taken as held as one that
+      // lost all of its bans (see whyHeld).
       let why = `${formatCount(ended.back)} of them came back`;
       if (ended.back === ended.held) why = 'all of them came back';
       else if (ended.hold === 'large')
@@ -1703,14 +1714,20 @@ export default class BanImporter {
           `${imported}: ${counts.join(', ')}.${many} Kept all ${result.stored} of its stored bans, as it no longer has any of them, which more likely means that its source broke. They are kept until one of them comes back. ${confirm}${dryRun}`
         );
       else {
-        // The bans it saved since, which it no longer has, are removed as usual.
+        // The bans it saved since, which it no longer has, are removed as usual. Those it held with
+        // its own, as it lost all of its bans again, that came back are no longer held, as only one
+        // of those it began with ends the hold.
         const waiting =
           result.pending > 0
             ? ` Of the bans it saved since, ${result.pending} that it no longer has are kept until a later complete read of it confirms they are gone.`
             : '';
+        const cameBack =
+          result.cameBack > 0
+            ? ` ${plural(result.cameBack, 'ban')} it saved since, and held with them, came back, and ${result.cameBack === 1 ? 'is' : 'are'} no longer held.`
+            : '';
         log(
           true,
-          `${imported}: ${counts.join(', ')}.${many} Still kept the ${plural(result.held - result.pending, 'ban')} it had when it lost all of its bans at once, held since ${new Date(result.heldSince).toISOString()}, as none of them has come back, which more likely means that its source broke. ${confirm}${waiting}${dryRun}`
+          `${imported}: ${counts.join(', ')}.${many} Still kept the ${plural(result.held - result.pending, 'ban')} it had when it lost all of its bans at once, held since ${new Date(result.heldSince).toISOString()}, as none of them has come back, which more likely means that its source broke.${cameBack} ${confirm}${waiting}${dryRun}`
         );
       }
     } else if (result.hold === 'large') {
