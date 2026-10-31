@@ -566,20 +566,21 @@ export default class BanImporter {
     return results;
   }
 
-  // Import a ban list, read as planFor plans it. A list read in full has its new and changed bans
-  // saved, then the bans it no longer has removed, by the rules of planRemovals, or the bans of its
-  // old source if its type or source was changed meanwhile, also when the run was asked to stop
-  // while they were saved. A list that is only polled has the new and changed bans on its newest
-  // pages saved, and none removed (see pollHead), unless the poll finds that it needs to be read in
-  // full after all, which it then is, or that its type or source was changed meanwhile, when the
-  // bans it fetched are removed as for a read in full. A list that cannot be fetched or saved keeps
-  // all of its stored bans, as does a list whose import is stopped part-way because the run was
-  // asked to stop, which then throws RunStopped. So does a list that imports one of CBL's own
-  // export ban lists, which is not fetched at all, and one CBL can no longer read on BattleMetrics.
-  // A list that was not read in full has its new and changed bans saved, but fails, and keeps all
-  // its stored bans. A list whose type or source was changed since its last import has its old bans
-  // replaced by the new source's. In a dry run, nothing is written: the counts say what the import
-  // would have done.
+  // Import a ban list, read as planFor plans it. A list read in full has what becomes of the bans
+  // it no longer has planned, by the rules of planRemovals, and a hold that keeps them written, then
+  // its new and changed bans saved, then the rest of the plan written, as those bans wait or are
+  // removed, or the bans of its old source removed instead, if its type or source was changed
+  // meanwhile, also when the run was asked to stop while they were saved. A list that is only
+  // polled has the new and changed bans on its newest pages saved, and none removed (see pollHead),
+  // unless the poll finds that it needs to be read in full after all, which it then is, or that its
+  // type or source was changed meanwhile, when the bans it fetched are removed as for a read in
+  // full. A list that cannot be fetched or saved keeps all of its stored bans, as does a list whose
+  // import is stopped part-way because the run was asked to stop, which then throws RunStopped. So
+  // does a list that imports one of CBL's own export ban lists, which is not fetched at all, and
+  // one CBL can no longer read on BattleMetrics. A list that was not read in full has its new and
+  // changed bans saved, but fails, and keeps all its stored bans. A list whose type or source was
+  // changed since its last import has its old bans replaced by the new source's. In a dry run,
+  // nothing is written: the counts say what the import would have done.
   //
   // How the import went is then saved in the list's BanListSyncs row: at once, or, in the first
   // pass, for a list to be tried again or one CBL cannot read, once every list has been tried. By
@@ -714,6 +715,20 @@ export default class BanImporter {
         result.fetched = bans.length;
       }
 
+      // What becomes of the bans a complete read of a list CBL can read no longer has is planned
+      // before its new and changed bans are saved, as what it lost is measured against the bans it
+      // had before the read, and a hold that keeps them is written then too, so a run cut short
+      // while the bans are saved, or stopped, leaves the list held as this read holds it (see
+      // holdMissingBans). The rest is written once they are saved, as before.
+      let removal = null;
+      if (scan.complete && !result.accessLost) {
+        removal = await this.planMissingBans(banList, bans, stored, pending, result);
+        if (!(await this.holdMissingBans(banList, removal, result, at))) {
+          result.gone = true;
+          return result;
+        }
+      }
+
       // Only the bans that are new or changed are written.
       at.stage = 'saving its bans';
       const diff = diffBans(bans, stored, { applyMoves: this.applySteamIDMoves });
@@ -758,8 +773,9 @@ export default class BanImporter {
 
       // A run that was asked to stop while the bans were saved ends here, once the batch under way
       // has been saved, as does one asked to stop since. So a list whose saves were cut short is
-      // never swept, as its unsaved bans would look removed. A list CBL cannot read, or may still
-      // not be able to, is never swept, and nor is a list that was not read in full.
+      // never swept, as its unsaved bans would look removed, though a hold its read wrote before
+      // them stays as it was written. A list CBL cannot read, or may still not be able to, is never
+      // swept, and nor is a list that was not read in full.
       at.stage = 'saving its bans';
       stopIfRequested();
       if (!result.accessLost) {
@@ -779,7 +795,7 @@ export default class BanImporter {
           throw Object.assign(new Error(`${scan.incomplete}.`), { incomplete: true });
         }
         at.stage = 'removing the bans it no longer has';
-        await this.removeMissingBans(banList, bans, stored, pending, result);
+        await this.removeMissingBans(banList, removal, result);
       }
       return result;
     } catch (err) {
@@ -828,6 +844,13 @@ export default class BanImporter {
       // A list stopped part-way is left out of the import's results, and the report gives it on its
       // own (see report).
       if (result.stopped) this.stopped = result;
+      // A list removed during the run took its bans, their records and its hold with it, so none of
+      // them is kept, and no hold of them ended here, whatever its read wrote of them before.
+      if (result.gone) {
+        Object.assign(result, { hold: null, held: 0, pending: 0 });
+        for (const field of ['holdEnded', 'cameBack', 'heldAnew', 'heldSince', 'fewest'])
+          delete result[field];
+      }
       if (!result.gone && !result.stopped) result.state = stateOf(result);
       this.logResult(result);
       // A second attempt that ends, saved or not, takes the place of the first one's row. One that
@@ -1324,23 +1347,25 @@ export default class BanImporter {
     return exists ? null : LIST_REMOVED;
   }
 
-  // Remove the bans the list had before this run that its complete read did not have, by the rules
-  // of planRemovals. A list named in IMPORTER_ALLOW_MASS_REMOVAL, or one whose row an admin has
-  // allowed to lose all its bans (allowFullRemovalUntil, set for its current source), loses them
-  // all at once. The bans kept are counted as held, and those that wait for a later complete read
-  // as pending too, which are recorded in BanListPendingRemovals, as are those held for an admin
-  // as the list seemed to have lost all its bans, or a large part of them at once, so that the hold
-  // lasts until it is confirmed or its bans come back: for a list that lost all of them, any one of
-  // those it began with, and for one that lost a large part of them, enough that fewer than
-  // fewestHeld are still missing, those that come back being no longer held. Which of the two holds
-  // it is goes in BanListHolds as the hold begins, with the bans a 'large' hold is measured
-  // against, so the runs after this one say it too, and is forgotten once the hold ends. What a
-  // read changes of a hold, as it begins, goes on, takes in the list's other missing bans, or ends,
-  // is written whole, in one transaction, or not at all (see saveHold), before any of the bans that
-  // the hold no longer keeps are removed. A recorded ban that came back, or that the list no longer
-  // has, loses its record. A list removed during the run, so that its records cannot be saved, is
-  // skipped as gone.
-  async removeMissingBans(banList, bans, stored, pending, result) {
+  // Plan what becomes of the bans the list had before this run that its complete read did not
+  // have, by the rules of planRemovals. A list named in IMPORTER_ALLOW_MASS_REMOVAL, or one whose
+  // row an admin has allowed to lose all its bans (allowFullRemovalUntil, set for its current
+  // source), loses them all at once. The bans kept are counted as held, and those that wait for a
+  // later complete read as pending too, which are recorded in BanListPendingRemovals, as are those
+  // held for an admin as the list seemed to have lost all its bans, or a large part of them at
+  // once, so that the hold lasts until it is confirmed or its bans come back: for a list that lost
+  // all of them, any one of those it began with, and for one that lost a large part of them, enough
+  // that fewer than fewestHeld are still missing, those that come back being no longer held. Which
+  // of the two holds it is goes in BanListHolds as the hold begins, with the bans a 'large' hold is
+  // measured against, so the runs after this one say it too, and is forgotten once the hold ends.
+  // A recorded ban that came back, or that the list no longer has, loses its record.
+  //
+  // The plan is made before the read's new and changed bans are saved, from the bans the list had
+  // before the read, its recorded missing bans and its row in BanListHolds, none of which the save
+  // changes, and what the read changes of a hold that keeps bans is written then too (see
+  // holdMissingBans), and the rest once they are saved (see removeMissingBans). Returns what those
+  // writes need: the plan, and what the read's result says once they are made.
+  async planMissingBans(banList, bans, stored, pending, result) {
     const now = this.clock();
     const found = new Set(bans.map((ban) => ban.id));
     const had = new Set(stored.map((ban) => ban.id));
@@ -1350,10 +1375,10 @@ export default class BanImporter {
     // hold that run began, by the list's BanListHolds row (see whyHeld), with the bans a 'large'
     // hold is measured against: 'full' for a list held before BanListHolds was made, and for one
     // whose row says 'large' while fewer of its bans are held than such a hold keeps, a row that
-    // outlived its hold, which is deleted below while the hold its bans are taken for goes on. Why
-    // it is held is read on every complete read, also of a list with no held bans, so the row of a
-    // list whose hold ended without this importer, e.g. as /banlist update deleted its held bans,
-    // or as the previous image ended it, is deleted below.
+    // outlived its hold, which is deleted while the hold its bans are taken for goes on. Why it is
+    // held is read on every complete read, also of a list with no held bans, so the row of a list
+    // whose hold ended without this importer, e.g. as /banlist update deleted its held bans, or as
+    // the previous image ended it, is deleted.
     const held = [...pending].filter(([banId, { heldAt }]) => heldAt !== null && had.has(banId));
     const recorded = await retryOperation(() => readHold(banList.id));
     const { heldFor, heldOf } = whyHeld(recorded, held.length, stored.length);
@@ -1383,15 +1408,14 @@ export default class BanImporter {
     const plan = planRemovals({ ...rules, confirmed });
     // What the read would have done without the confirmation, which says whether the confirmation
     // let the list lose bans that it would otherwise have kept, and whether it ended a hold that
-    // would otherwise have gone on.
+    // would otherwise have gone on, and the bans it would have removed by the usual rules (see
+    // logResult).
     const unconfirmed = confirmed ? planRemovals(rules) : null;
-    if (confirmed) {
-      result.massRemoval = unconfirmed.hold !== null || unconfirmed.wait.length > 0;
-      result.confirmedBy = bySetting ? 'IMPORTER_ALLOW_MASS_REMOVAL' : 'allowFullRemovalUntil';
-      // The bans it would have removed without the confirmation, by the usual rules (see
-      // logResult).
-      result.removedAsUsual = unconfirmed.remove.length;
-    }
+    const confirmation = confirmed && {
+      massRemoval: unconfirmed.hold !== null || unconfirmed.wait.length > 0,
+      confirmedBy: bySetting ? 'IMPORTER_ALLOW_MASS_REMOVAL' : 'allowFullRemovalUntil',
+      removedAsUsual: unconfirmed.remove.length
+    };
     // What the read's result says of the list's hold, once what the read changes of it is written,
     // so that a list that fails part-way says only what it wrote: why its bans are held (hold), how
     // many are (held), and the rest below. The bans that wait for a later complete read are added
@@ -1478,12 +1502,91 @@ export default class BanImporter {
       row = { reason: 'large', stored: plan.heldOf };
     const end =
       recorded !== null && ((!recordedHold && plan.hold !== 'empty') || (stale && goesOn));
+    // The records of the bans that came back, or that the list no longer has, but for those of its
+    // held bans that came back, which go with its hold.
+    const cameBack = new Set(back);
     const remove = new Set(plan.remove);
-    const removed = missing.filter((ban) => remove.has(ban.id));
+    return {
+      now,
+      plan,
+      confirmation,
+      fields,
+      confirmAt,
+      recordedHold,
+      anew,
+      goesOn,
+      began,
+      back,
+      ended,
+      row,
+      end,
+      unheld: cleared.filter((banId) => !cameBack.has(banId)),
+      removed: missing.filter((ban) => remove.has(ban.id))
+    };
+  }
 
+  // Write what the read changes of the list's hold for an admin, as planMissingBans planned it, in
+  // one transaction (see saveHold): the records of its held bans that came back are dropped, the
+  // rest are released, as it ends, also as an admin confirmed it, or as it begins anew, its row is
+  // saved or deleted, and its bans are held. Cut short, none of it is, so no hold is left with
+  // fewer of its bans held than it keeps, or held in part. The bans a hold that goes on holds from
+  // now, as a 'full' hold whose list lost all of its bans again, are held at least a millisecond
+  // after those it began with, which are told by when they were held, whatever the clock did
+  // meanwhile.
+  writeHold(banList, { plan, recordedHold, back, ended, anew, goesOn, row, end, now, began }) {
+    return saveHold(banList.id, recordedHold ? plan.held : [], {
+      back,
+      release: ended || anew,
+      reason: row?.reason ?? null,
+      stored: row?.stored ?? null,
+      end,
+      now: new Date(goesOn ? Math.max(now, began + 1) : now),
+      batchSize: this.batchSize
+    });
+  }
+
+  // Write what the read changes of a hold that keeps bans, as the hold begins, goes on or takes in
+  // more, or begins as another ends, before the read's new and changed bans are saved (see
+  // writeHold). Holding bans only keeps them, so it is written whatever becomes of the rest of the
+  // read: a run cut short while the bans are saved, or stopped then, leaves the list held as this
+  // read holds it, and the next complete read, which measures what the list lost against a list
+  // that includes the bans saved, never holds less. What the read changes of a hold that only ends
+  // lets bans go, so it is written with those that wait or are removed, once the save is over (see
+  // removeMissingBans). Holding bans needs the run lock, as removing them does. The read's result
+  // says the hold once it is written, or at once in a dry run. Returns false when the list was
+  // removed during the run, so its hold could not be written.
+  async holdMissingBans(banList, removal, result, at) {
+    if (!removal.recordedHold) return true;
+    at.stage = 'holding the bans it no longer has';
+    if (!this.dryRun) {
+      await checkRunLock();
+      try {
+        await this.writeHold(banList, removal);
+      } catch (err) {
+        if ((await this.stopReason(err, banList)) === LIST_REMOVED) return false;
+        throw err;
+      }
+    }
+    Object.assign(result, removal.fields);
+    return true;
+  }
+
+  // Write the rest of what becomes of the bans the list had before this run that its complete read
+  // did not have, as planMissingBans planned it, once the read's new and changed bans are saved:
+  // the records of those that came back, or that the list no longer has, are dropped; what the read
+  // changes of a hold that only ends is written (see writeHold), or the list's row in BanListHolds
+  // is deleted once it names no hold, before any of the bans that the hold no longer keeps wait or
+  // are removed; then the bans that wait for a later complete read are recorded, and the others
+  // removed. A list removed during the run, so that its records cannot be saved, is skipped as
+  // gone.
+  async removeMissingBans(banList, removal, result) {
+    const { now, plan, confirmation, fields, confirmAt, recordedHold, ended, end, removed } =
+      removal;
+    if (confirmation) Object.assign(result, confirmation);
     if (this.dryRun) {
-      Object.assign(result, fields, {
-        held: fields.held + plan.wait.length,
+      if (!recordedHold) Object.assign(result, fields);
+      Object.assign(result, {
+        held: result.held + plan.wait.length,
         pending: plan.wait.length,
         removed: removed.length
       });
@@ -1494,32 +1597,13 @@ export default class BanImporter {
       );
     } else {
       try {
-        // The records of the bans that came back, or that the list no longer has, but for those of
-        // its held bans that came back, which go with its hold.
-        const cameBack = new Set(back);
-        const unheld = cleared.filter((banId) => !cameBack.has(banId));
-        if (unheld.length > 0)
-          await clearPendingRemovals(banList.id, unheld, { batchSize: this.batchSize });
-        // What changes of the list's hold, in one transaction (see saveHold), before any of the
-        // bans it no longer holds wait or are removed: the records of its held bans that came back
-        // are dropped, the rest are released, as it ends, also as an admin confirmed it, or as it
-        // begins anew, its row is saved or deleted, and its bans are held. Cut short, none of it
-        // is, so no hold is left with fewer of its bans held than it keeps, or held in part. The
-        // bans a hold that goes on holds from now, as a 'full' hold whose list lost all of its bans
-        // again, are held at least a millisecond after those it began with, which are told by when
-        // they were held, whatever the clock did meanwhile.
-        if (recordedHold || ended)
-          await saveHold(banList.id, recordedHold ? plan.held : [], {
-            back,
-            release: ended || anew,
-            reason: row?.reason ?? null,
-            stored: row?.stored ?? null,
-            end,
-            now: new Date(goesOn ? Math.max(now, began + 1) : now),
-            batchSize: this.batchSize
-          });
-        else if (end) await clearHoldReason(banList.id);
-        Object.assign(result, fields);
+        if (removal.unheld.length > 0)
+          await clearPendingRemovals(banList.id, removal.unheld, { batchSize: this.batchSize });
+        if (!recordedHold) {
+          if (ended) await this.writeHold(banList, removal);
+          else if (end) await clearHoldReason(banList.id);
+          Object.assign(result, fields);
+        }
         // Counted as each batch is recorded, and removed, so the result of a list whose records or
         // removals are cut short says how many it made, and its line how many it removed.
         if (plan.wait.length > 0) {
@@ -1542,10 +1626,7 @@ export default class BanImporter {
           });
       } catch (err) {
         if ((await this.stopReason(err, banList)) !== LIST_REMOVED) throw err;
-        // Its bans went with it, so none of them is kept, and no hold of them ended here.
-        Object.assign(result, { gone: true, hold: null, held: 0, pending: 0 });
-        for (const field of ['holdEnded', 'cameBack', 'heldAnew', 'heldSince', 'fewest'])
-          delete result[field];
+        result.gone = true;
         return;
       }
     }

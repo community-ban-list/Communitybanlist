@@ -605,13 +605,14 @@ const CLEAR_HOLD = 'DELETE FROM BanListHolds WHERE banList = ?';
 // - ids: the hold's bans are recorded as missing from the complete read at now and held, from now
 //   unless they already were, a statement for each batch of batchSize bans (see recordMissing).
 // A run cut short in it, e.g. by a database outage longer than the retries or the process being
-// killed, writes none of it, so the next complete read finds the list held as it
-// was, or not held at all. (That read measures the loss again, against a list that includes the
-// bans this read saved before it; see the README.) Written a statement at a
-// time, a hold cut short as it ended could leave a 'large' row with fewer of its bans held than
-// such a hold keeps, and one cut short as it began could leave part of its bans held, so that the
-// next read took the list as held, and the rest of the bans it lost as missing besides, which
-// would wait for a confirming read that removes them.
+// killed, writes none of it, so the next complete read finds the list held as it was, or not held
+// at all. A hold that keeps bans is written before the read's new and changed bans are saved, so
+// that read finds the same loss, against the same bans, and one that only ends once they are, as it
+// lets bans go, so a run cut short before then leaves it as it was (see holdMissingBans in
+// ban-importer.js). Written a statement at a time, a hold cut short as it ended could leave a
+// 'large' row with fewer of its bans held than such a hold keeps, and one cut short as it began
+// could leave part of its bans held, so that the next read took the list as held, and the rest of
+// the bans it lost as missing besides, which would wait for a confirming read that removes them.
 export async function saveHold(
   banList,
   ids,
