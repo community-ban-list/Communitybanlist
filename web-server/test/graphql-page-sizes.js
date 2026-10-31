@@ -44,7 +44,8 @@ const models = { Ban, BanList: {}, ExportBanList: {}, Organisation: {}, SteamUse
 const { Query } = await load('../src/graphql-api/query/resolver.js', {
   graphql: { default: graphql },
   'scbl-lib/db/models': models,
-  'scbl-lib/db/sequelize': { Op }
+  'scbl-lib/db/sequelize': { Op },
+  'scbl-lib/utils': { describeError: String }
 });
 const { SteamUser: SteamUserFields } = await load('../src/graphql-api/steam-user/resolver.js', {
   graphql: { default: graphql },
