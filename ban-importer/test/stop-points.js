@@ -947,7 +947,8 @@ const exportBanModel = (rows) => ({
 
 // What the export did before it stopped is counted, in all and on BattleMetrics and remote lists
 // apart, as the run's record keeps it: the export ban whose BattleMetrics request was under way,
-// but not the one after it.
+// but not the one after it. The remote list deletes one more ban than the BattleMetrics list, so
+// counts that mixed up the two types would not match.
 {
   const events = [];
   const [create, , remove] = exportBans(events, (id) => {
@@ -970,6 +971,7 @@ const exportBanModel = (rows) => ({
     create,
     remote(4, 'TO_BE_DELETED'),
     remote(5, 'TO_BE_CREATED'),
+    remote(7, 'TO_BE_DELETED'),
     remove,
     remote(6, 'TO_BE_CREATED')
   ];
@@ -983,15 +985,16 @@ const exportBanModel = (rows) => ({
     'save 1',
     'destroy 4',
     'save 5',
+    'destroy 7',
     'delete 3 on BattleMetrics',
     'destroy 3'
   ]);
   assert.deepStrictEqual(JSON.parse(JSON.stringify(counts)), {
-    queued: 5,
+    queued: 6,
     created: 2,
-    deleted: 2,
+    deleted: 3,
     failed: 0,
-    remote: { created: 1, deleted: 1, failed: 0 },
+    remote: { created: 1, deleted: 2, failed: 0 },
     battlemetrics: { created: 1, deleted: 1, failed: 0 }
   });
 }
