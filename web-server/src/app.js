@@ -17,6 +17,7 @@ import clientConfig from './client-config.js';
 import { inProduction, nodeEnvProblem } from './production.js';
 import GraphQL from './graphql-api/index.js';
 import ExportBanLists from './export-ban-lists.js';
+import { isShuttingDown } from './shutting-down.js';
 
 import { DISCORD_INVITE, EXPORT_LIST_LIMIT_PROBLEMS, INTAKE_FORM } from 'scbl-lib/config';
 import { sequelize } from 'scbl-lib/db';
@@ -111,6 +112,13 @@ app.use(GraphQL);
 router.use('/export', ExportBanLists.routes(), ExportBanLists.allowedMethods());
 
 router.get('/health-check', async (ctx) => {
+  // A server that is stopping is not healthy, though it still answers the requests it has (see
+  // shutdown.js).
+  if (isShuttingDown()) {
+    ctx.status = 503;
+    ctx.body = 'The web server is stopping.';
+    return;
+  }
   await sequelize.authenticate();
   ctx.status = 200;
 });
