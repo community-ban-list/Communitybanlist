@@ -256,8 +256,8 @@ export const RECORDED_HOLDS = ['full', 'large'];
 // large part of the list's other bans, of those no earlier read had missed, holds every missing
 // ban as 'large' from now, and so does one that finds none of the list's bans while it is held as
 // 'large': a 'large' hold takes them in, measured as before, and a 'full' one becomes 'large',
-// measured against the bans it held, which keeps those at least until one of them comes back, as
-// the 'full' hold would have. Kept as 'full', it would let the large loss go as soon as any one of
+// measured against the bans it began with (firstHeld), which keeps those at least until one of them
+// comes back, as the 'full' hold would have, also when it held bans the list saved since. Kept as 'full', it would let the large loss go as soon as any one of
 // the bans it began with came back.
 // Any other missing ban is removed once complete reads have not had it for CONFIRM_AFTER, and
 // waits until then, but when fewer than REMOVE_AT_ONCE_BANS and REMOVE_AT_ONCE_SHARE of the list
@@ -286,7 +286,7 @@ export function planRemovals({
   // that came back are no longer held.
   const isMissing = new Set(missing);
   const stillHeld = [...held].filter((id) => isMissing.has(id));
-  const of = heldFor === 'large' ? Math.min(heldOf ?? stored, stored) : held.size;
+  const of = heldFor === 'large' ? Math.min(heldOf ?? stored, stored) : firstHeld.size;
   const lasts =
     heldFor === 'large'
       ? stillHeld.length >= fewestHeld(of)

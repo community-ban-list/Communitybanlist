@@ -721,9 +721,10 @@ export default class BanImporter {
       // had before the read. What of it only keeps bans is written then too, in one transaction (see
       // keepMissingBans): the records of the bans the read found again that waited for a confirming
       // read are dropped, also by a read that is not complete, and a hold that keeps bans is
-      // written. So a run cut short while the bans are saved, or stopped then, never leaves a later
-      // read holding less than it would have had this read finished. The rest is written once they
-      // are saved, as before.
+      // written. So a run cut short while the bans are saved, or stopped then, keeps the hold this
+      // read wrote, though a later read measures its own new losses against the list as the cut left
+      // it, so a loss just over the numbers can then fall under them (see the README). The rest is
+      // written once they are saved, as before.
       let removal = null;
       if (!result.accessLost) {
         if (scan.complete)
@@ -1578,9 +1579,10 @@ export default class BanImporter {
   // bans: a ban whose record is dropped is missing for the first time when a read misses it again,
   // so it counts towards a large loss, or waits from then, and holding bans keeps them. So they are
   // written whatever becomes of the rest of the read: a run cut short while the bans are saved, or
-  // stopped then, or later, never leaves a later read holding less than it would have had this read
-  // finished, though it measures what the list lost against a list that includes the bans saved,
-  // and one cut short in the transaction writes none of it, and saves none of the read's bans. What
+  // stopped then, or later, keeps the hold this read wrote, though a later read measures its own new
+  // losses against a list that includes the bans saved, so a loss just over the numbers can fall
+  // under them, and one cut short in the transaction writes none of it, and saves none of the
+  // read's bans. What
   // the read changes of a hold that only ends lets bans go, so it is written with those that wait or
   // are removed, once the save is over (see removeMissingBans). Writing either needs the run lock,
   // as removing bans does. The read's result says the hold once it is written, with the bans it

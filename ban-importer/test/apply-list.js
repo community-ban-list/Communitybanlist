@@ -868,6 +868,21 @@ assert.deepStrictEqual(
   plan({ missing: lose(19, 1), stored: 420, fetched: 401, pending, ...tookIn }),
   { remove: lose(19, 1), wait: [], hold: null, held: [], released: lose(19, 1) }
 );
+// A 'full' hold that held bans the list saved since, here 10 with the 20 it began with, measures a
+// large loss it takes in against the 20 it began with, not the 30 it holds, so it keeps them at
+// least until one of those 20 comes back, also once the 10 came back.
+pending = pendingSince(lose(30), 600);
+assert.deepStrictEqual(
+  plan({
+    missing: lose(130),
+    stored: 430,
+    fetched: 300,
+    pending,
+    held: new Set(lose(30)),
+    firstHeld: new Set(lose(20))
+  }),
+  { remove: [], wait: [], hold: 'large', held: lose(130), released: [], heldOf: 20 }
+);
 pending = pendingSince(lose(300), 600);
 // A large loss in the read that ends the hold, of bans no read had missed, is held anew, as a hold
 // that begins. While the hold goes on, such a loss is held with it (above).
