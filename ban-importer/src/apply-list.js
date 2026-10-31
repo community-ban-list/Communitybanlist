@@ -512,8 +512,9 @@ export async function writeBans(
 // Remove bans from the list, each given as { id, steamUser }, and optionally the player it had
 // before (previousSteamUser), in transactions of batchSize bans, each of which also queues the bans'
 // players for an update, as they lost a ban, and drops the bans' records in BanListPendingRemovals.
-// onRemoved is given how many bans each transaction removed once it is committed, so a removal cut
-// short part-way still counts those it made. Resolves with the number of bans removed.
+// onRemoved is given how many bans each transaction removed once it is committed, and the bans of
+// that batch, whose records it dropped, so a removal cut short part-way still counts those it made.
+// Resolves with the number of bans removed.
 export async function removeBans(
   banList,
   bans,
@@ -545,7 +546,7 @@ export async function removeBans(
       })
     );
     removed += count;
-    onRemoved(count);
+    onRemoved(count, batch);
   }
   return removed;
 }
@@ -572,8 +573,8 @@ function recordMissing(banList, batch, { now, held, transaction }) {
 
 // Record that the bans, by ID, were missing from the complete read of the list at now, and wait for
 // a later complete read, a statement for each batch of batchSize bans (see recordMissing). onSaved
-// is given how many bans each statement recorded once it has, so records cut short part-way still
-// count those that were saved.
+// is given how many bans each statement recorded once it has, and their IDs, so records cut short
+// part-way still count those that were saved.
 export async function savePendingRemovals(
   banList,
   ids,
@@ -582,7 +583,7 @@ export async function savePendingRemovals(
   for (let i = 0; i < ids.length; i += batchSize) {
     const batch = ids.slice(i, i + batchSize);
     await retryOperation(() => recordMissing(banList, batch, { now, held: false }));
-    onSaved(batch.length);
+    onSaved(batch.length, batch);
   }
 }
 

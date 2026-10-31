@@ -2515,9 +2515,10 @@ const banIDs = (prefix, from, to) => pairs(prefix, from, to).map(([uid]) => `5,$
 // being killed, ends none of it. Here a list of 200 held for 80 grew to 500, and a read
 // finds 41 of the 80 again, which ends the hold, and loses 120 of the bans it saved since, which
 // begins another. The release fails on every attempt, so the list fails, with its hold, its row and
-// the records of the 41 as they were. The next read does what this one would have: it ends the old
-// hold, holds the 120, and says so, as holds of large losses, not as one of a list that lost all
-// of its bans, and the read 11 minutes later removes none of the 120.
+// the records of the 41 as they were, and its entry in the run's record gives none of it. The next
+// read does what this one would have: it ends the old hold, holds the 120, and says so, as holds of
+// large losses, not as one of a list that lost all of its bans, and the read 11 minutes later
+// removes none of the 120.
 reset();
 battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
 await run();
@@ -2533,7 +2534,8 @@ statementErrors.set(
   Array.from({ length: 5 }, () => new ConnectionError())
 );
 events.length = 0;
-[result] = await run();
+const cutEnd = new BanImporter();
+[result] = await cutEnd.importBans();
 assert.deepStrictEqual(
   [result.stage, result.error, heldIDs(5).length, pendingRows.has('5,5,e0'), holdRows.get(5)],
   [
@@ -2543,6 +2545,10 @@ assert.deepStrictEqual(
     true,
     { reason: 'large', storedCount: 200 }
   ]
+);
+assert.deepStrictEqual(
+  [plainReport(cutEnd).banLists.map(holdFields), plainReport(cutEnd).held],
+  [[{ held: 0 }], 0]
 );
 assert.deepStrictEqual(
   ['begin', 'clear pending', 'rollback', 'commit'].map(
@@ -2691,13 +2697,92 @@ assert.deepStrictEqual(
   ],
   [[{ held: 90, pending: 10, hold: 'large' }], 90, 10]
 );
+// The bans a hold's transaction releases as it ends wait for a later complete read from when it
+// commits, so a list that fails, or is stopped, after that gives them as held and pending, as the
+// database then has them: here a hold of 80 of 200 that ends as 41 of them come back, whose records
+// of the other 39 then fail on every attempt, and the same hold ending as 40 others are lost, a
+// large loss, which begins another, written before the bans are saved, whose new ban then cannot
+// be saved, or SIGTERM comes as it is saved. The 39 are pending, and held with the 40 the new hold
+// holds.
+reset();
+battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+await run();
+battlemetricsLists.set('bm-5', [[...pairs('e', 0, 41), ...pairs('e', 80, 200)]]);
+statementErrors.set(
+  'save pending',
+  Array.from({ length: 5 }, () => new ConnectionError())
+);
+failedHold = new BanImporter();
+[result] = await failedHold.importBans();
+assert.deepStrictEqual(
+  [result.stage, heldIDs(5).length, pendingIDs(5).length, holdRows.has(5)],
+  ['removing the bans it no longer has', 0, 39, false]
+);
+assert.deepStrictEqual(
+  [
+    plainReport(failedHold).banLists.map(holdFields),
+    plainReport(failedHold).held,
+    plainReport(failedHold).pending
+  ],
+  [[{ held: 39, pending: 39, holdEnded: 'large', cameBack: 41 }], 39, 39]
+);
+for (const cut of ['an outage', 'SIGTERM']) {
+  reset();
+  battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
+  await run();
+  battlemetricsLists.set('bm-5', [
+    [...pairs('e', 0, 41), ...pairs('e', 80, 160), ...pairs('n', 1000, 1001)]
+  ]);
+  let report;
+  if (cut === 'an outage') {
+    writeErrors.set(
+      '5,n1000',
+      Array.from({ length: 5 }, () => new ConnectionError())
+    );
+    failedHold = new BanImporter();
+    [result] = await failedHold.importBans();
+    assert.deepStrictEqual([result.stage, storedIDs(5).length], ['saving its bans', 200], cut);
+    report = plainReport(failedHold);
+    assert.deepStrictEqual(report.banLists.map(holdFields), [
+      { held: 79, pending: 39, hold: 'large', holdEnded: 'large', cameBack: 41 }
+    ]);
+  } else {
+    const stopping = await loadImporter();
+    onWrite = (ids) => {
+      if (ids.includes('5,n1000')) stopping.control.requestStop('it received SIGTERM');
+    };
+    const stoppedImport = new stopping.BanImporter();
+    const stopped = await stoppedImport.importBans().catch((err) => err);
+    onWrite = null;
+    assert.deepStrictEqual([stopped.name, storedIDs(5).length], ['RunStopped', 201], cut);
+    report = plainReport(stoppedImport);
+    assert.deepStrictEqual(holdFields(report.stopped), {
+      held: 79,
+      pending: 39,
+      hold: 'large',
+      holdEnded: 'large',
+      cameBack: 41
+    });
+  }
+  assert.deepStrictEqual(
+    [heldIDs(5).length, pendingIDs(5).length, holdRows.get(5)],
+    [40, 79, { reason: 'large', storedCount: 200 }],
+    cut
+  );
+  assert.deepStrictEqual(
+    [report.held, report.pending],
+    cut === 'an outage' ? [79, 39] : [0, 0],
+    cut
+  );
+}
 
 // An admin's confirmation that ends a hold releases its bans, and forgets why they were held, in
 // one transaction, before any of them is removed. So a removal cut short after its first batch
 // leaves the rest waiting for a confirming read, whose removal the admin confirmed already,
-// rather than held, by a row that no longer fits them. Its line says how many it removed. The next
-// read keeps the rest until then, and its line only goes to the console; the read 11 minutes on
-// removes them, posted as a large part of the list.
+// rather than held, by a row that no longer fits them. Its line says how many it removed, and its
+// entry in the run's record, and the run's totals, the rest as held and pending. The next read
+// keeps the rest until then, and its line only goes to the console; the read 11 minutes on removes
+// them, posted as a large part of the list.
 reset();
 battlemetricsList(5, pairs('e', 0, 200), [pairs('e', 80, 200)]);
 await run();
@@ -2705,7 +2790,16 @@ env.IMPORTER_ALLOW_MASS_REMOVAL = '5';
 statementErrors.set('remove', [null, ...Array.from({ length: 5 }, () => new ConnectionError())]);
 events.length = 0;
 logs.length = 0;
-[result] = await run({ batchSize: 50 });
+const confirmedCut = new BanImporter({ batchSize: 50 });
+[result] = await confirmedCut.importBans();
+assert.deepStrictEqual(
+  [
+    plainReport(confirmedCut).banLists.map(holdFields),
+    plainReport(confirmedCut).held,
+    plainReport(confirmedCut).pending
+  ],
+  [[{ held: 30, pending: 30, holdEnded: 'large', massRemoval: true }], 30, 30]
+);
 assert.deepStrictEqual(
   warnings().map(({ message }) => message),
   [
@@ -7642,5 +7736,5 @@ assert.strictEqual(
 assert.strictEqual(verboseLevelOneLines, 0, 'Lines for the log channel are logged as important');
 
 console.log(
-  "Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed, of lists that lost all their bans, until one of the bans they began with comes back, those they saved since held with them, whatever the clock says, or a large part of them at once, until fewer than a large part of the bans the list had then are still missing, also as the list grows, with those that come back no longer held, and once it loses all of its bans, or another large part of them, measured against fewer bans as the list shrinks, holds of lists that lost all their bans that take in a large loss, holds ended, begun or taken in whole, or not at all, as a run is cut short, holds that keep bans written before the bans a read saves, so a cut or stop then never holds less, also without the run lock or as the list is removed, and those that only end after them, and in the run record only once written, confirmations said to end only the holds they ended, also as a large loss would begin another, large removals said in every line, the holds replaced sources ended, reasons that outlived their holds, also found by a poll's drift, without queueing their players, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, second attempts, retries, sync state, the access check, lost access, also with no hold written before the bans are saved, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, also as the run stops, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming reads, periodic full reads at each list's slot, by the lists' pages and the cycle, cycles whose full reads spread out after the first, held counts of polled lists, the switches, stops, also during a poll, and the list a stop came in, each list's seconds without the access check, the page a failed or stopped read was on, but no count of the old source's for a changed one, how a list's first attempt ended, the list under way and the access check while it is read, runs an interval apart, the loop's cycle, the oldest periodic reads first, and the run summary."
+  "Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed, of lists that lost all their bans, until one of the bans they began with comes back, those they saved since held with them, whatever the clock says, or a large part of them at once, until fewer than a large part of the bans the list had then are still missing, also as the list grows, with those that come back no longer held, and once it loses all of its bans, or another large part of them, measured against fewer bans as the list shrinks, holds of lists that lost all their bans that take in a large loss, holds ended, begun or taken in whole, or not at all, as a run is cut short, holds that keep bans written before the bans a read saves, so a cut or stop then never holds less, also without the run lock or as the list is removed, and those that only end after them, and in the run record only once written, with the bans a hold's end lets wait counted from then, less those removed, confirmations said to end only the holds they ended, also as a large loss would begin another, large removals said in every line, the holds replaced sources ended, reasons that outlived their holds, also found by a poll's drift, without queueing their players, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, second attempts, retries, sync state, the access check, lost access, also with no hold written before the bans are saved, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, also as the run stops, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming reads, periodic full reads at each list's slot, by the lists' pages and the cycle, cycles whose full reads spread out after the first, held counts of polled lists, the switches, stops, also during a poll, and the list a stop came in, each list's seconds without the access check, the page a failed or stopped read was on, but no count of the old source's for a changed one, how a list's first attempt ended, the list under way and the access check while it is read, runs an interval apart, the loop's cycle, the oldest periodic reads first, and the run summary."
 );

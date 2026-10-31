@@ -1419,9 +1419,11 @@ export default class BanImporter {
     // What the read's result says of the list's hold, once what the read changes of it is written,
     // so that a list that fails part-way says only what it wrote: why its bans are held (hold), how
     // many are (held), and the rest below. The bans that wait for a later complete read are added
-    // to held, and counted as pending, as each batch of them is recorded. A list that fails before
-    // its hold is written keeps that hold as it was, and its result says none of it, as for any list
-    // that fails. A dry run's says what it would have written.
+    // to held, and counted as pending, as their records are written: those its hold's transaction
+    // releases as it ends once that has committed, less those of them removed after it, and the
+    // others as each batch of them is recorded (see releasing, and removeMissingBans). A list that
+    // fails before its hold is written keeps that hold as it was, and its result says none of it,
+    // as for any list that fails. A dry run's says what it would have written.
     const fields = { hold: plan.hold, held: plan.held.length };
     // The first of the bans that wait for a later complete read is due to be confirmed as gone
     // CONFIRM_AFTER after it was first missing, which is now for a ban first missing now, or no
@@ -1486,6 +1488,16 @@ export default class BanImporter {
       if (heldFor === 'large')
         fields.holdEnded.fewest = fewestHeld(Math.min(heldOf ?? stored.length, stored.length));
     }
+    // The bans whose records the hold's transaction leaves waiting for a later complete read, as
+    // it ends: its held bans still missing, which it releases, as if first missing now (see
+    // saveHold), whether they then wait or are removed. They wait from when it commits, so they are
+    // counted as held, and as pending, from then, and those removed after it are taken off as each
+    // batch of them is removed: a list that fails, or is stopped, part-way gives those it leaves
+    // waiting (see removeMissingBans). A hold that begins anew holds them again in the same
+    // transaction, so it leaves none.
+    const releasing = ended
+      ? held.filter(([banId]) => !found.has(banId)).map(([banId]) => banId)
+      : [];
     // What the list's BanListHolds row says from now, when that changes: why its bans are held, and
     // the bans a 'large' hold is measured against, saved as a hold begins, and again as a 'large'
     // hold goes on, or begins anew, measured against fewer bans, as the list shrank, or as it took
@@ -1518,6 +1530,7 @@ export default class BanImporter {
       began,
       back,
       ended,
+      releasing,
       row,
       end,
       unheld: cleared.filter((banId) => !cameBack.has(banId)),
@@ -1553,8 +1566,9 @@ export default class BanImporter {
   // that includes the bans saved, never holds less. What the read changes of a hold that only ends
   // lets bans go, so it is written with those that wait or are removed, once the save is over (see
   // removeMissingBans). Holding bans needs the run lock, as removing them does. The read's result
-  // says the hold once it is written, or at once in a dry run. Returns false when the list was
-  // removed during the run, so its hold could not be written.
+  // says the hold once it is written, with the bans it released as another hold ended (see
+  // countReleased), or at once in a dry run. Returns false when the list was removed during the
+  // run, so its hold could not be written.
   async holdMissingBans(banList, removal, result, at) {
     if (!removal.recordedHold) return true;
     at.stage = 'holding the bans it no longer has';
@@ -1568,7 +1582,17 @@ export default class BanImporter {
       }
     }
     Object.assign(result, removal.fields);
+    if (!this.dryRun) this.countReleased(result, removal);
     return true;
+  }
+
+  // Count the bans whose records a hold's transaction left waiting for a later complete read, as
+  // the hold ended, once it has committed: as held, and as pending, as they wait from then, also
+  // when the read fails, or is stopped, before they are recorded again or removed (see
+  // planMissingBans).
+  countReleased(result, { releasing }) {
+    result.held += releasing.length;
+    result.pending += releasing.length;
   }
 
   // Write the rest of what becomes of the bans the list had before this run that its complete read
@@ -1603,16 +1627,21 @@ export default class BanImporter {
           if (ended) await this.writeHold(banList, removal);
           else if (end) await clearHoldReason(banList.id);
           Object.assign(result, fields);
+          this.countReleased(result, removal);
         }
         // Counted as each batch is recorded, and removed, so the result of a list whose records or
-        // removals are cut short says how many it made, and its line how many it removed.
+        // removals are cut short says how many it made, and its line how many it removed. The bans
+        // the hold's transaction released were counted as waiting once it committed, so they are not
+        // counted again as they are recorded, and are taken off as they are removed.
+        const releasing = new Set(removal.releasing);
         if (plan.wait.length > 0) {
           await savePendingRemovals(banList.id, plan.wait, {
             now: new Date(now),
             batchSize: this.batchSize,
-            onSaved: (count) => {
-              result.held += count;
-              result.pending += count;
+            onSaved: (count, batch) => {
+              const recorded = batch.filter((banId) => !releasing.has(banId)).length;
+              result.held += recorded;
+              result.pending += recorded;
             }
           });
           result.confirmAt = confirmAt;
@@ -1620,8 +1649,11 @@ export default class BanImporter {
         if (removed.length > 0)
           await removeBans(banList.id, removed, {
             batchSize: this.batchSize,
-            onRemoved: (count) => {
+            onRemoved: (count, batch) => {
               result.removed += count;
+              const released = batch.filter((ban) => releasing.has(ban.id)).length;
+              result.held -= released;
+              result.pending -= released;
             }
           });
       } catch (err) {

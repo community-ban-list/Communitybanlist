@@ -1218,8 +1218,9 @@ assert.deepStrictEqual(
     ['commit', 3]
   ]
 );
-// Each committed batch is counted as it is removed, so one that fails for good after the first,
-// e.g. as the database stays unavailable, still counts the bans the first removed.
+// Each committed batch is counted as it is removed, with the bans whose records it dropped, so one
+// that fails for good after the first, e.g. as the database stays unavailable, still counts the
+// bans the first removed.
 reset();
 deleted = 2;
 let deletes = 0;
@@ -1236,11 +1237,17 @@ await assert.rejects(
       { id: '7,b', steamUser: steamID(1) },
       { id: '7,c', steamUser: steamID(2) }
     ],
-    { batchSize: 2, onRemoved: (count) => counted.push(count) }
+    {
+      batchSize: 2,
+      onRemoved: (count, batch) => counted.push([count, batch.map(({ id }) => id)])
+    }
   ),
   { name: 'SequelizeConnectionRefusedError' }
 );
-assert.deepStrictEqual([counted, events.filter(([type]) => type === 'commit').length], [[2], 1]);
+assert.deepStrictEqual(
+  [counted, events.filter(([type]) => type === 'commit').length],
+  [[[2, ['7,a', '7,b']]], 1]
+);
 
 // Missing bans are recorded with one statement per batch, which keeps when a ban was first missing
 // and updates when it was last, and their records are dropped the same way.
@@ -1273,8 +1280,8 @@ reset();
 fail(/^DELETE FROM BanListPendingRemovals /, deadlock());
 await clearPendingRemovals(7, ['7,d']);
 assert.deepStrictEqual([statements().length, delays], [2, [5000]]);
-// Each statement's bans are counted once they are recorded, so records cut short after the first
-// statement, as the database stays unavailable, count only those it recorded.
+// Each statement's bans are counted once they are recorded, with their IDs, so records cut short
+// after the first statement, as the database stays unavailable, count only those it recorded.
 reset();
 let inserts = 0;
 fail(
@@ -1286,11 +1293,11 @@ await assert.rejects(
   savePendingRemovals(7, ['7,a', '7,b', '7,c'], {
     now: new Date(NOW),
     batchSize: 2,
-    onSaved: (count) => recorded.push(count)
+    onSaved: (count, batch) => recorded.push([count, [...batch]])
   }),
   { name: 'SequelizeConnectionRefusedError' }
 );
-assert.deepStrictEqual([recorded, statements().length], [[2], 6]);
+assert.deepStrictEqual([recorded, statements().length], [[[2, ['7,a', '7,b']]], 6]);
 
 // What a read changes of a hold for an admin is written in one transaction, whole or not at all.
 // A hold that begins saves why the list's bans are held, with the bans a 'large' hold is measured
@@ -1532,5 +1539,5 @@ assert.deepStrictEqual(batches, [2, 2]);
 assert.strictEqual(events.filter(([type]) => type === 'commit').length, 2);
 
 console.log(
-  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, records of missing bans, counted a statement at a time, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
+  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, with their bans, records of missing bans, counted a statement at a time, with their IDs, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
 );
