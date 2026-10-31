@@ -1383,7 +1383,14 @@ export default class BanImporter {
     // The held bans the hold began with: those held since the first of them was. A ban keeps when
     // it was first held while it stays held (see saveHold), so those are all of them, unless a
     // 'full' hold held bans the list saved since, as it lost all of its bans again, which were held
-    // from then. A hold that takes in more holds all of its bans from then, as 'large'.
+    // from then, at least a millisecond later (see writeHold). A hold that takes in more holds all
+    // of its bans from then, as 'large'. The tables cannot tell two cases of a 'full' hold an
+    // earlier importer left, which are then read wrongly: one whose bans an importer from before
+    // BanListHolds held a batch at a time, without a transaction, cut short between batches, with
+    // the rest held as its list lost all of its bans again, is taken as begun with its first batch
+    // only, so it keeps its bans longer; and one that held bans saved since while its clock had gone
+    // back since the hold began has those taken as the bans it began with, so it ends as one of them
+    // comes back, as such a hold did before this importer, and not as one of its own does.
     const heldAt = new Map(held.map(([banId, { heldAt: since }]) => [banId, since]));
     const began = [...heldAt.values()].reduce((first, since) => Math.min(first, since), Infinity);
     const firstHeld = [...heldAt].filter(([, since]) => since === began).map(([banId]) => banId);
@@ -1870,16 +1877,18 @@ export default class BanImporter {
           `${imported}: ${counts.join(', ')}.${many} Kept all ${result.stored} of its stored bans, as it no longer has any of them, which more likely means that its source broke. They are kept until one of them comes back. ${confirm}${dryRun}`
         );
       else {
-        // The bans it saved since, which it no longer has, are removed as usual. Those it held with
-        // its own, as it lost all of its bans again, that came back are no longer held, as only one
-        // of those it began with ends the hold.
+        // The bans it saved since, which it no longer has, are removed as usual. Those it held after
+        // the bans it began with, as it lost all of its bans again, that came back are no longer
+        // held, as only one of those it began with ends the hold. They are said to be held later,
+        // not saved since, as of a hold an earlier importer left, the bans held later may be its
+        // own (see planMissingBans).
         const waiting =
           result.pending > 0
             ? ` Of the bans it saved since, ${result.pending} that it no longer has are kept until a later complete read of it confirms they are gone.`
             : '';
         const cameBack =
           result.cameBack > 0
-            ? ` ${plural(result.cameBack, 'ban')} it saved since, and held with them, came back, and ${result.cameBack === 1 ? 'is' : 'are'} no longer held.`
+            ? ` ${plural(result.cameBack, 'ban')} it held later came back, and ${result.cameBack === 1 ? 'is' : 'are'} no longer held.`
             : '';
         log(
           true,
