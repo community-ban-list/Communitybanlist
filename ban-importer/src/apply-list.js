@@ -257,8 +257,8 @@ export const RECORDED_HOLDS = ['full', 'large'];
 // ban as 'large' from now, and so does one that finds none of the list's bans while it is held as
 // 'large': a 'large' hold takes them in, measured as before, and a 'full' one becomes 'large',
 // measured against the bans it began with (firstHeld), which keeps those at least until one of them
-// comes back, as the 'full' hold would have, also when it held bans the list saved since. Kept as 'full', it would let the large loss go as soon as any one of
-// the bans it began with came back.
+// comes back, as the 'full' hold would have, also when it held bans the list saved since. Kept as
+// 'full', it would let the large loss go as soon as any one of the bans it began with came back.
 // Any other missing ban is removed once complete reads have not had it for CONFIRM_AFTER, and
 // waits until then, but when fewer than REMOVE_AT_ONCE_BANS and REMOVE_AT_ONCE_SHARE of the list
 // would wait, all of them are removed at once.
@@ -653,7 +653,7 @@ export async function saveHold(
 // The hold the list's held bans were held for, as BanListHolds keeps it: why, 'full' or 'large'
 // (reason), and the bans a 'large' hold is measured against (stored): those the list had before
 // the read that began it, or fewer, as the list shrank since, or for one that took in a 'full'
-// hold, the bans that hold held. Or null when it keeps none: the bans of a list held by an
+// hold, the bans that hold began with. Or null when it keeps none: the bans of a list held by an
 // importer from before that table were held as it lost all of them, the only hold that importer
 // recorded.
 export async function readHold(banList) {
