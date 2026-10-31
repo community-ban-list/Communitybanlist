@@ -2,25 +2,28 @@ import { disconnect, flushLogMessages, stopRecordingLogMessages } from 'scbl-lib
 import { describeError, Logger } from 'scbl-lib/utils';
 
 import { stopGraphQL } from './graphql-api/index.js';
+import { flushViews } from './graphql-api/query/record-view.js';
 import { setShuttingDown } from './shutting-down.js';
 
 // The web server stops on SIGTERM, which docker stop sends, or SIGINT, e.g. Ctrl+C. It takes no new
 // connections, its health check fails, and it answers the requests under way, for up to 8 seconds,
-// closing each connection once its answer is sent. Then it stops Apollo Server, sends the lines
-// waiting for the log channel, e.g. one about a change a request just made, writes the newest
+// closing each connection once its answer is sent. Then it stops Apollo Server, saves the profile
+// views still waiting to be saved, sends the lines waiting for the log channel, e.g. one about a change a request just made, writes the newest
 // message it posted there to the database and closes the database connections, as the importer
 // service does as it stops, and sends any lines still waiting. It exits 0, or 1 when requests were
 // still being answered after 8 seconds and were cut off, and always within 9 seconds of the signal,
 // before docker stop, which waits 10 seconds by default, kills it. A signal that comes before the
 // server is listening ends it at once.
 
-// How long the requests under way have to be answered, how long the lines waiting for the log
+// How long the requests under way have to be answered, how long saving the profile views still
+// waiting may take, how long the lines waiting for the log
 // channel may take to be sent before the newest message is written, and how long writing it may
 // take, so a log channel or a database that does not answer cannot take the time the steps after
 // it need, and how long after the signal the web server exits at the latest. Held on an object so
 // the tests can shorten them.
 export const stopTimes = {
   answering: 8 * 1000,
+  views: 2 * 1000,
   lines: 2 * 1000,
   recording: 2 * 1000,
   exiting: 9 * 1000
@@ -112,6 +115,9 @@ export default function stopOnSignals() {
       );
 
     await step('stop the GraphQL API', stopGraphQL, left());
+    // No more lookups come in now, so the profile views still waiting are saved before the database
+    // closes (see graphql-api/query/record-view.js).
+    await step('save which players were viewed', flushViews, Math.min(stopTimes.views, left()));
     // The lines waiting are sent before the newest message is written, so it is the newest the web
     // server posted, as the importer service does (see recordNewest in ban-importer/src/loop.js):
     // they get half of the time left, and at most stopTimes.lines.

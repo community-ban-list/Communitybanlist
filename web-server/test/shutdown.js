@@ -80,7 +80,11 @@ function responsesOf({ received }) {
 // ms. As with the real recorder (see scbl-lib/db/log-channel.js), writing the newest message writes
 // the newest line posted since the last write, while the stop still records them, and written
 // holds the lines it wrote. The flag the health check reads is the real one.
-async function loadStop({ recordNewest = async () => {}, closeDatabase = async () => {} } = {}) {
+async function loadStop({
+  recordNewest = async () => {},
+  closeDatabase = async () => {},
+  saveViews = async () => {}
+} = {}) {
   const events = [];
   const output = [];
   const exits = [];
@@ -138,7 +142,13 @@ async function loadStop({ recordNewest = async () => {}, closeDatabase = async (
         getLogQueue: () => ({ RECEIVED: 0, QUEUED: waitingLines, RUNNING: 0, EXECUTING: 0 })
       }
     },
-    './graphql-api/index.js': { stopGraphQL: async () => events.push('stop GraphQL') }
+    './graphql-api/index.js': { stopGraphQL: async () => events.push('stop GraphQL') },
+    './graphql-api/query/record-view.js': {
+      flushViews: async () => {
+        events.push('save the views');
+        await saveViews();
+      }
+    }
   };
   const modules = new Map();
   async function moduleFor(specifier, referencingURL) {
@@ -198,10 +208,12 @@ async function startServer(shutdown) {
   return { port: server.address().port, waiting };
 }
 
-// The steps after the requests are answered, in order: the lines waiting for the log channel are
-// sent before the newest message is written, and any still waiting once the database is closed.
+// The steps after the requests are answered, in order: the profile views still waiting are saved
+// once Apollo Server has stopped, the lines waiting for the log channel are sent before the newest
+// message is written, and any still waiting once the database is closed.
 const STEPS = [
   'stop GraphQL',
+  'save the views',
   'send the log lines',
   'record the newest message',
   'stop recording',
@@ -247,6 +259,7 @@ const STEPS = [
   await until(() => stop.exits.length === 1, 'the exit');
   assert.deepStrictEqual(stop.events, [
     'stop GraphQL',
+    'save the views',
     'send the log lines',
     'post 1001',
     'record the newest message',
@@ -289,12 +302,19 @@ const STEPS = [
   ]);
 }
 
-// A database that never answers, and a log line that is never sent, cannot keep the process from
-// exiting in time: each step is given up when its time is up, those of the database with a warning.
+// A views save and a database that never answer, and a log line that is never sent, cannot keep
+// the process from exiting in time: each step is given up when its time is up, those of the views
+// and the database with a warning.
 {
   const never = () => new Promise(() => {});
-  const stop = await loadStop({ recordNewest: never, closeDatabase: never });
-  Object.assign(stop.stopTimes, { answering: 200, lines: 200, recording: 200, exiting: 800 });
+  const stop = await loadStop({ recordNewest: never, closeDatabase: never, saveViews: never });
+  Object.assign(stop.stopTimes, {
+    answering: 200,
+    views: 200,
+    lines: 200,
+    recording: 200,
+    exiting: 1000
+  });
   const shutdown = stop.stopOnSignals();
   await startServer(shutdown);
   stop.logLine('1001');
@@ -303,16 +323,20 @@ const STEPS = [
   stop.process.emit('SIGTERM', 'SIGTERM');
   await until(() => stop.exits.length === 1, 'the exit');
   const took = stop.exits[0].at - signalledAt;
-  assert.ok(took >= 750 && took < 3000, `it exits once its time is up, not after ${took}ms`);
+  assert.ok(took >= 950 && took < 3000, `it exits once its time is up, not after ${took}ms`);
   assert.deepStrictEqual(stop.events, [...STEPS, 'exit 0']);
   const warnings = stop.output.filter((line) => line.startsWith('Warning'));
-  assert.strictEqual(warnings.length, 2);
+  assert.strictEqual(warnings.length, 3);
   assert.strictEqual(
     warnings[0],
+    'Warning: could not save which players were viewed within 0.2s as the web server stopped.'
+  );
+  assert.strictEqual(
+    warnings[1],
     'Warning: could not record the newest message in the Discord log in the database within 0.2s as the web server stopped.'
   );
   assert.match(
-    warnings[1],
+    warnings[2],
     /^Warning: could not close the database connections within [\d.]+s as the web server stopped\.$/
   );
 }
