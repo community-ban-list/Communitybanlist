@@ -245,6 +245,8 @@ const book = (pages) => {
 
 // Every page is read by following BattleMetrics' links, from a first request for the list's newest
 // bans first, so a read's first page is the list's newest page, which head polls read on its own.
+// Every request asks for the list's expired bans too, those of the pages the links lead to as well
+// as the first, as BattleMetrics' API documentation says it hides them without filter[expired].
 // Bans without a SteamID are skipped but counted, as is a ban listed twice.
 reset();
 book({
@@ -290,9 +292,36 @@ assert.strictEqual(list.firstMetaTotal, 6);
 assert.deepStrictEqual(
   battlemetricsRequests.map(({ method, endpoint, params }) => [method, endpoint, { ...params }]),
   [
-    ['get', 'bans', { 'filter[banList]': 'bm-list', sort: '-timestamp', 'page[size]': 100 }],
-    ['get', 'bans', { 'filter[banList]': 'bm-list', 'page[key]': 'two', 'page[size]': '100' }],
-    ['get', 'bans', { 'filter[banList]': 'bm-list', 'page[key]': 'three', 'page[size]': '100' }]
+    [
+      'get',
+      'bans',
+      {
+        'filter[banList]': 'bm-list',
+        'filter[expired]': 'true',
+        sort: '-timestamp',
+        'page[size]': 100
+      }
+    ],
+    [
+      'get',
+      'bans',
+      {
+        'filter[banList]': 'bm-list',
+        'filter[expired]': 'true',
+        'page[key]': 'two',
+        'page[size]': '100'
+      }
+    ],
+    [
+      'get',
+      'bans',
+      {
+        'filter[banList]': 'bm-list',
+        'filter[expired]': 'true',
+        'page[key]': 'three',
+        'page[size]': '100'
+      }
+    ]
   ]
 );
 // Each page has up to 5 attempts, as BattleMetrics at times does not answer a page at all, and in
@@ -329,8 +358,8 @@ assert.strictEqual(fetcher.reading, null);
 // compare their pages with. Each request is counted as one of a read of all of a list.
 assert.deepStrictEqual(plainCopy(list.head), { uids: ['a', 'b'], total: 6 });
 assert.deepStrictEqual(plainCopy(fetcher.requests), { head: 0, follow: 0, full: 3 });
-// Without newest first, as with head polls off, the first request is as before head polls, and
-// a read gives no newest page.
+// Without newest first, as with head polls off, the first request is as before head polls, apart
+// from asking for expired bans, and a read gives no newest page.
 const unsorted = new BanFetcher({ newestFirst: false });
 reset();
 list = await unsorted.fetchBanList(banList);
@@ -338,6 +367,7 @@ assert.deepStrictEqual(
   { ...battlemetricsRequests[0].params },
   {
     'filter[banList]': 'bm-list',
+    'filter[expired]': 'true',
     'page[size]': 100
   }
 );
@@ -380,18 +410,25 @@ await assert.rejects(fetcher.fetchBattlemetricsHead(banList), (err) => {
 assert.strictEqual(battlemetricsRequests.length, 1);
 assertPageOptions(battlemetricsRequests[0]);
 
-// Links that lead back to a page already fetched, however they are written, are refused.
-reset();
-book({
-  first: {
-    data: [ban('a', steam(1))],
-    links: {
-      next: 'https://api.battlemetrics.com/bans?page[size]=100&sort=-timestamp&filter[banList]=bm-list'
+// Links that lead back to a page already fetched, however they are written, are refused: in any
+// order or encoding, and whether they repeat the request's filter[expired], as BattleMetrics' links
+// repeat its query, leave it out or give another value for it, as every page asks for expired bans.
+for (const query of [
+  'page[size]=100&sort=-timestamp&filter[banList]=bm-list',
+  'filter[expired]=true&page[size]=100&sort=-timestamp&filter[banList]=bm-list',
+  'filter%5Bexpired%5D=true&filter%5BbanList%5D=bm-list&sort=-timestamp&page%5Bsize%5D=100',
+  'page[size]=100&filter[expired]=false&sort=-timestamp&filter[banList]=bm-list'
+]) {
+  reset();
+  book({
+    first: {
+      data: [ban('a', steam(1))],
+      links: { next: `https://api.battlemetrics.com/bans?${query}` }
     }
-  }
-});
-await assert.rejects(fetcher.fetchBanList(banList), /Invalid BattleMetrics pagination link/);
-assert.strictEqual(battlemetricsRequests.length, 1);
+  });
+  await assert.rejects(fetcher.fetchBanList(banList), /Invalid BattleMetrics pagination link/);
+  assert.strictEqual(battlemetricsRequests.length, 1, query);
+}
 
 reset();
 book({
@@ -423,6 +460,81 @@ book({
   two: { data: [ban('b', steam(2))], links: {} }
 });
 assert.deepStrictEqual(ids((await fetcher.fetchBanList(banList)).bans), ['3,a', '3,b']);
+
+// A link to the next page is followed, and the page is asked for with the list's expired bans,
+// whatever the link gives for filter[expired]: one that repeats it, in either encoding, as
+// BattleMetrics' links repeat the request's query, one that leaves it out, and one that gives
+// another value for it. The page is asked for with the link's other parameters as they are.
+for (const query of [
+  'filter[banList]=bm-list&filter[expired]=true&sort=-timestamp&page[key]=two&page[size]=100',
+  'filter%5BbanList%5D=bm-list&filter%5Bexpired%5D=true&sort=-timestamp&page%5Bkey%5D=two&page%5Bsize%5D=100',
+  'filter[banList]=bm-list&sort=-timestamp&page[key]=two&page[size]=100',
+  'filter[expired]=false&filter[banList]=bm-list&sort=-timestamp&page[key]=two&page[size]=100'
+]) {
+  reset();
+  book({
+    first: {
+      data: [ban('a', steam(1))],
+      links: { next: `https://api.battlemetrics.com/bans?${query}` }
+    },
+    two: { data: [ban('b', steam(2))], links: {} }
+  });
+  assert.deepStrictEqual(ids((await fetcher.fetchBanList(banList)).bans), ['3,a', '3,b'], query);
+  assert.deepStrictEqual(
+    battlemetricsRequests.map(({ params }) => ({ ...params })),
+    [
+      {
+        'filter[banList]': 'bm-list',
+        'filter[expired]': 'true',
+        sort: '-timestamp',
+        'page[size]': 100
+      },
+      {
+        'filter[banList]': 'bm-list',
+        'filter[expired]': 'true',
+        sort: '-timestamp',
+        'page[key]': 'two',
+        'page[size]': '100'
+      }
+    ],
+    query
+  );
+}
+
+// BattleMetrics as its API documentation describes GET /bans: expired bans are hidden, and left out
+// of its count of the list's bans, unless filter[expired] is true. A read still gets every ban of
+// the list, expired or not, on the page a link leads to, here one that leaves the filter out, as on
+// the first. Had either page been asked for without the filter, the read would have looked
+// complete, as the count would have left the expired bans out too, and they would look removed.
+{
+  const expired = { expires: '2026-01-02T00:00:00.000Z' };
+  const pages = {
+    first: [ban('a', steam(1)), ban('b', steam(2), expired)],
+    two: [ban('c', steam(3), expired), ban('d', steam(4))]
+  };
+  const running = ({ attributes: { expires } }) => !expires || new Date(expires) > new Date();
+  const shown = (bans, params) =>
+    params['filter[expired]'] === 'true' ? bans : bans.filter(running);
+  const page = (key, next) => (params) => ({
+    meta: { total: shown([...pages.first, ...pages.two], params).length },
+    data: shown(pages[key], params),
+    links: { next }
+  });
+  reset();
+  book({ first: page('first', link('two')), two: page('two', null) });
+  list = await fetcher.fetchBanList(banList);
+  assert.deepStrictEqual(
+    Array.from(list.bans, (ban) => [ban.id, ban.expired]),
+    [
+      ['3,a', false],
+      ['3,b', true],
+      ['3,c', true],
+      ['3,d', false]
+    ]
+  );
+  assert.deepStrictEqual([list.complete, list.firstMetaTotal], [true, 4]);
+  assert.strictEqual(battlemetricsRequests.length, 2);
+}
 
 // BattleMetrics' count of the list's bans is returned. With the count check off, it does not limit
 // the pages read: a list with many more bans than its count is still read in full, and is complete
@@ -942,7 +1054,14 @@ await assert.rejects(fetcher.fetchBanList(remoteList), /the server answered HTTP
   const read = await reader.fetchBattlemetricsHead(banList);
   assert.deepStrictEqual(
     battlemetricsRequests.map(({ params }) => ({ ...params })),
-    [{ 'filter[banList]': 'bm-list', sort: '-timestamp', 'page[size]': 100 }]
+    [
+      {
+        'filter[banList]': 'bm-list',
+        'filter[expired]': 'true',
+        sort: '-timestamp',
+        'page[size]': 100
+      }
+    ]
   );
   const [head] = read.pages;
   assert.deepStrictEqual(plainCopy({ ...head, bans: ids(head.bans) }), {
@@ -952,7 +1071,12 @@ await assert.rejects(fetcher.fetchBanList(remoteList), /the server answered HTTP
     total: 5,
     active: 2,
     expired: 3,
-    next: { 'filter[banList]': 'bm-list', 'page[key]': 'two', 'page[size]': '100' }
+    next: {
+      'filter[banList]': 'bm-list',
+      'filter[expired]': 'true',
+      'page[key]': 'two',
+      'page[size]': '100'
+    }
   });
   assert.deepStrictEqual(plainCopy(reader.requests), { head: 1, follow: 0, full: 0 });
   const followed = await reader.followBattlemetrics(read);
@@ -965,9 +1089,18 @@ await assert.rejects(fetcher.fetchBanList(remoteList), /the server answered HTTP
   assert.deepStrictEqual(ids(list.bans), ['3,a', '3,c', '3,d', '3,e']);
   assert.deepStrictEqual([list.complete, list.rawCount, list.firstMetaTotal], [true, 5, 5]);
   assert.deepStrictEqual(plainCopy(list.head), { uids: ['a', 'b'], total: 5 });
+  // The page the poll followed, and the one the read of all of the list read on to, asked for the
+  // list's expired bans too, as its newest page did.
   assert.deepStrictEqual(
-    battlemetricsRequests.map(({ params }) => params['page[key]'] ?? 'first'),
-    ['first', 'two', 'three']
+    battlemetricsRequests.map(({ params }) => [
+      params['page[key]'] ?? 'first',
+      params['filter[expired]']
+    ]),
+    [
+      ['first', 'true'],
+      ['two', 'true'],
+      ['three', 'true']
+    ]
   );
   assert.deepStrictEqual(plainCopy(reader.requests), { head: 1, follow: 1, full: 1 });
 
@@ -1018,5 +1151,5 @@ await assert.rejects(fetcher.fetchBanList(remoteList), /the server answered HTTP
 }
 
 console.log(
-  "Ban list fetch checks passed: remote bodies, limits and retries, remote files kept and asked about, BattleMetrics paging, each page's attempts' time limits and stops, the page under way and the page a read failed on, the count check, reads longer than the count, counts that change too much, lists left out of the check, SteamIDs, hidden bans, and head polls read on in full."
+  "Ban list fetch checks passed: remote bodies, limits and retries, remote files kept and asked about, BattleMetrics paging, expired bans asked for on every page, each page's attempts' time limits and stops, the page under way and the page a read failed on, the count check, reads longer than the count, counts that change too much, lists left out of the check, SteamIDs, hidden bans, and head polls read on in full."
 );

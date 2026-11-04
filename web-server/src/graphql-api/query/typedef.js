@@ -23,7 +23,7 @@ export default gql`
       """
       The order to list players in: id, the default; reputationRank, which lists ranked players;
       reputationPointsMonthChange, which lists ranked players whose points rose this month; or
-      lastViewed, which lists players who have been viewed.
+      lastViewed, which lists players with reputation points who have been viewed.
       """
       orderBy: String
       orderDirection: OrderDirection

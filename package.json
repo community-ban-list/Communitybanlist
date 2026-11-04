@@ -39,9 +39,5 @@
     "neostandard": "^0.13.0",
     "nodemon": "^3.1.14",
     "prettier": "^3.9.9"
-  },
-  "dependencies": {
-    "react-step-wizard": "^5.3.5",
-    "simple-discord-webhooks": "^2.1.0"
   }
 }

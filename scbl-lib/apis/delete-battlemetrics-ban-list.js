@@ -74,7 +74,9 @@ export async function checkOwnership(id) {
       throw error;
     });
     if (ownership) {
-      if (String(ownership.data.data.relationships.owner.data.id) !== owner)
+      const ownerID = ownership.data?.data?.relationships?.owner?.data?.id;
+      if (!ownerID) throw new Error('Invalid BattleMetrics ownership response.');
+      if (String(ownerID) !== owner)
         throw new Error('The configured CBL organization does not own this BattleMetrics list.');
       return true;
     }
