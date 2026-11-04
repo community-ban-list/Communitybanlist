@@ -38,6 +38,10 @@ FROM dhi.io/node:26@sha256:dc87c509f7279f734d04036f696bf9aad1b8d66f34750f32c30c5
 
 WORKDIR /opt/workdir/
 
+# The web server serves the site only when NODE_ENV is exactly production
+# (web-server/src/production.js).
+ENV NODE_ENV=production
+
 # Copy only the necessary files from the build stage
 COPY --from=build /opt/workdir /opt/workdir
 

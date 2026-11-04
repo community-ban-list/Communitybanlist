@@ -136,7 +136,8 @@ export default class Core {
   }
 
   // Send the export bans' changes to their lists, counting in counts how many were queued, and how
-  // many were created, deleted and failed, also when the step stops part-way.
+  // many were created, deleted and failed, in all and for each type of list (remote and
+  // battlemetrics), also when the step stops part-way.
   static async exportExportBans(counts = {}) {
     Logger.verbose('Core', 2, 'Exporting Bans...');
     const profileStartTime = Date.now();
@@ -228,7 +229,14 @@ export default class Core {
     // Changes reach BattleMetrics from here on, so they must never be made by two runs at once.
     await checkRunLock();
 
-    Object.assign(counts, { queued: exportBans.length, created: 0, deleted: 0, failed: 0 });
+    Object.assign(counts, {
+      queued: exportBans.length,
+      created: 0,
+      deleted: 0,
+      failed: 0,
+      remote: { created: 0, deleted: 0, failed: 0 },
+      battlemetrics: { created: 0, deleted: 0, failed: 0 }
+    });
 
     // Whether BattleMetrics refused the API key, which every BattleMetrics export ban list uses.
     let battlemetricsRefused = false;
@@ -269,8 +277,11 @@ export default class Core {
       if (failures && failures.stopped) continue;
 
       // A creation marks the export ban as created before saving it, so a failed save is still
-      // described as a creation.
+      // described as a creation. A list that is not a BattleMetrics list is a remote one, as
+      // createExportBan and deleteExportBan take it to be.
       const creating = exportBan.status === 'TO_BE_CREATED';
+      const typeCounts =
+        counts[exportBanList.type === 'battlemetrics' ? 'battlemetrics' : 'remote'];
       Logger.verbose(
         'Core',
         2,
@@ -284,6 +295,7 @@ export default class Core {
         if (made) {
           listChangeCount[exportBanList.id].made++;
           counts[creating ? 'created' : 'deleted']++;
+          typeCounts[creating ? 'created' : 'deleted']++;
           if (failures) {
             failures.count = 0;
             listsDown = 0;
@@ -291,6 +303,7 @@ export default class Core {
         }
       } catch (err) {
         counts.failed++;
+        typeCounts.failed++;
         if (err.auth) {
           battlemetricsRefused = true;
           await Logger.verbose(

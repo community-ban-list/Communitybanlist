@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Navigate, useNavigate } from 'react-router';
 import { Button, Card, CardHeader, Container, Row, Col } from 'reactstrap';
 
@@ -11,13 +11,16 @@ export default function () {
 
   const urlParams = new URLSearchParams(window.location.search);
   const signingIn = Auth.isLoggedIn === false && urlParams.get('openid.claimed_id') !== null;
+  // Steam's answer can only be used once, so a sign-in that failed is not tried again with it.
+  const [failed, setFailed] = useState(false);
 
   // Hooks must run on every render, so the effect checks whether to sign in. Calling it only while
   // signing in crashed the page once React Router 7's useNavigate added hooks of its own.
   useEffect(() => {
-    if (!signingIn) return;
-    Auth.attemptAuth(window.location.search).then(() => {
-      navigate('/login', { replace: true });
+    if (!signingIn || failed) return;
+    Auth.attemptAuth(window.location.search).then((signedIn) => {
+      if (signedIn) navigate('/login', { replace: true });
+      else setFailed(true);
     });
   });
 
@@ -53,7 +56,6 @@ export default function () {
                         onClick={() => {
                           Auth.saveToken = true;
                           Auth.storeToken();
-                          console.log(Auth);
                           navigate('/');
                         }}
                       >
@@ -80,9 +82,17 @@ export default function () {
               <Col lg="5">
                 <Card className="shadow border-0">
                   <CardHeader className="bg-transparent pb-5">
-                    <div className="text-center mt-2 mb-3">Loading...</div>
+                    <div className="text-center mt-2 mb-3">
+                      {failed ? 'Sign-in failed, please try again.' : 'Loading...'}
+                    </div>
                     <div className="btn-wrapper text-center">
-                      <i className="fas fa-circle-notch fa-spin fa-4x" />
+                      {failed ? (
+                        <Button color="default" href="/auth/steam">
+                          Try again
+                        </Button>
+                      ) : (
+                        <i className="fas fa-circle-notch fa-spin fa-4x" />
+                      )}
                     </div>
                   </CardHeader>
                 </Card>

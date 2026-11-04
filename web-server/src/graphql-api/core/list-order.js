@@ -28,7 +28,9 @@ const LISTS = {
         thenBy: [['reputationRank', 'ASC']],
         where: { reputationPointsMonthChange: { [Op.gt]: 0 }, reputationRank: { [Op.ne]: null } }
       },
-      lastViewed: { where: { lastViewed: { [Op.ne]: null } } }
+      // The viewed players with reputation points, so that Recently Viewed Players shows the players
+      // the ban lists name. A player's points follow their bans once the importer recalculates them.
+      lastViewed: { where: { lastViewed: { [Op.ne]: null }, reputationPoints: { [Op.gt]: 0 } } }
     }
   }
 };

@@ -95,9 +95,9 @@ const imported = (counts = {}, banLists = []) => ({
 });
 
 // What a cycle did, from its counts: the bans it added, updated, removed and marked expired, the
-// export bans it created and deleted, the players the reputation check queued, the lists that
-// failed, the bans held by the lists it read in full, and the Steam profiles it updated. Counts a
-// step did not give, or that are not counts, are none.
+// export bans it created and deleted, in all and on each type of list, the players the reputation
+// check queued, the lists that failed, the bans held by the lists it read in full, and the Steam
+// profiles it updated. Counts a step did not give, or that are not counts, are none.
 {
   const numbers = copy(
     cycleNumbers(
@@ -111,7 +111,14 @@ const imported = (counts = {}, banLists = []) => ({
           expireBans: { due: 4, expired: 4, players: 3 },
           checkReputationPoints: { ran: true, checked: 145000, mismatched: 6, queued: 6 },
           updateSteamUserInfo: { due: 300, updated: 250 },
-          exportExportBans: { queued: 7, created: 5, deleted: 2, failed: 0 }
+          exportExportBans: {
+            queued: 7,
+            created: 5,
+            deleted: 2,
+            failed: 0,
+            remote: { created: 2, deleted: 2, failed: 0 },
+            battlemetrics: { created: 3, deleted: 0, failed: 0 }
+          }
         }
       }),
       { battlemetricsRequests: 23 }
@@ -126,6 +133,10 @@ const imported = (counts = {}, banLists = []) => ({
     expired: 4,
     created: 5,
     deleted: 2,
+    exportsByType: {
+      battlemetrics: { created: 3, deleted: 0 },
+      remote: { created: 2, deleted: 2 }
+    },
     reputationQueued: 6,
     failedLists: 1,
     held: 17,
@@ -139,7 +150,8 @@ const imported = (counts = {}, banLists = []) => ({
         record({
           counts: {
             importBans: { new: -1, updated: 'x', dryRun: true },
-            checkReputationPoints: { ran: false, dueAt: '2026-10-23T14:02:00.000Z' }
+            checkReputationPoints: { ran: false, dueAt: '2026-10-23T14:02:00.000Z' },
+            exportExportBans: { created: 1, remote: { created: 'x', deleted: -1 } }
           }
         })
       )
@@ -149,8 +161,12 @@ const imported = (counts = {}, banLists = []) => ({
       updated: 0,
       removed: 0,
       expired: 0,
-      created: 0,
+      created: 1,
       deleted: 0,
+      exportsByType: {
+        battlemetrics: { created: 0, deleted: 0 },
+        remote: { created: 0, deleted: 0 }
+      },
       reputationQueued: 0,
       failedLists: 0,
       held: 0,
@@ -210,9 +226,9 @@ const imported = (counts = {}, banLists = []) => ({
 }
 
 // The totals sum up the cycles that ended: how many, how many failed and were stopped, the bans
-// and export bans, the players the reputation check queued, the lists that failed, the
-// BattleMetrics requests and Steam profiles, and the slowest cycle. A dry run's bans were not
-// written, so they are not counted.
+// and export bans, in all and on each type of list, the players the reputation check queued, the
+// lists that failed, the BattleMetrics requests and Steam profiles, and the slowest cycle. A dry
+// run's bans were not written, so they are not counted.
 {
   const totals = newTotals(START);
   const add = (cycle) =>
@@ -226,7 +242,12 @@ const imported = (counts = {}, banLists = []) => ({
         expireBans: { due: 2, expired: 2, players: 2 },
         checkReputationPoints: { ran: true, checked: 145000, mismatched: 1500, queued: 1000 },
         updateSteamUserInfo: { updated: 250 },
-        exportExportBans: { created: 4, deleted: 1 }
+        exportExportBans: {
+          created: 4,
+          deleted: 1,
+          battlemetrics: { created: 3, deleted: 1 },
+          remote: { created: 1, deleted: 0 }
+        }
       }
     })
   );
@@ -237,7 +258,9 @@ const imported = (counts = {}, banLists = []) => ({
       exitCode: 3,
       seconds: 900,
       counts: {
-        checkReputationPoints: { ran: true, checked: 144000, mismatched: 500, queued: 441 }
+        checkReputationPoints: { ran: true, checked: 144000, mismatched: 500, queued: 441 },
+        // A cycle stopped part-way counts what its export push did.
+        exportExportBans: { created: 2, deleted: 2, remote: { created: 2, deleted: 2 } }
       }
     })
   );
@@ -258,8 +281,12 @@ const imported = (counts = {}, banLists = []) => ({
     updated: 1,
     removed: 0,
     expired: 2,
-    created: 4,
-    deleted: 1,
+    created: 6,
+    deleted: 3,
+    exportsByType: {
+      battlemetrics: { created: 3, deleted: 1 },
+      remote: { created: 3, deleted: 2 }
+    },
     reputationQueued: 1441,
     failedLists: 2,
     battlemetricsRequests: 100,
@@ -279,7 +306,7 @@ const imported = (counts = {}, banLists = []) => ({
     `<t:${UNIX}:f> to <t:${UNIX + 53 * 60}:t>`,
     '**Cycles** 5 run · 1 failed · 1 stopped · 2 lists failed',
     '**Bans** 3 added · 1 updated · 0 removed · 2 expired',
-    '**Export bans** 4 created · 1 deleted',
+    '**Export bans** 6 created (3 BattleMetrics, 3 remote) · 3 deleted (1 BattleMetrics, 2 remote)',
     '**Reputation check** 1,441 players queued',
     '**BattleMetrics** 100 requests',
     '**Steam** 250 profiles updated',
@@ -338,7 +365,7 @@ const last = {
         importBans: imported({ new: 2, removed: 1 }),
         expireBans: { expired: 3 },
         checkReputationPoints: { ran: true, checked: 145000, mismatched: 3, queued: 3 },
-        exportExportBans: { created: 4, deleted: 0 }
+        exportExportBans: { created: 4, deleted: 0, battlemetrics: { created: 4, deleted: 0 } }
       }
     })
   )
@@ -372,7 +399,7 @@ const running = {
     '',
     `🔄 **Cycle 2** · started <t:${UNIX + 600}:R> · **Import** 7 / 20 ban lists`,
     `✅ **Cycle 1** finished in **45s**, <t:${UNIX + 45}:R>`,
-    '> 2 bans added, 1 removed, 3 expired · 4 export bans created · 3 players queued by the reputation check',
+    '> 2 bans added, 1 removed, 3 expired · 4 export bans created (4 BattleMetrics) · 3 players queued by the reputation check',
     '',
     `**Since <t:${UNIX}:t>** · 1 cycle · bans 2 added, 0 updated, 0 removed, 0 expired · export bans 0 created, 0 deleted · 21 BattleMetrics requests · 0 Steam profiles updated · slowest 45s`
   ]);
@@ -391,6 +418,39 @@ const running = {
   assert.strictEqual(
     lines(render({ ...running, totals: withQueued })).at(-1),
     `**Since <t:${UNIX}:t>** · 2 cycles · bans 2 added, 0 updated, 0 removed, 0 expired · export bans 0 created, 0 deleted · 441 players queued by the reputation check · 21 BattleMetrics requests · 0 Steam profiles updated · slowest 45s`
+  );
+
+  // The export bans created and deleted, in the totals and in the last cycle's changes, say how
+  // many were on BattleMetrics and remote lists, naming only the types that had any.
+  const pushed = record({
+    cycle: 2,
+    counts: {
+      exportExportBans: {
+        created: 1,
+        deleted: 3,
+        battlemetrics: { created: 1, deleted: 1 },
+        remote: { created: 0, deleted: 2 }
+      }
+    }
+  });
+  const withExports = addCycle(copy(totals), pushed, cycleNumbers(pushed));
+  const shown = lines(
+    render({ ...running, totals: withExports, last: { ...last, numbers: cycleNumbers(pushed) } })
+  );
+  assert.strictEqual(
+    shown[5],
+    '> 1 export ban created (1 BattleMetrics), 3 deleted (1 BattleMetrics, 2 remote)'
+  );
+  assert.strictEqual(
+    shown.at(-1),
+    `**Since <t:${UNIX}:t>** · 2 cycles · bans 2 added, 0 updated, 0 removed, 0 expired · export bans 1 created (1 BattleMetrics), 3 deleted (1 BattleMetrics, 2 remote) · 21 BattleMetrics requests · 0 Steam profiles updated · slowest 45s`
+  );
+  const deletedOnly = record({
+    counts: { exportExportBans: { created: 0, deleted: 2, remote: { created: 0, deleted: 2 } } }
+  });
+  assert.strictEqual(
+    lines(render({ ...running, last: { ...last, numbers: cycleNumbers(deletedOnly) } }))[5],
+    '> 2 export bans deleted (2 remote)'
   );
 
   // A cycle that waits for the database, or for another run to end, as it holds the run lock, says

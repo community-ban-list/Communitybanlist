@@ -6,9 +6,9 @@ const { DataTypes } = Sequelize;
 
 // The bans a complete read of their ban list no longer had, which the ban importer removes only once
 // a later complete read, at least 10 minutes on, still does not have them, and the bans it holds
-// for an admin, as their list seemed to have lost all of them. A ban that comes back loses its
-// row. A list's rows are deleted with the list. The importer makes this table with its migrations,
-// so the model is never synced.
+// for an admin, as their list seemed to have lost all of them, or a large part of them at once
+// (see BanListHolds). A ban that comes back loses its row. A list's rows are deleted with the
+// list. The importer makes this table with its migrations, so the model is never synced.
 export default sequelize.define(
   'BanListPendingRemoval',
   {
@@ -32,7 +32,8 @@ export default sequelize.define(
       allowNull: false
     },
     // When the importer began holding the ban for an admin, as a complete read of its list had none
-    // of the list's bans, or NULL for a ban that only waits for a later complete read.
+    // of the list's bans, or lost a large part of them at once, or NULL for a ban that only waits
+    // for a later complete read.
     heldAt: {
       type: DataTypes.DATE(3),
       allowNull: true

@@ -20,7 +20,10 @@ export default [
       'react-hooks/exhaustive-deps': 'warn',
       // Handlers are often third-party props, such as react-step-wizard's nextStep, which this
       // naming rule would require renaming.
-      'react/jsx-handler-names': 'off'
+      'react/jsx-handler-names': 'off',
+      // Anything logged in the browser shows in every visitor's console, including sign-in
+      // details. Warnings and errors stay allowed for problems worth reporting.
+      'no-console': ['error', { allow: ['warn', 'error'] }]
     }
   },
   prettier

@@ -7,9 +7,14 @@ const parseJsonBody = BodyParser({
   // not come from the site.
   jsonLimit: '100kb',
   strict: true,
+  // Answer a body that cannot be read with the status the parser gives it, such as 413 for one over
+  // the limit or 400 for one that is not JSON, and a fixed message. The parser's error can hold the
+  // body itself, so only what kind of error it was is logged.
   onerror: function (err, ctx) {
-    if (err) console.log(err);
-    ctx.throw(422, 'body parse error');
+    console.log(`Could not read a request body: ${err.type || err.name} (${err.status})`);
+    const status = err.status >= 400 && err.status < 500 ? err.status : 400;
+    if (status === 413) ctx.throw(413, 'Request body too large.');
+    ctx.throw(status, 'Request body could not be read.');
   }
 });
 
