@@ -98,7 +98,7 @@ export function configProblems(values, exportBanList, banLists, limits) {
 
 // What the edit form says above its fields about a saved list outside today's limits.
 export const OUTSIDE_LIMITS_NOTE =
-  "This list's settings are outside today's limits. You can keep them, and changes that make the list smaller are always allowed. Other changes must bring the whole list within the limits, so once you change these settings you may not be able to set them back.";
+  "This list's settings are outside today's limits. You can keep them, and you can always rename the list or change its webhook. Changes that make the list smaller, such as a higher threshold, are allowed too, as long as each value you set is within its allowed range and none of the list's settings or points is empty or below 0. Other changes must bring the whole list within the limits, so once you change these settings you may not be able to set them back.";
 
 // What puts a saved list outside today's points rules, as the problems the limits give, each with
 // its message, or none for a list within them.
@@ -140,12 +140,25 @@ const numberRule = (name) =>
     )
     .typeError(checkBounds({ [name]: NaN })[0].message);
 
-// The list form's schema: the format rules every list meets for its name, server, type and webhook
-// (scbl-lib/validators.js), its settings as numbers, and then the limits.
+// The rule for the list form's name, server or webhook: the format rule every list meets
+// (scbl-lib/validators.js). On a saved list, a value the same as the saved one is left alone, as
+// the web server leaves it, so a list saved before the rules can still be changed.
+const formatRule = (name) =>
+  yup.lazy((value, { context }) =>
+    context?.exportBanList && value === context.exportBanList[name]
+      ? yup.mixed()
+      : Validators.ExportBanList[name]
+  );
+
+// The list form's schema: the format rules for its name, server, type and webhook, its settings as
+// numbers, and then the limits.
 const listSchema = yup
   .object()
   .shape({
     ...Validators.ExportBanList,
+    ...Object.fromEntries(
+      ['name', 'server', 'discordWebhook'].map((name) => [name, formatRule(name)])
+    ),
     ...Object.fromEntries(SETTINGS.map((name) => [name, numberRule(name)]))
   })
   .test(

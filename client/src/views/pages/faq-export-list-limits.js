@@ -109,6 +109,6 @@ export default function exportListLimitsAnswer(limits) {
     ...rules(types, limits),
     ...caps(Object.fromEntries(types.map((type) => [type, limits[type]]))),
     `Points can be whole numbers from 0 to ${number(POINTS_MAX)}, thresholds from 1 to ${number(THRESHOLD_MAX)}, and max ban ages from 0 to ${number(MAX_BAN_AGE_MAX)} days, where 0 counts bans of any age.`,
-    'Export ban lists saved before these limits keep working as they are, and you can always rename them or make them smaller, for example by raising the threshold. Changes that could make one bigger must bring the whole list within the limits.'
+    "Export ban lists saved before these limits keep working as they are, and you can always rename them or change their webhooks. Changes that make one smaller, for example raising its threshold, are allowed too, as long as each value set is within these ranges and none of the list's settings or points is empty or below 0. Other changes must bring the whole list within the limits."
   ].join(' ');
 }

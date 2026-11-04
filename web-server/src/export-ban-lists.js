@@ -27,6 +27,9 @@ router.get('/:id', async (ctx) => {
       })
     : [];
 
+  // The list is always plain text, one player a line. Say so, rather than leave Koa to guess the
+  // type from the first line.
+  ctx.type = 'text/plain; charset=utf-8';
   ctx.body = exportBans.map((exportBan) => `${exportBan.steamUser}:0`).join('\n');
 });
 

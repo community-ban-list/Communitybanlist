@@ -46,7 +46,7 @@ const stubs = {
   graphql: { default: graphql },
   'scbl-lib/db/models': { Ban, BanList: {}, ExportBanList: {}, Organisation: {}, SteamUser },
   'scbl-lib/db/sequelize': { Op },
-  'scbl-lib/utils': { calculateRiskRating() {} }
+  'scbl-lib/utils': { calculateRiskRating() {}, describeError: String }
 };
 
 const { Query } = await load('../src/graphql-api/query/resolver.js', stubs);
@@ -109,8 +109,8 @@ const INVALID_CURSOR = 'Invalid page cursor.';
 
 // Each list's sort orders, as the site's pages use them. Each order leaves out the rows with no
 // value to sort by. This month's most harmful players are those with a rank whose points rose,
-// sorted by rank when their points rose by the same amount. A player's bans are only theirs, and
-// only the active or expired ones when asked.
+// sorted by rank when their points rose by the same amount. Recently viewed players are those with
+// reputation points. A player's bans are only theirs, and only the active or expired ones when asked.
 const notNull = { [Op.ne]: null };
 for (const [list, args, order, where] of [
   [bans, {}, [['created', 'DESC']], { created: notNull }],
@@ -144,7 +144,7 @@ for (const [list, args, order, where] of [
     steamUsers,
     { orderBy: 'lastViewed', orderDirection: 'DESC' },
     [['lastViewed', 'DESC']],
-    { lastViewed: notNull }
+    { lastViewed: notNull, reputationPoints: { [Op.gt]: 0 } }
   ]
 ]) {
   const options = optionsFor(list, args);

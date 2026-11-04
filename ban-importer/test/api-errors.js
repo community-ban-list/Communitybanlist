@@ -126,15 +126,26 @@ const exportBan = (
     this.destroyed = true;
   }
 });
-// Resolves with what the step counted.
+// Resolves with what the step counted, copied into this context to compare it.
 async function exportExportBans(...bans) {
   logs.length = 0;
   progress.length = 0;
   exportBans = bans;
   const counts = {};
   await Core.exportExportBans(counts);
-  return { ...counts };
+  return JSON.parse(JSON.stringify(counts));
 }
+
+// The step's counts: how many export bans were queued, and how many were created, deleted and
+// failed, in all and on BattleMetrics and remote lists, each given as [created, deleted, failed].
+const exportCounts = (queued, [bmCreated, bmDeleted, bmFailed], [created, deleted, failed]) => ({
+  queued,
+  created: bmCreated + created,
+  deleted: bmDeleted + deleted,
+  failed: bmFailed + failed,
+  remote: { created, deleted, failed },
+  battlemetrics: { created: bmCreated, deleted: bmDeleted, failed: bmFailed }
+});
 
 // A BattleMetrics export ban that could not be created is logged with its error. When BattleMetrics
 // did not answer, as the request timed out or was cut off, it is most likely not answering at all,
@@ -212,7 +223,7 @@ assert.strictEqual(exportError, saveError);
 const gone = exportBan('TO_BE_DELETED', { request: () => 'gone' });
 const goneCounts = await exportExportBans(gone);
 assert.strictEqual(gone.requests, 1);
-assert.deepStrictEqual(goneCounts, { queued: 1, created: 0, deleted: 1, failed: 0 });
+assert.deepStrictEqual(goneCounts, exportCounts(1, [0, 1, 0], [0, 0, 0]));
 assert.deepStrictEqual(errorLines(), [
   `Removed export ban (ID: ${gone.id}) from Lists due to error 404 during deletion.`
 ]);
@@ -270,7 +281,48 @@ assert.deepStrictEqual(
 );
 assert.ok(!errorLines().some((line) => line.startsWith('Stopped')));
 // The step counts the export bans it created and deleted apart, and those that failed.
-assert.deepStrictEqual(mixedCounts, { queued: 8, created: 2, deleted: 1, failed: 5 });
+assert.deepStrictEqual(mixedCounts, exportCounts(8, [2, 1, 5], [0, 0, 0]));
+
+// It counts them on BattleMetrics and remote lists apart too: those made on BattleMetrics,
+// including one whose ban an earlier run made or that was already gone, those only marked for a
+// remote list, and those that failed on either, such as a remote list's export ban whose save
+// failed. One left for a later run, or that had no BattleMetrics ban, is none of these.
+const lostConnection = new Error('Connection lost: The server closed the connection.');
+const unsavable = (status) =>
+  Object.assign(exportBan(status, { list: remoteList }), {
+    async save() {
+      throw lostConnection;
+    },
+    async destroy() {
+      throw lostConnection;
+    }
+  });
+const byType = [
+  exportBan('TO_BE_CREATED'),
+  exportBan('TO_BE_CREATED', { request: () => 'found' }),
+  exportBan('TO_BE_CREATED', { request: () => 'waiting' }),
+  exportBan('TO_BE_DELETED'),
+  exportBan('TO_BE_DELETED', { request: () => 'gone' }),
+  exportBan('TO_BE_DELETED', { request: () => 'cleared' }),
+  rejected(),
+  exportBan('TO_BE_CREATED'),
+  rejected('TO_BE_DELETED'),
+  exportBan('TO_BE_CREATED', { list: remoteList }),
+  exportBan('TO_BE_DELETED', { list: remoteList }),
+  exportBan('TO_BE_DELETED', { list: remoteList }),
+  unsavable('TO_BE_CREATED'),
+  unsavable('TO_BE_DELETED'),
+  unsavable('TO_BE_DELETED')
+];
+assert.deepStrictEqual(await exportExportBans(...byType), exportCounts(15, [3, 2, 2], [1, 2, 3]));
+assert.deepStrictEqual(
+  errorLines().filter((line) => line.endsWith(lostConnection.message)),
+  [
+    `Failed to create export ban (ID: ${byType[12].id}): ${lostConnection.message}`,
+    `Failed to delete export ban (ID: ${byType[13].id}): ${lostConnection.message}`,
+    `Failed to delete export ban (ID: ${byType[14].id}): ${lostConnection.message}`
+  ]
+);
 
 // Once BattleMetrics refuses the key, the BattleMetrics export bans left wait for the next run, as
 // it would refuse them too. Remote lists' export bans are still updated.
@@ -291,7 +343,7 @@ assert.deepStrictEqual(
   progress,
   [0, 1, 2, 3, 4].map((done) => [done, 4, 'export bans'])
 );
-assert.deepStrictEqual(refusedCounts, { queued: 4, created: 1, deleted: 0, failed: 1 });
+assert.deepStrictEqual(refusedCounts, exportCounts(4, [0, 0, 1], [1, 0, 0]));
 assert.deepStrictEqual(
   bans.map((ban) => ban.requests),
   [1, 0, 0, 0]

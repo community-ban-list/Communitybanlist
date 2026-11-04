@@ -11,8 +11,9 @@ let timeoutAt;
 let goneAt;
 // What BattleMetrics answers when the ban list itself is looked up: an answer, or an error.
 let banListAnswer;
-// An error for the ownership check to fail with.
+// An error for the ownership check to fail with, or an answer for it to get instead of CBL's.
 let ownershipError;
+let ownershipAnswer;
 let wrongOwner;
 let invalidSubscription;
 let loop;
@@ -51,6 +52,7 @@ const request = async (method, endpoint, params) => {
   }
   if (endpoint === `${base}/organizations/42`) {
     if (ownershipError) throw ownershipError;
+    if (ownershipAnswer) return ownershipAnswer;
     return {
       data: { data: { relationships: { owner: { data: { id: wrongOwner ? '99' : '42' } } } } }
     };
@@ -111,6 +113,7 @@ const reset = () => {
   goneAt = [];
   banListAnswer = { data: { data: { type: 'banList', id: 'test-list' } } };
   ownershipError = null;
+  ownershipAnswer = null;
   wrongOwner = false;
   invalidSubscription = false;
   loop = false;
@@ -199,6 +202,25 @@ for (const [answer, message] of [
     return true;
   });
   assert.deepStrictEqual(calls, [ownership, lookUp]);
+}
+
+// An answer to the ownership check that does not say who owns the ban list fails the check, and
+// says so, without looking the ban list up.
+for (const answer of [
+  { data: '<html>Not JSON</html>' },
+  { data: {} },
+  { data: { data: { relationships: { owner: { data: null } } } } }
+]) {
+  reset();
+  ownershipAnswer = answer;
+  await assert.rejects(remove('test-list'), (error) => {
+    assert.strictEqual(
+      error.message,
+      'BattleMetrics deletion failed while checking ownership: Invalid BattleMetrics ownership response. The local list was retained; any invites or subscriptions already removed remain removed.'
+    );
+    return true;
+  });
+  assert.deepStrictEqual(calls, [ownership]);
 }
 
 // Any other failure of the ownership check fails without looking the ban list up.

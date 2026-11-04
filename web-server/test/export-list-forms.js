@@ -334,7 +334,7 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(
   forms.OUTSIDE_LIMITS_NOTE,
-  "This list's settings are outside today's limits. You can keep them, and changes that make the list smaller are always allowed. Other changes must bring the whole list within the limits, so once you change these settings you may not be able to set them back."
+  "This list's settings are outside today's limits. You can keep them, and you can always rename the list or change its webhook. Changes that make the list smaller, such as a higher threshold, are allowed too, as long as each value you set is within its allowed range and none of the list's settings or points is empty or below 0. Other changes must bring the whole list within the limits, so once you change these settings you may not be able to set them back."
 );
 for (const within of [listOf({}), listOf({ threshold: 5 }), { ...withConfig, threshold: 10 }])
   assert.deepStrictEqual(forms.outsideLimits(within, limits), []);
@@ -462,6 +462,14 @@ assert.deepStrictEqual(form.errors(), {
 await form.type('threshold', '5');
 assert.deepStrictEqual(form.errors(), {});
 assert.strictEqual((await form.submit()).threshold, 5);
+// That holds for a higher threshold too, which the edit form's note says, while the same list with
+// no value below 0 can have its threshold raised.
+form = listForm(listOf({ threshold: 3, defaultActivePoints: 5, defaultExpiredPoints: -1 }));
+await form.type('threshold', '4');
+assert.deepStrictEqual(Object.keys(form.errors()), ['threshold']);
+form = listForm(listOf({ threshold: 3, defaultActivePoints: 5, defaultExpiredPoints: 0 }));
+await form.type('threshold', '4');
+assert.deepStrictEqual(form.errors(), {});
 
 // A list with a value outside the bounds can still be saved, and its other values changed. The
 // values a change sets must be within them.
@@ -471,6 +479,72 @@ await form.type('threshold', '10');
 assert.deepStrictEqual(form.errors(), {});
 await form.type('maxBanAge', '4000');
 assert.deepStrictEqual(form.errors(), { maxBanAge: MESSAGES.maxBanAge });
+// That holds for a change that makes a list outside the rules smaller too, which the edit form's
+// note says: here the max ban age can be lowered to 3,650 but not to a value still above it, and
+// the active points lowered to 100 but not to a value still above it.
+for (const [saved, field, refused, allowed, message] of [
+  [{ threshold: 3, maxBanAge: 5000 }, 'maxBanAge', '4000', '3650', MESSAGES.maxBanAge],
+  [
+    { threshold: 150, defaultActivePoints: 200 },
+    'defaultActivePoints',
+    '150',
+    '100',
+    MESSAGES.points
+  ]
+]) {
+  const list = listOf(saved);
+  assert.notDeepStrictEqual(forms.outsideLimits(list, limits), [], JSON.stringify(saved));
+  form = listForm(list);
+  await form.type(field, refused);
+  assert.deepStrictEqual(form.errors(), { [field]: message }, JSON.stringify(saved));
+  assert.strictEqual(await form.submit(), undefined);
+  await form.type(field, allowed);
+  assert.deepStrictEqual(form.errors(), {}, JSON.stringify(saved));
+  assert.strictEqual((await form.submit())[field], Number(allowed));
+}
+
+// A list saved with a name and server longer than the form's rules allow, and a webhook that is not
+// a Discord one, can still be saved with them and have its settings changed, as the web server
+// only checks the name, server and webhook a change sets. Those typed in must follow the rules.
+const NAME_RULE = 'A name between 1 and 40 characters long is required.';
+const SERVER_RULE = 'A community/server name between 1 and 40 characters long is required.';
+const longNamed = listOf({
+  name: 'An older list whose name is 41 characters',
+  server: 'An older server with a name of 41 letters',
+  discordWebhook: 'https://example.com/webhook'
+});
+const RENAMED = 'A renamed list with a name of 41 letters!';
+const ANOTHER_SERVER = 'Another server with a name of 41 letters!';
+for (const value of [longNamed.name, longNamed.server, RENAMED, ANOTHER_SERVER])
+  assert.strictEqual(value.length, 41, value);
+form = listForm(longNamed);
+await form.type('threshold', '10');
+assert.deepStrictEqual(form.errors(), {});
+assert.deepStrictEqual(await form.submit(), {
+  ...forms.listFormOptions(longNamed, limits).defaultValues,
+  threshold: 10
+});
+await form.type('name', RENAMED);
+assert.deepStrictEqual(form.errors(), { name: NAME_RULE });
+assert.strictEqual(await form.submit(), undefined);
+await form.type('name', longNamed.name);
+await form.type('server', ANOTHER_SERVER);
+await form.type('discordWebhook', 'https://example.com/another-webhook');
+assert.deepStrictEqual(form.errors(), {
+  server: SERVER_RULE,
+  discordWebhook: 'Invalid Discord Webhook'
+});
+assert.strictEqual(await form.submit(), undefined);
+await form.type('server', 'Server');
+await form.type('discordWebhook', '');
+assert.deepStrictEqual(form.errors(), {});
+assert.strictEqual((await form.submit()).server, 'Server');
+// A new list's name and server are always checked.
+form = listForm(undefined);
+await form.type('name', longNamed.name);
+await form.type('server', longNamed.server);
+assert.deepStrictEqual(form.errors(), { name: NAME_RULE, server: SERVER_RULE });
+assert.strictEqual(await form.submit(), undefined);
 
 // Adding a config. Its points must be within their bounds, and points that could make the list
 // bigger must leave the whole list within the rules. The rules' problems are about both points,
@@ -678,6 +752,11 @@ for (const type of ['constructor', '__proto__', 'toString', undefined])
 // changes that make a list bigger, as lists are never cut down to them.
 const NEVER_CUT =
   'Lists are never cut down to fit, so a list can still grow past its limit as new bans are added.';
+// Lists saved before the limits can be renamed, and made smaller with values within their bounds
+// unless a setting or points are empty or below 0, as the web server counts any change to such a
+// list as one that could make it bigger.
+const OLDER_LISTS =
+  "Export ban lists saved before these limits keep working as they are, and you can always rename them or change their webhooks. Changes that make one smaller, for example raising its threshold, are allowed too, as long as each value set is within these ranges and none of the list's settings or points is empty or below 0. Other changes must bring the whole list within the limits.";
 assert.strictEqual(
   exportListLimitsAnswer(DEFAULT_LIMITS),
   'So that one active ban and one expired ban are never enough to put a player on an export ban list, its threshold must be higher than the most points they can give together, whichever ban lists they are on, and at least 4. ' +
@@ -685,10 +764,8 @@ assert.strictEqual(
     'A new export ban list, or a change that makes a list bigger, is refused if the list would then have more than 40,000 players, or 20,000 for a BattleMetrics export ban list, as each player on a BattleMetrics export ban list is added to BattleMetrics separately. ' +
     `${NEVER_CUT} ` +
     'Points can be whole numbers from 0 to 100, thresholds from 1 to 1,000, and max ban ages from 0 to 3,650 days, where 0 counts bans of any age. ' +
-    'Export ban lists saved before these limits keep working as they are, and you can always rename them or make them smaller, for example by raising the threshold. Changes that could make one bigger must bring the whole list within the limits.'
+    OLDER_LISTS
 );
-const OLDER_LISTS =
-  'Export ban lists saved before these limits keep working as they are, and you can always rename them or make them smaller, for example by raising the threshold. Changes that could make one bigger must bring the whole list within the limits.';
 const answerWith = (env) => exportListLimitsAnswer(limitsWith(env));
 // It follows the limits set: here one ban must not be enough for either type, with a higher
 // minimum, and lists of each type can be as big as each other.
