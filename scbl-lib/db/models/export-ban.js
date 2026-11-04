@@ -190,7 +190,10 @@ class ExportBan extends Sequelize.Model {
                   manual: true
                 }
               ],
-              nativeEnabled: null,
+              // Never a native ban, a line BattleMetrics' Ban Sync writes into a game server's own
+              // ban list, which CBL cannot remove itself. BattleMetrics' API documentation says
+              // false prevents native bans, where null leaves it to the ban list's default.
+              nativeEnabled: false,
               note: battlemetricsNote(this),
               reason: `Kicked via communitybanlist.com/banned`
             },
