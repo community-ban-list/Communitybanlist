@@ -171,20 +171,21 @@ assert.deepStrictEqual(
   }
 );
 
-// Creating a list. The form starts with the model's defaults and the lowest threshold allowed for
-// either type, which are within the limits, and every value is checked as it is typed.
+// Creating a list. The form starts as a BattleMetrics list with the model's default settings, and
+// the default threshold raised to any higher minimum threshold, which are within the limits for
+// either type, and every value is checked as it is typed.
 assert.deepStrictEqual(forms.listFormOptions(undefined, limits).defaultValues, {
-  type: 'remote',
+  type: 'battlemetrics',
   threshold: 9,
   defaultActivePoints: 3,
   defaultExpiredPoints: 1,
   maxBanAge: 0
 });
-assert.strictEqual(
-  forms.listFormOptions(undefined, limitsWith({ EXPORT_BM_MIN_THRESHOLD: '12' })).defaultValues
-    .threshold,
-  12
-);
+for (const variable of ['EXPORT_BM_MIN_THRESHOLD', 'EXPORT_REMOTE_MIN_THRESHOLD'])
+  assert.strictEqual(
+    forms.listFormOptions(undefined, limitsWith({ [variable]: '12' })).defaultValues.threshold,
+    12
+  );
 assert.strictEqual(forms.listFormOptions(undefined, limits).mode, 'onChange');
 
 let form = listForm(undefined);
@@ -211,7 +212,7 @@ await form.type('defaultActivePoints', '1');
 await form.type('defaultExpiredPoints', '1');
 // 1/1 points need only the minimum threshold of 4.
 await form.type('threshold', '3');
-assert.deepStrictEqual(form.errors(), { threshold: MESSAGES.minimum('remote', 4) });
+assert.deepStrictEqual(form.errors(), { threshold: MESSAGES.minimum('battlemetrics', 4) });
 await form.type('threshold', '0');
 assert.deepStrictEqual(form.errors(), { threshold: MESSAGES.threshold });
 await form.type('threshold', '1001');
@@ -249,7 +250,7 @@ assert.deepStrictEqual(Object.keys(form.errors()).sort(), ['name', 'server']);
 await form.type('name', 'New');
 await form.type('server', 'Server');
 assert.deepStrictEqual(await form.submit(), {
-  type: 'remote',
+  type: 'battlemetrics',
   threshold: 4,
   defaultActivePoints: 1,
   defaultExpiredPoints: 1,
@@ -262,15 +263,33 @@ form = listForm(undefined, limitsWith({ EXPORT_BM_MIN_THRESHOLD: '12' }));
 await form.type('name', 'New');
 await form.type('server', 'Server');
 await form.type('threshold', '11');
-assert.deepStrictEqual(form.errors(), {});
-await form.type('type', 'battlemetrics');
 assert.deepStrictEqual(form.errors(), { threshold: MESSAGES.minimum('battlemetrics', 12) });
 assert.strictEqual(await form.submit(), undefined);
 await form.type('type', 'remote');
 assert.deepStrictEqual(form.errors(), {});
-// Under the rule that only one ban must not be enough, 3/1 points at threshold 4 are allowed.
+assert.strictEqual((await form.submit()).type, 'remote');
+await form.type('type', 'battlemetrics');
+assert.deepStrictEqual(form.errors(), { threshold: MESSAGES.minimum('battlemetrics', 12) });
+// And a remote list's own minimum threshold applies once the type is changed to remote.
+form = listForm(undefined, limitsWith({ EXPORT_REMOTE_MIN_THRESHOLD: '12' }));
+await form.type('name', 'New');
+await form.type('server', 'Server');
+await form.type('threshold', '11');
+assert.deepStrictEqual(form.errors(), {});
+await form.type('type', 'remote');
+assert.deepStrictEqual(form.errors(), { threshold: MESSAGES.minimum('remote', 12) });
+assert.strictEqual(await form.submit(), undefined);
+await form.type('type', 'battlemetrics');
+assert.deepStrictEqual(form.errors(), {});
+assert.strictEqual((await form.submit()).type, 'battlemetrics');
+// Under the rule that only one ban must not be enough for a remote list, a remote list's 3/1 points
+// at threshold 4 are allowed, and a BattleMetrics list keeps its own rule.
 form = listForm(undefined, limitsWith({ EXPORT_REMOTE_NEVER_ENOUGH: 'one-ban' }));
 await form.type('threshold', '4');
+assert.deepStrictEqual(form.errors(), {
+  threshold: MESSAGES.activePlusExpired(4, '3 for an active ban', '1 for an expired ban', 5)
+});
+await form.type('type', 'remote');
 assert.deepStrictEqual(form.errors(), {});
 await form.type('threshold', '3');
 assert.deepStrictEqual(form.errors(), {
