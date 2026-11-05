@@ -2,6 +2,7 @@ import { AttachmentBuilder, escapeMarkdown, SlashCommandBuilder } from 'discord.
 
 import { sequelize } from 'scbl-lib/db';
 import { ExportBanList } from 'scbl-lib/db/models';
+import { isSteamID } from 'scbl-lib/player-ids';
 
 import {
   audit,
@@ -110,9 +111,6 @@ const REVIEW_TIMEOUT = 5 * 60 * 1000;
 // transfers nor a list the new owner creates on the website at the same moment can take a user
 // past it.
 const MAX_LISTS_PER_USER = 4;
-
-// A SteamID64, as the website takes one from a Steam sign-in.
-const STEAM_ID = /^[0-9]{17}$/;
 
 // What happened on BattleMetrics, as deleteExportBanList gives it, for the log.
 const OUTCOMES = {
@@ -990,7 +988,7 @@ async function removeAllOutsideLimits(interaction) {
 // The new owner's Steam ID as given, or a UserError when it is not a SteamID64.
 function parseSteamID(value) {
   const id = value.trim();
-  if (!STEAM_ID.test(id))
+  if (!isSteamID(id))
     throw new UserError(
       `${bold(truncate(id, 100))} is not a Steam ID. Give the new owner's SteamID64, which is 17 digits.`
     );
