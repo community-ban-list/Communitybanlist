@@ -6,11 +6,22 @@ import {
   stopRecordingLogMessages,
   takeRunLock
 } from 'scbl-lib/db';
+import {
+  createFloorsRow,
+  FLOORS_ROW,
+  hasFloorsRow,
+  readFloors,
+  writeImporterHeartbeat
+} from 'scbl-lib/db/floors';
 import { isDatabaseUnavailable } from 'scbl-lib/db/sequelize';
+import { IMPORTER_FEATURES, IMPORTER_GAMES, KNOWN_FEATURES } from 'scbl-lib/floors';
 import { describeError, Logger } from 'scbl-lib/utils';
 
+import { retryOperation } from './apply-list.js';
 import RunRecord, {
   alertIfStale,
+  claimFloorAlert,
+  clearFloorAlert,
   LOCK_HOLDERS,
   readRunMessage,
   readSavedRun,
@@ -37,6 +48,8 @@ export const EXIT_CODES = {
   FAILED: 1,
   // Stopped part-way by SIGTERM, SIGINT or the time limit.
   INTERRUPTED: 3,
+  // Finished, but this image lacks what the data needs, so it skipped the steps that need it.
+  BELOW_FLOOR: 4,
   // Skipped, as the importer service or another run holds the locks. 75 is EX_TEMPFAIL: try again
   // later.
   SKIPPED: 75
@@ -47,6 +60,7 @@ const OUTCOMES = {
   [EXIT_CODES.FINISHED]: 'finished',
   [EXIT_CODES.FAILED]: 'failed',
   [EXIT_CODES.INTERRUPTED]: 'interrupted',
+  [EXIT_CODES.BELOW_FLOOR]: 'belowFloor',
   [EXIT_CODES.SKIPPED]: 'skipped'
 };
 
@@ -184,6 +198,7 @@ export function readSeconds(name, defaultSeconds) {
 function outcomeOf({ exitCode, reason }) {
   if (exitCode === EXIT_CODES.FINISHED) return 'finished';
   if (exitCode === EXIT_CODES.INTERRUPTED) return 'stopped';
+  if (exitCode === EXIT_CODES.BELOW_FLOOR) return 'belowFloor';
   return STOPPED_LOCK_LOST.includes(reason) ? 'lockLost' : 'failed';
 }
 
@@ -277,19 +292,84 @@ export async function checkStaleness(options, ms = RECORD_TIMEOUT) {
   }
 }
 
+// Names in words, e.g. "a, b and c".
+function inWords(names) {
+  return names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+}
+
+// What the floors, as readFloors gives them, say of this image with these steps: null when it has
+// every feature they name, and otherwise { missing, everyStep, unreadable }. A name that no step of
+// this image names stops every step (everyStep), as the image cannot know what the feature guards,
+// and so does a row that cannot be read, as it cannot know what the row names.
+function judgeFloors(floors, steps) {
+  if (floors.unreadable) return { missing: [], everyStep: true, unreadable: true };
+  const missing = [...new Set(floors.importer)]
+    .filter((name) => !IMPORTER_FEATURES.includes(name))
+    .sort();
+  if (missing.length === 0) return null;
+  const named = new Set(steps.map(({ needs }) => needs));
+  return { missing, everyStep: missing.some((name) => !named.has(name)), unreadable: false };
+}
+
+// What the importer posts when a check finds it below its floor (see judgeFloors), with the
+// statements that fix a row that cannot be read, which only a person can do. The statement that
+// sets the row again has a placeholder, <features>, so it fails as it is, rather than set the floor
+// to nothing. The image to change is the one IMPORTER_TAG names in loop mode, and the script's in
+// once mode.
+function describeFloorAlert({ missing, everyStep, unreadable }, steps) {
+  const stale = 'bans lifted meanwhile keep applying';
+  const newer = 'until IMPORTER_TAG names a newer image, or the script runs one';
+  if (unreadable)
+    return `The floors row in ImporterState cannot be read, so this importer cannot tell what the data needs, and runs no step. Nothing is imported, exports stay as they are, and ${stale}, until the row is fixed by hand. \`SELECT value FROM ImporterState WHERE name = '${FLOORS_ROW}';\` shows it. \`UPDATE ImporterState SET value = JSON_OBJECT('importer', JSON_ARRAY(<features>), 'raised', JSON_ARRAY()), updatedAt = UTC_TIMESTAMP(3) WHERE name = '${FLOORS_ROW}';\` sets it again, once <features> is replaced by the features the data needs, each in quotes, e.g. 'game-rule', or by nothing if it needs none (see Floors in the importer's README).`;
+  const lacks = `This importer image lacks ${inWords(missing)}, which the data needs`;
+  if (everyStep)
+    return `${lacks}, and it cannot know what that guards, so it runs no step. Nothing is imported, exports stay as they are, and ${stale}, ${newer}.`;
+  const guarded = steps.filter(({ needs }) => missing.includes(needs)).map(({ name }) => name);
+  return `${lacks}, so it skips ${inWords(guarded)}. Exports stay as they are, and ${stale}, ${newer}.`;
+}
+
+// Why a run ended below its floor, for its record, from what the record keeps of it.
+function describeBelowFloor({ missing, skipped, unreadable }) {
+  const why = unreadable
+    ? 'The floors row in ImporterState could not be read'
+    : `This importer image lacks ${inWords(missing)}, which the data needs`;
+  return `${why}, ${
+    skipped.length > 0
+      ? `so it skipped ${inWords(skipped)}`
+      : 'though the steps that need it had started by then'
+  }.`;
+}
+
 // One run of the importer's steps, or in loop mode one cycle of the importer service: its record,
 // which phases finished, and how far each step got, as the steps report it. Each step is
-// { name, run, counts }: run(settings) does the step's work, given the run's settings that steps
-// use, { cadenceSeconds, startedAt }, which is when the run started, in milliseconds, and counts(),
-// if given, returns the counts the run record keeps for it. onChange, when set, is told whenever a
-// phase starts or ends.
+// { name, needs, run, counts }: run(settings) does the step's work, given the run's settings that
+// steps use, { cadenceSeconds, startedAt }, which is when the run started, in milliseconds, needs,
+// if given, names the one feature of the importer that the step must not run without, a name in
+// KNOWN_FEATURES, and counts(), if given, returns the counts the run record keeps for it. A step
+// whose needs is anything else, e.g. a list or a name misspelt, could not be skipped when it must
+// be, so the run fails before any step. checkFloors says whether the run checks the importer's
+// floors, which only a dry run does not, as its one step writes nothing, and a newer image's dry
+// run must not claim features that the image of the service lacks. onChange, when set, is told
+// whenever a phase starts or ends, and onFloorCheck what each check of the floors found.
 export class RunState {
-  constructor(steps) {
+  constructor(steps, { checkFloors = true } = {}) {
+    for (const { name, needs } of steps)
+      if (needs !== undefined && !KNOWN_FEATURES.includes(needs))
+        throw new Error(
+          `The step ${name} needs ${JSON.stringify(needs) ?? typeof needs}, which is not one feature that the importer knows, so it could not tell when to skip the step, and runs no step.`
+        );
     this.steps = steps;
+    this.checksFloors = checkFloors;
     this.record = new RunRecord();
     this.completed = new Set();
     this.progress = {};
     this.onChange = null;
+    this.onFloorCheck = null;
+    // What the run last posted that it lacks, so it posts each thing once (see alertBelowFloor),
+    // and whether a check that found the image at its floor has seen to it that the next alert is
+    // not held back (see noteAtFloor).
+    this.floorAlert = null;
+    this.atFloorNoted = false;
   }
 
   changed() {
@@ -324,14 +404,157 @@ export class RunState {
     if (step?.counts) record.count(phase, step.counts);
   }
 
+  // Say what this image can do, and create the floors row if it is not there yet, as the run's
+  // steps begin: after the migrations, as ImporterState may not exist before them, and with the run
+  // lock held, so the row names the image that is running. The floors row is looked for first, by a
+  // read that takes no lock, and created only when it is not there, as its insert would wait for
+  // any raise that has not ended. None of this failing fails the run: a heartbeat that is not
+  // written goes stale, which counts as no importer, and the check before each step takes a row
+  // that is not there as no floors. A write can still hold the steps up while it waits for a lock,
+  // until MySQL gives up on it: the heartbeat for a lock on its own row, which nothing takes in this
+  // version, or, before its row is there, on the gap where it would be, and the insert, when the
+  // floors row is not there, for a first raise that has not ended.
+  async sayStepsBegin() {
+    try {
+      await writeImporterHeartbeat({
+        features: IMPORTER_FEATURES,
+        games: IMPORTER_GAMES,
+        gitSha: this.record.gitSha
+      });
+    } catch (err) {
+      console.warn(`Warning: could not write the importer's heartbeat: ${describeError(err)}`);
+    }
+    let there;
+    try {
+      there = await hasFloorsRow();
+    } catch (err) {
+      console.warn(
+        `Warning: could not look for the importer's floors row, so this run does not create it: ${describeError(err)}`
+      );
+      return;
+    }
+    if (there) return;
+    try {
+      await createFloorsRow();
+    } catch (err) {
+      console.warn(
+        `Warning: could not create the importer's floors row, which was not there: ${describeError(err)}`
+      );
+    }
+  }
+
+  // Keep in the record what a check of the floors found. A run that finds itself below its floor
+  // and skips a step stays so, also when a later check finds the floor lowered, and one that has
+  // skipped nothing is not, once a later check does.
+  noteFloors(found) {
+    const { record } = this;
+    if (found) {
+      const { missing = [], skipped = [], unreadable } = record.belowFloor ?? {};
+      record.belowFloor = {
+        missing: [...new Set([...missing, ...found.missing])],
+        skipped,
+        ...(unreadable || found.unreadable ? { unreadable: true } : {})
+      };
+    } else if (!record.belowFloor?.skipped.length) record.belowFloor = null;
+  }
+
+  // Post that the importer is below its floor, unless this run has posted the same already, or a
+  // run has within the hour (see claimFloorAlert). A failure to read or save when it last posted
+  // never fails the run, and it then posts, as a repeat costs less than an alert that is lost.
+  async alertBelowFloor(found) {
+    const { missing, unreadable } = found;
+    const alert = JSON.stringify({ missing, unreadable });
+    if (this.floorAlert === alert) return;
+    this.floorAlert = alert;
+    // The alert's row may hold this alert now, which a later check that finds the image at its
+    // floor sees to.
+    this.atFloorNoted = false;
+    let post = true;
+    try {
+      post = await withTimeout(
+        claimFloorAlert({ missing, unreadable, startedAt: this.record.startedAt }),
+        RECORD_TIMEOUT,
+        'Checking when the importer last posted that it is below its floor'
+      );
+    } catch (err) {
+      console.warn(
+        `Warning: could not check when the importer last posted that it is below its floor, so it posts it now: ${describeError(err)}`
+      );
+    }
+    if (post) Logger.important('Core', describeFloorAlert(found, this.steps));
+  }
+
+  // Note that a check found the image at its floor, so that once it is below its floor again, it
+  // posts that at once, also when it lacks what it lacked before (see clearFloorAlert). A run
+  // reads the alert's row for this once, and again only after it has posted since, and writes it
+  // only when it held an alert. A failure never fails the run.
+  async noteAtFloor() {
+    this.floorAlert = null;
+    if (this.atFloorNoted) return;
+    this.atFloorNoted = true;
+    try {
+      await withTimeout(
+        clearFloorAlert(),
+        RECORD_TIMEOUT,
+        'Noting that the importer is at its floor'
+      );
+    } catch (err) {
+      console.warn(
+        `Warning: could not note that the importer is at its floor, so if it goes below it again, it may say so only an hour after it last did: ${describeError(err)}`
+      );
+    }
+  }
+
+  // Read the floors before a step, as one raised while a run goes, which can take many minutes,
+  // must stop the steps that have not started, and resolve with whether the step must be skipped. A
+  // read that fails in a way that could pass, e.g. as the database restarts, is tried again as the
+  // steps' own reads are (see retryOperation), so a run that would have ridden it out still does,
+  // and one that still fails fails the run, as no step may run without knowing.
+  async mustSkip(step) {
+    const found = judgeFloors(await retryOperation(() => readFloors()), this.steps);
+    this.onFloorCheck?.(found);
+    this.noteFloors(found);
+    if (!found) {
+      await this.noteAtFloor();
+      return false;
+    }
+    await this.alertBelowFloor(found);
+    return found.everyStep || found.missing.includes(step.needs);
+  }
+
+  // Keep a step skipped below the floor in the record, as one that finished without running, which
+  // nothing that reads records counts as work done.
+  skip(step) {
+    const { record } = this;
+    const lacked = record.belowFloor.missing.includes(step.needs);
+    Logger.verbose('Core', 2, `Skipping ${step.name}, as this importer is below its floor.`);
+    record.belowFloor.skipped.push(step.name);
+    record.count(step.name, () => ({
+      ran: false,
+      belowFloor: true,
+      ...(lacked ? { needs: step.needs } : {})
+    }));
+  }
+
   // Run the steps in order, keeping the counts each gives, also when it fails or stops part-way. A
   // run that is asked to stop does so between steps, as well as at the steps' own safe points. Each
-  // step is given the settings, with when the run started (startedAt).
+  // step is given the settings, with when the run started (startedAt). Unless this is a dry run,
+  // the floors are checked before each step (see mustSkip).
   async runSteps(settings) {
     const given = { ...settings, startedAt: this.record.startedAt };
+    if (this.checksFloors) {
+      stopIfRequested();
+      await this.sayStepsBegin();
+    }
     for (const step of this.steps) {
       stopIfRequested();
+      const skipped = this.checksFloors && (await this.mustSkip(step));
+      stopIfRequested();
       await this.time(step.name, async () => {
+        if (skipped) {
+          this.skip(step);
+          return;
+        }
         try {
           await step.run(given);
         } finally {
@@ -339,6 +562,14 @@ export class RunState {
         }
       });
     }
+  }
+
+  // How a run ended whose steps have all had their turn, as [exit code, reason].
+  endOfSteps() {
+    const { belowFloor } = this.record;
+    return belowFloor
+      ? [EXIT_CODES.BELOW_FLOOR, describeBelowFloor(belowFloor)]
+      : [EXIT_CODES.FINISHED];
   }
 
   // The run's status, while it runs or once it has ended, as run-status.js draws it.
@@ -364,13 +595,13 @@ export class RunState {
   }
 
   // End the run's record and print it as the run's JSON line, once. Returns the exit code it ended
-  // with: a run that finished exits 1 after a promise failed with nothing to handle it, as index.js
-  // then exits 1, and its record says so.
+  // with: a run that finished, also below its floor, exits 1 after a promise failed with nothing to
+  // handle it, as index.js then exits 1, and its record says so.
   end(exitCode, reason) {
     const { record } = this;
     if (record.ended) return record.ended.exitCode;
     let code = exitCode;
-    if (code === EXIT_CODES.FINISHED && process.exitCode) {
+    if ((code === EXIT_CODES.FINISHED || code === EXIT_CODES.BELOW_FLOOR) && process.exitCode) {
       code = EXIT_CODES.FAILED;
       reason = 'A promise failed with nothing to handle it';
     }
@@ -385,8 +616,9 @@ export class RunState {
 }
 
 // Run the importer's steps once, holding the run lock, and resolve with the exit code. Each step is
-// { name, run, counts } (see RunState). A run that is asked to stop does so between steps. Once the
-// run holds the lock, the importer's migrations are applied before the first step.
+// { name, needs, run, counts } (see RunState). A run that is asked to stop does so between steps.
+// Once the run holds the lock, the importer's migrations are applied before the first step.
+// checkFloors, which only a dry run turns off, says whether it checks the importer's floors.
 //
 // The run's lines about problems, such as why it failed or is stopping, are logged as important, so
 // they reach the log channel even when the run's other messages fill its queue. Its start and its
@@ -397,8 +629,8 @@ export class RunState {
 // most every 15 seconds while the run goes, with each finished phase and the progress of the one
 // under way, and edited a last time to show how the run ended, at the start of its end, before the
 // lock is released. A run that is skipped, or fails before it holds the lock, posts no status.
-export default async function run(steps) {
-  const current = new RunState(steps);
+export default async function run(steps, { checkFloors = true } = {}) {
+  const current = new RunState(steps, { checkFloors });
   const { record } = current;
   const maxRunSeconds = readSeconds('IMPORTER_MAX_RUN_SECONDS', DEFAULT_MAX_RUN_SECONDS);
   const cadenceSeconds = readSeconds('IMPORTER_CADENCE_SECONDS', DEFAULT_CADENCE_SECONDS);
@@ -494,13 +726,13 @@ export default async function run(steps) {
 
   // End a run that holds the lock, once: print its record, show how it ended in its status, save
   // its record, check whether the importer is now stale if the run did not succeed, close the
-  // database connections if it finished, then send the log messages still waiting, the status's
-  // last edit among them, and release the lock, all within END_TIMEOUT. A database that could not
-  // save the record in time, or is unavailable, is not asked whether the importer is stale, which
-  // leaves the time for the log messages. Before it closes the connections, it writes the newest
-  // message the run posted to the database (see recordNewestMessage), and then writes no more: a
-  // message posted after, as the end sends its log messages, is not written, rather than tried on
-  // a closed pool. Resolves with the exit code.
+  // database connections if it finished, also below its floor, then send the log messages still
+  // waiting, the status's last edit among them, and release the lock, all within END_TIMEOUT. A
+  // database that could not save the record in time, or is unavailable, is not asked whether the
+  // importer is stale, which leaves the time for the log messages. Before it closes the
+  // connections, it writes the newest message the run posted to the database (see
+  // recordNewestMessage), and then writes no more: a message posted after, as the end sends its log
+  // messages, is not written, rather than tried on a closed pool. Resolves with the exit code.
   let finishing = null;
   const finish = (exitCode, reason) => {
     finishing ??= (async () => {
@@ -516,7 +748,7 @@ export default async function run(steps) {
             { cadenceSeconds, skipped: false, startedAt: record.startedAt },
             left(RECORD_TIMEOUT)
           );
-        if (code === EXIT_CODES.FINISHED) {
+        if (code === EXIT_CODES.FINISHED || code === EXIT_CODES.BELOW_FLOOR) {
           await recordNewestMessage(left(RECORD_TIMEOUT), 'the run');
           stopRecordingLogMessages();
           try {
@@ -675,9 +907,9 @@ export default async function run(steps) {
 
       await current.runSteps({ cadenceSeconds });
 
-      exitCode = EXIT_CODES.FINISHED;
+      [exitCode, reason] = current.endOfSteps();
       console.log(
-        `Finished All Tasks. Complete CBL run Took ${(
+        `${exitCode === EXIT_CODES.BELOW_FLOOR ? 'Finished the tasks this image may run, below its floor.' : 'Finished All Tasks.'} Complete CBL run Took ${(
           (Date.now() - record.startedAt) /
           1000
         ).toFixed(2)}s. Garbage Collection Completed.`

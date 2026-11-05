@@ -56,7 +56,10 @@ function counted(name, work) {
 // tells when it is due from when the run started and how often runs start. The import works out
 // when each list's next full read is due, and the Steam step how many profiles to refresh, from how
 // often runs start: the import from how often cycles start in loop mode (cycleSeconds), as the
-// run's settings give it.
+// run's settings give it. A step that must not run on an image without some feature, as it would
+// get the data wrong, names the feature (needs), and is skipped while the importer's floor names it
+// and this image lacks it (see RunState in run.js). The export recalculation and the export push
+// are the only steps that write export bans or send them: the others only queue players for them.
 const steps = [];
 const writes = !banImporter.dryRun;
 if (TASKS_TO_COMPLETE.IMPORT_BANS)
@@ -87,13 +90,17 @@ if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_POINTS && writes)
 if (TASKS_TO_COMPLETE.UPDATE_REPUTATION_RANK && writes)
   steps.push({ name: 'updateReputationRank', run: () => Core.updateReputationRank() });
 if (TASKS_TO_COMPLETE.UPDATE_EXPORT_BANS && writes)
-  steps.push(
-    counted('updateExportBans', (counts, settings) =>
+  steps.push({
+    ...counted('updateExportBans', (counts, settings) =>
       ExportBanManager.updateExportBans(counts, settings)
-    )
-  );
+    ),
+    needs: 'game-rule'
+  });
 if (TASKS_TO_COMPLETE.EXPORT_EXPORT_BANS && writes)
-  steps.push(counted('exportExportBans', (counts) => Core.exportExportBans(counts)));
+  steps.push({
+    ...counted('exportExportBans', (counts) => Core.exportExportBans(counts)),
+    needs: 'native-false'
+  });
 
 // Set once the run has ended, as the importer exits with the run's code.
 let ended = false;
@@ -117,23 +124,28 @@ process.on('beforeExit', () => {
 });
 
 // IMPORTER_MODE=once, the default, runs the steps once and exits with the run's code: 0 finished, 1
-// failed, 3 stopped part-way by a signal or the time limit, or 75 skipped as another run is active.
-// A run that finished exits 1 after an unhandled rejection, as the run's own exit code and record
-// already say. IMPORTER_MODE=loop runs them as the importer service, a cycle at a time, until it is
-// stopped, and exits with the service's code (see loop.js). Any other value starts nothing.
+// failed, 3 stopped part-way by a signal or the time limit, 4 finished below its floor, or 75
+// skipped as another run is active. A run that finished, also below its floor, exits 1 after an
+// unhandled rejection, as the run's own exit code and record already say. IMPORTER_MODE=loop runs
+// them as the importer service, a cycle at a time, until it is stopped, and exits with the
+// service's code (see loop.js). Any other value starts nothing. A dry run does not check the
+// floors, as its one step writes nothing, and a newer image's dry run must not claim features that
+// the service lacks.
 const mode = readMode(process.env.IMPORTER_MODE);
 if (mode.error) {
   console.error(mode.error);
   ended = true;
   process.exit(EXIT_CODES.FAILED);
 } else {
-  (mode.loop ? runLoop : run)(steps)
+  (mode.loop ? runLoop : run)(steps, { checkFloors: writes })
     .catch((err) => {
       console.error(`The CBL update run failed: ${describeError(err)}${stackTrace(err)}`);
       return EXIT_CODES.FAILED;
     })
     .then((exitCode) => {
       ended = true;
-      process.exit(exitCode || process.exitCode);
+      process.exit(
+        (exitCode === EXIT_CODES.BELOW_FLOOR && process.exitCode) || exitCode || process.exitCode
+      );
     });
 }
