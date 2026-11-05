@@ -9,16 +9,18 @@ import {
 import {
   createFloorsRow,
   FLOORS_ROW,
+  hasFloorsRow,
   readFloors,
   writeImporterHeartbeat
 } from 'scbl-lib/db/floors';
 import { isDatabaseUnavailable } from 'scbl-lib/db/sequelize';
-import { IMPORTER_FEATURES, IMPORTER_GAMES } from 'scbl-lib/floors';
+import { IMPORTER_FEATURES, IMPORTER_GAMES, KNOWN_FEATURES } from 'scbl-lib/floors';
 import { describeError, Logger } from 'scbl-lib/utils';
 
 import RunRecord, {
   alertIfStale,
   claimFloorAlert,
+  clearFloorAlert,
   LOCK_HOLDERS,
   readRunMessage,
   readSavedRun,
@@ -309,16 +311,20 @@ function judgeFloors(floors, steps) {
 }
 
 // What the importer posts when a check finds it below its floor (see judgeFloors), with the
-// statements that fix a row that cannot be read, which only a person can do.
+// statements that fix a row that cannot be read, which only a person can do. The statement that
+// sets the row again has a placeholder, <features>, so it fails as it is, rather than set the floor
+// to nothing. The image to change is the one IMPORTER_TAG names in loop mode, and the script's in
+// once mode.
 function describeFloorAlert({ missing, everyStep, unreadable }, steps) {
   const stale = 'bans lifted meanwhile keep applying';
+  const newer = 'until IMPORTER_TAG names a newer image, or the script runs one';
   if (unreadable)
-    return `The floors row in ImporterState cannot be read, so this importer cannot tell what the data needs, and runs no step. Nothing is imported, exports stay as they are, and ${stale}, until the row is fixed by hand. \`SELECT value FROM ImporterState WHERE name = '${FLOORS_ROW}';\` shows it. \`UPDATE ImporterState SET value = JSON_OBJECT('importer', JSON_ARRAY(), 'raised', JSON_ARRAY()), updatedAt = UTC_TIMESTAMP(3) WHERE name = '${FLOORS_ROW}';\` sets it again, with the features the data needs listed in the first \`JSON_ARRAY()\` (see Floors in the importer's README).`;
+    return `The floors row in ImporterState cannot be read, so this importer cannot tell what the data needs, and runs no step. Nothing is imported, exports stay as they are, and ${stale}, until the row is fixed by hand. \`SELECT value FROM ImporterState WHERE name = '${FLOORS_ROW}';\` shows it. \`UPDATE ImporterState SET value = JSON_OBJECT('importer', JSON_ARRAY(<features>), 'raised', JSON_ARRAY()), updatedAt = UTC_TIMESTAMP(3) WHERE name = '${FLOORS_ROW}';\` sets it again, once <features> is replaced by the features the data needs, each in quotes, e.g. 'game-rule', or by nothing if it needs none (see Floors in the importer's README).`;
   const lacks = `This importer image lacks ${inWords(missing)}, which the data needs`;
   if (everyStep)
-    return `${lacks}, and it cannot know what that guards, so it runs no step. Nothing is imported, exports stay as they are, and ${stale}, until IMPORTER_TAG names a newer image.`;
+    return `${lacks}, and it cannot know what that guards, so it runs no step. Nothing is imported, exports stay as they are, and ${stale}, ${newer}.`;
   const guarded = steps.filter(({ needs }) => missing.includes(needs)).map(({ name }) => name);
-  return `${lacks}, so it skips ${inWords(guarded)}. Exports stay as they are, and ${stale}, until IMPORTER_TAG names a newer image.`;
+  return `${lacks}, so it skips ${inWords(guarded)}. Exports stay as they are, and ${stale}, ${newer}.`;
 }
 
 // Why a run ended below its floor, for its record, from what the record keeps of it.
@@ -337,13 +343,20 @@ function describeBelowFloor({ missing, skipped, unreadable }) {
 // which phases finished, and how far each step got, as the steps report it. Each step is
 // { name, needs, run, counts }: run(settings) does the step's work, given the run's settings that
 // steps use, { cadenceSeconds, startedAt }, which is when the run started, in milliseconds, needs,
-// if given, names the feature of the importer that the step must not run without, and counts(), if
-// given, returns the counts the run record keeps for it. checkFloors says whether the run checks
-// the importer's floors, which only a dry run does not, as its one step writes nothing, and a newer
-// image's dry run must not claim features that the image of the service lacks. onChange, when set,
-// is told whenever a phase starts or ends, and onFloorCheck what each check of the floors found.
+// if given, names the one feature of the importer that the step must not run without, a name in
+// KNOWN_FEATURES, and counts(), if given, returns the counts the run record keeps for it. A step
+// whose needs is anything else, e.g. a list or a name misspelt, could not be skipped when it must
+// be, so the run fails before any step. checkFloors says whether the run checks the importer's
+// floors, which only a dry run does not, as its one step writes nothing, and a newer image's dry
+// run must not claim features that the image of the service lacks. onChange, when set, is told
+// whenever a phase starts or ends, and onFloorCheck what each check of the floors found.
 export class RunState {
   constructor(steps, { checkFloors = true } = {}) {
+    for (const { name, needs } of steps)
+      if (needs !== undefined && !KNOWN_FEATURES.includes(needs))
+        throw new Error(
+          `The step ${name} needs ${JSON.stringify(needs) ?? typeof needs}, which is not one feature that the importer knows, so it could not tell when to skip the step, and runs no step.`
+        );
     this.steps = steps;
     this.checksFloors = checkFloors;
     this.record = new RunRecord();
@@ -351,8 +364,11 @@ export class RunState {
     this.progress = {};
     this.onChange = null;
     this.onFloorCheck = null;
-    // What the run last posted that it lacks, so it posts each thing once (see alertBelowFloor).
+    // What the run last posted that it lacks, so it posts each thing once (see alertBelowFloor),
+    // and whether a check that found the image at its floor has seen to it that the next alert is
+    // not held back (see noteAtFloor).
     this.floorAlert = null;
+    this.atFloorNoted = false;
   }
 
   changed() {
@@ -389,9 +405,14 @@ export class RunState {
 
   // Say what this image can do, and create the floors row if it is not there yet, as the run's
   // steps begin: after the migrations, as ImporterState may not exist before them, and with the run
-  // lock held, so the row names the image that is running. Neither failing holds up the run: a
-  // heartbeat that is not written goes stale, which counts as no importer, and the check before
-  // each step takes a row that is not there as no floors.
+  // lock held, so the row names the image that is running. The floors row is looked for first, by a
+  // read that takes no lock, and created only when it is not there, as its insert would wait for
+  // any raise that has not ended. None of this failing fails the run: a heartbeat that is not
+  // written goes stale, which counts as no importer, and the check before each step takes a row
+  // that is not there as no floors. A write can still hold the steps up while it waits for a lock,
+  // until MySQL gives up on it: the heartbeat for a lock on its own row, which nothing takes in this
+  // version, or, before its row is there, on the gap where it would be, and the insert, when the
+  // floors row is not there, for a first raise that has not ended.
   async sayStepsBegin() {
     try {
       await writeImporterHeartbeat({
@@ -402,10 +423,22 @@ export class RunState {
     } catch (err) {
       console.warn(`Warning: could not write the importer's heartbeat: ${describeError(err)}`);
     }
+    let there;
+    try {
+      there = await hasFloorsRow();
+    } catch (err) {
+      console.warn(
+        `Warning: could not look for the importer's floors row, so this run does not create it: ${describeError(err)}`
+      );
+      return;
+    }
+    if (there) return;
     try {
       await createFloorsRow();
     } catch (err) {
-      console.warn(`Warning: could not create the importer's floors row: ${describeError(err)}`);
+      console.warn(
+        `Warning: could not create the importer's floors row, which was not there: ${describeError(err)}`
+      );
     }
   }
 
@@ -432,6 +465,9 @@ export class RunState {
     const alert = JSON.stringify({ missing, unreadable });
     if (this.floorAlert === alert) return;
     this.floorAlert = alert;
+    // The alert's row may hold this alert now, which a later check that finds the image at its
+    // floor sees to.
+    this.atFloorNoted = false;
     let post = true;
     try {
       post = await withTimeout(
@@ -447,6 +483,27 @@ export class RunState {
     if (post) Logger.important('Core', describeFloorAlert(found, this.steps));
   }
 
+  // Note that a check found the image at its floor, so that once it is below its floor again, it
+  // posts that at once, also when it lacks what it lacked before (see clearFloorAlert). A run
+  // reads the alert's row for this once, and again only after it has posted since, and writes it
+  // only when it held an alert. A failure never fails the run.
+  async noteAtFloor() {
+    this.floorAlert = null;
+    if (this.atFloorNoted) return;
+    this.atFloorNoted = true;
+    try {
+      await withTimeout(
+        clearFloorAlert(),
+        RECORD_TIMEOUT,
+        'Noting that the importer is at its floor'
+      );
+    } catch (err) {
+      console.warn(
+        `Warning: could not note that the importer is at its floor, so if it goes below it again, it may say so only an hour after it last did: ${describeError(err)}`
+      );
+    }
+  }
+
   // Read the floors before a step, as one raised while a run goes, which can take many minutes,
   // must stop the steps that have not started, and resolve with whether the step must be skipped. A
   // read that fails fails the run, as no step may run without knowing.
@@ -454,7 +511,10 @@ export class RunState {
     const found = judgeFloors(await readFloors(), this.steps);
     this.onFloorCheck?.(found);
     this.noteFloors(found);
-    if (!found) return false;
+    if (!found) {
+      await this.noteAtFloor();
+      return false;
+    }
     await this.alertBelowFloor(found);
     return found.everyStep || found.missing.includes(step.needs);
   }

@@ -4,10 +4,10 @@ import vm from 'vm';
 
 // Check the statements on the importer's floors and heartbeat rows, without a database: a stand-in
 // for Sequelize keeps ImporterState's rows in memory, answers the statements the module sends as
-// MySQL would, with its row lock, its gap lock where a row would be and its deadlock between two
-// inserts, and records them. It checks the heartbeat, creating and reading the floors row, also
-// before the importer has made the table, and how a raise changes the row, also with another at the
-// same time.
+// MySQL would, with its row lock, its gap lock where a row would be, its deadlock between two
+// inserts and its refusal of JSON with half a surrogate pair, and records them. It checks the
+// heartbeat, creating and reading the floors row, also before the importer has made the table, and
+// how a raise changes the row, also with another at the same time.
 
 const NOW = Date.parse('2026-11-05T17:00:00.000Z');
 const AT = new Date(NOW).toISOString();
@@ -17,16 +17,36 @@ const tidy = (sql) => sql.replace(/\s+/g, ' ').replace(/\( /g, '(').replace(/ \)
 // Values made in the module's context are copied into this one before they are compared.
 const copy = (value) => JSON.parse(JSON.stringify(value));
 
-// MySQL's errors as Sequelize gives them, with MySQL's number.
-const mysqlError = (message, errno) =>
-  Object.assign(new Error(message), { name: 'SequelizeDatabaseError', original: { errno } });
+// MySQL's errors as Sequelize gives them, of Sequelize's kind of error, with MySQL's number and
+// code.
+class DatabaseError extends Error {}
+const mysqlError = (message, errno, code = undefined) =>
+  Object.assign(new DatabaseError(message), {
+    name: 'SequelizeDatabaseError',
+    original: { errno, code }
+  });
 const noTable = () => mysqlError("Table 'cbl.ImporterState' doesn't exist", 1146);
 const deadlock = () => mysqlError('Deadlock found when trying to get lock', 1213);
 const duplicate = () => mysqlError("Duplicate entry 'floors' for key 'PRIMARY'", 1062);
+const halfPair = () =>
+  mysqlError(
+    'Invalid JSON text in argument 1 to function cast_as_json: "The surrogate pair in string is invalid."',
+    3141
+  );
+
+// Whether every text in a JSON value is whole, with no half of a surrogate pair, which MySQL's
+// JSON refuses.
+const wellFormed = (value) =>
+  typeof value === 'string'
+    ? value.isWellFormed()
+    : value === null ||
+      typeof value !== 'object' ||
+      Object.entries(value).every(([key, inner]) => key.isWellFormed() && wellFormed(inner));
 
 const STATEMENTS = {
   heartbeat:
     'INSERT INTO ImporterState (name, value, updatedAt) VALUES (:name, CAST(:value AS JSON), UTC_TIMESTAMP(3)) AS new ON DUPLICATE KEY UPDATE value = new.value, updatedAt = new.updatedAt',
+  find: 'SELECT name FROM ImporterState WHERE name = :name',
   create:
     'INSERT IGNORE INTO ImporterState (name, value, updatedAt) VALUES (:name, CAST(:value AS JSON), UTC_TIMESTAMP(3))',
   read: 'SELECT value FROM ImporterState WHERE name = :name',
@@ -78,12 +98,16 @@ const sequelize = {
     const error = failures.get(kind)?.shift();
     if (error) throw error;
     if (!tableExists) throw noTable();
+    if (value !== undefined && !wellFormed(JSON.parse(value))) throw halfPair();
 
     switch (kind) {
       case 'heartbeat':
         assert.strictEqual(name, 'features:importer');
         rows.set(name, value);
         return [];
+      case 'find':
+        assert.strictEqual(type, 'SELECT');
+        return rows.has(name) ? [{ name }] : [];
       case 'create':
         assert.strictEqual(name, 'floors');
         if (!rows.has(name)) rows.set(name, value);
@@ -174,6 +198,7 @@ const { IMPORTER_FEATURES, IMPORTER_GAMES, KNOWN_FEATURES } = names.namespace;
 const {
   createFloorsRow,
   FLOORS_ROW,
+  hasFloorsRow,
   HEARTBEAT_ROW,
   raiseImporterFloor,
   readFloors,
@@ -234,16 +259,40 @@ reset({ importer: ['game-rule'], raised: [], other: 1 });
 await createFloorsRow();
 assert.deepStrictEqual(row(), { importer: ['game-rule'], raised: [], other: 1 });
 
+// Whether the row is there is read on its own, with no lock and in no transaction, so it waits for
+// no raise that holds the row. A table that is not there is passed on, as the database gives it.
+reset();
+assert.strictEqual(await hasFloorsRow(), false);
+reset({ importer: [], raised: [] });
+assert.strictEqual(await hasFloorsRow(), true);
+assert.deepStrictEqual(kinds(), ['find']);
+assert.strictEqual(sent[0].transaction, null);
+reset();
+tableExists = false;
+await assert.rejects(hasFloorsRow(), (err) => err.original.errno === 1146);
+
 // Before the importer has made the table, or created the row, there are no floors, for any service.
-// Other errors are passed on.
+// Other errors are passed on, saying that it was the floors that could not be read, but still the
+// database's own error, of its kind and with its number and code, e.g. for whatever tells whether
+// the database is unavailable.
 reset();
 assert.deepStrictEqual(copy(await readFloors()), { importer: [] });
 tableExists = false;
 assert.deepStrictEqual(copy(await readFloors()), { importer: [] });
 reset({ importer: ['game-rule'], raised: [] });
-const down = mysqlError('Connection lost', 2013);
+const down = mysqlError('Connection lost', 2013, 'PROTOCOL_CONNECTION_LOST');
 failures.set('read', [down]);
-await assert.rejects(readFloors(), (err) => err === down);
+await assert.rejects(readFloors(), (err) => {
+  assert.strictEqual(err.message, "Could not read the importer's floors: Connection lost");
+  assert.ok(err instanceof DatabaseError);
+  assert.strictEqual(err.name, 'SequelizeDatabaseError');
+  assert.deepStrictEqual(err.original, { errno: 2013, code: 'PROTOCOL_CONNECTION_LOST' });
+  return true;
+});
+// The error it came from is left as it was.
+assert.strictEqual(down.message, 'Connection lost');
+failures.set('read', ['broken']);
+await assert.rejects(readFloors(), /^Error: Could not read the importer's floors: broken$/);
 
 // A readable row is given as it is, whether the driver parsed its JSON or left it as text.
 for (const text of [false, true]) {
@@ -356,6 +405,20 @@ reset();
 result = await raiseImporterFloor('native-false', { by: 'x'.repeat(150) });
 assert.deepStrictEqual(copy(result.added), ['native-false']);
 assert.strictEqual(row().raised[0].by, 'x'.repeat(100));
+
+// It is cut on a character boundary, as MySQL refuses JSON with half a surrogate pair, such as half
+// an emoji, and a lone half already in it is replaced, so the raise, and the caller's data with
+// it, is not refused. A whole emoji is kept.
+for (const [by, kept] of [
+  ['x'.repeat(99) + '\u{1F600}', 'x'.repeat(99)],
+  ['x'.repeat(98) + '\u{1F600}', 'x'.repeat(98) + '\u{1F600}'],
+  ['bot \uD83D', 'bot �'],
+  ['\uDE00 bot', '� bot']
+]) {
+  reset();
+  await raiseImporterFloor('game-rule', { by });
+  assert.strictEqual(row().raised[0].by, kept, JSON.stringify(by));
+}
 
 // A name that is not known is refused before anything is sent, as it would stop every step of every
 // importer, also when the other names given are known.
@@ -540,6 +603,34 @@ assert.deepStrictEqual(row().importer, ['game-rule']);
   );
   assert.strictEqual(attempts, 1);
 
+  // A duplicate key in the caller's own data, e.g. a name that is taken, would only come again, so
+  // it is passed on at once, with work run once, while a deadlock is tried again wherever it came
+  // from, as MySQL can end any transaction in one.
+  reset();
+  attempts = 0;
+  const taken = mysqlError("Duplicate entry 'taken' for key 'ReviewLists.name'", 1062);
+  await assert.rejects(
+    withFloorRetries(async (transaction) => {
+      attempts++;
+      await raiseImporterFloor(['game-rule'], { by: 'bot', transaction });
+      throw taken;
+    }),
+    (err) => err === taken
+  );
+  assert.strictEqual(attempts, 1);
+  assert.strictEqual(rows.size, 0);
+  reset();
+  attempts = 0;
+  const resolved = await withFloorRetries(async (transaction) => {
+    attempts++;
+    await raiseImporterFloor(['game-rule'], { by: 'bot', transaction });
+    if (attempts === 1) throw deadlock();
+    return 'done';
+  });
+  assert.strictEqual(resolved, 'done');
+  assert.strictEqual(attempts, 2);
+  assert.deepStrictEqual(row().importer, ['game-rule']);
+
   // The raise goes with what it was made for, so it is rolled back with it.
   reset();
   await assert.rejects(
@@ -570,5 +661,5 @@ assert.deepStrictEqual(row().importer, ['game-rule']);
 }
 
 console.log(
-  'Importer floors checks passed: the heartbeat, creating and reading the floors row, a row that cannot be read, raises that keep what is there and refuse what is not known, two first raises at once, and a raise in a transaction of its caller, run again as a whole.'
+  'Importer floors checks passed: the heartbeat, looking for, creating and reading the floors row, a read that fails, a row that cannot be read, raises that keep what is there and refuse what is not known, who raised it cut on a character boundary, two first raises at once, and a raise in a transaction of its caller, run again as a whole on a deadlock or its own duplicate key.'
 );

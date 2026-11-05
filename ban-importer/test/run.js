@@ -43,13 +43,16 @@ const describeLine = (message, extras) => `${message}${extras.map(describeError)
 // A stand-in for the ImporterState and ImporterSchemaMigrations tables, holding JSON text as the
 // database would. A transaction's writes are kept once it commits. With hang, transactions never
 // end, with hangReads, the staleness check's reads never end, and with error, every use of the
-// tables fails with it.
+// tables fails with it. reads has the name of each row read by its key, and upserts the name of
+// each row written, in or out of a transaction.
 function fakeState(
   events,
   { rows = {}, tablesMadeAt = null, hang = false, hangReads = false, error = null } = {}
 ) {
   const state = new Map(Object.entries(rows).map(([name, value]) => [name, JSON.stringify(value)]));
   const read = (name) => (state.has(name) ? JSON.parse(state.get(name)) : undefined);
+  const reads = [];
+  const upserts = [];
   const fail = () => {
     if (error) throw error;
   };
@@ -64,11 +67,13 @@ function fakeState(
         .map((key) => ({ name: key, value: read(key) }));
     },
     async findByPk(name) {
+      reads.push(name);
       fail();
       return state.has(name) ? { name, value: read(name) } : null;
     },
     // A write outside a transaction is kept at once.
     async upsert({ name, value }, { transaction } = {}) {
+      upserts.push(name);
       fail();
       if (transaction) transaction.writes.push([name, JSON.stringify(value)]);
       else state.set(name, JSON.stringify(value));
@@ -91,7 +96,7 @@ function fakeState(
     return result;
   };
 
-  return { state, read, ImporterState, ImporterSchemaMigration, transaction };
+  return { state, read, reads, upserts, ImporterState, ImporterSchemaMigration, transaction };
 }
 
 // A stand-in for the logger's status message, which records what it is given: whether it was
@@ -833,7 +838,8 @@ for (const [busy, held] of [
   assert.strictEqual(importer.timers.size, 0);
 }
 {
-  // The same goes for checking whether the importer is stale, after a run that failed.
+  // The same goes for checking whether the importer is stale, after a run that failed. Before its
+  // step, the run found itself at its floor, and could not note it either.
   const importer = await loadRun({ state: { error: new Error('Connection lost') } });
   const exitCode = await importer.run([
     step('import', async () => {
@@ -842,6 +848,7 @@ for (const [busy, held] of [
   ]);
   assert.strictEqual(exitCode, 1);
   assert.deepStrictEqual(importer.printed(), [
+    'Warning: could not note that the importer is at its floor, so if it goes below it again, it may say so only an hour after it last did: Error: Connection lost',
     'Warning: could not save the run record: Error: Connection lost',
     'Warning: could not check whether the CBL update is stale: Error: Connection lost'
   ]);
@@ -950,11 +957,13 @@ const sinceEnd = (importer) => importer.now() - Date.parse(importer.record().end
   ]);
 }
 {
-  // Nor is a database that is unavailable asked whether the importer is stale.
+  // Nor is a database that is unavailable asked whether the importer is stale. Before its step, the
+  // run found itself at its floor, and could not note it either.
   const importer = await loadRun({ state: { error: unavailable() } });
   assert.strictEqual(await importer.run([failingStep()]), 1);
   assert.ok(!importer.events.includes('read state'));
   assert.deepStrictEqual(importer.printed(), [
+    'Warning: could not note that the importer is at its floor, so if it goes below it again, it may say so only an hour after it last did: Error: connect ECONNREFUSED',
     'Warning: could not save the run record: Error: connect ECONNREFUSED'
   ]);
   assert.deepStrictEqual(importer.events.slice(-2), ['flush', 'release']);
@@ -2052,15 +2061,16 @@ function floorSteps(importer, during = {}) {
 }
 const stepsRun = (importer) => importer.events.filter((event) => FLOOR_STEPS.includes(event));
 const LACKS_GAME_RULE =
-  'This importer image lacks game-rule, which the data needs, so it skips updateExportBans. Exports stay as they are, and bans lifted meanwhile keep applying, until IMPORTER_TAG names a newer image.';
+  'This importer image lacks game-rule, which the data needs, so it skips updateExportBans. Exports stay as they are, and bans lifted meanwhile keep applying, until IMPORTER_TAG names a newer image, or the script runs one.';
 const SKIPPED_REASON =
   'This importer image lacks game-rule, which the data needs, so it skipped updateExportBans.';
 const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
 
 // With no floors, a run does what it always did: every step runs and it exits 0. As its steps
 // begin, after the migrations, it says what this image can do, with the record's commit, and
-// creates the floors row, and it reads the floors before each step. It posts nothing, and saves no
-// alert.
+// creates the floors row, which it did not find, and it reads the floors before each step. It
+// posts nothing, and saves no alert: finding itself at its floor, it reads the alert's row once,
+// and writes nothing, as the row holds no alert.
 {
   const importer = await loadRun({ env: { GIT_SHA: 'abc1234' }, floorRows: {} });
   const exitCode = await importer.run(floorSteps(importer));
@@ -2072,6 +2082,7 @@ const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
     'connect',
     'migrate',
     'heartbeat',
+    'find floors',
     'create floors',
     'read floors',
     'importBans',
@@ -2101,6 +2112,11 @@ const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
   assert.ok(!('reason' in record));
   assert.deepStrictEqual(importer.discord, []);
   assert.ok(!importer.state.state.has('lastFloorAlertAt'));
+  assert.deepStrictEqual(
+    importer.state.reads.filter((name) => name === 'lastFloorAlertAt'),
+    ['lastFloorAlertAt']
+  );
+  assert.ok(!importer.state.upserts.includes('lastFloorAlertAt'));
   assert.deepStrictEqual(importer.printed(), [
     'Finished All Tasks. Complete CBL run Took 0.00s. Garbage Collection Completed.'
   ]);
@@ -2157,11 +2173,18 @@ const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
   const { events } = importer;
   assert.ok(events.indexOf(`important ${LACKS_GAME_RULE}`) < events.indexOf('importBans'));
   assert.strictEqual(events.filter((event) => event === 'read floors').length, 4);
-  // The floors row is left as it is.
+  // The floors row is left as it is: found by a read that takes no lock, so the run asks for no
+  // lock on it, which a raise that has not ended would hold.
   assert.deepStrictEqual(importer.floors.rows.get('floors'), {
     importer: ['game-rule'],
     raised: []
   });
+  assert.deepStrictEqual(importer.floors.sent.slice(0, 3), [
+    'heartbeat',
+    'find floors',
+    'read floors'
+  ]);
+  assert.ok(!importer.floors.sent.includes('create floors'));
 
   const record = importer.record();
   assert.strictEqual(record.outcome, 'belowFloor');
@@ -2245,7 +2268,7 @@ const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
   assert.strictEqual(await importer.run(floorSteps(importer)), 4);
   assert.deepStrictEqual(stepsRun(importer), ['importBans', 'expireBans']);
   assert.deepStrictEqual(importer.important(), [
-    'This importer image lacks game-rule and native-false, which the data needs, so it skips updateExportBans and exportExportBans. Exports stay as they are, and bans lifted meanwhile keep applying, until IMPORTER_TAG names a newer image.'
+    'This importer image lacks game-rule and native-false, which the data needs, so it skips updateExportBans and exportExportBans. Exports stay as they are, and bans lifted meanwhile keep applying, until IMPORTER_TAG names a newer image, or the script runs one.'
   ]);
   assert.deepStrictEqual(importer.record().belowFloor, {
     missing: ['game-rule', 'native-false'],
@@ -2310,6 +2333,83 @@ const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
   assert.deepStrictEqual(second.important(), []);
 }
 
+// A run that finds the image at its floor notes it in the alert's row, which keeps when the alert
+// was posted and says that nothing is missing now, so a run that finds the image below the same
+// floor again posts at once, though the last alert was within the hour. A run at its floor reads
+// the row once, and writes it only when it held an alert: once, as a run after it, at its floor
+// too, finds nothing to note. An alert of a row that could not be read is noted alike.
+{
+  const at = new Date(START).toISOString();
+  const below = await loadRun({ floorRows: floorRow('game-rule') });
+  assert.strictEqual(await below.run(floorSteps(below)), 4);
+  assert.deepStrictEqual(below.important(), [LACKS_GAME_RULE]);
+  assert.deepStrictEqual(below.state.read('lastFloorAlertAt'), { at, missing: ['game-rule'] });
+
+  for (const alerted of [
+    { at, missing: ['game-rule'] },
+    { at, missing: [], unreadable: true }
+  ]) {
+    const lowered = await loadRun({
+      floorRows: floorRow(),
+      state: { rows: { lastFloorAlertAt: alerted } }
+    });
+    assert.strictEqual(await lowered.run(floorSteps(lowered)), 0);
+    assert.deepStrictEqual(lowered.important(), []);
+    assert.deepStrictEqual(lowered.state.read('lastFloorAlertAt'), { at, missing: [] });
+    const reads = lowered.state.reads.filter((name) => name === 'lastFloorAlertAt');
+    const writes = lowered.state.upserts.filter((name) => name === 'lastFloorAlertAt');
+    assert.deepStrictEqual([reads.length, writes.length], [1, 1], JSON.stringify(alerted));
+
+    const after = await loadRun({
+      floorRows: floorRow(),
+      state: { rows: { lastFloorAlertAt: lowered.state.read('lastFloorAlertAt') } }
+    });
+    assert.strictEqual(await after.run(floorSteps(after)), 0);
+    assert.strictEqual(after.state.reads.filter((name) => name === 'lastFloorAlertAt').length, 1);
+    assert.ok(!after.state.upserts.includes('lastFloorAlertAt'));
+
+    const again = await loadRun({
+      floorRows: floorRow('game-rule'),
+      state: { rows: { lastFloorAlertAt: after.state.read('lastFloorAlertAt') } }
+    });
+    assert.strictEqual(await again.run(floorSteps(again)), 4);
+    assert.deepStrictEqual(again.important(), [LACKS_GAME_RULE]);
+    assert.deepStrictEqual(again.state.read('lastFloorAlertAt'), { at, missing: ['game-rule'] });
+  }
+
+  // A row that holds anything else holds no alert back, so it is left as it is.
+  for (const row of ['2026-10-15T11:59:00.000Z', { at }, { at, missing: 'game-rule' }]) {
+    const atFloor = await loadRun({ floorRows: {}, state: { rows: { lastFloorAlertAt: row } } });
+    assert.strictEqual(await atFloor.run(floorSteps(atFloor)), 0);
+    assert.ok(!atFloor.state.upserts.includes('lastFloorAlertAt'), JSON.stringify(row));
+  }
+
+  // Within a run too: a floor lowered while it goes, and raised again, is posted again at once.
+  const run = await loadRun({ floorRows: floorRow('game-rule') });
+  const exitCode = await run.run(
+    floorSteps(run, {
+      importBans: () => run.floors.rows.set('floors', { importer: [], raised: [] }),
+      expireBans: () => run.floors.rows.set('floors', { importer: ['game-rule'], raised: [] })
+    })
+  );
+  assert.strictEqual(exitCode, 4);
+  assert.deepStrictEqual(run.important(), [LACKS_GAME_RULE, LACKS_GAME_RULE]);
+  assert.deepStrictEqual(stepsRun(run), ['importBans', 'expireBans', 'exportExportBans']);
+
+  // And a run that found itself at its floor, then below it, as a floor was raised while it went,
+  // and then at it again, as the floor was lowered, notes that again, after its alert.
+  const twice = await loadRun({ floorRows: {} });
+  const twiceCode = await twice.run(
+    floorSteps(twice, {
+      importBans: () => twice.floors.rows.set('floors', { importer: ['game-rule'], raised: [] }),
+      expireBans: () => twice.floors.rows.set('floors', { importer: [], raised: [] })
+    })
+  );
+  assert.strictEqual(twiceCode, 0);
+  assert.deepStrictEqual(twice.important(), [LACKS_GAME_RULE]);
+  assert.deepStrictEqual(twice.state.read('lastFloorAlertAt'), { at, missing: [] });
+}
+
 // A failure to read or save when the alert was last posted never fails the run. The run warns and
 // posts, as a repeated alert costs less than one that is lost, and a database that does not answer
 // holds the run up for at most 15 seconds.
@@ -2329,12 +2429,15 @@ const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
   );
 
   const stuck = await loadRun({ floorRows: floorRow('game-rule'), state: { hang: true } });
-  const run = stuck.run(floorSteps(stuck));
+  let importAt = null;
+  const run = stuck.run(floorSteps(stuck, { importBans: () => (importAt = stuck.now()) }));
   await until(() => stuck.events.includes('transaction'), 'the alert to be checked');
   assert.deepStrictEqual(stepsRun(stuck), []);
   assert.strictEqual(await stuck.runTimers(run), 4);
   assert.deepStrictEqual(stepsRun(stuck), ['importBans', 'expireBans', 'exportExportBans']);
   assert.ok(stuck.important().includes(LACKS_GAME_RULE));
+  // The import, the first step, started once the 15 seconds were up, and no later.
+  assert.strictEqual(importAt, START + 15 * 1000);
 }
 
 // A floor raised while the run goes, which can take many minutes, stops the steps that have not
@@ -2437,7 +2540,7 @@ const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
   assert.strictEqual(await importer.run(floorSteps(importer)), 4);
   assert.deepStrictEqual(stepsRun(importer), []);
   assert.deepStrictEqual(importer.important(), [
-    'This importer image lacks a-later-feature and game-rule, which the data needs, and it cannot know what that guards, so it runs no step. Nothing is imported, exports stay as they are, and bans lifted meanwhile keep applying, until IMPORTER_TAG names a newer image.'
+    'This importer image lacks a-later-feature and game-rule, which the data needs, and it cannot know what that guards, so it runs no step. Nothing is imported, exports stay as they are, and bans lifted meanwhile keep applying, until IMPORTER_TAG names a newer image, or the script runs one.'
   ]);
   const record = importer.record();
   assert.strictEqual(record.outcome, 'belowFloor');
@@ -2469,7 +2572,9 @@ const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
 }
 
 // A row that cannot be read stops every step too, as the run cannot know what it names, and its
-// alert gives the statements to see the row and to set it, which are in the README.
+// alert gives the statements to see the row and to set it, which are in the README. The one that
+// sets it has a placeholder for the features the data needs, which makes it fail as it is, rather
+// than set the floor to nothing, and the alert says what to put in its place.
 for (const value of [
   'not JSON',
   [1, 2],
@@ -2486,9 +2591,10 @@ for (const value of [
   assert.ok(alert.includes("SELECT value FROM ImporterState WHERE name = 'floors';"));
   assert.ok(
     alert.includes(
-      "UPDATE ImporterState SET value = JSON_OBJECT('importer', JSON_ARRAY(), 'raised', JSON_ARRAY()), updatedAt = UTC_TIMESTAMP(3) WHERE name = 'floors';"
+      "`UPDATE ImporterState SET value = JSON_OBJECT('importer', JSON_ARRAY(<features>), 'raised', JSON_ARRAY()), updatedAt = UTC_TIMESTAMP(3) WHERE name = 'floors';` sets it again, once <features> is replaced by the features the data needs, each in quotes, e.g. 'game-rule', or by nothing if it needs none"
     )
   );
+  assert.ok(!alert.includes("JSON_OBJECT('importer', JSON_ARRAY(),"));
   const record = importer.record();
   assert.deepStrictEqual(record.belowFloor, {
     missing: [],
@@ -2564,22 +2670,69 @@ for (const value of [{ importer: ['a-later-feature'], raised: [] }, 'not JSON'])
   assert.ok(!('belowFloor' in importer.record()));
 }
 
-// The heartbeat, or creating the floors row, failing is a warning in the console, and the run goes
-// on: what reads the heartbeat takes a stale one as no importer, and the read before each step
-// takes a row that is not there as no floors. Neither posts anything.
-for (const [kind, warning] of [
-  ['heartbeat', "Warning: could not write the importer's heartbeat: Error: Connection lost"],
-  ['create floors', "Warning: could not create the importer's floors row: Error: Connection lost"]
+// A step names one feature that the importer knows, or none. One whose needs is anything else, e.g.
+// a list, or a name misspelt or in other letters, could not be skipped when it must be, so the run
+// fails before it does anything, saying why, whatever the floors say, also in a dry run.
+for (const [needs, options] of [
+  [['game-rule', 'native-false'], undefined],
+  ['game_rule', undefined],
+  ['Game-Rule', undefined],
+  ['', undefined],
+  [null, undefined],
+  [7, undefined],
+  ['a-later-feature', { checkFloors: false }]
+]) {
+  const importer = await loadRun({ floorRows: floorRow('game-rule') });
+  const later = { ...step('later', async () => importer.events.push('later')), needs };
+  await assert.rejects(importer.run([...floorSteps(importer), later], options), (err) => {
+    assert.strictEqual(
+      err.message,
+      `The step later needs ${JSON.stringify(needs)}, which is not one feature that the importer knows, so it could not tell when to skip the step, and runs no step.`
+    );
+    return true;
+  });
+  assert.deepStrictEqual(importer.events, []);
+  assert.deepStrictEqual(importer.floors.sent, []);
+  assert.deepStrictEqual(importer.records(), []);
+}
+
+// The heartbeat, looking for the floors row, or creating it, failing is a warning in the console,
+// which says which failed, and the run goes on: what reads the heartbeat takes a stale one as no
+// importer, and the read before each step takes a row that is not there as no floors. None posts
+// anything. A run that could not look for the row does not create it, as it would then ask for
+// the row's lock whether it is there or not.
+for (const [kind, warning, tried] of [
+  [
+    'heartbeat',
+    "Warning: could not write the importer's heartbeat: Error: Connection lost",
+    ['heartbeat', 'find floors', 'create floors']
+  ],
+  [
+    'find floors',
+    "Warning: could not look for the importer's floors row, so this run does not create it: Error: Connection lost",
+    ['heartbeat', 'find floors']
+  ],
+  [
+    'create floors',
+    "Warning: could not create the importer's floors row, which was not there: Error: Connection lost",
+    ['heartbeat', 'find floors', 'create floors']
+  ]
 ]) {
   const importer = await loadRun({ floorRows: {} });
   importer.floors.errors[kind] = new Error('Connection lost');
   assert.strictEqual(await importer.run(floorSteps(importer)), 0, kind);
   assert.deepStrictEqual(stepsRun(importer), FLOOR_STEPS);
-  assert.ok(importer.printed().includes(warning), kind);
+  assert.deepStrictEqual(
+    importer.printed().filter((line) => line.startsWith('Warning: ')),
+    [warning],
+    kind
+  );
   assert.deepStrictEqual(importer.discord, []);
-  // The other is still tried.
-  assert.ok(importer.events.includes('heartbeat'));
-  assert.ok(importer.events.includes('create floors'));
+  assert.deepStrictEqual(
+    importer.floors.sent.filter((sent) => sent !== 'read floors'),
+    tried,
+    kind
+  );
   assert.strictEqual(importer.record().outcome, 'finished');
 }
 
@@ -2596,8 +2749,10 @@ for (const [kind, warning] of [
 }
 
 // A read of the floors that fails with a database error fails the run, as any database error does:
-// no step runs without knowing, and it is posted as a failure. The check before the first step, and
-// one before a later step, do alike.
+// no step runs without knowing, and it is posted as a failure. Its reason says that it was the
+// floors that could not be read, as the phase it names is the one before the read. The check before
+// the first step, and one before a later step, do alike.
+const READ_FAILED = "Error: Could not read the importer's floors: Connection lost";
 {
   const importer = await loadRun({ floorRows: {} });
   importer.floors.errors['read floors'] = new Error('Connection lost');
@@ -2605,9 +2760,9 @@ for (const [kind, warning] of [
   assert.deepStrictEqual(stepsRun(importer), []);
   const record = importer.record();
   assert.strictEqual(record.outcome, 'failed');
-  assert.strictEqual(record.reason, 'Error: Connection lost');
+  assert.strictEqual(record.reason, READ_FAILED);
   assert.strictEqual(record.phase, 'migrate');
-  assert.deepStrictEqual(importer.discord, ['The CBL update run failed: Error: Connection lost']);
+  assert.deepStrictEqual(importer.discord, [`The CBL update run failed: ${READ_FAILED}`]);
 }
 {
   const importer = await loadRun({ floorRows: {} });
@@ -2620,7 +2775,7 @@ for (const [kind, warning] of [
   );
   assert.strictEqual(exitCode, 1);
   assert.deepStrictEqual(stepsRun(importer), ['importBans', 'expireBans']);
-  assert.strictEqual(importer.record().reason, 'Error: Connection lost');
+  assert.strictEqual(importer.record().reason, READ_FAILED);
   assert.strictEqual(importer.record().phase, 'expireBans');
 }
 
@@ -2744,5 +2899,5 @@ for (const [kind, warning] of [
 }
 
 console.log(
-  'Importer run checks passed: exit codes, the run lock, signals, the time limit, the database wait, migrations, the run record, the end within 45 seconds, the newest message written before the connections close, a run left waiting, staleness, posted lines, the run status on every way a run ends, the last run status corrected from its record or marked, and the floors: the heartbeat, the steps skipped below them, the outcome, its alert and a dry run.'
+  'Importer run checks passed: exit codes, the run lock, signals, the time limit, the database wait, migrations, the run record, the end within 45 seconds, the newest message written before the connections close, a run left waiting, staleness, posted lines, the run status on every way a run ends, the last run status corrected from its record or marked, and the floors: the heartbeat, the steps skipped below them, the outcome, its alert, also again once a run found the image at its floor, a step that names no known feature, and a dry run.'
 );

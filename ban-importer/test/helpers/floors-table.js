@@ -10,6 +10,7 @@ const STATEMENTS = [
     'heartbeat',
     /^INSERT INTO ImporterState \(name, value, updatedAt\)\s+VALUES \(:name, CAST\(:value AS JSON\), UTC_TIMESTAMP\(3\)\) AS new\s+ON DUPLICATE KEY UPDATE value = new\.value, updatedAt = new\.updatedAt$/
   ],
+  ['find floors', /^SELECT name FROM ImporterState WHERE name = :name$/],
   [
     'create floors',
     /^INSERT IGNORE INTO ImporterState \(name, value, updatedAt\)\s+VALUES \(:name, CAST\(:value AS JSON\), UTC_TIMESTAMP\(3\)\)$/
@@ -31,6 +32,7 @@ export default function floorsTable({ rows = {}, events = null } = {}) {
       table.onStatement?.(kind);
       if (table.errors[kind]) throw table.errors[kind];
       const { name, value } = replacements;
+      if (kind === 'find floors') return table.rows.has(name) ? [{ name }] : [];
       if (kind === 'read floors')
         return table.rows.has(name) ? [{ value: table.rows.get(name) }] : [];
       if (kind === 'heartbeat' || !table.rows.has(name)) table.rows.set(name, JSON.parse(value));

@@ -18,13 +18,13 @@ Only one run works at a time. A run holds two MySQL locks while it works (see [T
 
 ### Exit codes
 
-| Code | Meaning                                                                                                                                                 | What to do                                                                                                  |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `0`  | The run finished.                                                                                                                                       | Nothing.                                                                                                    |
-| `1`  | The run failed, e.g. it could not reach the database, a step or migration failed, or it lost its locks.                                                 | Read why in the run's JSON line or the log channel. The next run starts afresh.                             |
-| `3`  | The run stopped part-way, as it received `SIGTERM` or `SIGINT`, or took longer than `IMPORTER_MAX_RUN_SECONDS`.                                         | Nothing, unless it keeps happening. The next run picks up the work.                                         |
-| `4`  | The run finished below its floor: its image lacks a feature that the data needs, so it skipped the steps that need the feature (see [Floors](#floors)). | Run a newer image. Until then, exports stay as they are.                                                    |
-| `75` | The run was skipped, as the importer service or another run, e.g. one started by hand, holds the locks.                                                 | Nothing. If no run has succeeded for 3 cadences, e.g. as the other run is stuck, it posts that it is stale. |
+| Code | Meaning                                                                                                                                                                                                       | What to do                                                                                                                                                                                                                         |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`  | The run finished.                                                                                                                                                                                             | Nothing.                                                                                                                                                                                                                           |
+| `1`  | The run failed, e.g. it could not reach the database, a step or migration failed, or it lost its locks.                                                                                                       | Read why in the run's JSON line or the log channel. The next run starts afresh.                                                                                                                                                    |
+| `3`  | The run stopped part-way, as it received `SIGTERM` or `SIGINT`, or took longer than `IMPORTER_MAX_RUN_SECONDS`.                                                                                               | Nothing, unless it keeps happening. The next run picks up the work.                                                                                                                                                                |
+| `4`  | The run finished below its floor: its image lacks a feature that the data needs, or the run cannot read the floors row, so it skipped the steps that need the feature, or every step (see [Floors](#floors)). | Read why in the log channel. Run a newer image, or, when the floors row cannot be read, fix it by hand (see [Floors](#floors)). Until then, exports stay as they are, and while every step is skipped, nothing is imported either. |
+| `75` | The run was skipped, as the importer service or another run, e.g. one started by hand, holds the locks.                                                                                                       | Nothing. If no run has succeeded for 3 cadences, e.g. as the other run is stuck, it posts that it is stale.                                                                                                                        |
 
 The importer service exits with codes of its own (see [Running as a service](#running-as-a-service)). An `IMPORTER_MODE` that is neither `once` nor `loop` starts nothing, and exits 1.
 
@@ -174,7 +174,7 @@ A run that held the run lock also saves its record in the database, in the impor
 | Row                  | What it holds                                                                                                                                                                                                                                                        |
 | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `lastRun`            | The latest run's record, as its JSON line shows it.                                                                                                                                                                                                                  |
-| `lastSuccessAt`      | When the latest successful run started: one that exited 0 and imported at least one ban list, if any.                                                                                                                                                                |
+| `lastSuccessAt`      | When the latest successful run started: one that exited 0, or finished below its floor (4), and imported at least one ban list, if any (see [Staleness](#staleness)).                                                                                                |
 | `recentRuns`         | The latest 100 runs' records, oldest first, without per-list counts but for a stopped import's `stopped` and `inProgress`.                                                                                                                                           |
 | `lastStaleAlertAt`   | When the run, or the skipped start, that last posted that the importer is stale started.                                                                                                                                                                             |
 | `lastRunMessage`     | The ID of the latest run's status message in the log channel, and when that run started (see below).                                                                                                                                                                 |
@@ -184,7 +184,7 @@ A run that held the run lock also saves its record in the database, in the impor
 | `lastLogMessage`     | The ID of the newest message in the log channel that CBL's services posted, as each writes it, and which posted it: `web`, `bot` or `importer` (see [The status message at the bottom](#the-status-message-at-the-bottom)). The web server and the bot write it too. |
 | `floors`             | The features an importer must have, and who raised each, when (see [Floors](#floors)). The web server and the bot may raise it too.                                                                                                                                  |
 | `features:importer`  | The heartbeat: what the image of the latest run can do, written as its steps begin (see [Floors](#floors)).                                                                                                                                                          |
-| `lastFloorAlertAt`   | When the run that last posted that the importer is below its floor started (`at`), and what it lacked (`missing`, and `unreadable`) (see [Floors](#floors)).                                                                                                         |
+| `lastFloorAlertAt`   | When the run that last posted that the importer is below its floor started (`at`), and what it lacked (`missing`, and `unreadable`), which is nothing once a later run found it at its floor (see [Floors](#floors)).                                                |
 
 ```sql
 SELECT name, updatedAt, value FROM ImporterState;
@@ -380,7 +380,7 @@ SELECT banList, suspendedAt, suspendedBy, reason, resumedAt FROM BanListSuspensi
 A newer version of CBL can bring data that an older importer would get wrong, and an image that `IMPORTER_TAG` pins, or that the script keeps running, may be that older importer. Two rows of `ImporterState` keep it from doing harm:
 
 - **`features:importer`**, the heartbeat: what the image of the latest run can do, as `{"features": [...], "games": [...], "gitSha": "..."}`, with the commit of the run's record. Only the importer writes it, in one statement, as a run's or a cycle's steps begin: once it holds the run lock and its migrations are done, as before that the table may not exist, and the row would name an image that is not running yet. A dry run never writes it, as a newer image's dry run must not claim features that the service lacks. `updatedAt` is by the database's clock, and the row is fresh within 30 minutes of it. A failed write only warns in the console, and the row then goes stale.
-- **`floors`**: the features an importer must have, as `{"importer": [...names], "raised": [{"feature", "by", "at"}]}`. Each run or cycle creates it, with no names, if it is not there. The bot, the web server and the importer raise it with the first data of each kind, each in one transaction, trying again on a deadlock or a duplicate key, as two first raises at once get in each other's way, and only a person lowers it, by hand (see below). Nothing raises it yet, so as of this version it names nothing.
+- **`floors`**: the features an importer must have, as `{"importer": [...names], "raised": [{"feature", "by", "at"}]}`. Each run or cycle creates it, with no names, if a read that takes no lock does not find it, so a raise that has not ended holds up no run while the row is there. The bot, the web server and the importer raise it with the first data of each kind, each in one transaction, trying again on a deadlock or a duplicate key, as two first raises at once get in each other's way, and only a person lowers it, by hand (see below). Nothing raises it yet, so as of this version it names nothing.
 
 The features are `native-false`, that the importer posts new BattleMetrics export bans with native bans off, which this version has, and `game-rule`, a rule that a later version adds for counting bans by game. A step that must not run without a feature names it (`needs` in `index.js`):
 
@@ -389,17 +389,17 @@ The features are `native-false`, that the importer posts new BattleMetrics expor
 | `game-rule`    | `updateExportBans` | Writing who is on each export ban list.          |
 | `native-false` | `exportExportBans` | Sending the export bans' changes to their lists. |
 
-No other step writes or sends export bans. Before every step, a run or a cycle reads `floors`, so a floor raised while a cycle goes stops the steps that have not started. A dry run does not. A read that fails with a database error fails the run, as no step may run without knowing, while a table or row that is not there means no floors, for every service.
+No other step writes or sends export bans. A step names one feature that the importer knows, or none, and a run whose step names anything else fails before any step. Before every step, a run or a cycle reads `floors`, so a floor raised while a cycle goes stops the steps that have not started. A dry run does not. A read that fails with a database error fails the run, as no step may run without knowing, and its reason says that it could not read the floors, while a table or row that is not there means no floors, for every service.
 
 **Below its floor**, when `floors` names a feature that the image lacks:
 
-- It skips the steps that need that feature, and runs the others. Its exports go stale: nobody is added or removed, so bans lifted meanwhile keep applying, until `IMPORTER_TAG` names a newer image. Nothing is lost: the first image that runs the step again catches up.
+- It skips the steps that need that feature, and runs the others. Its exports go stale: nobody is added or removed, so bans lifted meanwhile keep applying, until `IMPORTER_TAG` names a newer image, or the script runs one. Nothing is lost: the first image that runs the step again catches up.
 - A name that no step of the image names stops every step, the import too, as the image cannot know what the feature guards. So does a row that cannot be read, as it is not an object, or its `importer` is not a list of names, whose alert gives the statements below.
-- It posts why to the log channel, at once when an image first finds itself below its floor, then hourly, by when runs start, also across restarts, as `lastFloorAlertAt` keeps when it last did, and at once again when what it lacks changes. A failure to read or save that row never fails the run: the run warns in the console, and posts.
+- It posts why to the log channel, at once when an image first finds itself below its floor, then hourly, by when runs start, also across restarts, as `lastFloorAlertAt` keeps when it last did, and at once again when what it lacks changes. That includes going below the same floor again after a run found the image at its floor, which that run notes in `lastFloorAlertAt`: a run at its floor reads that row once, and writes it only then. A failure to read or save that row never fails the run: the run warns in the console, and below its floor posts.
 - A run or cycle ends with exit code 4 and the outcome `belowFloor`, once its steps have had their turn, and its record has `belowFloor`, what it lacks and what it skipped, and why in `reason`. It is not a failure. In its status, its title says so, in yellow, each skipped step is marked with ⛔, and it counts as succeeding if its import imported a list (see [Staleness](#staleness)). The service's own exit code does not change, and a cycle is only worth an embed of its own if it would be otherwise, or posted the alert.
 - The importer service is unhealthy while the latest check found its image below its floor, and healthy again once a later check does not (see [Health](#health)). That restarts nothing.
 
-Only images from this version on check floors. An older image ignores both rows and runs every step, whatever `floors` names, so an image from this version or later is the oldest that `IMPORTER_TAG` should name once any floor is raised.
+Only images from this version on check floors. An older image ignores both rows and runs every step, whatever `floors` names, so an image from this version or later is the oldest that `IMPORTER_TAG` should name, or the script run, once any floor is raised.
 
 To read the rows:
 
@@ -407,7 +407,7 @@ To read the rows:
 SELECT name, value, updatedAt, TIMESTAMPDIFF(MINUTE, updatedAt, UTC_TIMESTAMP(3)) AS minutesAgo FROM ImporterState WHERE name IN ('floors', 'features:importer', 'lastFloorAlertAt');
 ```
 
-**To go below a floor on purpose**, e.g. to go back to an image without a feature, once no data that needs the feature is left: set `IMPORTER_TAG` to that image first, as an image from this version on then stops at the floor, and its heartbeat lacks the feature, so nothing raises the floor again. Only then remove the one name by hand, with `<feature>` in both places, which leaves the row's other names and its `raised` as they are:
+**To go below a floor on purpose**, e.g. to go back to an image without a feature, once no data that needs the feature is left: set `IMPORTER_TAG` to that image first, or have the script run it, as an image from this version on then stops at the floor, and its heartbeat lacks the feature, so nothing raises the floor again. Only then remove the one name by hand, with `<feature>` in both places, which leaves the row's other names and its `raised` as they are:
 
 ```sql
 UPDATE ImporterState
@@ -416,11 +416,11 @@ SET value = JSON_REMOVE(value, JSON_UNQUOTE(JSON_SEARCH(value, 'one', '<feature>
 WHERE name = 'floors' AND JSON_SEARCH(value, 'one', '<feature>', NULL, '$.importer') IS NOT NULL;
 ```
 
-**A row that cannot be read**, which should only come from an edit by hand, is left as it is, and no raise overwrites it. To put it right, read what it holds, and set it again, with each feature that the data needs named in the first `JSON_ARRAY()`, e.g. `JSON_ARRAY('game-rule')`:
+**A row that cannot be read**, which should only come from an edit by hand, is left as it is, and no raise overwrites it. To put it right, read what it holds, and set it again, with `<features>` replaced by the features that the data needs, each in quotes, e.g. `'game-rule', 'native-false'`, or by nothing if it needs none. As it is, with `<features>`, the statement fails, rather than set the floor to nothing:
 
 ```sql
 SELECT value FROM ImporterState WHERE name = 'floors';
-UPDATE ImporterState SET value = JSON_OBJECT('importer', JSON_ARRAY(), 'raised', JSON_ARRAY()), updatedAt = UTC_TIMESTAMP(3) WHERE name = 'floors';
+UPDATE ImporterState SET value = JSON_OBJECT('importer', JSON_ARRAY(<features>), 'raised', JSON_ARRAY()), updatedAt = UTC_TIMESTAMP(3) WHERE name = 'floors';
 ```
 
 ## Database tables

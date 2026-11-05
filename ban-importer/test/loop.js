@@ -3650,7 +3650,7 @@ function floorSteps(service, during = {}) {
 }
 const stepsRun = (service) => service.events.filter((event) => FLOOR_STEPS.includes(event));
 const LACKS_GAME_RULE =
-  'This importer image lacks game-rule, which the data needs, so it skips updateExportBans. Exports stay as they are, and bans lifted meanwhile keep applying, until IMPORTER_TAG names a newer image.';
+  'This importer image lacks game-rule, which the data needs, so it skips updateExportBans. Exports stay as they are, and bans lifted meanwhile keep applying, until IMPORTER_TAG names a newer image, or the script runs one.';
 const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
 const cycleEmbeds = (service) =>
   service.posts.map(({ embed }) => embed.title).filter((title) => title.startsWith('CBL update'));
@@ -3659,34 +3659,52 @@ const staleLines = (service) => service.discord.filter((line) => line.includes('
 // With no floors, cycles go as they always did: every step runs, each cycle exits 0 and is healthy.
 // Each cycle says what this image can do as its steps begin, after the migrations in the first, and
 // reads the floors before each step. The heartbeat keeps coming, as it goes stale in 30 minutes.
+// The floors row is created by the first cycle, which did not find it, and only looked for by the
+// cycles after it, with a read that takes no lock, so they ask for no lock that a raise that has
+// not ended would hold.
 {
   const service = await loadLoop({
     env: { GIT_SHA: 'abc1234', IMPORTER_CYCLE_SECONDS: '600' },
     floorRows: {}
   });
   const running = service.start(floorSteps(service));
-  await service.runUntil(() => service.records().length === 2, 'two cycles');
-  const floorEvents = ['migrate', 'heartbeat', 'create floors', 'read floors', ...FLOOR_STEPS];
-  const round = ['read floors', 'importBans', 'read floors', 'updateExportBans'];
+  await service.runUntil(() => service.records().length === 3, 'three cycles');
+  const floorEvents = [
+    'migrate',
+    'heartbeat',
+    'find floors',
+    'create floors',
+    'read floors',
+    ...FLOOR_STEPS
+  ];
+  const round = [
+    'read floors',
+    'importBans',
+    'read floors',
+    'updateExportBans',
+    'read floors',
+    'exportExportBans'
+  ];
   assert.deepStrictEqual(
     service.events.filter((event) => floorEvents.includes(event)),
     [
       'migrate',
       'heartbeat',
+      'find floors',
       'create floors',
       ...round,
-      'read floors',
-      'exportExportBans',
       'heartbeat',
-      'create floors',
+      'find floors',
       ...round,
-      'read floors',
-      'exportExportBans'
+      'heartbeat',
+      'find floors',
+      ...round
     ]
   );
   assert.deepStrictEqual(
     service.records().map(({ outcome, exitCode }) => [outcome, exitCode]),
     [
+      ['finished', 0],
       ['finished', 0],
       ['finished', 0]
     ]
@@ -3831,6 +3849,52 @@ const staleLines = (service) => service.discord.filter((line) => line.includes('
   }
 }
 
+// Once a cycle found the image at its floor, a cycle that finds it below the same floor again posts
+// that at once, with an embed of its own, though the last alert was within the hour: the first
+// cycle at its floor notes it in the alert's row, once, and the cycles after it only read the row.
+{
+  const service = await loadLoop({
+    env: { IMPORTER_CYCLE_SECONDS: '600' },
+    floorRows: floorRow('game-rule')
+  });
+  const running = service.start(floorSteps(service));
+  await service.runUntil(() => service.records().length === 1, 'the first cycle');
+  assert.deepStrictEqual(service.important(), [LACKS_GAME_RULE]);
+
+  service.floors.rows.set('floors', { importer: [], raised: [] });
+  await service.runUntil(() => service.records().length === 3, 'two cycles at the floor');
+  assert.deepStrictEqual(
+    service.records().map(({ outcome }) => outcome),
+    ['belowFloor', 'finished', 'finished']
+  );
+  assert.deepStrictEqual(service.state.read('lastFloorAlertAt'), {
+    at: new Date(START).toISOString(),
+    missing: []
+  });
+  assert.strictEqual(service.events.filter((event) => event === 'save lastFloorAlertAt').length, 1);
+  assert.strictEqual(service.health().status, 200);
+
+  // 30 minutes after the first alert, the floor is raised again.
+  service.floors.rows.set('floors', { importer: ['game-rule'], raised: [] });
+  await service.runUntil(() => service.records().length === 4, 'the fourth cycle');
+  const fourth = service.records()[3];
+  assert.strictEqual(fourth.outcome, 'belowFloor');
+  assert.strictEqual(Date.parse(fourth.startedAt) - START, 30 * MINUTE);
+  assert.deepStrictEqual(service.important(), [LACKS_GAME_RULE, LACKS_GAME_RULE]);
+  assert.deepStrictEqual(cycleEmbeds(service), [
+    'CBL update cycle 1 finished below its floor',
+    'CBL update cycle 4 finished below its floor'
+  ]);
+  assert.deepStrictEqual(service.state.read('lastFloorAlertAt'), {
+    at: fourth.startedAt,
+    missing: ['game-rule']
+  });
+  assert.strictEqual(service.health().status, 503);
+  await service.runTo(service.now() + MINUTE);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
+}
+
 // A floor raised during a cycle stops the steps that have not started, and the health check says so
 // from the check that found it on, before the cycle has ended. The cycles after it stay below it.
 // One lowered by hand then lets the next cycle run in full, finished as usual, and health clears.
@@ -3954,41 +4018,81 @@ for (const [row, reason, belowFloor, firstLine] of [
 
 // The heartbeat failing only warns, and the cycle goes on. A read of the floors that fails with a
 // database error fails the cycle, as any database error does, with no step run without knowing, and
-// the next cycle starts as usual. It leaves the health check as the last check that worked found
-// it.
+// the next cycle starts as usual. Its reason says it was the floors that could not be read. It
+// leaves the health check as the last check that worked found it: a service below its floor stays
+// unhealthy, saying what its image lacks, until a check finds the floor lowered.
 {
-  const service = await loadLoop({ env: { IMPORTER_CYCLE_SECONDS: '600' }, floorRows: {} });
+  const service = await loadLoop({
+    env: { IMPORTER_CYCLE_SECONDS: '600' },
+    floorRows: floorRow('game-rule')
+  });
   service.floors.errors.heartbeat = new Error('Connection lost');
   const running = service.start(floorSteps(service));
   await service.runUntil(() => service.records().length === 1, 'the first cycle');
-  assert.strictEqual(service.records()[0].outcome, 'finished');
-  assert.deepStrictEqual(stepsRun(service), FLOOR_STEPS);
+  assert.strictEqual(service.records()[0].outcome, 'belowFloor');
+  assert.deepStrictEqual(stepsRun(service), ['importBans', 'exportExportBans']);
   assert.ok(
     service
       .printed()
       .includes("Warning: could not write the importer's heartbeat: Error: Connection lost")
   );
-  assert.deepStrictEqual(service.important(), []);
+  assert.deepStrictEqual(service.important(), [LACKS_GAME_RULE]);
   delete service.floors.errors.heartbeat;
   assert.ok(!service.floors.rows.has('features:importer'));
+  const belowFloor = { missing: ['game-rule'], unreadable: false };
+  let health = service.health();
+  assert.strictEqual(health.status, 503);
+  assert.deepStrictEqual(health.belowFloor, belowFloor);
 
   service.floors.errors['read floors'] = new Error('Connection lost');
   await service.runUntil(() => service.records().length === 2, 'the second cycle');
   const failed = service.records()[1];
   assert.strictEqual(failed.outcome, 'failed');
   assert.strictEqual(failed.exitCode, 1);
-  assert.strictEqual(failed.reason, 'Error: Connection lost');
-  assert.deepStrictEqual(stepsRun(service), FLOOR_STEPS);
-  assert.ok(service.important().includes('The CBL update cycle 2 failed: Error: Connection lost'));
+  assert.strictEqual(failed.reason, "Error: Could not read the importer's floors: Connection lost");
+  assert.deepStrictEqual(stepsRun(service), ['importBans', 'exportExportBans']);
+  assert.ok(
+    service
+      .important()
+      .includes(
+        "The CBL update cycle 2 failed: Error: Could not read the importer's floors: Connection lost"
+      )
+  );
   assert.ok(service.floors.rows.has('features:importer'));
+  health = service.health();
+  assert.strictEqual(health.status, 503);
+  assert.strictEqual(health.reason, 'its image is below its floor, as it lacks game-rule');
+  assert.deepStrictEqual(health.belowFloor, belowFloor);
+  assert.strictEqual(health.lastCycle.outcome, 'failed');
 
   delete service.floors.errors['read floors'];
+  service.floors.rows.set('floors', { importer: [], raised: [] });
   await service.runUntil(() => service.records().length === 3, 'the third cycle');
   assert.strictEqual(service.records()[2].outcome, 'finished');
+  assert.strictEqual(service.health().status, 200);
   assert.deepStrictEqual(service.process.exits, []);
   await service.runTo(service.now() + MINUTE);
   service.process.emit('SIGTERM', 'SIGTERM');
   assert.strictEqual(await service.finish(running), 0);
+}
+
+// A step whose needs is not one feature that the importer knows could not be skipped when it must
+// be, so the service fails as its first cycle begins, before any step, saying why, and exits 1.
+{
+  const service = await loadLoop({ env: { IMPORTER_CYCLE_SECONDS: '600' }, floorRows: {} });
+  const later = { ...step('later', async () => service.events.push('later')), needs: 'game_rule' };
+  const running = service.start([...floorSteps(service), later]);
+  assert.strictEqual(await service.finish(running), 1);
+  assert.deepStrictEqual(stepsRun(service), []);
+  assert.ok(!service.events.includes('later'));
+  assert.deepStrictEqual(service.floors.sent, []);
+  assert.ok(
+    service
+      .important()
+      .includes(
+        'The importer service failed: Error: The step later needs "game_rule", which is not one feature that the importer knows, so it could not tell when to skip the step, and runs no step.'
+      )
+  );
 }
 
 // Once it is stopping, that is what the health check says first, also below its floor.
@@ -4015,5 +4119,5 @@ for (const [row, reason, belowFloor, firstLine] of [
 }
 
 console.log(
-  'Importer service checks passed: cycle timing, overruns, the time limit and its hard exit, signals and the 55 s stop limit, the stop deadline, its end and its record, the statements stopped before the locks are freed, a second signal, a lost lock, the run lock held only during cycles, the database, the service lock and the run lock waited for, health, the stale alert of failed cycles, each Discord mode, the status message kept across restarts and saved once posted again, the status message kept at the bottom of the log channel, after its own embeds and summaries, the lines of the web server and the bot, and a restart, its old copies deleted, also after a failed delete, the setting off, and its end only editing it, the hourly summary, nothing growing per cycle, and the floors: the heartbeat of each cycle, cycles below them, the alert across cycles and processes, health, and a dry run.'
+  'Importer service checks passed: cycle timing, overruns, the time limit and its hard exit, signals and the 55 s stop limit, the stop deadline, its end and its record, the statements stopped before the locks are freed, a second signal, a lost lock, the run lock held only during cycles, the database, the service lock and the run lock waited for, health, the stale alert of failed cycles, each Discord mode, the status message kept across restarts and saved once posted again, the status message kept at the bottom of the log channel, after its own embeds and summaries, the lines of the web server and the bot, and a restart, its old copies deleted, also after a failed delete, the setting off, and its end only editing it, the hourly summary, nothing growing per cycle, and the floors: the heartbeat of each cycle, cycles below them, the alert across cycles and processes, also again once a cycle found the image at its floor, health, also after a failed read, a step that names no known feature, and a dry run.'
 );

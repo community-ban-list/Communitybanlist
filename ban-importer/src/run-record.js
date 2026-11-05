@@ -22,7 +22,8 @@ export const STATE = {
   // The status message in the log channel of the latest run that posted one, and when that run
   // started, so the next run can correct it if the run's last edit did not reach Discord.
   LAST_RUN_MESSAGE: 'lastRunMessage',
-  // When the run that last posted that the importer is below its floor started, and what it lacked.
+  // When the run that last posted that the importer is below its floor started, and what it
+  // lacked, which is nothing once a later run found it at its floor.
   LAST_FLOOR_ALERT_AT: 'lastFloorAlertAt'
 };
 
@@ -331,11 +332,18 @@ async function claimStaleAlert(startedAt, cadence, leeway) {
   });
 }
 
+// Whether what lastFloorAlertAt holds could hold an alert back (see claimFloorAlert): what an image
+// lacked, or that the floors row could not be read.
+function holdsAlert(value) {
+  return Array.isArray(value?.missing) && (value.missing.length > 0 || Boolean(value.unreadable));
+}
+
 // Whether the run that started at startedAt is to post that the importer is below its floor, as it
 // lacks the names in missing, sorted, or as the floors row cannot be read (unreadable): at once
-// when no run has posted it, or the last that did lacked something else, and otherwise once an
-// hour. If so, it saves when the run started and what it lacks, for the runs after it, also those
-// of later processes. The alert's row is read with a row lock, as in claimStaleAlert.
+// when no run has posted it, or the last that did lacked something else, or a run has found the
+// importer at its floor since (see clearFloorAlert), and otherwise once an hour. If so, it saves
+// when the run started and what it lacks, for the runs after it, also those of later processes.
+// The alert's row is read with a row lock, as in claimStaleAlert.
 export async function claimFloorAlert({ missing, unreadable, startedAt }) {
   return sequelize.transaction(async (transaction) => {
     const last = await ImporterState.findByPk(STATE.LAST_FLOOR_ALERT_AT, {
@@ -358,6 +366,20 @@ export async function claimFloorAlert({ missing, unreadable, startedAt }) {
     );
     return true;
   });
+}
+
+// Note that a run found the importer at its floor, so the next run below it posts at once, also
+// when it lacks what the last alert said, rather than within the hour of that alert: the row keeps
+// when that alert was posted, and says that nothing is missing now. A run at its floor reads the
+// row once, by its key, with no lock, and writes it only when it held an alert, once, in one
+// statement: only a run that holds the run lock checks the floors, so the row needs no lock for
+// this. Resolves with whether it wrote.
+export async function clearFloorAlert() {
+  const last = await ImporterState.findByPk(STATE.LAST_FLOOR_ALERT_AT);
+  if (!holdsAlert(last?.value)) return false;
+  const { unreadable, ...kept } = last.value;
+  await ImporterState.upsert({ name: STATE.LAST_FLOOR_ALERT_AT, value: { ...kept, missing: [] } });
+  return true;
 }
 
 // Post one alert to the log channel when no run has succeeded for 3 cadences, at most once a
@@ -410,12 +432,20 @@ export async function alertIfStale({
       } ${isoTime(since)}. ${schedule}, so ${STALE_CADENCES} or more in a row have not succeeded.`
     ];
     if (lastRun?.endedAt) {
+      const importBans = lastRun.counts?.importBans;
       let how = '';
       if (lastRun.reason) how = ` (${lastRun.reason})`;
-      else if (lastRun.exitCode === 0 && lastRun.counts?.importBans?.dryRun === true)
+      else if (lastRun.exitCode === 0 && importBans?.dryRun === true)
         how = ', but was a dry run, which imports nothing';
-      else if (lastRun.exitCode === 0 && !succeeded(lastRun))
-        how = `, but imported none of its ${lastRun.counts.importBans.lists} ban lists`;
+      // A run that finished, also below its floor, whose import ran but imported no list did not
+      // succeed for that, which a run below its floor says beside why it skipped what it did.
+      if (
+        (lastRun.exitCode === 0 || lastRun.outcome === 'belowFloor') &&
+        importBans?.ran !== false &&
+        importBans?.dryRun !== true &&
+        !succeeded(lastRun)
+      )
+        how += `, but imported none of its ${importBans.lists} ban lists`;
       parts.push(
         `The last run ended at ${lastRun.endedAt} with exit code ${lastRun.exitCode}${how}.`
       );

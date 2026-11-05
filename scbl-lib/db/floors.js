@@ -26,6 +26,10 @@ const ATTEMPTS = 3;
 // The most of who raised a floor that the row keeps.
 const MAX_BY_LENGTH = 100;
 
+// Marks a duplicate key that the insert of the floors row found, as another raise made the row
+// after this one looked for it, which the next attempt finds (see withFloorRetries).
+const MADE_MEANWHILE = Symbol('the floors row was made meanwhile');
+
 const errnoOf = (err) => (err?.original ?? err?.parent ?? err)?.errno;
 
 // Written in one statement, which takes no lock on anything else, with updatedAt by the database's
@@ -33,6 +37,9 @@ const errnoOf = (err) => (err?.original ?? err?.parent ?? err)?.errno;
 const SAVE_HEARTBEAT = `INSERT INTO ImporterState (name, value, updatedAt)
   VALUES (:name, CAST(:value AS JSON), UTC_TIMESTAMP(3)) AS new
   ON DUPLICATE KEY UPDATE value = new.value, updatedAt = new.updatedAt`;
+
+// Takes no lock, so it waits for nothing.
+const FIND_FLOORS = 'SELECT name FROM ImporterState WHERE name = :name';
 
 // Keeps a row that is there already, which may name floors.
 const CREATE_FLOORS = `INSERT IGNORE INTO ImporterState (name, value, updatedAt)
@@ -65,6 +72,28 @@ function parseFloors(value) {
   return readable ? floors : { unreadable: true };
 }
 
+// Who raised a floor, as the row keeps it: cut short on a character boundary, as MySQL rejects JSON
+// with half a surrogate pair, such as half an emoji. A lone half already in it is replaced.
+function byWhom(by) {
+  return String(by)
+    .toWellFormed()
+    .slice(0, MAX_BY_LENGTH)
+    .replace(/[\uD800-\uDBFF]$/, '');
+}
+
+// The error that a read of the floors failed with, with a message that says it was that read, as
+// what reports it might not, e.g. a run's failure, between two of its steps. It is still the
+// database's error for anything that asks, of the same kind and with the same numbers, e.g. to
+// tell whether the database is unavailable.
+function readFailure(err) {
+  const what = "Could not read the importer's floors";
+  if (err === null || typeof err !== 'object') return new Error(`${what}: ${String(err)}`);
+  const message = typeof err.message === 'string' ? err.message : String(err);
+  return Object.create(err, {
+    message: { value: `${what}: ${message}`, writable: true, configurable: true }
+  });
+}
+
 // Say what the importer image of this run can do, whatever the row said before.
 export async function writeImporterHeartbeat({ features, games, gitSha }) {
   await sequelize.query(SAVE_HEARTBEAT, {
@@ -75,7 +104,19 @@ export async function writeImporterHeartbeat({ features, games, gitSha }) {
   });
 }
 
-// Create the floors row, with no names, unless it is there already.
+// Whether the floors row is there. It takes no lock, so it waits for nothing.
+export async function hasFloorsRow() {
+  const [row] = await sequelize.query(FIND_FLOORS, {
+    type: QueryTypes.SELECT,
+    replacements: { name: FLOORS_ROW }
+  });
+  return Boolean(row);
+}
+
+// Create the floors row, with no names, unless it is there already. The insert asks for the row's
+// lock even when the row is there, so it waits for any raise that has not ended, as a raise holds
+// the lock until its caller's transaction ends: the importer only makes the row once hasFloorsRow
+// finds none.
 export async function createFloorsRow() {
   await sequelize.query(CREATE_FLOORS, {
     replacements: {
@@ -88,7 +129,8 @@ export async function createFloorsRow() {
 // The floors, as { importer, raised, ... }, or { unreadable: true } for a row that cannot be read,
 // which is not to be taken for no floors. A table the importer has not made yet, and a row it has
 // not created yet, give no floors, as no floor can have been raised before they are there. Other
-// errors are passed on, as nobody should act without knowing.
+// errors are passed on, saying that it was this read that failed (see readFailure), as nobody
+// should act without knowing.
 export async function readFloors() {
   try {
     const [row] = await sequelize.query(READ_FLOORS, {
@@ -98,7 +140,7 @@ export async function readFloors() {
     return row ? parseFloors(row.value) : { importer: [] };
   } catch (err) {
     if (errnoOf(err) === NO_SUCH_TABLE) return { importer: [] };
-    throw err;
+    throw readFailure(err);
   }
 }
 
@@ -126,29 +168,41 @@ async function addToFloors(names, by, transaction) {
     importer: [...floors.importer, ...added],
     raised: [
       ...(Array.isArray(floors.raised) ? floors.raised : []),
-      ...added.map((feature) => ({ feature, by: String(by).slice(0, MAX_BY_LENGTH), at }))
+      ...added.map((feature) => ({ feature, by: byWhom(by), at }))
     ]
   };
-  await sequelize.query(row ? UPDATE_FLOORS : INSERT_FLOORS, {
-    replacements: { name: FLOORS_ROW, value: JSON.stringify(value) },
-    transaction
-  });
+  try {
+    await sequelize.query(row ? UPDATE_FLOORS : INSERT_FLOORS, {
+      replacements: { name: FLOORS_ROW, value: JSON.stringify(value) },
+      transaction
+    });
+  } catch (err) {
+    // Another raise made the row since this one looked for it.
+    if (!row && errnoOf(err) === DUPLICATE_KEY && err !== null && typeof err === 'object')
+      err[MADE_MEANWHILE] = true;
+    throw err;
+  }
   return { importer: value.importer, added };
 }
 
 // Run work(transaction) in a transaction, and all of it again when another raise gets in its way:
 // of two first raises at once, each finds no row and locks the gap where it would be, so MySQL ends
-// one in a deadlock, and a raise whose row another made since it looked finds a duplicate key. The
-// next attempt finds the row. A raise in a transaction of its caller's, as when it is made with the
-// data that needs it, cannot run the caller's work again itself, so the caller runs its transaction
-// with this. Resolves as work does, and fails as the last attempt did.
+// one in a deadlock, and a raise whose row another made since it looked finds a duplicate key as it
+// inserts the row. The next attempt finds the row. A deadlock is tried again wherever in work it
+// came from, as MySQL can end any transaction in one, but a duplicate key only from the insert of
+// the floors row, as one in the caller's own data, e.g. a name that is taken, would only come
+// again. A raise in a transaction of its caller's, as when it is made with the data that needs it,
+// cannot run the caller's work again itself, so the caller runs its transaction with this. As work
+// may run up to 3 times, it must do nothing outside the transaction, which a rollback would not
+// undo: nothing posted, and no call to BattleMetrics or any other API. Resolves as work does, and
+// fails as the last attempt did.
 export async function withFloorRetries(work) {
   for (let attempt = 1; ; attempt++) {
     try {
       return await sequelize.transaction(work);
     } catch (err) {
-      const errno = errnoOf(err);
-      if (attempt < ATTEMPTS && (errno === DUPLICATE_KEY || errno === DEADLOCK)) continue;
+      const again = errnoOf(err) === DEADLOCK || err?.[MADE_MEANWHILE] === true;
+      if (attempt < ATTEMPTS && again) continue;
       throw err;
     }
   }
