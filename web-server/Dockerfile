@@ -35,6 +35,10 @@ ENV NODE_ENV=production
 # Copy only the necessary files from the build stage
 COPY --from=build /opt/workdir /opt/workdir
 
+# Check that this stage's Node, which can be a different version from the build stage's, starts the
+# server with the heap setting in CMD below. With no shell here, the test runs as a plain command.
+RUN [ "node", "web-server/test/runtime-heap-limit.js" ]
+
 # The commit the image was built from, which CI passes in, so the services can say which build is
 # running. It is set last, so a new commit does not change any earlier layer.
 ARG GIT_SHA
@@ -47,5 +51,10 @@ EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD [ "node", "web-server/healthcheck.js" ]
 
-# Run service
-CMD [ "node", "web-server/index.js" ]
+# Run service. The heap is 60% of the container's memory limit, 159 MiB under 256 MiB, where V8's
+# default of 262 MiB is more than the container has, so a growing heap ends in a logged heap error
+# rather than a kill by the kernel. Memory outside the heap, such as Buffers, is not capped by it,
+# and with no memory limit the heap is 60% of the host's memory. Set on the command line, it applies
+# whatever NODE_OPTIONS the stack sets, and it wins over --max-old-space-size there too, so a fixed
+# size has to replace this flag in the command.
+CMD [ "node", "--max-old-space-size-percentage=60", "web-server/index.js" ]
