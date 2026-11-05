@@ -1,7 +1,9 @@
 name: Docker Image Dev CI
 
+# Runs are grouped by workflow and branch, so a dev push never cancels a pending build and deploy of
+# master. A newer push to dev still replaces a dev run that has not started.
 concurrency:
-  group: "build"
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 on:
@@ -36,11 +38,15 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-
+    # The images are built only for the runner's own platform, so no emulators are needed. Buildx runs
+    # BuildKit in a container, which the attestations need. That image, and the SBOM scanner the build
+    # and push steps name, are pinned by digest like the actions, so every build uses the same known
+    # releases. Dependabot does not update these two pins, so bump them by hand.
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      with:
+          driver: docker-container
+          driver-opts: image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
 
     - name: Build Docker image for the web server
       uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -49,6 +55,7 @@ jobs:
           file: web-server/Dockerfile
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:dev
           provenance: true
+          sbom: generator=docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
 
     - name: Build Docker image for the ban importer
       uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -57,6 +64,7 @@ jobs:
           file: ban-importer/Dockerfile
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:dev
           provenance: true
+          sbom: generator=docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
 
     - name: Build Docker image for the Discord bot
       uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -65,6 +73,7 @@ jobs:
           file: discord-bot/Dockerfile
           tags: werewolfboy13/cbl-bot:dev
           provenance: true
+          sbom: generator=docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
 
     - name: Push image for the web server
       if: success()
@@ -75,6 +84,7 @@ jobs:
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblwebserver:dev-latest
           provenance: true
+          sbom: generator=docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
 
   #   - name: Update Web Server Deployment
   #     if: success()
@@ -90,6 +100,7 @@ jobs:
           push: true
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/cblimporter:dev-latest
           provenance: true
+          sbom: generator=docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
 
     - name: Push image for the Discord bot
       if: success()
@@ -100,3 +111,4 @@ jobs:
           push: true
           tags: werewolfboy13/cbl-bot:dev-latest
           provenance: true
+          sbom: generator=docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
