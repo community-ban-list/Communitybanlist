@@ -1,3 +1,5 @@
+import { steamIDSQL } from '../player-ids.js';
+
 import { excludedBanListsSQL } from './excluded-ban-lists.js';
 import sequelize, { QueryTypes } from './sequelize.js';
 
@@ -15,8 +17,9 @@ import sequelize, { QueryTypes } from './sequelize.js';
 // - The bans of paused ban lists count for nothing (see ban-list-suspensions.js). The importer's
 //   statement is given their IDs (excludedBanLists), as the importer read them. A count leaves out
 //   only the lists it is given, none by default, as a list's size cap must hold once paused lists
-//   count again. With none to leave out, each statement is the one from before lists could be
-//   paused.
+//   count again. With none to leave out, a statement has no condition on ban lists.
+// - Only a player whose ID is a SteamID64 can be on a list, as those are all the servers and tools
+//   that read the lists are known to take.
 
 // The columns of an export ban list that decide who is on it. Its configs are the only other input.
 export const SCORING_FIELDS = [
@@ -36,6 +39,8 @@ const CONFIG_FIELDS = ['banList', 'activePoints', 'expiredPoints'];
 const EXPIRED = 'B.expired';
 // Whether a ban counts. One with no created time counts only when maxBanAge is 0.
 const COUNTED = '(EBL.maxBanAge = 0 OR EBL.maxBanAge >= DATEDIFF(NOW(), B.created))';
+// Whether a ban's player can be on a list at all, by their ID.
+const EXPORTABLE = steamIDSQL('B.steamUser');
 // A player's points from one ban list: its active points once, if any of their bans there has not
 // expired, and its expired points for each one that has.
 const ACTIVE_POINTS = `MAX(IF(${EXPIRED}, 0, IFNULL(EBLC.activePoints, EBL.defaultActivePoints)))`;
@@ -86,7 +91,7 @@ export function membershipForPlayers(steamUserIDs, { transaction, excludedBanLis
         FROM Bans B
         CROSS JOIN ExportBanLists EBL
         LEFT JOIN ExportBanListConfigs EBLC ON EBL.id = EBLC.exportBanList AND B.banList = EBLC.banList
-        WHERE ${COUNTED} AND B.steamUser IN (?)${notExcluded}
+        WHERE ${COUNTED} AND ${EXPORTABLE} AND B.steamUser IN (?)${notExcluded}
         GROUP BY EBL.id, B.steamUser, B.banList
       ) A
       GROUP BY exportBanList, steamUser
@@ -151,7 +156,7 @@ function qualifyingPlayers(settings, configs, timeLimit, excludedBanLists) {
         FROM Bans B
         CROSS JOIN (SELECT ${SCORING_FIELDS.map((field) => `? AS ${field}`).join(', ')}) EBL
         LEFT JOIN (${configRows}) EBLC ON B.banList = EBLC.banList
-        WHERE ${COUNTED}${notExcluded}
+        WHERE ${COUNTED} AND ${EXPORTABLE}${notExcluded}
         GROUP BY B.steamUser, B.banList
       ) A
       GROUP BY steamUser

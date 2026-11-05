@@ -1,5 +1,6 @@
 // What a player's ID is: the rule the importer goes by as it reads ban lists and refreshes Steam
-// profiles, and the bot as it checks a ban list or a new owner. There are two kinds of ID:
+// profiles, the bot as it checks a ban list or a new owner, and the export ban lists as they decide
+// who can be on them. There are two kinds of ID:
 // - steam: a SteamID64, the 17 digits of a Steam account.
 // - eos: an EOS ID, the 32 lowercase hexadecimal characters of an Epic Online Services account.
 //

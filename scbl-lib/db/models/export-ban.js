@@ -3,6 +3,7 @@ import Sequelize from 'sequelize';
 import { battlemetrics } from '../../apis/index.js';
 import readBattlemetricsPages from '../../apis/read-battlemetrics-pages.js';
 import { BATTLEMETRICS_ORGANIZATION } from '../../config.js';
+import { isSteamID } from '../../player-ids.js';
 import { Logger } from '../../utils/index.js';
 
 import sequelize from '../sequelize.js';
@@ -100,6 +101,16 @@ class ExportBan extends Sequelize.Model {
     // There is nowhere to add the ban while the list has no BattleMetrics ban list, e.g. while it
     // is being deleted.
     if (!exportBanList.battlemetricsID) return 'skipped';
+
+    // The ban names its player by SteamID, so one without a SteamID is never sent to BattleMetrics.
+    if (!isSteamID(this.steamUser)) {
+      Logger.verbose(
+        'ExportBan',
+        2,
+        `Export ban (ID: ${this.id}) gets no Battlemetrics ban, as its player's ID is not a SteamID.`
+      );
+      return 'skipped';
+    }
 
     // A ban made by an earlier run that could not mark the export ban as created.
     if (this.battlemetricsID && this.battlemetricsID !== PENDING) {
