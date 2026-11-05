@@ -63,38 +63,6 @@ const GET_PLAYER = gql`
           }
         }
       }
-      activeBans: bans(orderBy: "created", orderDirection: DESC, expired: false) {
-        edges {
-          cursor
-          node {
-            id
-            banList {
-              id
-              organisation {
-                id
-                name
-                discord
-              }
-            }
-          }
-        }
-      }
-      expiredBans: bans(orderBy: "created", orderDirection: DESC, expired: true) {
-        edges {
-          cursor
-          node {
-            id
-            banList {
-              id
-              organisation {
-                id
-                name
-                discord
-              }
-            }
-          }
-        }
-      }
     }
   }
 `;
