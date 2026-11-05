@@ -2,6 +2,7 @@ import Router from '@koa/router';
 
 import { ExportBan } from 'scbl-lib/db/models';
 import { Op } from 'scbl-lib/db/sequelize';
+import { isSteamID } from 'scbl-lib/player-ids';
 
 const router = new Router();
 
@@ -28,9 +29,13 @@ router.get('/:id', async (ctx) => {
     : [];
 
   // The list is always plain text, one player a line. Say so, rather than leave Koa to guess the
-  // type from the first line.
+  // type from the first line. Only SteamIDs are served, whatever a row holds, as those are all the
+  // servers and tools that read the list are known to take.
   ctx.type = 'text/plain; charset=utf-8';
-  ctx.body = exportBans.map((exportBan) => `${exportBan.steamUser}:0`).join('\n');
+  ctx.body = exportBans
+    .filter((exportBan) => isSteamID(exportBan.steamUser))
+    .map((exportBan) => `${exportBan.steamUser}:0`)
+    .join('\n');
 });
 
 export default router;
