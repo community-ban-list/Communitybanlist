@@ -90,12 +90,13 @@ export default function (props) {
                   invalid={errors.type?.message}
                   disabled={props.exportBanList}
                 >
-                  <option value="remote">Remote</option>
                   <option value="battlemetrics">Battlemetrics</option>
+                  <option value="remote">Remote</option>
                 </Input>
                 <FormText>
-                  Please select an export ban list type. Export ban lists can either be imported as
-                  a remote ban list or shared with you via Battlemetrics.
+                  Please select an export ban list type. Every export ban list can be imported as a
+                  remote ban list. A Battlemetrics list is also shared with you via Battlemetrics.
+                  The type cannot be changed once the list is created.
                 </FormText>
                 <FormFeedback>{errors.type?.message}</FormFeedback>
               </FormGroup>

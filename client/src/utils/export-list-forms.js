@@ -165,13 +165,14 @@ const listSchema = yup
     limitsTest((values, { exportBanList, limits }) => listProblems(values, exportBanList, limits))
   );
 
-// The list form's starting values: a saved list's, or for a new list the model's defaults, with the
-// lowest threshold that is allowed whichever type it is. Only the form's own fields are taken, so
-// the submitted data does not carry the rest of the list, and a missing value starts as an empty
-// string, as an empty input would give.
+// The list form's starting values: a saved list's, or for a new list the BattleMetrics type and the
+// model's default settings, with the default threshold raised to any higher minimum threshold, so
+// it is allowed whichever type is chosen. Only the form's own fields are taken, so the submitted
+// data does not carry the rest of the list, and a missing value starts as an empty string, as an
+// empty input would give.
 function listValues(exportBanList, limits) {
   if (!exportBanList)
-    return { type: 'remote', ...DEFAULT_SETTINGS, threshold: defaultThreshold(limits) };
+    return { type: 'battlemetrics', ...DEFAULT_SETTINGS, threshold: defaultThreshold(limits) };
   return Object.fromEntries(
     Object.keys(Validators.ExportBanList).map((field) => [field, exportBanList[field] ?? ''])
   );
