@@ -796,7 +796,8 @@ assert.deepStrictEqual(
 // would end as soon as one of them came back. So does one of a list whose only bans are those it
 // holds, measured against the 300 it has. A list whose hold no longer lasts, here as fewer than a
 // fifth of the 1,000 bans it is measured against are held, and one held as it lost all of its
-// bans, whose other bans are too few to be a large loss, are held as 'full', as any list is.
+// bans, whose other bans are too few to be a large loss, are held as 'full', as any list is: all
+// of their bans, the 10 the second saved since among them.
 assert.deepStrictEqual(
   plan({ missing: lose(2000), stored: 2000, fetched: 50, pending, ...heldLarge }),
   { remove: [], wait: [], hold: 'large', held: lose(2000), released: [], heldOf: 1000 }
@@ -807,9 +808,35 @@ assert.deepStrictEqual(
 );
 assert.deepStrictEqual(
   [{ ...heldLarge, held: new Set(lose(199)), heldOf: 2000 }, { held: new Set(lose(990)) }].map(
-    (hold) => plan({ missing: lose(1000), stored: 1000, fetched: 50, pending, ...hold }).hold
+    (hold) => plan({ missing: lose(1000), stored: 1000, fetched: 50, pending, ...hold })
   ),
-  ['full', 'full']
+  [
+    { remove: [], wait: [], hold: 'full', held: lose(1000), released: [] },
+    { remove: [], wait: [], hold: 'full', held: lose(1000), released: [] }
+  ]
+);
+// Only one of the bans a 'full' hold began with ends it as it comes back (firstHeld): here a list
+// held as it lost all of its 30 bans, which then lost all of the 35 it had, too few of them saved
+// since to be a large loss, so it holds the 5 it saved since with its 30. One of the 5 that comes
+// back is no longer held, and the hold goes on with the rest, as it does once all 5 came back, and
+// once one of the 30 comes back, the hold ends: the rest wait for a later complete read, the 4 it
+// saved since among them. Without firstHeld, all of its held bans are those it began with, as for
+// a hold whose bans were all held in one read, and any one of them ends it.
+const heldAgain = { held: new Set(lose(35)), firstHeld: new Set(lose(30)) };
+pending = pendingSince(lose(35), 600);
+assert.deepStrictEqual(
+  [
+    plan({ missing: lose(34), stored: 36, fetched: 2, pending, ...heldAgain }),
+    plan({ missing: lose(30), stored: 36, fetched: 6, pending, ...heldAgain }),
+    plan({ missing: lose(34, 1), stored: 36, fetched: 2, pending, ...heldAgain }),
+    plan({ missing: lose(34), stored: 36, fetched: 2, pending, held: heldAgain.held })
+  ],
+  [
+    { remove: [], wait: [], hold: 'full', held: lose(34), released: [] },
+    { remove: [], wait: [], hold: 'full', held: lose(30), released: [] },
+    { remove: [], wait: lose(34, 1), hold: null, held: [], released: lose(34, 1) },
+    { remove: [], wait: lose(34), hold: null, held: [], released: lose(34) }
+  ]
 );
 // A list held as it lost all of its bans, here 20, whose read loses a large part of the bans it
 // saved since, here 100 of the 400 it saved, or all of them, holds every missing ban as 'large'
@@ -840,6 +867,21 @@ assert.deepStrictEqual(plan({ missing: lose(20), stored: 420, fetched: 400, pend
 assert.deepStrictEqual(
   plan({ missing: lose(19, 1), stored: 420, fetched: 401, pending, ...tookIn }),
   { remove: lose(19, 1), wait: [], hold: null, held: [], released: lose(19, 1) }
+);
+// A 'full' hold that held bans the list saved since, here 10 with the 20 it began with, measures a
+// large loss it takes in against the 20 it began with, not the 30 it holds, so it keeps them at
+// least until one of those 20 comes back, also once the 10 came back.
+pending = pendingSince(lose(30), 600);
+assert.deepStrictEqual(
+  plan({
+    missing: lose(130),
+    stored: 430,
+    fetched: 300,
+    pending,
+    held: new Set(lose(30)),
+    firstHeld: new Set(lose(20))
+  }),
+  { remove: [], wait: [], hold: 'large', held: lose(130), released: [], heldOf: 20 }
 );
 pending = pendingSince(lose(300), 600);
 // A large loss in the read that ends the hold, of bans no read had missed, is held anew, as a hold
@@ -1191,8 +1233,9 @@ assert.deepStrictEqual(
     ['commit', 3]
   ]
 );
-// Each committed batch is counted as it is removed, so one that fails for good after the first,
-// e.g. as the database stays unavailable, still counts the bans the first removed.
+// Each committed batch is counted as it is removed, with the bans whose records it dropped, so one
+// that fails for good after the first, e.g. as the database stays unavailable, still counts the
+// bans the first removed.
 reset();
 deleted = 2;
 let deletes = 0;
@@ -1209,11 +1252,17 @@ await assert.rejects(
       { id: '7,b', steamUser: steamID(1) },
       { id: '7,c', steamUser: steamID(2) }
     ],
-    { batchSize: 2, onRemoved: (count) => counted.push(count) }
+    {
+      batchSize: 2,
+      onRemoved: (count, batch) => counted.push([count, batch.map(({ id }) => id)])
+    }
   ),
   { name: 'SequelizeConnectionRefusedError' }
 );
-assert.deepStrictEqual([counted, events.filter(([type]) => type === 'commit').length], [[2], 1]);
+assert.deepStrictEqual(
+  [counted, events.filter(([type]) => type === 'commit').length],
+  [[[2, ['7,a', '7,b']]], 1]
+);
 
 // Missing bans are recorded with one statement per batch, which keeps when a ban was first missing
 // and updates when it was last, and their records are dropped the same way.
@@ -1246,6 +1295,24 @@ reset();
 fail(/^DELETE FROM BanListPendingRemovals /, deadlock());
 await clearPendingRemovals(7, ['7,d']);
 assert.deepStrictEqual([statements().length, delays], [2, [5000]]);
+// Each statement's bans are counted once they are recorded, with their IDs, so records cut short
+// after the first statement, as the database stays unavailable, count only those it recorded.
+reset();
+let inserts = 0;
+fail(
+  { test: (sql) => /^INSERT INTO BanListPendingRemovals /.test(sql) && ++inserts > 1 },
+  ...Array.from({ length: 5 }, () => new ConnectionError())
+);
+const recorded = [];
+await assert.rejects(
+  savePendingRemovals(7, ['7,a', '7,b', '7,c'], {
+    now: new Date(NOW),
+    batchSize: 2,
+    onSaved: (count, batch) => recorded.push([count, [...batch]])
+  }),
+  { name: 'SequelizeConnectionRefusedError' }
+);
+assert.deepStrictEqual([recorded, statements().length], [[[2, ['7,a', '7,b']]], 6]);
 
 // What a read changes of a hold for an admin is written in one transaction, whole or not at all.
 // A hold that begins saves why the list's bans are held, with the bans a 'large' hold is measured
@@ -1487,5 +1554,5 @@ assert.deepStrictEqual(batches, [2, 2]);
 assert.strictEqual(events.filter(([type]) => type === 'commit').length, 2);
 
 console.log(
-  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans, which last until confirmed or a held ban comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, records of missing bans, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
+  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, with their bans, records of missing bans, counted a statement at a time, with their IDs, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
 );
