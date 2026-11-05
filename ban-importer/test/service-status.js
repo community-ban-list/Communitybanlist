@@ -65,7 +65,7 @@ assert.strictEqual(DEFAULT_DISCORD_MODE, 'both');
 // A cycle's record, as its JSON line gives it, with the counts given.
 const record = ({ cycle = 1, exitCode = 0, seconds = 45, counts = {}, ...rest } = {}) => ({
   event: 'cbl-importer-run',
-  outcome: { 0: 'finished', 1: 'failed', 3: 'interrupted' }[exitCode],
+  outcome: { 0: 'finished', 1: 'failed', 3: 'interrupted', 4: 'belowFloor' }[exitCode],
   exitCode,
   startedAt: new Date(START + (cycle - 1) * 10 * MINUTE).toISOString(),
   endedAt: new Date(START + (cycle - 1) * 10 * MINUTE + seconds * SECOND).toISOString(),
@@ -223,6 +223,46 @@ const imported = (counts = {}, banLists = []) => ({
     const cycle = record({ counts });
     assert.strictEqual(isNoteworthy(cycle, cycleNumbers(cycle)), true, JSON.stringify(counts));
   }
+}
+
+// A cycle that only finished below its floor is as quiet as any other, as the floor's alert carries
+// that news hourly: it is worth an embed once it posted that alert, a line, or changed something,
+// or had a problem. Steps it skipped count nothing, as the numbers show, whatever step they are.
+{
+  const skipped = { ran: false, belowFloor: true };
+  const below = record({
+    exitCode: 4,
+    counts: {
+      importBans: imported(),
+      updateExportBans: { ...skipped, needs: 'game-rule' },
+      exportExportBans: { queued: 0, created: 0, deleted: 0 }
+    }
+  });
+  assert.strictEqual(below.outcome, 'belowFloor');
+  assert.strictEqual(isNoteworthy(below, cycleNumbers(below)), false);
+  assert.strictEqual(isNoteworthy(below, cycleNumbers(below), { lines: 0 }), false);
+  assert.strictEqual(isNoteworthy(below, cycleNumbers(below), { lines: 1 }), true);
+  const changed = record({ exitCode: 4, counts: { importBans: imported({ new: 1 }) } });
+  assert.strictEqual(isNoteworthy(changed, cycleNumbers(changed)), true);
+  const failedList = record({ exitCode: 4, counts: { importBans: imported({ failedLists: 1 }) } });
+  assert.strictEqual(isNoteworthy(failedList, cycleNumbers(failedList)), true);
+
+  // Every step skipped, the import too, gives the numbers of a cycle that did nothing.
+  const nothing = record({
+    exitCode: 4,
+    counts: Object.fromEntries(
+      ['importBans', 'expireBans', 'checkReputationPoints', 'updateSteamUserInfo'].map((name) => [
+        name,
+        skipped
+      ])
+    )
+  });
+  const numbers = copy(cycleNumbers(nothing));
+  assert.deepStrictEqual(numbers, copy(cycleNumbers(record())));
+  assert.strictEqual(isNoteworthy(nothing, numbers), false);
+  // Nor does a cycle below its floor count as failed or stopped in the totals.
+  const counted = addCycle(newTotals(START), nothing, cycleNumbers(nothing));
+  assert.deepStrictEqual([counted.cycles, counted.failed, counted.stopped], [1, 0, 0]);
 }
 
 // The totals sum up the cycles that ended: how many, how many failed and were stopped, the bans
@@ -554,6 +594,25 @@ const running = {
     lines(stopped).at(-1),
     `**Stopped** <t:${UNIX + 1800}:f>, as it received SIGTERM.`
   );
+  // A last cycle that finished below its floor has a mark and words of its own, and says why.
+  const below = render({
+    ...running,
+    last: {
+      cycle: 2,
+      outcome: 'belowFloor',
+      seconds: 45,
+      endedAt: START + 45 * SECOND,
+      reason:
+        'This importer image lacks game-rule, which the data needs, so it skipped updateExportBans.',
+      numbers: cycleNumbers(record())
+    }
+  });
+  assert.strictEqual(below.title, 'CBL importer service running');
+  assert.ok(
+    lines(below).includes(
+      `⛔ **Cycle 2** finished below its floor in **45s**, <t:${UNIX + 45}:R>: This importer image lacks game-rule, which the data needs, so it skipped updateExportBans.`
+    )
+  );
   const failed = render({ ...running, outcome: 'failed', reason: 'it lost its locks' });
   assert.deepStrictEqual([failed.title, failed.color], ['CBL importer service failed', 0xed4245]);
   assert.match(
@@ -610,5 +669,5 @@ const running = {
 }
 
 console.log(
-  "Importer service status checks passed: what a cycle did, which cycles are posted, the totals and hourly summary, when it is due, and the status message, within Discord's limits."
+  "Importer service status checks passed: what a cycle did, which cycles are posted, also below the floor, the totals and hourly summary, when it is due, and the status message, within Discord's limits."
 );

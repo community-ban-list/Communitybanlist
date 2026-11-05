@@ -20,25 +20,35 @@ const isoTime = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : null
 //   before its first cycle ends, it took the lock within window;
 // - while it waits for the database, or for another run to end, as another run holds the service
 //   lock or the run lock, for its first 10 minutes of waiting;
-// - not once it is stopping.
-// health is what loop.js keeps: { stopping, lockedAt, cycles, cycle, lastCycle, waitingFor,
-// waitingSince, window }, with times in milliseconds, where lastCycle is
-// { cycle, outcome, endedAt, seconds } and waitingFor is 'database' or 'lock'. Returns
-// { healthy, reason } with what the health check prints.
+// - not once it is stopping;
+// - not while the latest check of its floors found its image below them, which it then says, as
+//   Docker shows it, and which stops or restarts nothing, as Docker never restarts a container that
+//   is only unhealthy.
+// health is what loop.js keeps: { stopping, belowFloor, lockedAt, cycles, cycle, lastCycle,
+// waitingFor, waitingSince, window }, with times in milliseconds, where belowFloor is null or
+// { missing, unreadable }, lastCycle is { cycle, outcome, endedAt, seconds } and waitingFor is
+// 'database' or 'lock'. Returns { healthy, reason } with what the health check prints.
 export function checkHealth(health, now) {
-  const { lockedAt, lastCycle, waitingFor, waitingSince, window } = health;
+  const { belowFloor, lockedAt, lastCycle, waitingFor, waitingSince, window } = health;
   const status = {
     holdsLock: Number.isFinite(lockedAt),
     cycles: health.cycles,
     cycle: health.cycle,
     lastCycle: lastCycle && { ...lastCycle, endedAt: isoTime(lastCycle.endedAt) },
     waitingFor: waitingFor ?? null,
-    waitingSince: waitingFor ? isoTime(waitingSince) : null
+    waitingSince: waitingFor ? isoTime(waitingSince) : null,
+    ...(belowFloor ? { belowFloor } : {})
   };
 
   const healthy = (reason) => ({ healthy: true, reason, ...status });
   const unhealthy = (reason) => ({ healthy: false, reason, ...status });
   if (health.stopping) return unhealthy('the importer service is stopping');
+  if (belowFloor)
+    return unhealthy(
+      belowFloor.unreadable
+        ? 'the floors row cannot be read, so it runs no step'
+        : `its image is below its floor, as it lacks ${belowFloor.missing.join(', ')}`
+    );
 
   const waited = waitingFor ? now - waitingSince : null;
   const waiting = waitingFor === 'database' ? 'the database' : 'another run to end';

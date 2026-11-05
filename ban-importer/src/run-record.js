@@ -21,7 +21,9 @@ export const STATE = {
   LAST_STALE_ALERT_AT: 'lastStaleAlertAt',
   // The status message in the log channel of the latest run that posted one, and when that run
   // started, so the next run can correct it if the run's last edit did not reach Discord.
-  LAST_RUN_MESSAGE: 'lastRunMessage'
+  LAST_RUN_MESSAGE: 'lastRunMessage',
+  // When the run that last posted that the importer is below its floor started, and what it lacked.
+  LAST_FLOOR_ALERT_AT: 'lastFloorAlertAt'
 };
 
 // The ImporterState rows of the importer service, which runs the importer in a loop (see loop.js).
@@ -52,6 +54,10 @@ const STALE_CADENCES = 3;
 // Runs start a little before or after their time, e.g. when Docker takes longer to start one, so
 // the check allows this much leeway, or a tenth of the cadence if that is less.
 const STALE_LEEWAY = 5 * 60 * 1000;
+
+// While the importer stays below its floor, it says so once an hour, comparing when runs started,
+// with the same leeway for those that start a little early.
+const FLOOR_ALERT_INTERVAL = 60 * 60 * 1000;
 
 // Why a run did not finish is kept to this many characters.
 const MAX_REASON_LENGTH = 500;
@@ -116,6 +122,9 @@ export default class RunRecord {
     this.counts = {};
     // The importer migrations the run applied.
     this.migrations = [];
+    // What the importer lacks and the steps it skipped, as { missing, skipped }, with unreadable
+    // when the floors row could not be read, while the run is below its floor (see RunState).
+    this.belowFloor = null;
     // In loop mode, the number of the importer service's cycle, from 1 when the service starts, and
     // the process's memory as the cycle ended.
     this.cycle = null;
@@ -175,9 +184,15 @@ export default class RunRecord {
     };
     if (this.cycle !== null) this.ended.cycle = this.cycle;
     if (reason) this.ended.reason = truncate(reason);
-    if (outcome !== 'finished' && outcome !== 'skipped' && this.phase)
+    if (outcome !== 'finished' && outcome !== 'skipped' && outcome !== 'belowFloor' && this.phase)
       this.ended.phase = this.phase;
     if (this.migrations.length > 0) this.ended.migrations = this.migrations;
+    if (this.belowFloor)
+      this.ended.belowFloor = {
+        ...this.belowFloor,
+        missing: [...this.belowFloor.missing],
+        skipped: [...this.belowFloor.skipped]
+      };
     this.ended.phases = { ...this.phases };
     this.ended.counts = copyCounts(this.counts);
     if (this.memory) this.ended.memory = this.memory;
@@ -185,12 +200,16 @@ export default class RunRecord {
   }
 }
 
-// Whether a run counts as a success: it exited 0, and its import imported at least one ban list, if
-// it had any to import. A run while every list fails, e.g. during a BattleMetrics outage, does not,
-// so it cannot hold off the stale alert, and nor does a dry run, which imports nothing. A run whose
-// import gave no counts is judged by its exit code.
+// Whether a run counts as a success: it exited 0, or finished below its floor, and its import
+// imported at least one ban list, if it had any to import. A run while every list fails, e.g.
+// during a BattleMetrics outage, does not, so it cannot hold off the stale alert, and nor does a
+// dry run, which imports nothing, or a run below its floor that skipped its import. One that
+// imported does, or the stale alert would repeat every cadence on top of the floor's own alert. A
+// run whose import gave no counts is judged by its exit code.
 export function succeeded(record) {
-  if (record?.exitCode !== 0 || record.counts?.importBans?.dryRun === true) return false;
+  if (record?.exitCode !== 0 && record?.outcome !== 'belowFloor') return false;
+  if (record.counts?.importBans?.dryRun === true || record.counts?.importBans?.ran === false)
+    return false;
   const banLists = record.counts?.importBans?.banLists;
   return (
     !Array.isArray(banLists) ||
@@ -306,6 +325,35 @@ async function claimStaleAlert(startedAt, cadence, leeway) {
     if (last && startedAt - Date.parse(last.value) < cadence - leeway) return false;
     await ImporterState.upsert(
       { name: STATE.LAST_STALE_ALERT_AT, value: isoTime(startedAt) },
+      { transaction }
+    );
+    return true;
+  });
+}
+
+// Whether the run that started at startedAt is to post that the importer is below its floor, as it
+// lacks the names in missing, sorted, or as the floors row cannot be read (unreadable): at once
+// when no run has posted it, or the last that did lacked something else, and otherwise once an
+// hour. If so, it saves when the run started and what it lacks, for the runs after it, also those
+// of later processes. The alert's row is read with a row lock, as in claimStaleAlert.
+export async function claimFloorAlert({ missing, unreadable, startedAt }) {
+  return sequelize.transaction(async (transaction) => {
+    const last = await ImporterState.findByPk(STATE.LAST_FLOOR_ALERT_AT, {
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+    // A row that holds something else, e.g. after an edit by hand, counts as no alert posted.
+    const { at, missing: lacked, unreadable: unread } = last?.value ?? {};
+    const same =
+      Boolean(unread) === Boolean(unreadable) &&
+      Array.isArray(lacked) &&
+      lacked.join() === missing.join();
+    if (same && startedAt - Date.parse(at) < FLOOR_ALERT_INTERVAL - STALE_LEEWAY) return false;
+    await ImporterState.upsert(
+      {
+        name: STATE.LAST_FLOOR_ALERT_AT,
+        value: { at: isoTime(startedAt), missing, ...(unreadable ? { unreadable: true } : {}) }
+      },
       { transaction }
     );
     return true;

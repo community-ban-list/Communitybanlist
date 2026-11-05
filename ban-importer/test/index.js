@@ -10,7 +10,7 @@ import describeError, { stackTrace } from '../../scbl-lib/utils/describe-error.j
 // and exits with the run's code, or with 1 when the run failed, when a promise failed with nothing
 // to handle it, or when the run was left waiting for something that can never happen.
 
-const EXIT_CODES = { FINISHED: 0, FAILED: 1, INTERRUPTED: 3, SKIPPED: 75 };
+const EXIT_CODES = { FINISHED: 0, FAILED: 1, INTERRUPTED: 3, BELOW_FLOOR: 4, SKIPPED: 75 };
 
 function deferred() {
   let resolve, reject;
@@ -41,6 +41,8 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
   const started = [];
   const modes = [];
   const order = [];
+  // What the run or the service was told besides its steps.
+  const startOptions = [];
 
   // As in Node, exit() without a code exits with process.exitCode, or 0 if that is not set.
   const fakeProcess = new EventEmitter();
@@ -95,9 +97,10 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
       default: { updateExportBans: step('updateExportBans') }
     },
     './src/run.js': {
-      default: (given) => {
+      default: (given, told) => {
         started.push('run');
         order.push('run');
+        startOptions.push(told);
         steps = given;
         return result.promise;
       },
@@ -109,9 +112,10 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
     },
     // The service runs the same steps. IMPORTER_MODE is loop or once, or else invalid.
     './src/loop.js': {
-      default: (given) => {
+      default: (given, told) => {
         started.push('loop');
         order.push('loop');
+        startOptions.push(told);
         steps = given;
         return result.promise;
       },
@@ -158,6 +162,7 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
     started,
     modes,
     order,
+    startOptions,
     process: fakeProcess,
     steps: () => steps
   };
@@ -250,8 +255,42 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
   assert.deepStrictEqual(index.calls, ['importBans']);
 }
 
-// The importer exits with the run's code: 0 finished, 1 failed, 3 stopped part-way and 75 skipped.
-for (const code of [0, 1, 3, 75]) {
+// The steps that must not run on an image without some feature name it, and only those: the export
+// recalculation and the export push, the only steps that write export bans or send them. The run,
+// or the service, is told to check the floors, unless this is a dry run, which only imports, and
+// writes nothing. A newer image's dry run must not claim features that the service lacks.
+{
+  const needs = (index) =>
+    Array.from(index.steps()).map(({ name, needs: feature }) => [name, feature]);
+  for (const [env, runner] of [
+    [{}, 'run'],
+    [{ IMPORTER_MODE: 'loop' }, 'loop']
+  ]) {
+    const index = await loadIndex({ env });
+    assert.deepStrictEqual(index.started, [runner]);
+    assert.deepStrictEqual(needs(index), [
+      ['importBans', undefined],
+      ['expireBans', undefined],
+      ['checkReputationPoints', undefined],
+      ['updateSteamUserInfo', undefined],
+      ['clearOrphanedUsers', undefined],
+      ['updateReputationPoints', undefined],
+      ['updateReputationRank', undefined],
+      ['updateExportBans', 'game-rule'],
+      ['exportExportBans', 'native-false']
+    ]);
+    assert.deepStrictEqual({ ...index.startOptions[0] }, { checkFloors: true });
+
+    const dryRun = await loadIndex({ env, dryRun: true });
+    assert.deepStrictEqual(dryRun.started, [runner]);
+    assert.deepStrictEqual(needs(dryRun), [['importBans', undefined]]);
+    assert.deepStrictEqual({ ...dryRun.startOptions[0] }, { checkFloors: false });
+  }
+}
+
+// The importer exits with the run's code: 0 finished, 1 failed, 3 stopped part-way, 4 finished
+// below its floor and 75 skipped.
+for (const code of [0, 1, 3, 4, 75]) {
   const index = await loadIndex();
   index.result.resolve(code);
   await settle();
@@ -260,9 +299,11 @@ for (const code of [0, 1, 3, 75]) {
 }
 
 // A promise that fails with nothing to handle it is printed with where it was thrown, and a run
-// that then finishes exits 1. One that was stopped or skipped keeps its own code.
+// that then finishes exits 1, also below its floor. One that was stopped or skipped keeps its own
+// code.
 for (const [code, exit] of [
   [0, 1],
+  [4, 1],
   [3, 3],
   [75, 75]
 ]) {
@@ -364,5 +405,5 @@ for (const [env, runner] of [
 }
 
 console.log(
-  'Importer entry point checks passed: the steps, the dry run step, exit codes, unhandled rejections, a run left waiting, IMPORTER_MODE, and the newest message posted recorded.'
+  'Importer entry point checks passed: the steps, what each needs, the dry run step, which checks no floors, exit codes, unhandled rejections, a run left waiting, IMPORTER_MODE, and the newest message posted recorded.'
 );

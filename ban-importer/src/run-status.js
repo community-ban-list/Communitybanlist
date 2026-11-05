@@ -10,6 +10,7 @@
 export const COLORS = {
   running: 0x5865f2,
   finished: 0x57f287,
+  belowFloor: 0xf1c40f,
   failed: 0xed4245,
   stopped: 0xe67e22,
   lockLost: 0xed4245,
@@ -19,6 +20,7 @@ export const COLORS = {
 export const TITLES = {
   running: 'CBL update run in progress',
   finished: 'CBL update run finished',
+  belowFloor: 'CBL update run finished below its floor',
   failed: 'CBL update run failed',
   stopped: 'CBL update run stopped',
   lockLost: 'CBL update run lost its locks',
@@ -48,6 +50,8 @@ const MARKS = {
   failed: '❌',
   stopped: '⏹️',
   waiting: '▫️',
+  // A step skipped, as the importer is below its floor.
+  belowFloor: '⛔',
   // The phase a run was in when it ended without saying how.
   unfinished: '⚠️'
 };
@@ -303,7 +307,8 @@ const skipped = (counts) => counts?.ran === false;
 // or not run yet, and before them a phase that is not a step, such as the migrations, while it is
 // under way or when the run ended in it. A step that finished without running is left out, unless
 // a run that did not finish ended in it, e.g. one stopped right after it, as the header names it as
-// the phase the run ended in.
+// the phase the run ended in, or it was skipped as the importer is below its floor, which is the
+// news of the embed. A run below its floor did finish.
 function phaseLines(state) {
   const { outcome, steps, phases, phase, completed, progress, counts } = state;
   const running = outcome === 'running';
@@ -330,11 +335,20 @@ function phaseLines(state) {
   };
   const isCurrent = (name) => name === phase && !completed.includes(name);
   // The phase a run that did not finish ended in, which its header names.
-  const endedIn = (name) => !running && outcome !== 'finished' && name === phase;
+  const endedIn = (name) =>
+    !running && outcome !== 'finished' && outcome !== 'belowFloor' && name === phase;
 
   const lines = [];
   if (phase && !steps.includes(phase) && isCurrent(phase)) lines.push(current(phase));
   for (const name of steps) {
+    if (completed.includes(name) && skipped(counts[name]) && counts[name].belowFloor === true) {
+      const { needs } = counts[name];
+      const lacked =
+        typeof needs === 'string' ? `, as it needs ${plain(cut(needs, MAX_LABEL))}` : '';
+      const text = `${label(name)} · skipped below the floor${lacked}`;
+      lines.push(line(name, 'belowFloor', MARKS.belowFloor, text));
+      continue;
+    }
     if (completed.includes(name) && skipped(counts[name]) && !endedIn(name)) continue;
     if (completed.includes(name)) {
       const details =
@@ -393,14 +407,15 @@ function headerLines(state) {
   if (migrations.length > 0)
     lines.push(`Applied migrations ${plain(cut(migrations.join(', '), MAX_MIGRATIONS))}`);
   if (outcome !== 'running' && outcome !== 'finished') {
-    if (state.phase) lines.push(`**Phase** ${label(state.phase)}`);
+    if (state.phase && outcome !== 'belowFloor') lines.push(`**Phase** ${label(state.phase)}`);
     if (state.reason) lines.push(`**Reason** ${describeReason(state.reason)}`);
   }
   return lines;
 }
 
 // Draw a run's embed from its state:
-// - outcome: 'running', or how it ended: 'finished', 'failed', 'stopped' or 'lockLost';
+// - outcome: 'running', or how it ended: 'finished', 'belowFloor', 'failed', 'stopped' or
+//   'lockLost';
 // - startedAt, and at, which is now while it runs and when it ended once it has, in milliseconds;
 // - seconds: how long a run that ended took;
 // - gitSha: the commit it runs;
@@ -411,7 +426,7 @@ function headerLines(state) {
 // - progress: each step's latest progress, as { done, total, unit }, by name;
 // - counts: the counts each step gave, by name, as the run record keeps them;
 // - migrations: the importer migrations it applied;
-// - reason: why a run that did not finish ended;
+// - reason: why a run that did not finish ended, or what a run below its floor skipped;
 // - cycle: in loop mode, the number of the importer service's cycle, which its title names.
 // Whatever the state holds, every part is kept within Discord's limits.
 export default function renderRunStatus(state) {

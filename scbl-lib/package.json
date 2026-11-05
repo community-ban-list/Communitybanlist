@@ -11,9 +11,11 @@
     "./db/ban-list-suspensions": "./db/ban-list-suspensions.js",
     "./db/excluded-ban-lists": "./db/excluded-ban-lists.js",
     "./db/export-membership": "./db/export-membership.js",
+    "./db/floors": "./db/floors.js",
     "./db/models": "./db/models/index.js",
     "./db/importer-models": "./db/models/importer/index.js",
     "./export-list-limits": "./export-list-limits.js",
+    "./floors": "./floors.js",
     "./player-ids": "./player-ids.js",
     "./utils": "./utils/index.js",
     "./validators": "./validators.js"

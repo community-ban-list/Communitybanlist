@@ -387,6 +387,113 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
   assert.ok(!database.state.has(STATE.LAST_SUCCESS_AT));
 }
 
+// A run below its floor is not a failure: it counts as a success as long as its import imported a
+// list, or the stale alert would repeat every cadence on top of the floor's own alert. So it does
+// not when its lists all failed, or it skipped its import, as a floor it does not know makes it do.
+// Its record says what it lacks and what it skipped, and names no phase it ended in, as it
+// finished.
+{
+  const database = fakeDatabase();
+  const { default: RunRecord, saveRecord, succeeded, STATE } = await loadRunRecord(database);
+  const below = (counts) => {
+    const run = new RunRecord();
+    run.phase = 'exportExportBans';
+    run.belowFloor = { missing: ['game-rule'], skipped: ['updateExportBans'] };
+    if (counts) run.count('importBans', () => counts);
+    return run.end('belowFloor', 4, 'It skipped updateExportBans.');
+  };
+  const success = below({ lists: 2, banLists: [{ id: 1, error: 'Error: down' }, { id: 2 }] });
+  assert.strictEqual(succeeded(success), true);
+  assert.strictEqual(success.outcome, 'belowFloor');
+  assert.strictEqual(success.exitCode, 4);
+  assert.strictEqual(success.reason, 'It skipped updateExportBans.');
+  assert.ok(!('phase' in success));
+  assert.deepStrictEqual(plain(success.belowFloor), {
+    missing: ['game-rule'],
+    skipped: ['updateExportBans']
+  });
+  await saveRecord(success);
+  assert.strictEqual(database.read(STATE.LAST_SUCCESS_AT), success.startedAt);
+  assert.deepStrictEqual(database.read(STATE.LAST_RUN).belowFloor, plain(success.belowFloor));
+  assert.deepStrictEqual(database.read(STATE.RECENT_RUNS)[0].belowFloor, plain(success.belowFloor));
+
+  assert.strictEqual(succeeded(below({ lists: 0, banLists: [] })), true);
+  assert.strictEqual(succeeded(below(null)), true);
+  assert.strictEqual(succeeded(below({ lists: 1, banLists: [{ id: 1, gone: true }] })), false);
+  assert.strictEqual(succeeded(below({ ran: false, belowFloor: true })), false);
+  assert.strictEqual(succeeded(below({ dryRun: true, banLists: [{ id: 1 }] })), false);
+  // A run that failed or stopped below its floor is judged by that, and keeps what it lacks, with
+  // the phase it ended in, in a copy that a step still running cannot change.
+  const run = new RunRecord();
+  run.phase = 'importBans';
+  run.belowFloor = { missing: ['game-rule'], skipped: [], unreadable: true };
+  const failed = run.end('failed', 1, 'Error: Deadlock found');
+  assert.strictEqual(failed.phase, 'importBans');
+  assert.strictEqual(succeeded(failed), false);
+  assert.deepStrictEqual(plain(failed.belowFloor), {
+    missing: ['game-rule'],
+    skipped: [],
+    unreadable: true
+  });
+  run.belowFloor.skipped.push('later');
+  run.belowFloor.missing.push('later');
+  assert.deepStrictEqual(plain(failed.belowFloor.skipped), []);
+  assert.deepStrictEqual(plain(failed.belowFloor.missing), ['game-rule']);
+  // A record with none says nothing of floors.
+  assert.ok(!('belowFloor' in new RunRecord().end('finished', 0)));
+}
+
+// Whether a run is to post that the importer is below its floor: at once when none has, or the last
+// lacked something else, and then once an hour, by when runs started, with 5 minutes of leeway. Two
+// runs at once cannot both post it, as its row is read with a row lock, and a run that posts saves
+// when it started and what it lacks.
+{
+  const database = fakeDatabase();
+  const { claimFloorAlert, STATE } = await loadRunRecord(database);
+  const claim = (minutes, missing = ['game-rule'], unreadable = false) =>
+    claimFloorAlert({ missing, unreadable, startedAt: START + minutes * MINUTE });
+  assert.strictEqual(await claim(0), true);
+  assert.deepStrictEqual(database.read(STATE.LAST_FLOOR_ALERT_AT), {
+    at: new Date(START).toISOString(),
+    missing: ['game-rule']
+  });
+  assert.strictEqual(await claim(10), false);
+  assert.strictEqual(await claim(54.9), false);
+  assert.strictEqual(database.read(STATE.LAST_FLOOR_ALERT_AT).at, new Date(START).toISOString());
+  assert.strictEqual(await claim(55), true);
+  assert.strictEqual(
+    database.read(STATE.LAST_FLOOR_ALERT_AT).at,
+    new Date(START + 55 * MINUTE).toISOString()
+  );
+  assert.strictEqual(await claim(56, ['game-rule', 'native-false']), true);
+  assert.strictEqual(await claim(57, ['game-rule', 'native-false']), false);
+  assert.strictEqual(await claim(58, ['game-rule']), true);
+  assert.strictEqual(await claim(59, [], true), true);
+  assert.deepStrictEqual(database.read(STATE.LAST_FLOOR_ALERT_AT), {
+    at: new Date(START + 59 * MINUTE).toISOString(),
+    missing: [],
+    unreadable: true
+  });
+  assert.strictEqual(await claim(60, [], true), false);
+  assert.strictEqual(await claim(61, []), true);
+
+  const both = fakeDatabase();
+  const loaded = await loadRunRecord(both);
+  const answers = await Promise.all(
+    [0, 1].map(() =>
+      loaded.claimFloorAlert({ missing: ['game-rule'], unreadable: false, startedAt: START })
+    )
+  );
+  assert.deepStrictEqual(answers.toSorted(), [false, true]);
+  // A failure is passed on, for the run to warn about.
+  const error = new Error('Connection lost');
+  const failing = await loadRunRecord(fakeDatabase({ error }));
+  await assert.rejects(
+    failing.claimFloorAlert({ missing: ['game-rule'], unreadable: false, startedAt: START }),
+    (err) => err === error
+  );
+}
+
 // The staleness check: no run has succeeded for 3 cadences. It compares when runs started.
 const cadenceSeconds = CADENCE / 1000;
 const stalenessRows = (lastSuccessAt, extra = {}) => ({
@@ -854,5 +961,5 @@ for (const held of ['service', 'run']) {
 }
 
 console.log(
-  'Run record checks passed: what a record holds, also when it ends while a phase is under way, reasons cut on a character boundary, saving it with the latest 100 summaries, what counts as a success, the staleness alert on the schedule, with its limit of one a cadence, the run status message to check, with the record of its run, and the importer service: its cycles, its row and its alert.'
+  'Run record checks passed: what a record holds, also when it ends while a phase is under way, reasons cut on a character boundary, saving it with the latest 100 summaries, what counts as a success, also below the floor, when that alert is posted, the staleness alert on the schedule, with its limit of one a cadence, the run status message to check, with the record of its run, and the importer service: its cycles, its row and its alert.'
 );

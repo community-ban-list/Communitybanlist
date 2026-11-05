@@ -4,8 +4,10 @@ import { readFile } from 'fs/promises';
 import { format } from 'util';
 import vm from 'vm';
 
+import { IMPORTER_FEATURES, IMPORTER_GAMES, KNOWN_FEATURES } from '../../scbl-lib/floors.js';
 import describeError from '../../scbl-lib/utils/describe-error.js';
 import isNewerMessage, { newerMessage } from '../../scbl-lib/utils/message-id.js';
+import floorsTable from './helpers/floors-table.js';
 
 // Exercise the importer service, the importer in loop mode, without a database, Discord, a real
 // health server or real signals: its cycles, their stop points, records and JSON lines, its time
@@ -227,7 +229,9 @@ function fakeStatus(events, payload, options, channel, Logger) {
 // posted that it asked for, which never end once recorded.flushHangs is set, recorded.written is
 // the newest message the logger had posted at the last of them, and the events have each of those
 // writes, as 'record newest', and the end of the recording, as 'stop recording'. The lines still
-// being sent with channel.slowLines are waiting in the log queue (see fakeChannel).
+// being sent with channel.slowLines are waiting in the log queue (see fakeChannel). The statements
+// on the floors' rows are the real ones, on a stand-in for those rows, which starts with floorRows
+// (see floorsTable): given, the events have those statements too.
 async function loadLoop({
   env = {},
   authenticate = async () => {},
@@ -236,7 +240,8 @@ async function loadLoop({
   migrations = { applied: [], unknown: [] },
   state: stateOptions = {},
   discordLog = true,
-  channel = null
+  channel = null,
+  floorRows = null
 } = {}) {
   const events = [];
   const output = [];
@@ -257,6 +262,8 @@ async function loadLoop({
   const bm = { requests: 0 };
   let now = START;
   const state = fakeState(events, stateOptions);
+  const floors = floorsTable({ rows: floorRows ?? {}, events: floorRows ? events : null });
+  const floorNames = { IMPORTER_FEATURES, IMPORTER_GAMES, KNOWN_FEATURES };
   const answers = [...lockAnswers];
   const runAnswers = [...runLockAnswers];
   const logQueue = { stuck: false };
@@ -518,6 +525,10 @@ async function loadLoop({
       ImporterState: state.ImporterState
     },
     'scbl-lib/db/sequelize': { isDatabaseUnavailable: (err) => err.unavailable === true },
+    'scbl-lib/floors': floorNames,
+    // What the real scbl-lib/db/floors.js imports.
+    '../floors.js': floorNames,
+    './sequelize.js': { default: floors, QueryTypes: { SELECT: 'SELECT' } },
     'scbl-lib/utils': { describeError, isNewerMessage, Logger, newerMessage },
     './schema/migrate.js': {
       default: async (options) => {
@@ -588,6 +599,13 @@ async function loadLoop({
         },
         { context }
       );
+    if (specifier === 'scbl-lib/db/floors') {
+      const statements = new URL('../../scbl-lib/db/floors.js', import.meta.url);
+      return new vm.SourceTextModule(await readFile(statements, 'utf8'), {
+        context,
+        identifier: statements.href
+      });
+    }
     assert.ok(OWN.includes(specifier), `Unexpected dependency: ${specifier}`);
     return load(specifier);
   });
@@ -613,6 +631,7 @@ async function loadLoop({
     recorded,
     channel,
     state,
+    floors,
     timers,
     server,
     bm,
@@ -678,9 +697,9 @@ async function loadLoop({
       return this.runUntil(() => now >= at, `the clock to reach ${at}`, at);
     },
     // Start the service with the steps, and note how it ended.
-    start(steps) {
+    start(steps, options) {
       service.result = null;
-      const running = service.runLoop(steps);
+      const running = service.runLoop(steps, options);
       running.then((code) => {
         service.result = code;
       });
@@ -3603,6 +3622,398 @@ for (const when of ['before the move after the embed', 'during a cycle, at a che
   );
 }
 
+// The steps that matter to the floors, as index.js gives them, each noting that it ran, and during
+// holds what a step does as it runs, by its name: the export recalculation and the export push
+// each name the feature they must not run without, and the import imported its lists.
+const FLOOR_STEPS = ['importBans', 'updateExportBans', 'exportExportBans'];
+function floorSteps(service, during = {}) {
+  const ran = (name) => async () => {
+    service.events.push(name);
+    await service.wait(5 * SECOND);
+    await during[name]?.();
+  };
+  return [
+    step('importBans', ran('importBans'), () => importCounts()),
+    {
+      ...step('updateExportBans', ran('updateExportBans'), () => ({ players: 5 })),
+      needs: 'game-rule'
+    },
+    {
+      ...step('exportExportBans', ran('exportExportBans'), () => ({
+        queued: 0,
+        created: 0,
+        deleted: 0
+      })),
+      needs: 'native-false'
+    }
+  ];
+}
+const stepsRun = (service) => service.events.filter((event) => FLOOR_STEPS.includes(event));
+const LACKS_GAME_RULE =
+  'This importer image lacks game-rule, which the data needs, so it skips updateExportBans. Exports stay as they are, and bans lifted meanwhile keep applying, until IMPORTER_TAG names a newer image.';
+const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
+const cycleEmbeds = (service) =>
+  service.posts.map(({ embed }) => embed.title).filter((title) => title.startsWith('CBL update'));
+const staleLines = (service) => service.discord.filter((line) => line.includes('is stale'));
+
+// With no floors, cycles go as they always did: every step runs, each cycle exits 0 and is healthy.
+// Each cycle says what this image can do as its steps begin, after the migrations in the first, and
+// reads the floors before each step. The heartbeat keeps coming, as it goes stale in 30 minutes.
+{
+  const service = await loadLoop({
+    env: { GIT_SHA: 'abc1234', IMPORTER_CYCLE_SECONDS: '600' },
+    floorRows: {}
+  });
+  const running = service.start(floorSteps(service));
+  await service.runUntil(() => service.records().length === 2, 'two cycles');
+  const floorEvents = ['migrate', 'heartbeat', 'create floors', 'read floors', ...FLOOR_STEPS];
+  const round = ['read floors', 'importBans', 'read floors', 'updateExportBans'];
+  assert.deepStrictEqual(
+    service.events.filter((event) => floorEvents.includes(event)),
+    [
+      'migrate',
+      'heartbeat',
+      'create floors',
+      ...round,
+      'read floors',
+      'exportExportBans',
+      'heartbeat',
+      'create floors',
+      ...round,
+      'read floors',
+      'exportExportBans'
+    ]
+  );
+  assert.deepStrictEqual(
+    service.records().map(({ outcome, exitCode }) => [outcome, exitCode]),
+    [
+      ['finished', 0],
+      ['finished', 0]
+    ]
+  );
+  assert.ok(service.records().every((record) => !('belowFloor' in record)));
+  assert.deepStrictEqual(copy(service.floors.rows.get('features:importer')), {
+    features: ['native-false'],
+    games: ['squad'],
+    gitSha: 'abc1234'
+  });
+  assert.deepStrictEqual(copy(service.floors.rows.get('floors')), { importer: [], raised: [] });
+  const health = service.health();
+  assert.strictEqual(health.status, 200);
+  assert.ok(!('belowFloor' in health));
+  assert.deepStrictEqual(service.important(), []);
+  await service.runTo(service.now() + MINUTE);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
+}
+
+// Below its floor, each cycle skips the step that needs what this image lacks, and runs the others,
+// and its record says so, with exit code 4. It is not a failure: the next cycle starts as usual,
+// and the service's own exit code stays as it was. The alert is posted at once, and hourly after
+// that, and only a cycle that posts it gets an embed of its own, as a quiet cycle below its floor
+// is still quiet. As the cycles import, they count as successes, so no stale alert comes on top.
+// The status message shows how the last cycle ended, and the health check is unhealthy, saying what
+// is missing, which stops or restarts nothing: the cycles go on all the same.
+{
+  const service = await loadLoop({
+    env: { IMPORTER_CYCLE_SECONDS: '600' },
+    floorRows: floorRow('game-rule')
+  });
+  const running = service.start(floorSteps(service));
+  await service.runUntil(() => service.records().length === 1, 'the first cycle');
+  assert.strictEqual(service.health().status, 503);
+  await service.runUntil(() => service.records().length === 8, 'eight cycles');
+
+  const records = service.records();
+  assert.ok(records.every(({ outcome, exitCode }) => outcome === 'belowFloor' && exitCode === 4));
+  assert.deepStrictEqual(records[0].belowFloor, {
+    missing: ['game-rule'],
+    skipped: ['updateExportBans']
+  });
+  assert.strictEqual(
+    records[0].reason,
+    'This importer image lacks game-rule, which the data needs, so it skipped updateExportBans.'
+  );
+  assert.ok(!('phase' in records[0]));
+  assert.deepStrictEqual(records[0].counts.updateExportBans, {
+    ran: false,
+    belowFloor: true,
+    needs: 'game-rule'
+  });
+  assert.deepStrictEqual(stepsRun(service).slice(0, 2), ['importBans', 'exportExportBans']);
+  assert.strictEqual(stepsRun(service).filter((name) => name === 'updateExportBans').length, 0);
+  assert.strictEqual(stepsRun(service).filter((name) => name === 'importBans').length, 8);
+
+  // Cycles 1 and 7, an hour apart, post the alert, and they alone an embed.
+  assert.deepStrictEqual(
+    service.important().filter((line) => line === LACKS_GAME_RULE),
+    [LACKS_GAME_RULE, LACKS_GAME_RULE]
+  );
+  assert.deepStrictEqual(service.state.read('lastFloorAlertAt'), {
+    at: new Date(START + HOUR).toISOString(),
+    missing: ['game-rule']
+  });
+  assert.deepStrictEqual(cycleEmbeds(service), [
+    'CBL update cycle 1 finished below its floor',
+    'CBL update cycle 7 finished below its floor'
+  ]);
+  const [embed] = service.posts
+    .map(({ embed }) => embed)
+    .filter(({ title }) => title.includes('cycle'));
+  assert.strictEqual(embed.color, 0xf1c40f);
+  assert.ok(
+    embed.description
+      .split('\n')
+      .includes('⛔ Export recalculation · skipped below the floor, as it needs game-rule')
+  );
+
+  // 8 cycles at 10 minutes is well past 3 cadences, but each counted as a success.
+  assert.deepStrictEqual(staleLines(service), []);
+  assert.strictEqual(service.state.read('lastSuccessAt'), records[7].startedAt);
+
+  // The status message shows it, and counts no cycle as failed or stopped.
+  const status = service.statuses[0].embed();
+  assert.match(
+    status.description,
+    /⛔ \*\*Cycle 8\*\* finished below its floor in \*\*10s\*\*, <t:\d+:R>: This importer image lacks game-rule, which the data needs, so it skipped updateExportBans\./
+  );
+  assert.match(status.description, /\*\* · 2 cycles · bans 0 added/);
+
+  // Unhealthy, for as long as the latest check found it below its floor, but still running.
+  const health = service.health();
+  assert.strictEqual(health.status, 503);
+  assert.strictEqual(health.healthy, false);
+  assert.strictEqual(health.reason, 'its image is below its floor, as it lacks game-rule');
+  assert.deepStrictEqual(health.belowFloor, { missing: ['game-rule'], unreadable: false });
+  assert.strictEqual(health.lastCycle.outcome, 'belowFloor');
+  assert.deepStrictEqual(service.process.exits, []);
+
+  // It stops as it was asked to, with its own exit code, 0, and its status says that it stopped.
+  await service.runTo(service.now() + MINUTE);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
+  assert.strictEqual(service.statuses[0].embed().title, 'CBL importer service stopped');
+}
+
+// The alert's time is kept across processes: a service that starts within the hour of the last one
+// says nothing until the hour is up, and one started later, or lacking something else, says it at
+// once.
+{
+  const saved = (minutesAgo, ...missing) => ({
+    lastFloorAlertAt: { at: new Date(START - minutesAgo * MINUTE).toISOString(), missing }
+  });
+  const service = await loadLoop({
+    env: { IMPORTER_CYCLE_SECONDS: '600' },
+    floorRows: floorRow('game-rule'),
+    state: { rows: saved(30, 'game-rule') }
+  });
+  const running = service.start(floorSteps(service));
+  await service.runUntil(() => service.records().length === 3, 'three cycles');
+  assert.deepStrictEqual(service.important(), []);
+  assert.deepStrictEqual(cycleEmbeds(service), []);
+  await service.runUntil(() => service.records().length === 4, 'the fourth cycle');
+  assert.deepStrictEqual(service.important(), [LACKS_GAME_RULE]);
+  assert.deepStrictEqual(cycleEmbeds(service), ['CBL update cycle 4 finished below its floor']);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  await service.finish(running);
+
+  for (const rows of [saved(60, 'game-rule'), saved(1, 'native-false')]) {
+    const again = await loadLoop({
+      env: { IMPORTER_CYCLE_SECONDS: '600' },
+      floorRows: floorRow('game-rule'),
+      state: { rows }
+    });
+    const going = again.start(floorSteps(again));
+    await again.runUntil(() => again.records().length === 1, 'the first cycle');
+    assert.deepStrictEqual(again.important(), [LACKS_GAME_RULE]);
+    again.process.emit('SIGTERM', 'SIGTERM');
+    await again.finish(going);
+  }
+}
+
+// A floor raised during a cycle stops the steps that have not started, and the health check says so
+// from the check that found it on, before the cycle has ended. The cycles after it stay below it.
+// One lowered by hand then lets the next cycle run in full, finished as usual, and health clears.
+{
+  const service = await loadLoop({ env: { IMPORTER_CYCLE_SECONDS: '600' }, floorRows: {} });
+  let after = null;
+  const running = service.start(
+    floorSteps(service, {
+      importBans: () => {
+        if (service.records().length > 0) return;
+        assert.strictEqual(service.health().status, 200);
+        service.floors.rows.set('floors', { importer: ['game-rule'], raised: [] });
+      },
+      exportExportBans: () => {
+        after ??= service.health();
+      }
+    })
+  );
+  await service.runUntil(() => service.records().length === 2, 'two cycles');
+  const records = service.records();
+  assert.deepStrictEqual(
+    records.map(({ outcome }) => outcome),
+    ['belowFloor', 'belowFloor']
+  );
+  assert.deepStrictEqual(after.belowFloor, { missing: ['game-rule'], unreadable: false });
+  assert.strictEqual(after.status, 503);
+  assert.deepStrictEqual(stepsRun(service).slice(0, 2), ['importBans', 'exportExportBans']);
+  assert.strictEqual(service.important().filter((line) => line === LACKS_GAME_RULE).length, 1);
+  assert.strictEqual(service.health().status, 503);
+
+  service.floors.rows.set('floors', { importer: [], raised: [] });
+  await service.runUntil(() => service.records().length === 3, 'the third cycle');
+  const last = service.records()[2];
+  assert.strictEqual(last.outcome, 'finished');
+  assert.strictEqual(last.exitCode, 0);
+  assert.ok(!('belowFloor' in last));
+  assert.deepStrictEqual(stepsRun(service).slice(-3), FLOOR_STEPS);
+  const health = service.health();
+  assert.strictEqual(health.status, 200);
+  assert.ok(!('belowFloor' in health));
+  assert.match(health.reason, /^cycle 3 ended/);
+  await service.runTo(service.now() + MINUTE);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
+}
+
+// A name that no step of this image names, and a row that cannot be read, stop every step of every
+// cycle, the import too, so the cycles count as no success, and the stale alert comes as well, in
+// its own time. The health check says why, and the service goes on. Health clears once the row is
+// fixed, by hand.
+for (const [row, reason, belowFloor, firstLine] of [
+  [
+    { importer: ['a-later-feature'], raised: [] },
+    'its image is below its floor, as it lacks a-later-feature',
+    { missing: ['a-later-feature'], unreadable: false },
+    /^This importer image lacks a-later-feature, which the data needs, and it cannot know what that guards, so it runs no step\./
+  ],
+  [
+    { importer: 'game-rule' },
+    'the floors row cannot be read, so it runs no step',
+    { missing: [], unreadable: true },
+    /^The floors row in ImporterState cannot be read, .*SELECT value FROM ImporterState WHERE name = 'floors';/
+  ]
+]) {
+  const service = await loadLoop({
+    env: { IMPORTER_CYCLE_SECONDS: '600' },
+    floorRows: { floors: row },
+    state: { rows: { lastSuccessAt: new Date(START - 10 * MINUTE).toISOString() } }
+  });
+  const running = service.start(floorSteps(service));
+  await service.runUntil(() => service.records().length === 3, 'three cycles');
+  assert.deepStrictEqual(stepsRun(service), []);
+  assert.ok(
+    service.records().every(({ outcome, exitCode }) => outcome === 'belowFloor' && exitCode === 4)
+  );
+  assert.deepStrictEqual(service.records()[0].belowFloor.skipped, FLOOR_STEPS);
+  const [first] = service.important();
+  assert.match(first, firstLine);
+  assert.strictEqual(service.important().filter((line) => line === first).length, 1);
+  assert.strictEqual(staleLines(service).length, 1);
+  const health = service.health();
+  assert.strictEqual(health.status, 503);
+  assert.strictEqual(health.reason, reason);
+  assert.deepStrictEqual(health.belowFloor, belowFloor);
+
+  service.floors.rows.set('floors', { importer: [], raised: [] });
+  await service.runUntil(() => service.records().length === 4, 'the fourth cycle');
+  assert.strictEqual(service.records()[3].outcome, 'finished');
+  assert.deepStrictEqual(stepsRun(service), FLOOR_STEPS);
+  assert.strictEqual(service.health().status, 200);
+  await service.runTo(service.now() + MINUTE);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
+}
+
+// In a dry run, the service reads and writes nothing of the floors, and stays healthy whatever the
+// row says, as its one step writes nothing, and it must not claim features the service lacks.
+{
+  const service = await loadLoop({
+    env: { IMPORTER_CYCLE_SECONDS: '600' },
+    floorRows: floorRow('a-later-feature')
+  });
+  const running = service.start(
+    [step('importBans', async () => service.events.push('importBans'))],
+    { checkFloors: false }
+  );
+  await service.runUntil(() => service.records().length === 2, 'two cycles');
+  assert.deepStrictEqual(service.floors.sent, []);
+  assert.ok(!service.floors.rows.has('features:importer'));
+  assert.deepStrictEqual(
+    service.records().map(({ outcome }) => outcome),
+    ['finished', 'finished']
+  );
+  assert.ok(!service.state.state.has('lastFloorAlertAt'));
+  assert.deepStrictEqual(service.important(), []);
+  assert.strictEqual(service.health().status, 200);
+  await service.runTo(service.now() + MINUTE);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
+}
+
+// The heartbeat failing only warns, and the cycle goes on. A read of the floors that fails with a
+// database error fails the cycle, as any database error does, with no step run without knowing, and
+// the next cycle starts as usual. It leaves the health check as the last check that worked found
+// it.
+{
+  const service = await loadLoop({ env: { IMPORTER_CYCLE_SECONDS: '600' }, floorRows: {} });
+  service.floors.errors.heartbeat = new Error('Connection lost');
+  const running = service.start(floorSteps(service));
+  await service.runUntil(() => service.records().length === 1, 'the first cycle');
+  assert.strictEqual(service.records()[0].outcome, 'finished');
+  assert.deepStrictEqual(stepsRun(service), FLOOR_STEPS);
+  assert.ok(
+    service
+      .printed()
+      .includes("Warning: could not write the importer's heartbeat: Error: Connection lost")
+  );
+  assert.deepStrictEqual(service.important(), []);
+  delete service.floors.errors.heartbeat;
+  assert.ok(!service.floors.rows.has('features:importer'));
+
+  service.floors.errors['read floors'] = new Error('Connection lost');
+  await service.runUntil(() => service.records().length === 2, 'the second cycle');
+  const failed = service.records()[1];
+  assert.strictEqual(failed.outcome, 'failed');
+  assert.strictEqual(failed.exitCode, 1);
+  assert.strictEqual(failed.reason, 'Error: Connection lost');
+  assert.deepStrictEqual(stepsRun(service), FLOOR_STEPS);
+  assert.ok(service.important().includes('The CBL update cycle 2 failed: Error: Connection lost'));
+  assert.ok(service.floors.rows.has('features:importer'));
+
+  delete service.floors.errors['read floors'];
+  await service.runUntil(() => service.records().length === 3, 'the third cycle');
+  assert.strictEqual(service.records()[2].outcome, 'finished');
+  assert.deepStrictEqual(service.process.exits, []);
+  await service.runTo(service.now() + MINUTE);
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
+}
+
+// Once it is stopping, that is what the health check says first, also below its floor.
+{
+  const service = await loadLoop({
+    env: { IMPORTER_CYCLE_SECONDS: '600' },
+    floorRows: floorRow('game-rule')
+  });
+  const gate = deferred();
+  const running = service.start(floorSteps(service, { exportExportBans: () => gate.promise }));
+  await service.runUntil(() => stepsRun(service).includes('exportExportBans'), 'the export push');
+  await service.runTo(service.now() + 5 * SECOND);
+  assert.strictEqual(
+    service.health().reason,
+    'its image is below its floor, as it lacks game-rule'
+  );
+  gate.resolve();
+  service.process.emit('SIGTERM', 'SIGTERM');
+  assert.strictEqual(await service.finish(running), 0);
+  assert.strictEqual(service.records()[0].outcome, 'belowFloor');
+  const health = service.health();
+  assert.strictEqual(health.reason, 'the importer service is stopping');
+  assert.deepStrictEqual(health.belowFloor, { missing: ['game-rule'], unreadable: false });
+}
+
 console.log(
-  'Importer service checks passed: cycle timing, overruns, the time limit and its hard exit, signals and the 55 s stop limit, the stop deadline, its end and its record, the statements stopped before the locks are freed, a second signal, a lost lock, the run lock held only during cycles, the database, the service lock and the run lock waited for, health, the stale alert of failed cycles, each Discord mode, the status message kept across restarts and saved once posted again, the status message kept at the bottom of the log channel, after its own embeds and summaries, the lines of the web server and the bot, and a restart, its old copies deleted, also after a failed delete, the setting off, and its end only editing it, the hourly summary, and nothing growing per cycle.'
+  'Importer service checks passed: cycle timing, overruns, the time limit and its hard exit, signals and the 55 s stop limit, the stop deadline, its end and its record, the statements stopped before the locks are freed, a second signal, a lost lock, the run lock held only during cycles, the database, the service lock and the run lock waited for, health, the stale alert of failed cycles, each Discord mode, the status message kept across restarts and saved once posted again, the status message kept at the bottom of the log channel, after its own embeds and summaries, the lines of the web server and the bot, and a restart, its old copies deleted, also after a failed delete, the setting off, and its end only editing it, the hourly summary, nothing growing per cycle, and the floors: the heartbeat of each cycle, cycles below them, the alert across cycles and processes, health, and a dry run.'
 );

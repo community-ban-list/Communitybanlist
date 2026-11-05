@@ -47,6 +47,7 @@ const MARKS = {
   waiting: '⏳',
   next: '💤',
   finished: '✅',
+  belowFloor: '⛔',
   failed: '❌',
   interrupted: '⏹️'
 };
@@ -106,9 +107,10 @@ export function cycleNumbers(record, { battlemetricsRequests = 0 } = {}) {
 // or expired, export bans created or deleted, or players queued by the reputation check) or had a
 // problem (it failed or was stopped, a list failed, a list read in full held bans, or it posted a
 // line to the log channel, such as a warning or an alert). lines is how many lines it logged for
-// the log channel. A quiet cycle is not.
+// the log channel. A quiet cycle is not, and nor is one that only finished below its floor: the
+// floor's alert carries that news hourly, and the cycle that posts the alert has a line.
 export function isNoteworthy(record, numbers, { lines = 0 } = {}) {
-  if (record?.exitCode !== 0) return true;
+  if (record?.exitCode !== 0 && record?.outcome !== 'belowFloor') return true;
   const { added, updated, removed, expired, created, deleted, reputationQueued = 0 } = numbers;
   const changes = added + updated + removed + expired + created + deleted + reputationQueued;
   return changes + numbers.failedLists + numbers.held + lines > 0;
@@ -227,9 +229,11 @@ function describeLast(last) {
   const how =
     last.outcome === 'finished'
       ? 'finished in'
-      : last.outcome === 'interrupted'
-        ? 'stopped after'
-        : 'failed after';
+      : last.outcome === 'belowFloor'
+        ? 'finished below its floor in'
+        : last.outcome === 'interrupted'
+          ? 'stopped after'
+          : 'failed after';
   const reason = last.reason ? `: ${describeReason(last.reason)}` : '';
   return [
     `${mark} **Cycle ${formatCount(last.cycle ?? 0)}** ${how} **${formatDuration(last.seconds)}**, ${discordTime(last.endedAt, 'R')}${reason}`,

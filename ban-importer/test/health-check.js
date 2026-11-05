@@ -179,6 +179,44 @@ assert.deepStrictEqual(reasonAt({ ...ended, stopping: true }, 41), [
   'the importer service is stopping'
 ]);
 
+// While the latest check of the floors found its image below them, it is not healthy, whatever else
+// it is doing, and says what it lacks, in its reason and on its own. Once it is stopping, that
+// comes first. Without it, the status says nothing of floors.
+const lacking = { missing: ['game-rule', 'native-false'], unreadable: false };
+const LACKS = 'its image is below its floor, as it lacks game-rule, native-false';
+assert.deepStrictEqual(check({ ...ended, belowFloor: lacking }, 41), {
+  healthy: false,
+  reason: LACKS,
+  holdsLock: true,
+  cycles: 4,
+  cycle: null,
+  lastCycle: { cycle: 4, outcome: 'failed', endedAt: '2026-10-22T14:47:00.000Z', seconds: 12 },
+  waitingFor: null,
+  waitingSince: null,
+  belowFloor: lacking
+});
+assert.deepStrictEqual(reasonAt({ belowFloor: lacking }, 1), [false, LACKS]);
+assert.deepStrictEqual(reasonAt({ ...waiting, belowFloor: lacking }, 74), [false, LACKS]);
+assert.deepStrictEqual(reasonAt({ ...ended, belowFloor: lacking }, 75), [false, LACKS]);
+assert.deepStrictEqual(reasonAt({ ...ended, belowFloor: { missing: [], unreadable: true } }, 41), [
+  false,
+  'the floors row cannot be read, so it runs no step'
+]);
+assert.deepStrictEqual(reasonAt({ ...ended, stopping: true, belowFloor: lacking }, 41), [
+  false,
+  'the importer service is stopping'
+]);
+assert.deepStrictEqual(
+  check({ ...ended, stopping: true, belowFloor: lacking }, 41).belowFloor,
+  lacking
+);
+// Cleared by a later check, it is healthy again, and the status no longer has it.
+assert.deepStrictEqual(reasonAt({ ...ended, belowFloor: null }, 41), [
+  true,
+  'cycle 4 ended 1 minute ago'
+]);
+assert.ok(!('belowFloor' in check({ ...ended, belowFloor: null }, 41)));
+
 // The server listens on 127.0.0.1:3001 only, and answers 200 when the service is healthy and 503
 // when it is not, with the status as JSON. A status it cannot tell is a 503. A server that fails,
 // e.g. as the port is taken, is reported in the console, and the service runs on without it.
@@ -275,5 +313,5 @@ for (const [status, code] of [
 }
 
 console.log(
-  'Importer health check checks passed: when the service is healthy, the health server, and the exit codes of healthcheck.js.'
+  'Importer health check checks passed: when the service is healthy, also below its floor, the health server, and the exit codes of healthcheck.js.'
 );
