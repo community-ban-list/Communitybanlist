@@ -524,7 +524,13 @@ async function loadLoop({
       ImporterSchemaMigration: state.ImporterSchemaMigration,
       ImporterState: state.ImporterState
     },
-    'scbl-lib/db/sequelize': { isDatabaseUnavailable: (err) => err.unavailable === true },
+    'scbl-lib/db/sequelize': {
+      isDatabaseUnavailable: (err) => err.unavailable === true,
+      // What the real apply-list.js, whose retryOperation run.js uses, imports too.
+      ForeignKeyConstraintError: class ForeignKeyConstraintError extends Error {},
+      ValidationError: class ValidationError extends Error {},
+      QueryTypes: { SELECT: 'SELECT' }
+    },
     'scbl-lib/floors': floorNames,
     // What the real scbl-lib/db/floors.js imports.
     '../floors.js': floorNames,
@@ -567,6 +573,7 @@ async function loadLoop({
   // each getting a copy with its own state, e.g. a stop asked for in one copy of run-control.js
   // that the other never sees.
   const OWN = [
+    './apply-list.js',
     './loop.js',
     './health-check-server.js',
     './run.js',

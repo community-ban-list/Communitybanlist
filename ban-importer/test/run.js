@@ -242,7 +242,13 @@ async function loadRun({
       ImporterSchemaMigration: state.ImporterSchemaMigration,
       ImporterState: state.ImporterState
     },
-    'scbl-lib/db/sequelize': { isDatabaseUnavailable: (err) => err.unavailable === true },
+    'scbl-lib/db/sequelize': {
+      isDatabaseUnavailable: (err) => err.unavailable === true,
+      // What the real apply-list.js, whose retryOperation the run uses, imports too.
+      ForeignKeyConstraintError: class ForeignKeyConstraintError extends Error {},
+      ValidationError: class ValidationError extends Error {},
+      QueryTypes: { SELECT: 'SELECT' }
+    },
     'scbl-lib/floors': floorNames,
     // What the real scbl-lib/db/floors.js imports.
     '../floors.js': floorNames,
@@ -311,7 +317,9 @@ async function loadRun({
     context,
     identifier: url.href
   });
-  let control;
+  // The run's own modules, each loaded once, as two of them import run-control.js, which must be
+  // one module, with one state, for a stop asked for in it to reach both.
+  const own = new Map();
   await module.link(async (specifier, referencingModule) => {
     const exports = dependencies[specifier];
     if (exports) {
@@ -330,21 +338,27 @@ async function loadRun({
         identifier: statements.href
       });
     }
-    // The real run-control.js, which the steps use too, the real run record and the real drawing
-    // of the run's status.
+    // The real run-control.js, which the steps use too, the real run record, the real drawing of
+    // the run's status, and the real apply-list.js, for its retryOperation.
     assert.ok(
-      ['./run-control.js', './run-record.js', './run-status.js'].includes(specifier),
+      ['./apply-list.js', './run-control.js', './run-record.js', './run-status.js'].includes(
+        specifier
+      ),
       `Unexpected dependency: ${specifier}`
     );
-    const dependency = new URL(specifier, referencingModule.identifier);
-    const loaded = new vm.SourceTextModule(await readFile(dependency, 'utf8'), {
-      context,
-      identifier: dependency.href
-    });
-    if (specifier === './run-control.js') control = loaded;
-    return loaded;
+    if (!own.has(specifier)) {
+      const dependency = new URL(specifier, referencingModule.identifier);
+      own.set(
+        specifier,
+        readFile(dependency, 'utf8').then(
+          (source) => new vm.SourceTextModule(source, { context, identifier: dependency.href })
+        )
+      );
+    }
+    return own.get(specifier);
   });
   await module.evaluate();
+  const control = await own.get('./run-control.js');
 
   const isRecord = (line) => line.startsWith('{"event":"cbl-importer-run"');
   return {
@@ -2777,6 +2791,47 @@ const READ_FAILED = "Error: Could not read the importer's floors: Connection los
   assert.deepStrictEqual(stepsRun(importer), ['importBans', 'expireBans']);
   assert.strictEqual(importer.record().reason, READ_FAILED);
   assert.strictEqual(importer.record().phase, 'expireBans');
+}
+
+// A read of the floors that fails in a way that could pass, e.g. as the database restarts, is tried
+// again 5 seconds later, as the steps' own reads are, so a run rides out what it rode out before
+// it read floors. Only one that fails 5 times in all fails the run, as a step's read would.
+const dropped = () => Object.assign(new Error('read ECONNRESET'), { unavailable: true });
+{
+  const importer = await loadRun({ floorRows: {} });
+  let reads = 0;
+  importer.floors.onStatement = (kind) => {
+    if (kind !== 'read floors') return;
+    reads++;
+    // Only the first read before expireBans fails.
+    importer.floors.errors['read floors'] = reads === 2 ? dropped() : null;
+  };
+  const run = importer.run(floorSteps(importer));
+  await importer.waitForTimer(5000);
+  assert.deepStrictEqual(stepsRun(importer), ['importBans']);
+  assert.ok(
+    importer.events.includes(
+      "verbose Attempt 1 failed (Error: Could not read the importer's floors: read ECONNRESET). Retrying in 5s..."
+    )
+  );
+  importer.advance(5000);
+  assert.strictEqual(await run, 0);
+  assert.deepStrictEqual(stepsRun(importer), FLOOR_STEPS);
+  assert.strictEqual(reads, FLOOR_STEPS.length + 1);
+  assert.strictEqual(importer.record().outcome, 'finished');
+  assert.deepStrictEqual(importer.discord, []);
+}
+{
+  const importer = await loadRun({ floorRows: {} });
+  importer.floors.errors['read floors'] = dropped();
+  assert.strictEqual(await importer.runTimers(importer.run(floorSteps(importer))), 1);
+  assert.deepStrictEqual(stepsRun(importer), []);
+  assert.strictEqual(importer.floors.sent.filter((kind) => kind === 'read floors').length, 5);
+  assert.strictEqual(importer.now(), START + 4 * 5000);
+  assert.strictEqual(
+    importer.record().reason,
+    "Error: Could not read the importer's floors: read ECONNRESET"
+  );
 }
 
 // A run asked to stop does so before it reads the floors for its next step, and after, and whatever

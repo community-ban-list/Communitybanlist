@@ -1179,8 +1179,9 @@ export default async function runLoop(steps, { checkFloors = true } = {}) {
   // then for the run lock, each for as long as it takes, and holds the run lock until it has ended,
   // when it frees it, unless the service is stopping, which frees both locks as it ends. Its time
   // limit starts once it holds the run lock. The first cycle also connects and applies the
-  // importer's migrations, as a run does, and so does each cycle after it until one has. Never
-  // throws.
+  // importer's migrations, as a run does, and so does each cycle after it until one has. It throws
+  // only for a step whose needs is not one feature that the importer knows (see RunState), before
+  // anything else, which ends the service.
   const runCycle = async (number) => {
     // A cycle the last one was stopped for, e.g. by its time limit, does not stop this one, unless
     // the service is stopping.

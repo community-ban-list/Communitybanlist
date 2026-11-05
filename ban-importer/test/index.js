@@ -4,6 +4,7 @@ import { readFile } from 'fs/promises';
 import { format } from 'util';
 import vm from 'vm';
 
+import { KNOWN_FEATURES } from '../../scbl-lib/floors.js';
 import describeError, { stackTrace } from '../../scbl-lib/utils/describe-error.js';
 
 // Check the importer's entry point, index.js, without a run: it gives the run its steps in order
@@ -279,6 +280,13 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
       ['updateExportBans', 'game-rule'],
       ['exportExportBans', 'native-false']
     ]);
+    // Each names one feature that the importer knows, or none, as a run checks before any step, and
+    // fails if one does not: the list above would be changed to match a name misspelt.
+    for (const [name, feature] of needs(index))
+      assert.ok(
+        feature === undefined || KNOWN_FEATURES.includes(feature),
+        `${name} needs ${feature}, which is not one feature that the importer knows`
+      );
     assert.deepStrictEqual({ ...index.startOptions[0] }, { checkFloors: true });
 
     const dryRun = await loadIndex({ env, dryRun: true });

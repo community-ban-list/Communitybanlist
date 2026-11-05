@@ -17,6 +17,7 @@ import { isDatabaseUnavailable } from 'scbl-lib/db/sequelize';
 import { IMPORTER_FEATURES, IMPORTER_GAMES, KNOWN_FEATURES } from 'scbl-lib/floors';
 import { describeError, Logger } from 'scbl-lib/utils';
 
+import { retryOperation } from './apply-list.js';
 import RunRecord, {
   alertIfStale,
   claimFloorAlert,
@@ -506,9 +507,11 @@ export class RunState {
 
   // Read the floors before a step, as one raised while a run goes, which can take many minutes,
   // must stop the steps that have not started, and resolve with whether the step must be skipped. A
-  // read that fails fails the run, as no step may run without knowing.
+  // read that fails in a way that could pass, e.g. as the database restarts, is tried again as the
+  // steps' own reads are (see retryOperation), so a run that would have ridden it out still does,
+  // and one that still fails fails the run, as no step may run without knowing.
   async mustSkip(step) {
-    const found = judgeFloors(await readFloors(), this.steps);
+    const found = judgeFloors(await retryOperation(() => readFloors()), this.steps);
     this.onFloorCheck?.(found);
     this.noteFloors(found);
     if (!found) {

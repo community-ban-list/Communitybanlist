@@ -389,7 +389,7 @@ The features are `native-false`, that the importer posts new BattleMetrics expor
 | `game-rule`    | `updateExportBans` | Writing who is on each export ban list.          |
 | `native-false` | `exportExportBans` | Sending the export bans' changes to their lists. |
 
-No other step writes or sends export bans. A step names one feature that the importer knows, or none, and a run whose step names anything else fails before any step. Before every step, a run or a cycle reads `floors`, so a floor raised while a cycle goes stops the steps that have not started. A dry run does not. A read that fails with a database error fails the run, as no step may run without knowing, and its reason says that it could not read the floors, while a table or row that is not there means no floors, for every service.
+No other step writes or sends export bans. A step names one feature that the importer knows, or none, and a run whose step names anything else fails before any step. Before every step, a run or a cycle reads `floors`, so a floor raised while a cycle goes stops the steps that have not started. A dry run does not. A read that fails in a way that could pass, e.g. as the database restarts, is tried again as the steps' own reads are, up to 5 times in all, 5 seconds apart, and one that still fails, or fails with any other database error, fails the run, as no step may run without knowing, and its reason says that it could not read the floors, while a table or row that is not there means no floors, for every service.
 
 **Below its floor**, when `floors` names a feature that the image lacks:
 
