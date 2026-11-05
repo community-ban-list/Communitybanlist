@@ -57,10 +57,10 @@ const context = vm.createContext({
 const load = async (path) =>
   new vm.SourceTextModule(await readFile(new URL(path, import.meta.url), 'utf8'), { context });
 const module = await load('../src/ban-fetcher.js');
-// The fetcher finds SteamIDs with the real steam-id.js.
-const steamIDModule = await load('../src/steam-id.js');
+// The fetcher finds SteamIDs with the real player-ids.js.
+const playerIDsModule = await load('../../scbl-lib/player-ids.js');
 await module.link((specifier) => {
-  if (specifier === './steam-id.js') return steamIDModule;
+  if (specifier === 'scbl-lib/player-ids') return playerIDsModule;
   const exports = dependencies[specifier];
   assert.ok(exports, `Unexpected dependency: ${specifier}`);
   return new vm.SyntheticModule(
@@ -139,6 +139,36 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(list.rawCount, 4);
 assert.strictEqual(list.firstMetaTotal, null);
+
+// A line that bans an EOS ID brings no ban, in either case and with a prefix that ends before the
+// ID, even when the ID's last 17 characters are a SteamID's digits. A SteamID on a line with a prefix
+// still does, one of letters included, and a number of 17 digits that is not a player's account does
+// not.
+reset();
+answers(
+  [
+    '0123456789abcdef0123456789abcdef:0 //An EOS ID',
+    '0123456789ABCDEF0123456789ABCDEF:0 //In capitals',
+    'Admin [EOSID 00000000000000000000000000000001] Banned:0123456789abcdef0123456789abcdef:0 //With a prefix',
+    'Banned76561198000000009:0 //After letters',
+    `${'a'.repeat(15)}76561198000000008:0 //Ends in a SteamID's digits`,
+    'Admin [SteamID 76561198000000002] Banned:76561198000000004:0 //Banned by an admin',
+    '12345678901234567:0 //Not an account'
+  ].join('\n')
+);
+list = await fetcher.fetchBanList(remoteList);
+assert.deepStrictEqual(
+  Array.from(list.bans, (ban) => [ban.id, ban.steamUser, ban.rawReason]),
+  [
+    ['7,76561198000000009,null', '76561198000000009', 'After letters'],
+    ['7,76561198000000004,null', '76561198000000004', 'Banned by an admin']
+  ]
+);
+
+// A file with only EOS IDs has no ban CBL takes, so it is treated as any other file with none.
+reset();
+answers('0123456789abcdef0123456789abcdef:0 //An EOS ID');
+await assert.rejects(fetcher.fetchBanList(remoteList), /has no bans in the/);
 
 // An empty or blank file is a list with no bans, fetched once.
 for (const body of ['', ' \r\n\n', '﻿', undefined]) {

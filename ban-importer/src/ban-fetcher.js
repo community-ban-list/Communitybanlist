@@ -2,10 +2,10 @@ import axios from 'axios';
 import { createHash } from 'crypto';
 
 import { battlemetrics } from 'scbl-lib/apis';
+import { findSteamIDIn, parseRemoteLine } from 'scbl-lib/player-ids';
 import { classifyBanReason, Logger } from 'scbl-lib/utils';
 
 import { stopIfRequested } from './run-control.js';
-import { findSteamIDIn } from './steam-id.js';
 
 // Remote ban lists are downloaded with a limit on each wait, a limit on the whole download and a
 // size limit, so a host that stalls, trickles or sends something huge cannot hold up the run.
@@ -328,14 +328,13 @@ export default class BanFetcher {
 
     // Loop over each line of the ban file.
     for (const line of data.split('\n')) {
-      // Split the line to get the steam user, expiry data and reason.
-      const match = line.match(/(?<![0-9])([0-9]{17}):([0-9]+) ?\/\/(.+)/);
+      // Split the line to get the steam user, expiry data and reason. Skip the line if no ban is
+      // contained on it, or if it bans an EOS ID, as CBL takes only SteamIDs from ban lists.
+      const ban = parseRemoteLine(line);
+      if (ban?.kind !== 'steam') continue;
 
-      // Skip the line if there's no match, i.e. no ban is contained on the line, or if its SteamID
-      // is not a player's account.
-      if (!match || !findSteamIDIn(match[1])) continue;
-
-      let [, steamUser, expires, reason] = match;
+      const { value: steamUser, reason } = ban;
+      let { expires } = ban;
 
       // Turn the expiry data into a date object or null for perm bans.
       expires = parseInt(expires);

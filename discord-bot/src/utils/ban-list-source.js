@@ -1,14 +1,12 @@
 import axios from 'axios';
 
 import { BATTLEMETRICS_API_KEY } from 'scbl-lib/config';
+import { parseRemoteLine } from 'scbl-lib/player-ids';
 
 import { plural } from './format.js';
 import UserError from './user-error.js';
 
 const CHECK_TIMEOUT = 30 * 1000;
-
-// The ban format the ban importer reads from remote ban lists.
-const REMOTE_BAN_REGEX = /([0-9]{17}):([0-9]+) ?\/\/(.+)/;
 
 // Requests are made directly rather than through scbl-lib's BattleMetrics API, which retries
 // failed requests for minutes, so that a wrong ban list ID is reported straight away.
@@ -72,9 +70,10 @@ async function checkRemoteSource(source) {
     throw new UserError(`Could not fetch the ban list: ${describeRequestError(err)}.`);
   }
 
+  // Count the lines the ban importer would take a ban from.
   const bans = String(data)
     .split('\n')
-    .filter((line) => REMOTE_BAN_REGEX.test(line)).length;
+    .filter((line) => parseRemoteLine(line)?.kind === 'steam').length;
   if (bans === 0)
     throw new UserError(
       'Fetched the link but found no bans in the `steamID:expiry //reason` format. Use `skip_check` if the list is meant to be empty.'

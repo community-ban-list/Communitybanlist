@@ -243,7 +243,7 @@ const dependencies = {
   }
 };
 // The step, with the real apply-list.js, ban-list-sync.js, planner.js, run-control.js and
-// steam-id.js, each loaded once.
+// scbl-lib's player-ids.js, each loaded once.
 const modules = new Map();
 const load = (path) => {
   if (!modules.has(path))
@@ -255,16 +255,11 @@ const load = (path) => {
     );
   return modules.get(path);
 };
-const OWN = [
-  './apply-list.js',
-  './ban-list-sync.js',
-  './planner.js',
-  './run-control.js',
-  './steam-id.js'
-];
+const OWN = ['./apply-list.js', './ban-list-sync.js', './planner.js', './run-control.js'];
 const module = await load('../src/steam-profiles.js');
 await module.link(async (specifier) => {
   if (OWN.includes(specifier)) return load(`../src/${specifier.slice(2)}`);
+  if (specifier === 'scbl-lib/player-ids') return load('../../scbl-lib/player-ids.js');
   const exports = dependencies[specifier];
   assert.ok(exports, `Unexpected dependency: ${specifier}`);
   return new vm.SyntheticModule(

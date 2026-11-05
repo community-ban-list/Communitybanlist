@@ -37,6 +37,7 @@ const Logger = { verbose() {}, important() {} };
 // The module of scbl-lib with the SQL piece that leaves out paused ban lists, which has no imports,
 // and is loaded as it is.
 const EXCLUDED_BAN_LISTS = 'scbl-lib/db/excluded-ban-lists';
+const PLAYER_IDS = 'scbl-lib/player-ids';
 
 // Load a module of the importer with stand-ins for its dependencies, the real run-control.js, the
 // real version of any other module of the importer it imports without a stand-in, such as
@@ -77,10 +78,18 @@ async function load(path, dependencies, globals = {}) {
       return control;
     }
     const exports = dependencies[specifier];
-    if (!exports && (specifier.startsWith('./') || specifier === EXCLUDED_BAN_LISTS)) {
+    if (
+      !exports &&
+      (specifier.startsWith('./') || specifier === EXCLUDED_BAN_LISTS || specifier === PLAYER_IDS)
+    ) {
       const url = specifier.startsWith('./')
         ? new URL(specifier, referencingModule.identifier)
-        : new URL('../../scbl-lib/db/excluded-ban-lists.js', import.meta.url);
+        : new URL(
+            specifier === PLAYER_IDS
+              ? '../../scbl-lib/player-ids.js'
+              : '../../scbl-lib/db/excluded-ban-lists.js',
+            import.meta.url
+          );
       return new vm.SourceTextModule(await readFile(url, 'utf8'), {
         context,
         identifier: url.href

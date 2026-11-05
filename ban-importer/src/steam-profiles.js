@@ -2,12 +2,12 @@ import { steam } from 'scbl-lib/apis';
 import { sequelize } from 'scbl-lib/db';
 import { ImporterState } from 'scbl-lib/db/importer-models';
 import { QueryTypes } from 'scbl-lib/db/sequelize';
+import { isSteamID } from 'scbl-lib/player-ids';
 import { Logger } from 'scbl-lib/utils';
 
 import { isRetryable, retryOperation, sqlTime } from './apply-list.js';
 import { unquote } from './ban-list-sync.js';
 import { reportProgress, stopIfRequested } from './run-control.js';
-import { isSteamID } from './steam-id.js';
 
 // Refreshing players' Steam profiles, their names and avatars, within a budget for each run, which
 // comes from how often runs start, so each profile is refreshed about once a week whatever the
