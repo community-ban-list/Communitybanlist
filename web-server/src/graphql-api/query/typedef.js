@@ -21,15 +21,19 @@ export default gql`
       last: Int
       before: String
       """
-      The order to list players in: id, the default; reputationRank, which lists ranked players;
-      reputationPointsMonthChange, which lists ranked players whose points rose this month; or
-      lastViewed, which lists players with reputation points who have been viewed.
+      The order to list players in: id, the default, which lists players listed under their EOS ID
+      before Steam players, as ids are compared as text; reputationRank, which lists ranked
+      players; reputationPointsMonthChange, which lists ranked players whose points rose this month;
+      or lastViewed, which lists players with reputation points who have been viewed.
       """
       orderBy: String
       orderDirection: OrderDirection
     ): SteamUserConnection
 
-    steamUser(id: String!): SteamUser
+    steamUser(
+      "A player's SteamID64, or their EOS ID, in lowercase, if their bans give no SteamID64."
+      id: String!
+    ): SteamUser
 
     loggedInSteamUser: SteamUser
   }

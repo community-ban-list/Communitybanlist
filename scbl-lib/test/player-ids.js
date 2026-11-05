@@ -7,6 +7,7 @@ import {
   findSteamIDIn,
   isSteamID,
   normaliseEosID,
+  parsePlayerInput,
   parseRemoteLine,
   steamIDSQL
 } from '../player-ids.js';
@@ -88,6 +89,55 @@ const KINDS = [
 for (const [id, kind] of KINDS) assert.strictEqual(accountKind(id), kind, JSON.stringify(id));
 for (const id of [null, undefined, Number(FIRST)]) assert.strictEqual(accountKind(id), null);
 
+// What someone types to look a player up: a SteamID64 or a Steam profile's address gives the
+// SteamID64, and 32 hexadecimal characters an EOS ID as CBL stores it, with spaces around either.
+const steam = (id) => ({ kind: 'steam', id });
+const eos = (id) => ({ kind: 'eos', id });
+for (const [text, player] of [
+  [FIRST, steam(FIRST)],
+  [` ${LAST}\n`, steam(LAST)],
+  [`https://steamcommunity.com/profiles/${FIRST}`, steam(FIRST)],
+  [`https://steamcommunity.com/profiles/${FIRST}/`, steam(FIRST)],
+  [`HTTP://WWW.SteamCommunity.com/profiles/${FIRST}`, steam(FIRST)],
+  [`steamcommunity.com/profiles/${FIRST}`, steam(FIRST)],
+  [` https://www.steamcommunity.com/profiles/${LAST}/ `, steam(LAST)],
+  [EOS, eos(EOS)],
+  [EOS.toUpperCase(), eos(EOS)],
+  [`\t${EOS} `, eos(EOS)],
+  ['0'.repeat(32), eos('0'.repeat(32))]
+])
+  assert.deepStrictEqual(parsePlayerInput(text), player, JSON.stringify(text));
+// Anything else is no player: a number outside the range, or not 17 digits, a profile's address
+// with a vanity name, anything after the SteamID, another site or a SteamID in other text, an EOS
+// ID that is masked, shortened or in an address, and anything that is not text.
+for (const text of [
+  '76561197960265728',
+  '76561202255233024',
+  FIRST.slice(1),
+  `${FIRST}0`,
+  'https://steamcommunity.com/profiles/76561197960265728',
+  'https://steamcommunity.com/id/someone',
+  `https://steamcommunity.com/profiles/${FIRST}/friends`,
+  `https://steamcommunity.com/profiles/${FIRST}?l=english`,
+  `https://example.com/steamcommunity.com/profiles/${FIRST}`,
+  `https://steamcommunity.com.example.com/profiles/${FIRST}`,
+  `ftp://steamcommunity.com/profiles/${FIRST}`,
+  `Banned ${FIRST}`,
+  `${FIRST} ${FIRST}`,
+  `${EOS.slice(0, 8)}${'*'.repeat(24)}`,
+  EOS.slice(1),
+  `${EOS}0`,
+  `eos:${EOS}`,
+  `https://communitybanlist.com/search/${EOS}`,
+  '',
+  '   ',
+  null,
+  undefined,
+  Number(FIRST),
+  [FIRST]
+])
+  assert.strictEqual(parsePlayerInput(text), null, JSON.stringify(text));
+
 // The SQL conditions are pinned, as the tests have no database. Each was run against every ID in
 // KINDS on MySQL 8.0 when it was written, and agreed with accountKind on all of them.
 assert.strictEqual(
@@ -165,4 +215,6 @@ for (const line of [
 ])
   assert.strictEqual(parseRemoteLine(line), null, String(line));
 
-console.log('Player ID checks passed: SteamIDs, EOS IDs, kinds, SQL and remote ban lines.');
+console.log(
+  'Player ID checks passed: SteamIDs, EOS IDs, kinds, lookups, SQL and remote ban lines.'
+);

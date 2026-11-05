@@ -1,6 +1,6 @@
 // What a player's ID is: the rule the importer goes by as it reads ban lists and refreshes Steam
-// profiles, the bot as it checks a ban list or a new owner, and the export ban lists as they decide
-// who can be on them. There are two kinds of ID:
+// profiles, the bot as it checks a ban list or a new owner, the export ban lists as they decide who
+// can be on them, and the website as it looks a player up. There are two kinds of ID:
 // - steam: a SteamID64, the 17 digits of a Steam account.
 // - eos: an EOS ID, the 32 lowercase hexadecimal characters of an Epic Online Services account.
 //
@@ -53,6 +53,22 @@ export function normaliseEosID(value) {
 export function accountKind(id) {
   if (isSteamID(id)) return 'steam';
   return typeof id === 'string' && STORED_EOS_ID.test(id) ? 'eos' : null;
+}
+
+// A Steam profile's address by its SteamID64, with or without https:// and www., and a final slash.
+const STEAM_PROFILE = /^(?:https?:\/\/)?(?:www\.)?steamcommunity\.com\/profiles\/([0-9]{17})\/?$/i;
+
+// The player someone means by what they typed to look one up, as { kind, id } with the ID as CBL
+// stores it, or null when it is neither kind of ID. Spaces around it make no difference. A Steam
+// profile's address gives its SteamID64. 32 hexadecimal characters give an EOS ID, lowercased,
+// although an Epic account ID looks the same: only the lookup can tell them apart.
+export function parsePlayerInput(text) {
+  if (typeof text !== 'string') return null;
+  const value = text.trim();
+  const steamID = STEAM_PROFILE.exec(value)?.[1] ?? value;
+  if (isSteamID(steamID)) return { kind: 'steam', id: steamID };
+  const eosID = normaliseEosID(value);
+  return eosID ? { kind: 'eos', id: eosID } : null;
 }
 
 // The SQL conditions that hold when a column has an ID of each kind, exactly when accountKind says

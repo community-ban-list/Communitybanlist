@@ -25,6 +25,7 @@ import { useQuery } from '@apollo/client/react';
 import classnames from 'classnames';
 
 import { DISCORD_INVITE } from 'scbl-lib/config';
+import { parsePlayerInput } from 'scbl-lib/player-ids';
 
 // The partner organisations whose bans a player has, each once, in the order of their bans, and
 // whether all of those bans are on paused ban lists, whose bans count for nothing for now.
@@ -68,8 +69,10 @@ const GET_PLAYER = gql`
 `;
 
 function EnterSteamUser(props) {
-  const [steamID, setSteamID] = useState('');
+  const [playerID, setPlayerID] = useState('');
   const navigate = useNavigate();
+  // The player's ID as CBL stores it, or null when what was typed is not a player's ID.
+  const player = parsePlayerInput(playerID);
 
   return (
     <>
@@ -77,17 +80,19 @@ function EnterSteamUser(props) {
         <Col>
           <h3>Who are you?</h3>
           <p>
-            Please enter your Steam 64 ID in the form below so we can tailor the following
-            information to you. You can find your Steam 64 ID{' '}
+            Please enter your Steam 64 ID, or your EOS ID if you bought Squad on the Epic Games
+            Store, in the form below so we can tailor the following information to you. You can find
+            your Steam 64 ID{' '}
             <a href="https://steamid.uk/" target="_blank" rel="noreferrer">
               here
             </a>
-            . Once you have entered your Steam 64 ID click "Next".
+            , and our <Link to="/faq">FAQ</Link> says how to find your EOS ID. Once you have entered
+            your ID click "Next".
           </p>
           <FormGroup>
             <InputGroup
               className={classnames({
-                'is-invalid': steamID !== '' && !(steamID && steamID.match(/^[0-9]{17}$/))
+                'is-invalid': playerID !== '' && !player
               })}
             >
               <InputGroupText>
@@ -96,12 +101,15 @@ function EnterSteamUser(props) {
 
               <Input
                 type="text"
-                placeholder="Steam 64 ID"
-                value={steamID}
-                onChange={(e) => setSteamID(e.target.value)}
+                placeholder="Steam 64 ID or EOS ID"
+                value={playerID}
+                onChange={(e) => setPlayerID(e.target.value)}
               />
             </InputGroup>
-            <FormFeedback>A valid Steam 64 ID is a 17 digit number.</FormFeedback>
+            <FormFeedback>
+              Enter a Steam 64 ID, which is a 17 digit number, or an EOS ID, which is 32 characters
+              made of the digits 0-9 and the letters a-f.
+            </FormFeedback>
           </FormGroup>
         </Col>
       </Row>
@@ -118,8 +126,8 @@ function EnterSteamUser(props) {
         <Col className="text-end">
           <Button
             color="primary"
-            onClick={() => navigate(`/banned/${steamID}`)}
-            disabled={!(steamID && steamID.match(/^[0-9]{17}$/))}
+            onClick={() => navigate(`/banned/${player.id}`)}
+            disabled={!player}
           >
             Next
             <i className="fa fa-arrow-right ms-2" />
@@ -139,6 +147,13 @@ function Foreword(props) {
           <p>
             Hello <strong>{props.steamUser?.name || ''}</strong>,
           </p>
+          {props.unknownEosID && (
+            <p>
+              We have no bans under this EOS ID. Steam players have an EOS ID too, but their bans
+              are listed under their Steam 64 ID, so if you play Squad on Steam,{' '}
+              <Link to="/banned">enter your Steam 64 ID</Link> instead.
+            </p>
+          )}
           <p>
             If you have been directed to this page then it likely means that you are listed on and
             potentially banned by CommunityBanList.com
@@ -160,7 +175,7 @@ function Foreword(props) {
       </Row>
       <Row className="mt-4">
         <Col className="text-start">
-          <Button color="default" onClick={props.previousStep} disabled={props.isValidSteam64ID}>
+          <Button color="default" onClick={props.previousStep} disabled={props.hasPlayerID}>
             <i className="fa fa-arrow-left me-2" />
             Back
           </Button>
@@ -455,10 +470,11 @@ function FurtherHelp(props) {
 
 export default function () {
   const { steamUser: search } = useParams();
-  const isValidSteam64ID = search && search.match(/^[0-9]{17}$/);
+  // The player's ID as CBL stores it, or null when the address has no player's ID.
+  const player = parsePlayerInput(search);
 
-  const { loading, error, data } = isValidSteam64ID
-    ? useQuery(GET_PLAYER, { variables: { id: search } })
+  const { loading, error, data } = player
+    ? useQuery(GET_PLAYER, { variables: { id: player.id } })
     : { loading: null, error: null, data: null };
 
   return (
@@ -498,8 +514,12 @@ export default function () {
               {!loading && !error && (
                 <div className="px-3 py-4 px-sm-4 py-sm-5">
                   <StepWizard>
-                    {!isValidSteam64ID && <EnterSteamUser />}
-                    <Foreword steamUser={data?.steamUser} isValidSteam64ID={isValidSteam64ID} />
+                    {!player && <EnterSteamUser />}
+                    <Foreword
+                      steamUser={data?.steamUser}
+                      hasPlayerID={Boolean(player)}
+                      unknownEosID={player?.kind === 'eos' && data?.steamUser === null}
+                    />
                     <WhatIsCommunityBanList />
                     <GettingUnlistedFromCommunityBanList steamUser={data?.steamUser} />
                     <GettingUnbannedFromCommunityBanList steamUser={data?.steamUser} />
