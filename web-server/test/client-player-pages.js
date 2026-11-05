@@ -16,8 +16,9 @@ import * as playerIDs from 'scbl-lib/player-ids';
 
 // Checks what the client's player pages show for a player listed under their SteamID64 or under
 // their EOS ID, and for an ID with nothing on record: the search page, the "I'm banned" page and a
-// player in a list. The pages are compiled the way the client's build compiles them, loaded with
-// the client's own packages, and rendered to HTML with a stand-in for the GraphQL query.
+// player in a list, and where their forms and the copy button send an ID. The pages are compiled
+// the way the client's build compiles them, loaded with the client's own packages, and rendered to
+// HTML with a stand-in for the GraphQL query.
 
 const CLIENT = new URL('../../client/src/', import.meta.url);
 
@@ -32,13 +33,48 @@ const useQuery = (query, options) => {
   return answer;
 };
 
+// What the forms and buttons do, as a page can only be rendered, not used: the props of the forms
+// and buttons on the last page rendered, where they send the browser, and what the copy button
+// copies. A form's box starts empty, so the text to have typed in the next one is set beforehand.
+const forms = [];
+const buttons = [];
+const navigations = [];
+const copied = [];
+const typed = [];
+const capture = (list, Component) => (props) => {
+  list.push(props);
+  return React.createElement(Component, props);
+};
+// A clipboard, so the copy button shows, as in a browser that lets the page copy text.
+Object.defineProperty(globalThis.navigator, 'clipboard', {
+  configurable: true,
+  value: {
+    writeText: async (text) => {
+      copied.push(text);
+    }
+  }
+});
+
 // The client's packages, and stand-ins for the parts of the client these pages only show.
 const Plain = (props) => jsxRuntime.jsx(jsxRuntime.Fragment, { children: props.children });
 const packages = {
-  react: { default: React, ...React },
+  react: {
+    default: React,
+    ...React,
+    useState: (initial) => React.useState(typed.length > 0 ? typed.shift() : initial)
+  },
   'react/jsx-runtime': jsxRuntime,
-  'react-router': reactRouter,
-  reactstrap,
+  'react-router': {
+    ...reactRouter,
+    useNavigate: () => (to) => {
+      navigations.push(to);
+    }
+  },
+  reactstrap: {
+    ...reactstrap,
+    Form: capture(forms, reactstrap.Form),
+    Button: capture(buttons, reactstrap.Button)
+  },
   classnames: { default: classnames },
   '@apollo/client': apolloClient,
   '@apollo/client/react': { useQuery },
@@ -96,15 +132,29 @@ async function component(path) {
 const Search = await component('views/pages/search.jsx');
 const Banned = await component('views/pages/banned.jsx');
 const SteamUser = await component('components/SteamUser/index.jsx');
+const SearchBox = await component('components/steam-user-search-box.jsx');
 
 const { createElement: h } = React;
 const { MemoryRouter, Route, Routes } = reactRouter;
+
+// The pages' routes, as the client's routes name them, since the pages read the ID by its name.
+const routesFile = await readFile(new URL('views/routes.js', CLIENT), 'utf8');
+const ROUTES = [
+  ['/search/:search', Search],
+  ['/search', Search],
+  ['/banned/:steamUser', Banned],
+  ['/banned/', Banned]
+];
+for (const [path] of ROUTES) assert.ok(routesFile.includes(`path: '${path}',`), path);
 
 // The HTML of a page at an address, as the client's routes give it, with the query's answer, and
 // the IDs its queries asked for.
 function render(address, data) {
   answer = { loading: false, error: undefined, data };
   queried.length = 0;
+  forms.length = 0;
+  buttons.length = 0;
+  navigations.length = 0;
   const html = renderToStaticMarkup(
     h(
       MemoryRouter,
@@ -112,10 +162,7 @@ function render(address, data) {
       h(
         Routes,
         null,
-        h(Route, { path: '/search/:search', element: h(Search) }),
-        h(Route, { path: '/search', element: h(Search) }),
-        h(Route, { path: '/banned/:steamUser', element: h(Banned) }),
-        h(Route, { path: '/banned', element: h(Banned) })
+        ...ROUTES.map(([path, Page]) => h(Route, { key: path, path, element: h(Page) }))
       )
     )
   );
@@ -164,7 +211,7 @@ for (const id of [EOS_ID, EOS_ID.toUpperCase()]) {
   assert.deepStrictEqual(queried, [EOS_ID]);
   assert.match(html, /Unknown EOS ID/);
   assert.match(html, /No bans are stored under this EOS ID\./);
-  assert.match(html, /their bans are listed under their Steam 64\s+ID/);
+  assert.match(html, /most of their bans are listed under their\s+Steam 64 ID/);
   assert.doesNotMatch(html, /Unknown Steam User/);
   assert.doesNotMatch(html, /\[RecentlyViewedSteamUsers\]/);
 }
@@ -190,7 +237,13 @@ for (const id of [EOS_ID, EOS_ID.toUpperCase()]) {
   assert.match(html, new RegExp(`href="/banned/${EOS_ID}"`));
   assert.match(html, /Reputation Points/);
   assert.match(html, /No active bans on record\./);
-  for (const steamOnly of ['Steam Profile', 'steamcommunity.com', 'SteamID.UK', 'steamrep', 'rep.tf'])
+  for (const steamOnly of [
+    'Steam Profile',
+    'steamcommunity.com',
+    'SteamID.UK',
+    'steamrep',
+    'rep.tf'
+  ])
     assert.ok(!html.includes(steamOnly), steamOnly);
   // There is no Steam profile to refresh, so only the reputation's times are shown.
   assert.strictEqual(html.match(/Last Refreshed/g).length, 2);
@@ -263,4 +316,97 @@ for (const [id, steamUser] of [
   assert.match(listed(null), /Unknown player/);
 }
 
-console.log("Player page checks passed: search, the I'm banned page and players in lists.");
+// The search box sends a search for the ID as CBL stores it, so an EOS ID in capitals, with spaces,
+// or a Steam profile's address, finds the same page as the ID itself.
+function searchBox(props) {
+  forms.length = 0;
+  buttons.length = 0;
+  navigations.length = 0;
+  const html = renderToStaticMarkup(h(MemoryRouter, null, h(SearchBox, props)));
+  assert.strictEqual(forms.length, 1);
+  assert.strictEqual(buttons.length, 1);
+  forms[0].onSubmit({ preventDefault() {} });
+  return { html, disabled: buttons[0].disabled, to: [...navigations] };
+}
+for (const [search, to] of [
+  [` ${EOS_ID.toUpperCase()} `, `/search/${EOS_ID}`],
+  [STEAM_ID, `/search/${STEAM_ID}`],
+  [`https://steamcommunity.com/profiles/${STEAM_ID}/`, `/search/${STEAM_ID}`]
+]) {
+  for (const frontpageVersion of [false, true]) {
+    const box = searchBox({ search, frontpageVersion });
+    assert.doesNotMatch(box.html, /is-invalid/, search);
+    assert.strictEqual(box.disabled, false, search);
+    assert.deepStrictEqual(box.to, [to], search);
+  }
+}
+// Anything else is marked as wrong and can't be searched for, except on the home page, which sends
+// what was typed, as before. An empty box is not marked as wrong. 17 digits that are not a Steam
+// account's ID, such as a SteamID64 with a typo, are called that, and anything else is told what an
+// ID looks like.
+const NOT_STEAM = /This is not the ID of a Steam account: check it for a typo\./;
+const LOOKS_LIKE =
+  /Enter a Steam 64 ID, which is a 17 digit number starting with 7656, or an EOS ID/;
+const TYPOS = [
+  '76561197960265728',
+  '76561188000000001',
+  '76569999999999999',
+  ' 76561202255233024 '
+];
+for (const search of ['hello', ...TYPOS, EOS_ID.slice(1), `${STEAM_ID}0`, '']) {
+  const box = searchBox({ search });
+  if (search) assert.match(box.html, /is-invalid/, search);
+  else assert.doesNotMatch(box.html, /is-invalid/);
+  assert.match(box.html, TYPOS.includes(search) ? NOT_STEAM : LOOKS_LIKE, search);
+  assert.doesNotMatch(box.html, TYPOS.includes(search) ? LOOKS_LIKE : NOT_STEAM, search);
+  assert.strictEqual(box.disabled, true, search);
+  const home = searchBox({ search, frontpageVersion: true });
+  assert.doesNotMatch(home.html, /is-invalid/, search);
+  assert.strictEqual(home.disabled, false, search);
+  assert.deepStrictEqual(home.to, [`/search/${search}`], search);
+}
+
+// The "I'm banned" page's form goes to the page for the ID typed in it, as CBL stores it, and marks
+// anything else as wrong, with no way on.
+function bannedForm(text) {
+  typed.length = 0;
+  typed.push(text);
+  const { html } = render('/banned', null);
+  assert.strictEqual(typed.length, 0, 'the form took the typed text');
+  const next = buttons.filter((props) => typeof props.onClick === 'function');
+  assert.strictEqual(next.length, 1);
+  assert.strictEqual(next[0].children[0], 'Next');
+  return { html, disabled: next[0].disabled, next: next[0] };
+}
+for (const [text, id] of [
+  [` ${EOS_ID.toUpperCase()} `, EOS_ID],
+  [STEAM_ID, STEAM_ID]
+]) {
+  const form = bannedForm(text);
+  assert.doesNotMatch(form.html, /is-invalid/, text);
+  assert.strictEqual(form.disabled, false, text);
+  form.next.onClick({ preventDefault() {} });
+  assert.deepStrictEqual(navigations, [`/banned/${id}`], text);
+}
+for (const text of ['hello', ...TYPOS, EOS_ID.slice(1), `${STEAM_ID}0`]) {
+  const form = bannedForm(text);
+  assert.match(form.html, /is-invalid/, text);
+  assert.strictEqual(form.disabled, true, text);
+  assert.match(form.html, TYPOS.includes(text) ? NOT_STEAM : LOOKS_LIKE, text);
+  assert.doesNotMatch(form.html, TYPOS.includes(text) ? LOOKS_LIKE : NOT_STEAM, text);
+}
+
+// An EOS player's copy button copies their EOS ID as CBL stores it, and says what it copies.
+{
+  const { html } = render(`/search/${EOS_ID.toUpperCase()}`, { steamUser: player(EOS_ID) });
+  const copy = buttons.filter((props) => props['aria-label'] === 'Copy EOS ID');
+  assert.strictEqual(copy.length, 1);
+  assert.match(html, /aria-label="Copy EOS ID"[^>]*>Copy</);
+  copied.length = 0;
+  await copy[0].onClick();
+  assert.deepStrictEqual(copied, [EOS_ID]);
+}
+
+console.log(
+  "Player page checks passed: search, the I'm banned page, their forms, the copy button and players in lists."
+);

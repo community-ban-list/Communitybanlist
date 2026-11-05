@@ -134,13 +134,14 @@ const sections = [
         question: 'I bought Squad on the Epic Games Store. How do I find my bans?',
         answer: (
           <>
-            Players who bought Squad on the Epic Games Store have no Steam 64 ID, so their bans are
-            listed under their EOS ID. An EOS ID is 32 characters long, made of the digits 0-9 and
-            the letters a-f. The admins of a server you play on can see it in their admin tools.
-            Search for it on our <Link to="/search">search page</Link>, or enter it on our{' '}
-            <Link to="/banned">banned players page</Link>. Your Epic account ID looks similar, but
-            it is a different number and finds nothing here. Steam players have an EOS ID too, but
-            their bans are listed under their Steam 64 ID, so they should search for that instead.
+            Players who bought Squad on the Epic Games Store have no Steam 64 ID, so any bans we
+            list for them are under their EOS ID. An EOS ID is 32 characters long, made of the
+            digits 0-9 and the letters a-f. The admins of a server you play on can see it in their
+            admin tools. Search for it on our <Link to="/search">search page</Link>, or enter it on
+            our <Link to="/banned">banned players page</Link>. Your Epic account ID looks similar,
+            but it is a different number and finds nothing here. Steam players have an EOS ID too.
+            Most of their bans are listed under their Steam 64 ID, but any ban we list that gives
+            only their EOS ID is under that, so Steam players should search for both.
           </>
         )
       },

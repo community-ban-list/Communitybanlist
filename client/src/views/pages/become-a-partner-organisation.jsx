@@ -46,10 +46,10 @@ export default function () {
               </p>
               <p>
                 A player listed under their EOS ID is shown publicly in the same way as a player
-                listed under their Steam ID. Steam players have an EOS ID too. If a ban later gives
-                both IDs for the same player, we may connect them, and a search for that EOS ID then
-                finds the Steam player, so anyone who noted the EOS ID could tell that both belong
-                to the same player.
+                listed under their Steam ID. Steam players have an EOS ID too. If we learn that an
+                EOS ID and a Steam ID belong to the same player, for example from a ban that gives
+                both, we may connect them. A search for that EOS ID then finds the Steam player, so
+                anyone who noted the EOS ID could tell that both belong to the same player.
               </p>
               <p>
                 There are currently no benefits to being a partner organization, however, everyone

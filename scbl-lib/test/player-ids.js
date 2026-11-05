@@ -13,9 +13,11 @@ import {
 } from '../player-ids.js';
 
 // Checks for the rule on what a player's ID is. It has no imports, so anything can load it, and the
-// package exports it, so the services can.
+// package exports it, so the services can. The website loads it too, so it has no lookbehind (or
+// named group), which Safari before 16.4 cannot read: the browser would refuse the whole site.
 const source = await readFile(new URL('../player-ids.js', import.meta.url), 'utf8');
 assert.ok(!/^\s*import\b/m.test(source));
+assert.ok(!source.includes('(?<'), 'player-ids.js has a lookbehind or a named group');
 assert.strictEqual((await import('scbl-lib/player-ids')).accountKind, accountKind);
 
 const FIRST = '76561197960265729';
@@ -189,10 +191,15 @@ for (const before of ['Banned', 'f', 'ABC', 'a'.repeat(16)])
     before
   );
 
-// The first ban on a line is the one that counts, so a SteamID's in an EOS ID ban's reason is not.
+// The first ban on a line is the one that counts, so a SteamID's in an EOS ID ban's reason is not,
+// nor an EOS ID's in a SteamID ban's.
 assert.deepStrictEqual(
   parseRemoteLine(`${EOS}:0 //Alt of ${FIRST}:0 //Inner`),
   ban('eos', EOS, '0', `Alt of ${FIRST}:0 //Inner`)
+);
+assert.deepStrictEqual(
+  parseRemoteLine(`${FIRST}:0 //Alt of ${EOS}:0 //Inner`),
+  ban('steam', FIRST, '0', `Alt of ${EOS}:0 //Inner`)
 );
 
 // No ban: a line that is something else, or is missing a part, or a number that is not an account,

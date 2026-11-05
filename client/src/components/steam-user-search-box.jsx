@@ -46,8 +46,9 @@ export default function (props) {
             </Button>
           </InputGroup>
           <FormFeedback>
-            Enter a Steam 64 ID, which is a 17 digit number, or an EOS ID, which is 32 characters
-            made of the digits 0-9 and the letters a-f.
+            {/^[0-9]{17}$/.test(search.trim())
+              ? 'This is not the ID of a Steam account: check it for a typo.'
+              : 'Enter a Steam 64 ID, which is a 17 digit number starting with 7656, or an EOS ID, which is 32 characters made of the digits 0-9 and the letters a-f.'}
           </FormFeedback>
         </FormGroup>
       </Form>

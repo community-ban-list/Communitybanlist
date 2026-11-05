@@ -86,8 +86,8 @@ function EnterSteamUser(props) {
             <a href="https://steamid.uk/" target="_blank" rel="noreferrer">
               here
             </a>
-            , and our <Link to="/faq">FAQ</Link> says how to find your EOS ID. Once you have entered
-            your ID click "Next".
+            , and our <Link to="/faq">FAQ</Link> has help for Epic Games Store players. Once you
+            have entered your ID click "Next".
           </p>
           <FormGroup>
             <InputGroup
@@ -107,8 +107,9 @@ function EnterSteamUser(props) {
               />
             </InputGroup>
             <FormFeedback>
-              Enter a Steam 64 ID, which is a 17 digit number, or an EOS ID, which is 32 characters
-              made of the digits 0-9 and the letters a-f.
+              {/^[0-9]{17}$/.test(playerID.trim())
+                ? 'This is not the ID of a Steam account: check it for a typo.'
+                : 'Enter a Steam 64 ID, which is a 17 digit number starting with 7656, or an EOS ID, which is 32 characters made of the digits 0-9 and the letters a-f.'}
             </FormFeedback>
           </FormGroup>
         </Col>
@@ -149,9 +150,9 @@ function Foreword(props) {
           </p>
           {props.unknownEosID && (
             <p>
-              We have no bans under this EOS ID. Steam players have an EOS ID too, but their bans
-              are listed under their Steam 64 ID, so if you play Squad on Steam,{' '}
-              <Link to="/banned">enter your Steam 64 ID</Link> instead.
+              We have no bans under this EOS ID. Steam players have an EOS ID too, but most of their
+              bans are listed under their Steam 64 ID, so if you play Squad on Steam,{' '}
+              <Link to="/banned">enter your Steam 64 ID</Link> as well.
             </p>
           )}
           <p>
