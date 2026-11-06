@@ -212,6 +212,14 @@ function describeUnfinished(exportBanList, error) {
   return `created export ban list ${list}: ${settings}. Making its BattleMetrics ban list ${id} failed:`;
 }
 
+// What the console says failed in making a new list's BattleMetrics ban list, by the stage that
+// createBattlemetricsBanList's error gives, when BattleMetrics made the ban list. Otherwise it
+// failed to make the ban list, or may have made it without saying so.
+const CREATION_FAILURES = {
+  saving: 'Failed to save the BattleMetrics ban list to export ban list:',
+  invite: 'Failed to create the BattleMetrics invite for export ban list:'
+};
+
 // How a deletion ended on BattleMetrics, for the log channel's line, from what deleteExportBanList
 // gives and the BattleMetrics ban list the list recorded before it. 'gone' only says BattleMetrics
 // did not know the ban list, which it also says of one CBL's key cannot see, so the line says no
@@ -309,9 +317,8 @@ export default {
           // Only this says which list it was, and whether BattleMetrics may have created a ban list
           // that the list does not record.
           logBattlemetricsFailure(
-            error.stage === 'invite'
-              ? 'Failed to create the BattleMetrics invite for export ban list:'
-              : 'Failed to create the BattleMetrics ban list for export ban list:',
+            CREATION_FAILURES[error.stage] ??
+              'Failed to create the BattleMetrics ban list for export ban list:',
             exportBanLsit,
             error
           );
@@ -355,7 +362,7 @@ export default {
                 destroyError
               );
               throw new Error(
-                'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later, or create it with Remote as its type: a remote export ban list does not need BattleMetrics.'
+                'BattleMetrics could not create a ban list for your export ban list. Please delete it, then try again later or create it again with Remote as its type: a remote export ban list does not need BattleMetrics.'
               );
             }
             // A list that is no longer the user's is left to its new owner, who can delete it.

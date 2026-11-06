@@ -260,7 +260,7 @@ created = {
 };
 await assert.rejects(create(), {
   message:
-    'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later, or create it with Remote as its type: a remote export ban list does not need BattleMetrics.'
+    'BattleMetrics could not create a ban list for your export ban list. Please delete it, then try again later or create it again with Remote as its type: a remote export ban list does not need BattleMetrics.'
 });
 assert.deepStrictEqual(
   logged().map(([description]) => description),

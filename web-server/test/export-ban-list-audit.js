@@ -662,7 +662,7 @@ failures.set('ExportBanList.destroy', [new Error('Database unavailable')]);
 await refused(
   'createExportBanList',
   { name: 'Bans', server: 'Server', type: 'battlemetrics' },
-  'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later, or create it with Remote as its type: a remote export ban list does not need BattleMetrics.'
+  'BattleMetrics could not create a ban list for your export ban list. Please delete it, then try again later or create it again with Remote as its type: a remote export ban list does not need BattleMetrics.'
 );
 id = nextID - 1;
 const ambiguousKept = `${unmade(id)}, and the list could not be deleted either, so its owner was asked to delete it. BattleMetrics may have made the ban list anyway, which nothing records: look for "Community Ban List - Bans (ID: ${id})" among CBL's ban lists on BattleMetrics, and remove it. ApiError: BattleMetrics POST ban-lists failed: timed out after 30s, so it may have been carried out, Error: Database unavailable`;
@@ -682,7 +682,7 @@ failures.set('ExportBanList.destroy', [new Error('Database unavailable')]);
 await refused(
   'createExportBanList',
   { name: 'Bans', server: 'Server', type: 'battlemetrics' },
-  'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later, or create it with Remote as its type: a remote export ban list does not need BattleMetrics.'
+  'BattleMetrics could not create a ban list for your export ban list. Please delete it, then try again later or create it again with Remote as its type: a remote export ban list does not need BattleMetrics.'
 );
 id = nextID - 1;
 assert.deepStrictEqual(take(), [
@@ -705,6 +705,11 @@ const unsaved = String(nextBanList - 1);
 const unsavedLine = `[WebServer][1] ${ALICE_TEXT} created export ban list ${bmList('Bans', id)}: ${DEFAULTS}, no Discord webhook. BattleMetrics ban list ${unsaved} was made for it, but saving it to the list failed, so nothing records the ban list, which must be removed on BattleMetrics by hand: Error: Lock wait timeout exceeded`;
 assert.deepStrictEqual(take(), [unsavedLine]);
 assert.deepStrictEqual(important.splice(0), [unsavedLine]);
+// The console says that saving the ban list failed, not making it.
+assert.deepStrictEqual(
+  consoleErrors.map(([description]) => description).at(-1),
+  'Failed to save the BattleMetrics ban list to export ban list:'
+);
 rows.ExportBanList = rows.ExportBanList.filter((row) => row.id !== id);
 
 // When its invite cannot be made, the list keeps its ban list, and the one line says so. The list

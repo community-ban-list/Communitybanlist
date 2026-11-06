@@ -41,7 +41,7 @@ const GET_EXPORT_BAN_LISTS = gql`
 // Saving the list makes its invite again, but only once the list has its Battlemetrics ban list.
 function missingInvite(exportBanList) {
   return exportBanList.battlemetricsID
-    ? 'Battlemetrics has not made the share invite for this export ban list yet. To try again, press Edit, then Save.'
+    ? 'Battlemetrics has not made the share invite for this export ban list yet. Please try again later: press Edit, then Save.'
     : 'This export ban list has no Battlemetrics ban list, so it cannot be used within Battlemetrics. To use it there, delete it and create it again.';
 }
 
