@@ -342,12 +342,20 @@ export default {
               : `could not create export ban list ${list}, as making its BattleMetrics ban list failed`;
             // A ban list BattleMetrics made, or may have made without saying so, that nothing
             // records must be removed by hand, so the line says which one, or what an admin should
-            // look for on BattleMetrics, and is posted ahead of others.
+            // look for on BattleMetrics, and is posted ahead of others. The save of a ban list may
+            // have gone through without the database saying so, e.g. as the connection was lost,
+            // so a list that is kept may record its ban list after all, which removing the ban
+            // list would then break: the line for a kept list says to check it first.
             let unrecorded = '';
-            if (unsaved)
-              unrecorded = ` Nothing records BattleMetrics ban list ${exportBanLsit.battlemetricsID}, which must be removed on BattleMetrics by hand.`;
-            else if (error.ambiguous)
+            let unrecordedIfKept = '';
+            if (unsaved) {
+              const { id, battlemetricsID } = exportBanLsit;
+              unrecorded = ` Nothing records BattleMetrics ban list ${battlemetricsID}, which must be removed on BattleMetrics by hand.`;
+              unrecordedIfKept = ` BattleMetrics ban list ${battlemetricsID} must be removed on BattleMetrics by hand, unless export ban list ${id} records it after all, as the save may have gone through without the database saying so.`;
+            } else if (error.ambiguous) {
               unrecorded = ` BattleMetrics may have made the ban list anyway, which nothing records: look for ${quote(exportBanLsit.battlemetricsBanListName())} among CBL's ban lists on BattleMetrics, and remove it.`;
+              unrecordedIfKept = unrecorded;
+            }
             const postFailure = unrecorded ? auditCleanup : audit;
             // The owner is told what failed: when BattleMetrics made the ban list, a remote list
             // would not have helped.
@@ -363,17 +371,15 @@ export default {
                 where: { id: exportBanLsit.id, owner: context.user.id }
               });
             } catch (destroyError) {
-              console.error(
-                'Failed to delete the export ban list with no BattleMetrics ban list:',
-                {
-                  exportBanListID: exportBanLsit.id,
-                  name: destroyError.name,
-                  message: destroyError.message
-                }
-              );
+              console.error('Failed to delete the unfinished export ban list:', {
+                exportBanListID: exportBanLsit.id,
+                battlemetricsID: exportBanLsit.battlemetricsID,
+                name: destroyError.name,
+                message: destroyError.message
+              });
               postFailure(
                 context,
-                `${failed}, and the list could not be deleted either, so its owner was asked to delete it.${unrecorded}`,
+                `${failed}, and the list could not be deleted either, so its owner was asked to delete it.${unrecordedIfKept}`,
                 error,
                 destroyError
               );
@@ -382,9 +388,9 @@ export default {
             // A list that is no longer the user's is left to its new owner, who can delete it.
             const outcome =
               deleted > 0
-                ? 'so the list was deleted'
-                : 'and it was no longer theirs, as it had been given to another user or removed meanwhile, so it was left as it is';
-            postFailure(context, `${failed}, ${outcome}.${unrecorded}`, error);
+                ? `so the list was deleted.${unrecorded}`
+                : `and it was no longer theirs, as it had been given to another user or removed meanwhile, so it was left as it is.${unrecordedIfKept}`;
+            postFailure(context, `${failed}, ${outcome}`, error);
             throw new Error(notCreated);
           }
           audit(context, describeUnfinished(exportBanLsit, error), error);
