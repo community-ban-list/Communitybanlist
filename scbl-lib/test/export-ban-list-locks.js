@@ -74,9 +74,10 @@ const sequelize = {
 // The connection holding the deletion lock, as IS_USED_LOCK gives it, or null when none does.
 let holder = null;
 
-// The deletion lock's connections, each with what was run on it and whether it was closed. GET_LOCK
-// answers with `taken`, and end() with `ending`, a promise, or an error. Any other statement is
-// answered by `answer`, when it is set, which can also throw MySQL's error.
+// The connections opened outside the pool, for the deletion lock and destroyUnfinished, each with
+// what was run on it and whether it was closed. GET_LOCK answers with `taken`, and end() with
+// `ending`, a promise, or an error. Any other statement is answered by `answer`, when it is set,
+// which can also throw MySQL's error.
 const connections = [];
 let taken = 1;
 let answer = null;

@@ -58,14 +58,15 @@ const errorNumber = (error) => (error?.original ?? error?.parent)?.errno;
 // 64 characters, so a long database name is cut short.
 const DELETION_LOCK = "LEFT(CONCAT('cbl-export-ban-list-deletion:', ?, ':', DATABASE()), 64)";
 
-// How long closeConnection waits for a connection to close before closing it at once.
+// How long closeConnection waits for mysql2's end() before closing the connection at once.
 const CLOSE_TIMEOUT = 5 * 1000;
 
 // Close a connection opened outside the pool (openConnection): the deletion lock's, which frees the
 // lock, or destroyUnfinished's. It tells MySQL first, or closes at once if that takes too long.
 // mysql2's end() resolves once the connection's earlier statements have finished, as it sends
-// MySQL the quit command, without waiting for MySQL to close the connection. Both callers wait for
-// their statements first, so the time limit only guards against a statement still running.
+// MySQL the quit command, or at once on a lost connection, without waiting for MySQL to close the
+// connection. Both callers wait for their statements first, so the time limit only guards against
+// a statement still running.
 async function closeConnection(connection) {
   let timer;
   const timeout = new Promise((resolve, reject) => {
