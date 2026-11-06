@@ -446,23 +446,38 @@ class ExportBanList extends Sequelize.Model {
   // another user meanwhile, and give how many rows were deleted: 0 when it was given away or
   // removed. The website does this while the list's owner waits for an answer, after waiting for
   // BattleMetrics, and maybe for a lock that made saving the list fail, so the deletion waits at
-  // most UNFINISHED_LOCK_WAIT seconds for a lock, not MySQL's 50 by default, which could keep the
-  // owner waiting longer than a proxy in front of the website allows. MySQL's SET_VAR hint cannot
-  // set innodb_lock_wait_timeout, so it is set for the transaction's connection, and set back to
-  // the server's own value before the connection goes back to Sequelize's pool. It runs in
-  // inTransaction, so it is run again if MySQL ends it in a deadlock, e.g. with the ban importer,
-  // which writes the list's export bans, and a wait that runs out is marked busy.
-  static destroyUnfinished(id, owner) {
-    return ExportBanList.inTransaction(async (transaction) => {
-      await sequelize.query(`SET SESSION innodb_lock_wait_timeout = ${UNFINISHED_LOCK_WAIT}`, {
-        transaction
-      });
-      try {
-        return await ExportBanList.destroy({ where: { id, owner }, transaction });
-      } finally {
-        await sequelize.query('SET SESSION innodb_lock_wait_timeout = DEFAULT', { transaction });
+  // most UNFINISHED_LOCK_WAIT seconds for each lock, not MySQL's 50 by default, which could keep
+  // the owner waiting longer than a proxy in front of the website allows.
+  //
+  // MySQL's SET_VAR hint cannot set innodb_lock_wait_timeout, so it is set for the session, on a
+  // connection of its own, outside Sequelize's pool, which is closed afterwards: a session setting
+  // made on one of the pool's connections would stay with it, and Sequelize rolls a transaction
+  // back itself when MySQL ends it in a deadlock, after which nothing more can run in it to set the
+  // connection back. The deletion is one statement, which deletes the row with its configs and
+  // export bans, so MySQL rolls all of it back when it waits too long for a lock or ends it in a
+  // deadlock, e.g. with the ban importer, which writes the list's export bans. One ended in a
+  // deadlock is run again, after a short random wait, as inTransaction runs a transaction again.
+  // mysql2's errors are given as they are: the website only logs and posts them.
+  static async destroyUnfinished(id, owner) {
+    const connection = await openConnection();
+    try {
+      await connection.query(`SET SESSION innodb_lock_wait_timeout = ${UNFINISHED_LOCK_WAIT}`);
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const [{ affectedRows }] = await connection.query(
+            'DELETE FROM ExportBanLists WHERE id = ? AND owner = ?',
+            [id, owner]
+          );
+          return affectedRows;
+        } catch (error) {
+          if (error?.errno !== DEADLOCK || attempt >= DEADLOCK_ATTEMPTS) throw error;
+          const wait = Math.random() * DEADLOCK_WAIT * 2 ** (attempt - 1);
+          await new Promise((resolve) => setTimeout(resolve, wait));
+        }
       }
-    });
+    } finally {
+      await closeConnection(connection);
+    }
   }
 
   // Run deletion() while holding the list's deletion lock, and give what it gives. A transfer, and a

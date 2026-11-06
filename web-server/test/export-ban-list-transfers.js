@@ -368,7 +368,7 @@ function database() {
       });
       return deleted;
     },
-    // The website's deletion of a new list it could not finish: the same DELETE, in a transaction
+    // The website's deletion of a new list it could not finish: the same DELETE, as a statement
     // of its own, run again after a deadlock.
     destroyUnfinished(id, owner) {
       return inTransaction((transaction) =>

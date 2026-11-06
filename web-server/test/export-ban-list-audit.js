@@ -352,9 +352,18 @@ const { default: ExportBanList } = await load(
         query: async (sql, options) => (options?.plain ? { holder: null } : [[], {}])
       }
     },
+    // A connection of its own: the deletion lock's, or the one a new list the website could not
+    // finish is deleted on, by its ID and owner, as the stand-in Model deletes rows.
     '../open-connection.js': {
       default: async () => ({
-        query: async () => [[{ taken: 1 }]],
+        async query(sql, values) {
+          if (sql === 'SET SESSION innodb_lock_wait_timeout = 10') return [{}];
+          if (sql === 'DELETE FROM ExportBanLists WHERE id = ? AND owner = ?') {
+            const [id, owner] = values;
+            return [{ affectedRows: await Model.destroy({ where: { id, owner } }) }];
+          }
+          return [[{ taken: 1 }]];
+        },
         end: async () => {},
         destroy() {}
       })

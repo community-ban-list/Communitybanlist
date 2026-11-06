@@ -114,8 +114,9 @@ const dependencies = {
         return list;
       },
       findOne: async () => found,
-      // A list that could not be finished is deleted by its ID and owner, in a transaction of
-      // its own (export-ban-list-locks.js in scbl-lib checks how).
+      // A list that could not be finished is deleted by its ID and owner, on a connection of its
+      // own, once the list's transaction has ended (export-ban-list-locks.js in scbl-lib checks
+      // how).
       async destroyUnfinished(id, owner) {
         assert.strictEqual(openTransaction, null, "The list's transaction has ended.");
         deletions.push({ id, owner });
@@ -357,7 +358,16 @@ assert.deepStrictEqual(important, []);
 // told that it was not created, so saving again does not make a second list. The one line names
 // the ban list, which nothing records, to be removed on BattleMetrics by hand, and is posted as
 // an important line, ahead of others.
-const saveError = new Error('Lock wait timeout exceeded; try restarting transaction');
+// Here the connection was lost, as Sequelize gives that, with no error number from MySQL, so the
+// save may have gone through without the database saying so.
+const lostConnection = Object.assign(
+  new Error('Connection lost: The server closed the connection.'),
+  { code: 'PROTOCOL_CONNECTION_LOST', fatal: true }
+);
+const saveError = Object.assign(new Error(lostConnection.message), {
+  original: lostConnection,
+  parent: lostConnection
+});
 const unsavedList = (id) => ({
   id,
   battlemetricsID: null,
@@ -446,17 +456,37 @@ assert.deepStrictEqual(important, posted);
 deletedRows = 1;
 
 // When MySQL says it rolled the save back, as a statement that waited too long for a lock, or one
-// in a transaction it ended in a deadlock, a kept list cannot record the ban list, so the line
-// says plainly that nothing records it, as for a deleted list.
-for (const [id, errno, message] of [
-  [19, 1205, 'Lock wait timeout exceeded; try restarting transaction'],
-  [20, 1213, 'Deadlock found when trying to get lock; try restarting transaction']
+// in a transaction it ended in a deadlock, a kept list cannot record the ban list, whether it was
+// given away or could not be deleted, so the line says plainly that nothing records it, as for a
+// deleted list.
+const KEPT =
+  'and it was no longer theirs, as it had been given to another user or removed meanwhile, so it was left as it is';
+const UNDELETED = 'and the list could not be deleted either, so its owner was asked to delete it';
+const deleteFailure = new Error('Database unavailable');
+for (const [id, errno, message, rows, outcome, told] of [
+  [19, 1205, 'Lock wait timeout exceeded; try restarting transaction', 0, KEPT, NOT_SAVED],
+  [
+    20,
+    1213,
+    'Deadlock found when trying to get lock; try restarting transaction',
+    0,
+    KEPT,
+    NOT_SAVED
+  ],
+  [
+    21,
+    1205,
+    'Lock wait timeout exceeded; try restarting transaction',
+    deleteFailure,
+    UNDELETED,
+    'Your export ban list could not be saved with its BattleMetrics ban list. Please delete it and try again later.'
+  ]
 ]) {
   logs.length = 0;
   posted.length = 0;
   important.length = 0;
   deletions.length = 0;
-  deletedRows = 0;
+  deletedRows = rows;
   const original = Object.assign(new Error(message), { errno });
   const rolledBack = Object.assign(new Error(message), { original, parent: original });
   created = {
@@ -466,10 +496,12 @@ for (const [id, errno, message] of [
       throw Object.assign(rolledBack, { stage: 'saving' });
     }
   };
-  await assert.rejects(create(), { message: NOT_SAVED });
+  await assert.rejects(create(), { message: told });
   assert.deepStrictEqual(deletions, [{ id, owner: 'owner' }]);
+  const errors =
+    rows instanceof Error ? `Error: ${message}, Error: ${rows.message}` : `Error: ${message}`;
   assert.deepStrictEqual(posted, [
-    `[WebServer][1] Steam user owner could not create export ban list Server's List "Test" (ID: ${id}, BattleMetrics), as saving its BattleMetrics ban list list-${id} to it failed, and it was no longer theirs, as it had been given to another user or removed meanwhile, so it was left as it is. Nothing records BattleMetrics ban list list-${id}, which must be removed on BattleMetrics by hand. Error: ${message}`
+    `[WebServer][1] Steam user owner could not create export ban list Server's List "Test" (ID: ${id}, BattleMetrics), as saving its BattleMetrics ban list list-${id} to it failed, ${outcome}. Nothing records BattleMetrics ban list list-${id}, which must be removed on BattleMetrics by hand. ${errors}`
   ]);
   assert.deepStrictEqual(important, posted);
 }
