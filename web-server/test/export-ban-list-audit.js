@@ -692,17 +692,19 @@ assert.deepStrictEqual(important, []);
 answers.delete('post ban-lists');
 rows.ExportBanList = rows.ExportBanList.filter((row) => row.id !== id);
 
-// When the list cannot be saved with the ban list BattleMetrics made, the one line gives the ban
+// When the list cannot be saved with the ban list BattleMetrics made, the list records no ban
+// list, so it is deleted, and its owner is told it was not created. The one line gives the ban
 // list, which nothing records, to be removed by hand, and is posted as an important line.
 failures.set('ExportBanList.save', [new Error('Lock wait timeout exceeded')]);
 await refused(
   'createExportBanList',
   { name: 'Bans', server: 'Server', type: 'battlemetrics' },
-  'Lock wait timeout exceeded'
+  'Your export ban list could not be saved with its BattleMetrics ban list, so it was not created. Please try again later.'
 );
 id = nextID - 1;
+assert.ok(!rows.ExportBanList.some((row) => row.id === id), 'The list is deleted.');
 const unsaved = String(nextBanList - 1);
-const unsavedLine = `[WebServer][1] ${ALICE_TEXT} created export ban list ${bmList('Bans', id)}: ${DEFAULTS}, no Discord webhook. BattleMetrics ban list ${unsaved} was made for it, but saving it to the list failed, so nothing records the ban list, which must be removed on BattleMetrics by hand: Error: Lock wait timeout exceeded`;
+const unsavedLine = `[WebServer][1] ${ALICE_TEXT} could not create export ban list ${bmList('Bans', id)}, as saving its BattleMetrics ban list ${unsaved} to it failed, so the list was deleted. Nothing records BattleMetrics ban list ${unsaved}, which must be removed on BattleMetrics by hand. Error: Lock wait timeout exceeded`;
 assert.deepStrictEqual(take(), [unsavedLine]);
 assert.deepStrictEqual(important.splice(0), [unsavedLine]);
 // The console says that saving the ban list failed, not making it.
@@ -710,7 +712,20 @@ assert.deepStrictEqual(
   consoleErrors.map(([description]) => description).at(-1),
   'Failed to save the BattleMetrics ban list to export ban list:'
 );
-rows.ExportBanList = rows.ExportBanList.filter((row) => row.id !== id);
+// Saving again makes one list, with its own ban list, and the deleted one is not left behind.
+const remade = await change('createExportBanList', {
+  name: 'Bans',
+  server: 'Server',
+  type: 'battlemetrics'
+});
+assert.deepStrictEqual(
+  rows.ExportBanList.filter((row) => row.owner === ALICE.id && row.name === 'Bans').map(
+    (row) => row.id
+  ),
+  [remade.id]
+);
+take();
+rows.ExportBanList = rows.ExportBanList.filter((row) => row.id !== remade.id);
 
 // When its invite cannot be made, the list keeps its ban list, and the one line says so. The list
 // is created, and its owner is given it with no error, as saving it makes the invite again.
@@ -982,14 +997,17 @@ await assert.rejects(
     { name: 'Bob BM', server: 'Server', type: 'battlemetrics' },
     as(BOB)
   ),
-  { message: 'Lock wait timeout exceeded' }
+  {
+    message:
+      'Your export ban list could not be saved with its BattleMetrics ban list, so it was not created. Please try again later.'
+  }
 );
 const bobsBM = nextID - 1;
-rows.ExportBanList = rows.ExportBanList.filter((row) => row.id !== bobsBM);
+assert.ok(!rows.ExportBanList.some((row) => row.id === bobsBM), 'The list is deleted.');
 const bobsList = (name) => `Server's List "${name}" (ID: ${bobs.id}, remote)`;
 const renamed = (i, level = 1) =>
   `[WebServer][${level}] Steam user ${BOB.id} updated export ban list ${bobsList(`Bob ${i}`)}: name "${i === 0 ? 'Bob' : `Bob ${i - 1}`}" → "Bob ${i}".`;
-const bobsUnsaved = `[WebServer][1] Steam user ${BOB.id} created export ban list Server's List "Bob BM" (ID: ${bobsBM}, BattleMetrics): ${DEFAULTS}, no Discord webhook. BattleMetrics ban list ${nextBanList - 1} was made for it, but saving it to the list failed, so nothing records the ban list, which must be removed on BattleMetrics by hand: Error: Lock wait timeout exceeded`;
+const bobsUnsaved = `[WebServer][1] Steam user ${BOB.id} could not create export ban list Server's List "Bob BM" (ID: ${bobsBM}, BattleMetrics), as saving its BattleMetrics ban list ${nextBanList - 1} to it failed, so the list was deleted. Nothing records BattleMetrics ban list ${nextBanList - 1}, which must be removed on BattleMetrics by hand. Error: Lock wait timeout exceeded`;
 assert.deepStrictEqual(take(), [
   ...Array.from({ length: LINES_PER_MINUTE }, (_, i) => renamed(i)),
   `[WebServer][1] Steam user ${BOB.id}'s changes have posted ${LINES_PER_MINUTE} lines in the last minute, the most for one user, so their next ones are only in the web server's console until there is room again. Failures are still posted.`,

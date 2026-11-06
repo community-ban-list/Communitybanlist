@@ -650,6 +650,34 @@ assert.ok(createdWithoutInvite, 'The list is kept.');
 assert.strictEqual(createdWithoutInvite.battlemetricsID, '123');
 assert.deepStrictEqual(noInvite.data, { createExportBanList: { id: createdWithoutInvite.id } });
 assert.deepStrictEqual(hiddenLines(), []);
+// When the ban list was made but could not be saved to the list, as the database gave up waiting
+// for a lock, the list is deleted, and its owner is told it was not created, rather than only that
+// the server had an error, or that the list could not be deleted either.
+const unrecorded = lockWait();
+const unsavedList = (values) =>
+  createBattlemetricsList({
+    async createBattlemetricsBanList() {
+      this.battlemetricsID = '124';
+      throw Object.assign(unrecorded, { stage: 'saving' });
+    },
+    ...values
+  });
+createList = unsavedList();
+await checkShown(
+  mutation('createExportBanList', { ...LIST, type: 'battlemetrics' }),
+  'Your export ban list could not be saved with its BattleMetrics ban list, so it was not created. Please try again later.',
+  { user: 'unrecorded' }
+);
+createList = unsavedList({
+  async destroy() {
+    throw deadlock();
+  }
+});
+await checkShown(
+  mutation('createExportBanList', { ...LIST, type: 'battlemetrics' }),
+  'Your export ban list could not be saved with its BattleMetrics ban list. Please delete it and try again later.',
+  { user: 'unrecorded-not-deleted' }
+);
 resetModels();
 
 // A list whose BattleMetrics ban list could not be deleted, with the errors scbl-lib's deletion
@@ -777,21 +805,6 @@ await checkHidden(
   ['deleteExportBanList'],
   { user: 'database-deleter' }
 );
-// A new BattleMetrics list whose BattleMetrics ban list was made but could not be saved with it.
-const unrecorded = lockWait();
-createList = createBattlemetricsList({
-  async createBattlemetricsBanList() {
-    this.battlemetricsID = '124';
-    throw Object.assign(unrecorded, { stage: 'saving' });
-  }
-});
-await checkHidden(
-  mutation('createExportBanList', { ...LIST, type: 'battlemetrics' }),
-  unrecorded,
-  ['createExportBanList'],
-  { user: 'unrecorded' }
-);
-resetModels();
 
 // Errors from the database, from bugs and from the packages the API uses, any of which any request
 // can meet, here as the organisations are looked up, or a ban list's organisation.
