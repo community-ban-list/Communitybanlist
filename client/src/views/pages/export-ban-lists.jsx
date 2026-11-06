@@ -37,6 +37,14 @@ const GET_EXPORT_BAN_LISTS = gql`
   }
 `;
 
+// What the Install box says in place of the share invite of a Battlemetrics list that has none.
+// Saving the list makes its invite again, but only once the list has its Battlemetrics ban list.
+function missingInvite(exportBanList) {
+  return exportBanList.battlemetricsID
+    ? 'Battlemetrics has not made the share invite for this export ban list yet. To try again, press Edit, then Save.'
+    : 'This export ban list has no Battlemetrics ban list, so it cannot be used within Battlemetrics. To use it there, delete it and create it again.';
+}
+
 export default function () {
   const { loading, error, data } = useQuery(GET_EXPORT_BAN_LISTS);
 
@@ -124,14 +132,18 @@ export default function () {
                                     {exportBanList.type === 'battlemetrics' && (
                                       <>
                                         <h6>Battlemetrics</h6>
-                                        <p>
-                                          To use this export ban list within Battlemetrics, please
-                                          accept our{' '}
-                                          <a href={exportBanList.battlemetricsInvite}>
-                                            Battlemetrics ban list share invite
-                                          </a>
-                                          .
-                                        </p>
+                                        {exportBanList.battlemetricsInvite ? (
+                                          <p>
+                                            To use this export ban list within Battlemetrics, please
+                                            accept our{' '}
+                                            <a href={exportBanList.battlemetricsInvite}>
+                                              Battlemetrics ban list share invite
+                                            </a>
+                                            .
+                                          </p>
+                                        ) : (
+                                          <p>{missingInvite(exportBanList)}</p>
+                                        )}
                                       </>
                                     )}
                                     <h6>Remote Ban List for Squad</h6>

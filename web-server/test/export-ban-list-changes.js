@@ -424,7 +424,7 @@ await assert.rejects(
 
 // Failures that are not refusals count, such as BattleMetrics or the database failing.
 const failures = [
-  'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.',
+  'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later, or choose Remote as its type: a remote export ban list does not need BattleMetrics.',
   'BattleMetrics DELETE ban-lists/1 failed after 3 attempts: HTTP 502',
   'Connection lost: The server closed the connection.'
 ];
