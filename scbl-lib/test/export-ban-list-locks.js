@@ -75,9 +75,11 @@ const sequelize = {
 let holder = null;
 
 // The deletion lock's connections, each with what was run on it and whether it was closed. GET_LOCK
-// answers with `taken`, and end() with `ending`, a promise, or an error.
+// answers with `taken`, and end() with `ending`, a promise, or an error. Any other statement is
+// answered by `answer`, when it is set, which can also throw MySQL's error.
 const connections = [];
 let taken = 1;
+let answer = null;
 let ending = null;
 let openFailure = null;
 async function openConnection() {
@@ -87,6 +89,7 @@ async function openConnection() {
     closed: null,
     async query(sql, values) {
       this.queries.push([sql, values]);
+      if (answer && !sql.includes('GET_LOCK')) return answer(sql, values);
       return [[{ taken }]];
     },
     end() {
@@ -162,6 +165,7 @@ function reset() {
   lockedLists = [];
   holder = null;
   taken = 1;
+  answer = null;
   ending = null;
   openFailure = null;
   random = 0.5;
@@ -441,6 +445,107 @@ reset();
 assert.strictEqual(await remoteList().deleteExportBanList({ important: true }), 'none');
 assert.deepStrictEqual(calls, [['destroy this', 42]]);
 
+// The website deletes a new list it could not finish, while its owner waits, only while they still
+// own it, and gives how many rows were deleted. It runs on a connection of its own, outside the
+// pool, which waits at most 10 s for a lock, rather than MySQL's 50 by default, and is closed
+// afterwards, so the setting never reaches a connection anything else uses.
+const SHORT_WAIT = 'SET SESSION innodb_lock_wait_timeout = 10';
+const DELETE_UNFINISHED = 'DELETE FROM ExportBanLists WHERE id = ? AND owner = ?';
+// MySQL's errors as mysql2 gives them, on a connection of its own.
+const rawError = (errno, message) => Object.assign(new Error(message), { errno });
+// Answer each DELETE in turn with the next of these: rows deleted, or an error to throw.
+function answerDeletes(...answers) {
+  answer = (sql) => {
+    if (sql !== DELETE_UNFINISHED) return [{}];
+    const next = answers.shift();
+    if (next instanceof Error) throw next;
+    return [{ affectedRows: next }];
+  };
+}
+const ranUnfinished = () =>
+  connections.map(({ queries, closed }) => ({
+    queries: queries.map(([sql, values]) => (values ? [sql, [...values]] : [sql])),
+    closed
+  }));
+const deleteOnce = [DELETE_UNFINISHED, [42, 'A']];
+reset();
+answerDeletes(1);
+assert.strictEqual(await ExportBanList.destroyUnfinished(42, 'A'), 1);
+assert.deepStrictEqual(ranUnfinished(), [{ queries: [[SHORT_WAIT], deleteOnce], closed: 'ended' }]);
+// Nothing runs on Sequelize's pool, in a transaction or not.
+assert.deepStrictEqual(calls, []);
+
+// A list given to another user, or removed, meanwhile is not deleted, and 0 is given.
+reset();
+answerDeletes(0);
+assert.strictEqual(await ExportBanList.destroyUnfinished(42, 'A'), 0);
+assert.deepStrictEqual(ranUnfinished(), [{ queries: [[SHORT_WAIT], deleteOnce], closed: 'ended' }]);
+
+// A deletion MySQL ends in a deadlock, e.g. with the importer writing the list's export bans, which
+// rolls the statement back, is run again on the same connection, after a random wait of up to
+// 0.1 s, then 0.2 and 0.4 s, up to 4 times in all.
+reset();
+random = 0.5;
+answerDeletes(
+  rawError(1213, 'Deadlock found when trying to get lock; try restarting transaction'),
+  rawError(1213, 'Deadlock found when trying to get lock; try restarting transaction'),
+  1
+);
+assert.strictEqual(await ExportBanList.destroyUnfinished(42, 'A'), 1);
+assert.deepStrictEqual(ranUnfinished(), [
+  { queries: [[SHORT_WAIT], deleteOnce, deleteOnce, deleteOnce], closed: 'ended' }
+]);
+// Then the connection is given 5 s to close.
+assert.deepStrictEqual(timers, [50, 100, 5000]);
+
+// A fourth deadlock is given to the caller as it is, and the connection is closed.
+reset();
+const fourthDeadlock = rawError(
+  1213,
+  'Deadlock found when trying to get lock; try restarting transaction'
+);
+answerDeletes(
+  rawError(1213, 'Deadlock found'),
+  rawError(1213, 'Deadlock found'),
+  rawError(1213, 'Deadlock found'),
+  fourthDeadlock
+);
+await assert.rejects(ExportBanList.destroyUnfinished(42, 'A'), (error) => error === fourthDeadlock);
+assert.deepStrictEqual(ranUnfinished(), [
+  { queries: [[SHORT_WAIT], deleteOnce, deleteOnce, deleteOnce, deleteOnce], closed: 'ended' }
+]);
+
+// A deletion that waited the 10 s for a lock, or failed any other way, is given to the caller at
+// once, as running it again would only wait as long again, and the connection is closed.
+for (const failure of [
+  rawError(1205, 'Lock wait timeout exceeded; try restarting transaction'),
+  Object.assign(new Error('Connection lost: The server closed the connection.'), {
+    code: 'PROTOCOL_CONNECTION_LOST'
+  })
+]) {
+  reset();
+  answerDeletes(failure);
+  await assert.rejects(ExportBanList.destroyUnfinished(42, 'A'), (error) => error === failure);
+  assert.deepStrictEqual(ranUnfinished(), [
+    { queries: [[SHORT_WAIT], deleteOnce], closed: 'ended' }
+  ]);
+  assert.deepStrictEqual(timers, [5000]);
+}
+
+// When the setting itself fails, nothing is deleted, and the connection is closed. When no
+// connection can be opened, the error is given as it is.
+reset();
+const settingFailed = rawError(2013, 'Lost connection to MySQL server during query');
+answer = () => {
+  throw settingFailed;
+};
+await assert.rejects(ExportBanList.destroyUnfinished(42, 'A'), (error) => error === settingFailed);
+assert.deepStrictEqual(ranUnfinished(), [{ queries: [[SHORT_WAIT]], closed: 'ended' }]);
+reset();
+openFailure = new Error('connect ECONNREFUSED');
+await assert.rejects(ExportBanList.destroyUnfinished(42, 'A'), (error) => error === openFailure);
+assert.deepStrictEqual(connections, []);
+
 console.log(
-  "Export ban list lock checks passed: transactions run again after a deadlock, the lock on a user's lists, the deletion lock, and deletions only while the user owns the list."
+  "Export ban list lock checks passed: transactions run again after a deadlock, the lock on a user's lists, the deletion lock, deletions only while the user owns the list, and unfinished lists deleted with a short lock wait."
 );
