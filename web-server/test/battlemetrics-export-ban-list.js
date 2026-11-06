@@ -114,9 +114,11 @@ const dependencies = {
         return list;
       },
       findOne: async () => found,
-      async destroy({ where, ...options }) {
-        assert.deepStrictEqual(Object.keys(options), []);
-        deletions.push({ ...where });
+      // A list that could not be finished is deleted by its ID and owner, in a transaction of
+      // its own (export-ban-list-locks.js in scbl-lib checks how).
+      async destroyUnfinished(id, owner) {
+        assert.strictEqual(openTransaction, null, "The list's transaction has ended.");
+        deletions.push({ id, owner });
         if (deletedRows instanceof Error) throw deletedRows;
         return deletedRows;
       }
@@ -441,6 +443,36 @@ assert.deepStrictEqual(posted, [
   `[WebServer][1] Steam user owner could not create export ban list Server's List "Test" (ID: 18, BattleMetrics), as saving its BattleMetrics ban list list-18 to it failed, and the list could not be deleted either, so its owner was asked to delete it. ${keptUnsaved(18)} Error: ${saveError.message}, Error: Database unavailable`
 ]);
 assert.deepStrictEqual(important, posted);
+deletedRows = 1;
+
+// When MySQL says it rolled the save back, as a statement that waited too long for a lock, or one
+// in a transaction it ended in a deadlock, a kept list cannot record the ban list, so the line
+// says plainly that nothing records it, as for a deleted list.
+for (const [id, errno, message] of [
+  [19, 1205, 'Lock wait timeout exceeded; try restarting transaction'],
+  [20, 1213, 'Deadlock found when trying to get lock; try restarting transaction']
+]) {
+  logs.length = 0;
+  posted.length = 0;
+  important.length = 0;
+  deletions.length = 0;
+  deletedRows = 0;
+  const original = Object.assign(new Error(message), { errno });
+  const rolledBack = Object.assign(new Error(message), { original, parent: original });
+  created = {
+    ...unsavedList(id),
+    async createBattlemetricsBanList() {
+      this.battlemetricsID = `list-${id}`;
+      throw Object.assign(rolledBack, { stage: 'saving' });
+    }
+  };
+  await assert.rejects(create(), { message: NOT_SAVED });
+  assert.deepStrictEqual(deletions, [{ id, owner: 'owner' }]);
+  assert.deepStrictEqual(posted, [
+    `[WebServer][1] Steam user owner could not create export ban list Server's List "Test" (ID: ${id}, BattleMetrics), as saving its BattleMetrics ban list list-${id} to it failed, and it was no longer theirs, as it had been given to another user or removed meanwhile, so it was left as it is. Nothing records BattleMetrics ban list list-${id}, which must be removed on BattleMetrics by hand. Error: ${message}`
+  ]);
+  assert.deepStrictEqual(important, posted);
+}
 deletedRows = 1;
 
 // A list made without trouble is returned, and nothing is logged. A remote list makes no

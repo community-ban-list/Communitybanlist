@@ -216,11 +216,12 @@ const models = {
       return list?.owner === where.owner ? list : null;
     },
     create: async (values) => createList(values),
-    // A list whose BattleMetrics ban list could not be made is removed by its ID and owner, which
-    // the stand-in passes on to that list's own row.
-    destroy: async ({ where }) => {
-      const list = lists.get(where.id);
-      if (list?.owner !== where.owner) return 0;
+    // A new list that could not be finished, as its BattleMetrics ban list could not be made or
+    // saved to it, is removed by its ID and owner, which the stand-in passes on to that list's
+    // own row.
+    destroyUnfinished: async (id, owner) => {
+      const list = lists.get(id);
+      if (list?.owner !== owner) return 0;
       await list.destroy();
       return 1;
     },

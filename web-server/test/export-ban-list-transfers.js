@@ -368,6 +368,13 @@ function database() {
       });
       return deleted;
     },
+    // The website's deletion of a new list it could not finish: the same DELETE, in a transaction
+    // of its own, run again after a deadlock.
+    destroyUnfinished(id, owner) {
+      return inTransaction((transaction) =>
+        models.ExportBanList.destroy({ where: { id, owner }, transaction })
+      );
+    },
     async whileDeleting(id, deletion) {
       await beforeDeleting.get(id)?.until;
       if (deleting.has(id))

@@ -66,6 +66,10 @@ const NO_BAN_LIST = 'Ban list does not exist!';
 const NO_REFERENCED_ROW = 1452;
 const errorNumber = (error) => (error?.original ?? error?.parent)?.errno;
 
+// MySQL's error numbers for a statement it rolled back: one that waited too long for a lock, and
+// one in a transaction it ended in a deadlock, rolling back the whole transaction.
+const ROLLED_BACK = new Set([1205, 1213]);
+
 // A list's settings, from its stored row or a change's arguments. Only the arguments given are
 // taken, so a change leaves the others as they are.
 const storedSettings = (exportBanList) =>
@@ -333,7 +337,8 @@ export default {
           // ended before the BattleMetrics ban list is made, which can take a while within the
           // BattleMetrics budget, and the Discord bot can give the list to another user meanwhile.
           // So it is deleted only while it is still the user's, in one statement, which locks the
-          // row as it checks the owner.
+          // row as it checks the owner, run again after a deadlock, and waiting only briefly for a
+          // lock, as the owner is waiting (see ExportBanList.destroyUnfinished).
           const unsaved = error.stage === 'saving';
           if (!exportBanLsit.battlemetricsID || unsaved) {
             const list = describeList(exportBanLsit);
@@ -345,13 +350,16 @@ export default {
             // look for on BattleMetrics, and is posted ahead of others. The save of a ban list may
             // have gone through without the database saying so, e.g. as the connection was lost,
             // so a list that is kept may record its ban list after all, which removing the ban
-            // list would then break: the line for a kept list says to check it first.
+            // list would then break: the line for a kept list says to check it first, unless MySQL
+            // said it rolled the save back.
             let unrecorded = '';
             let unrecordedIfKept = '';
             if (unsaved) {
               const { id, battlemetricsID } = exportBanLsit;
               unrecorded = ` Nothing records BattleMetrics ban list ${battlemetricsID}, which must be removed on BattleMetrics by hand.`;
-              unrecordedIfKept = ` BattleMetrics ban list ${battlemetricsID} must be removed on BattleMetrics by hand, unless export ban list ${id} records it after all, as the save may have gone through without the database saying so.`;
+              unrecordedIfKept = ROLLED_BACK.has(errorNumber(error))
+                ? unrecorded
+                : ` BattleMetrics ban list ${battlemetricsID} must be removed on BattleMetrics by hand, unless export ban list ${id} records it after all, as the save may have gone through without the database saying so.`;
             } else if (error.ambiguous) {
               unrecorded = ` BattleMetrics may have made the ban list anyway, which nothing records: look for ${quote(exportBanLsit.battlemetricsBanListName())} among CBL's ban lists on BattleMetrics, and remove it.`;
               unrecordedIfKept = unrecorded;
@@ -367,9 +375,7 @@ export default {
               : 'BattleMetrics could not create a ban list for your export ban list. Please delete it, then try again later or create it again with Remote as its type: a remote export ban list does not need BattleMetrics.';
             let deleted;
             try {
-              deleted = await ExportBanList.destroy({
-                where: { id: exportBanLsit.id, owner: context.user.id }
-              });
+              deleted = await ExportBanList.destroyUnfinished(exportBanLsit.id, context.user.id);
             } catch (destroyError) {
               console.error('Failed to delete the unfinished export ban list:', {
                 exportBanListID: exportBanLsit.id,

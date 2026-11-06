@@ -12,7 +12,7 @@ import vm from 'vm';
 const calls = [];
 
 // A stand-in for Sequelize's Model, whose queries record their options. destroy deletes as many
-// rows as `deletedRows`, and count counts `countedRows`.
+// rows as `deletedRows`, or fails with it when it is an error, and count counts `countedRows`.
 class Model {
   static init() {}
 
@@ -23,6 +23,7 @@ class Model {
 
   static async destroy(options) {
     calls.push(['destroy', options]);
+    if (deletedRows instanceof Error) throw deletedRows;
     return deletedRows;
   }
 
@@ -441,6 +442,57 @@ reset();
 assert.strictEqual(await remoteList().deleteExportBanList({ important: true }), 'none');
 assert.deepStrictEqual(calls, [['destroy this', 42]]);
 
+// The website deletes a new list it could not finish, while its owner waits, only while they still
+// own it, in a transaction of its own, and gives how many rows were deleted. Its connection waits
+// at most 10 s for a lock, rather than MySQL's 50 by default, and is set back to the server's own
+// value before the transaction ends, so the connection goes back to the pool as it was.
+const unfinishedCalls = () =>
+  calls.map(([call, ...rest]) => {
+    if (call === 'query') return ['query', rest[0], rest[1].transaction.number];
+    if (call === 'destroy') return ['destroy', { ...rest[0].where }, rest[0].transaction.number];
+    return [call, ...rest];
+  });
+const SHORT_WAIT = 'SET SESSION innodb_lock_wait_timeout = 10';
+const SERVER_WAIT = 'SET SESSION innodb_lock_wait_timeout = DEFAULT';
+const unfinishedAttempt = (number) => [
+  ['begin', number],
+  ['query', SHORT_WAIT, number],
+  ['destroy', { id: 42, owner: 'A' }, number],
+  ['query', SERVER_WAIT, number]
+];
+reset();
+assert.strictEqual(await ExportBanList.destroyUnfinished(42, 'A'), 1);
+assert.deepStrictEqual(unfinishedCalls(), [...unfinishedAttempt(1), ['commit', 1]]);
+
+// A list given to another user meanwhile is not deleted, and 0 is given.
+reset();
+deletedRows = 0;
+assert.strictEqual(await ExportBanList.destroyUnfinished(42, 'A'), 0);
+assert.deepStrictEqual(unfinishedCalls(), [...unfinishedAttempt(1), ['commit', 1]]);
+
+// A deletion MySQL ends in a deadlock, e.g. with the importer writing the list's export bans, is
+// run again, as a whole, and each attempt sets the connection back.
+reset();
+attempts = [deadlock()];
+assert.strictEqual(await ExportBanList.destroyUnfinished(42, 'A'), 1);
+assert.deepStrictEqual(unfinishedCalls(), [
+  ...unfinishedAttempt(1),
+  ['rollback', 1],
+  ...unfinishedAttempt(2),
+  ['commit', 2]
+]);
+
+// A deletion that waited the 10 s for a lock is given to the caller at once, marked busy, after
+// the connection is set back.
+reset();
+const unfinishedTimeout = lockWaitTimeout();
+deletedRows = unfinishedTimeout;
+await assert.rejects(
+  ExportBanList.destroyUnfinished(42, 'A'),
+  (error) => error === unfinishedTimeout && error.busy === true
+);
+assert.deepStrictEqual(unfinishedCalls(), [...unfinishedAttempt(1), ['rollback', 1]]);
+
 console.log(
-  "Export ban list lock checks passed: transactions run again after a deadlock, the lock on a user's lists, the deletion lock, and deletions only while the user owns the list."
+  "Export ban list lock checks passed: transactions run again after a deadlock, the lock on a user's lists, the deletion lock, deletions only while the user owns the list, and unfinished lists deleted with a short lock wait."
 );

@@ -45,6 +45,10 @@ const DEADLOCK = 1213;
 const DEADLOCK_ATTEMPTS = 4;
 const DEADLOCK_WAIT = 100;
 
+// How long destroyUnfinished waits for a lock, in seconds, in place of MySQL's
+// innodb_lock_wait_timeout, 50 seconds by default.
+const UNFINISHED_LOCK_WAIT = 10;
+
 // MySQL's error number for an error Sequelize gives, which holds MySQL's own error.
 const errorNumber = (error) => (error?.original ?? error?.parent)?.errno;
 
@@ -435,6 +439,30 @@ class ExportBanList extends Sequelize.Model {
       transaction
     });
     return lists.length;
+  }
+
+  // Delete a new list the website could not finish, as its BattleMetrics ban list could not be made
+  // or saved to it, only while the Steam user still owns it, as the Discord bot can give it to
+  // another user meanwhile, and give how many rows were deleted: 0 when it was given away or
+  // removed. The website does this while the list's owner waits for an answer, after waiting for
+  // BattleMetrics, and maybe for a lock that made saving the list fail, so the deletion waits at
+  // most UNFINISHED_LOCK_WAIT seconds for a lock, not MySQL's 50 by default, which could keep the
+  // owner waiting longer than a proxy in front of the website allows. MySQL's SET_VAR hint cannot
+  // set innodb_lock_wait_timeout, so it is set for the transaction's connection, and set back to
+  // the server's own value before the connection goes back to Sequelize's pool. It runs in
+  // inTransaction, so it is run again if MySQL ends it in a deadlock, e.g. with the ban importer,
+  // which writes the list's export bans, and a wait that runs out is marked busy.
+  static destroyUnfinished(id, owner) {
+    return ExportBanList.inTransaction(async (transaction) => {
+      await sequelize.query(`SET SESSION innodb_lock_wait_timeout = ${UNFINISHED_LOCK_WAIT}`, {
+        transaction
+      });
+      try {
+        return await ExportBanList.destroy({ where: { id, owner }, transaction });
+      } finally {
+        await sequelize.query('SET SESSION innodb_lock_wait_timeout = DEFAULT', { transaction });
+      }
+    });
   }
 
   // Run deletion() while holding the list's deletion lock, and give what it gives. A transfer, and a
