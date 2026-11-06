@@ -7,10 +7,12 @@ Copies the bans of the partner ban lists into the CBL database and marks the ban
 The importer runs on Node.js 26, like the other services, as `yarn start-ban-importer` or with the `werewolfboy13/cblimporter` image. The script that starts it runs each run in a container of its own, with `--init`, so a `docker stop` lets the run stop cleanly, and `--stop-timeout 60`, so the run has time to: once it reaches a safe point, it ends within 45 seconds.
 
 ```bash
-docker run -d --init --stop-timeout 60 --env-file .envimporter --name cblimporter \
-  --network=cbl_backend --network=cbl_frontend werewolfboy13/cblimporter:sha-<commit>
+docker run -d --pull always --init --stop-timeout 60 --env-file .envimporter --name cblimporter \
+  --network=cbl_backend --network=cbl_frontend werewolfboy13/cblimporter:latest
 docker wait cblimporter # Waits for the run to end, and prints its exit code.
 ```
+
+`--pull always` fetches the newest `latest` before each run, as the host's copy is otherwise only refreshed by the CI webhook's update of the stack after each merge, and only while the importer service runs `latest`, so not at all once the service is gone from the stack. While `IMPORTER_TAG` pins the service to an earlier image, run that `sha-` tag by hand instead, as `latest` may be the image the service went back from. If the pull fails, e.g. while Docker Hub cannot be reached, `docker run` exits 125, as it does for a name in use (see below), and starts no run, not even from the host's copy, so nothing runs or posts until a pull works again. To run the host's copy meanwhile, leave `--pull always` out.
 
 Until the container is removed, `docker inspect -f '{{.State.ExitCode}}' cblimporter` gives the run's exit code and `docker logs cblimporter` its output. Before the next start, the script removes it with `docker rm cblimporter` once the run has ended, never with `docker rm -f`, which kills a run that is still going before it can save its record, and throws away its output with its JSON line.
 
@@ -377,7 +379,7 @@ SELECT banList, suspendedAt, suspendedBy, reason, resumedAt FROM BanListSuspensi
 
 ## Floors
 
-A newer version of CBL can bring data that an older importer would get wrong, and an image that `IMPORTER_TAG` pins, or that the script keeps running, may be that older importer. Two rows of `ImporterState` keep it from doing harm:
+A newer version of CBL can bring data that an older importer would get wrong. The importer service runs `latest`, which every merge deploys, but an older importer can still meet newer data: until the deploy replaces its container, a cycle on the old image goes on while the web server and the bot already run the new one; a revert on master makes `latest` itself older than data written before it; and an image that `IMPORTER_TAG` pins, e.g. to go back after a bad deploy, or that a run by hand starts, may be older than the data for as long as it runs. Two rows of `ImporterState` keep such an importer from doing harm:
 
 - **`features:importer`**, the heartbeat: what the image of the latest run can do, as `{"features": [...], "games": [...], "gitSha": "..."}`, with the commit of the run's record. Only the importer writes it, in one statement, as a run's or a cycle's steps begin: once it holds the run lock and its migrations are done, as before that the table may not exist, and the row would name an image that is not running yet. A dry run never writes it, as a newer image's dry run must not claim features that the service lacks. `updatedAt` is by the database's clock, and the row is fresh within 30 minutes of it. A failed write only warns in the console, and the row then goes stale.
 - **`floors`**: the features an importer must have, as `{"importer": [...names], "raised": [{"feature", "by", "at"}]}`. Each run or cycle creates it, with no names, if a read that takes no lock does not find it, so a raise that has not ended holds up no run while the row is there. The bot, the web server and the importer raise it with the first data of each kind, each in one transaction, trying again on a deadlock or a duplicate key, as two first raises at once get in each other's way, and only a person lowers it, by hand (see below). Nothing raises it yet, so as of this version it names nothing.
@@ -393,13 +395,13 @@ No other step writes or sends export bans. A step names one feature that the imp
 
 **Below its floor**, when `floors` names a feature that the image lacks:
 
-- It skips the steps that need that feature, and runs the others. Its exports go stale: nobody is added or removed, so bans lifted meanwhile keep applying, until `IMPORTER_TAG` names a newer image, or the script runs one. Nothing is lost: the first image that runs the step again catches up.
+- It skips the steps that need that feature, and runs the others. Its exports go stale: nobody is added or removed, so bans lifted meanwhile keep applying, until the importer runs a newer image. On `latest`, a deploy brings one, unless master was reverted to code that lacks the feature too: then a merge that brings it back ends this, or, once no data that needs it is left, lowering the floor by hand does (see below). An image that `IMPORTER_TAG` pins stays until the tag is set to a newer image, or removed and the stack updated with its images pulled again, to run `latest`. A run by hand needs a newer image too. Nothing is lost: the first image that runs the step again catches up.
 - A name that no step of the image names stops every step, the import too, as the image cannot know what the feature guards. So does a row that cannot be read, as it is not an object, or its `importer` is not a list of names, whose alert gives the statements below.
 - It posts why to the log channel, at once when an image first finds itself below its floor, then hourly, by when runs start, also across restarts, as `lastFloorAlertAt` keeps when it last did, and at once again when what it lacks changes. That includes going below the same floor again after a run found the image at its floor, which that run notes in `lastFloorAlertAt`: a run at its floor reads that row once, and writes it only then. A failure to read or save that row never fails the run: the run warns in the console, and below its floor posts.
 - A run or cycle ends with exit code 4 and the outcome `belowFloor`, once its steps have had their turn, and its record has `belowFloor`, what it lacks and what it skipped, and why in `reason`. It is not a failure. In its status, its title says so, in yellow, each skipped step is marked with ⛔, and it counts as succeeding if its import imported a list (see [Staleness](#staleness)). The service's own exit code does not change, and a cycle is only worth an embed of its own if it would be otherwise, or posted the alert.
 - The importer service is unhealthy while the latest check found its image below its floor, and healthy again once a later check does not (see [Health](#health)). That restarts nothing.
 
-Only images from this version on check floors. An older image ignores both rows and runs every step, whatever `floors` names, so an image from this version or later is the oldest that `IMPORTER_TAG` should name, or the script run, once any floor is raised.
+Only images from this version on check floors. An older image ignores both rows and runs every step, whatever `floors` names, so once any floor is raised, an image from this version or later is the oldest to pin `IMPORTER_TAG` to, to run by hand, or for a revert on master to take the importer back to.
 
 To read the rows:
 
@@ -407,7 +409,7 @@ To read the rows:
 SELECT name, value, updatedAt, TIMESTAMPDIFF(MINUTE, updatedAt, UTC_TIMESTAMP(3)) AS minutesAgo FROM ImporterState WHERE name IN ('floors', 'features:importer', 'lastFloorAlertAt');
 ```
 
-**To go below a floor on purpose**, e.g. to go back to an image without a feature, once no data that needs the feature is left: set `IMPORTER_TAG` to that image first, or have the script run it, as an image from this version on then stops at the floor, and its heartbeat lacks the feature, so nothing raises the floor again. Only then remove the one name by hand, with `<feature>` in both places, which leaves the row's other names and its `raised` as they are:
+**To go below a floor on purpose**, e.g. to go back to an image without a feature, once no data that needs the feature is left: pin `IMPORTER_TAG` to that image first, or, for the service on `latest`, merge the revert and let its deploy run, or for runs by hand have the script run it, as an image from this version on then stops at the floor, and its heartbeat lacks the feature, so nothing raises the floor again. Only then remove the one name by hand, with `<feature>` in both places, which leaves the row's other names and its `raised` as they are:
 
 ```sql
 UPDATE ImporterState
@@ -548,7 +550,7 @@ WHERE SU.lastRefreshedReputationPoints IS NOT NULL
 
 The orphaned players step of the first run clears, in milliseconds, the points of those with no bans left (`withNoBansLeft`), whether queued or not, and the others, `players - withNoBansLeft`, are queued 1,000 a run, or cycle.
 
-To leave the check off, set `IMPORTER_REPUTATION_CHECK_HOURS` to `0` before the importer first runs an image with the check: in the script's env file for runs in once mode, and for the importer service in its own `environment:` block, as `IMPORTER_REPUTATION_CHECK_HOURS: '0'`, as the stack passes the service only the variables that block names. For a service whose `IMPORTER_TAG` is `latest`, that is before this version is merged, as CI's webhook updates the stack once it has pushed the new `latest`. Going back to the previous image leaves the `reputationCheck` row in `ImporterState`, which it ignores.
+To leave the check off, set `IMPORTER_REPUTATION_CHECK_HOURS` to `0` before the importer first runs an image with the check: in the script's env file for runs in once mode, and for the importer service in its own `environment:` block, as `IMPORTER_REPUTATION_CHECK_HOURS: '0'`, as the stack passes the service only the variables that block names. For the service on `latest`, that is before this version is merged, as CI's webhook updates the stack once it has pushed the new `latest`. Going back to the previous image leaves the `reputationCheck` row in `ImporterState`, which it ignores.
 
 ### Deploying paused ban lists
 
@@ -683,12 +685,13 @@ Nothing grows from one cycle to the next: each cycle has a record of its own, an
 
 ### Moving from the script to the service
 
-The service in the Portainer stack, to paste under `services:`. It runs the image of one commit, given in the stack's environment as `IMPORTER_TAG`, e.g. `IMPORTER_TAG=sha-1a2b3c4`, so CI's pushes of `latest` never change it, and the Portainer webhook, which updates the stack after each push, leaves it running as it is. Without `IMPORTER_TAG`, the stack update fails, saying so, rather than run an image nobody chose. The other variables are the stack's, passed by name as the web service has them, and a stack update without any of those the importer needs fails in the same way, rather than start a service that posts nothing, not even alerts, as it would without `DISCORD_LOG_WEBHOOK`, or links owners' alerts to `http://localhost`, as it would without `HOST`. So check that the stack's environment has each of them, as the script's env file does. `BATTLEMETRICS_ORGANIZATION` may be left out, as the importer, like the web server and the bot, then uses CBL's organisation, 56746.
+The service in the Portainer stack, to paste under `services:`. It runs `latest`, so every merge to master deploys it, as it does the web server and the bot: CI pushes the new `latest`, and the Portainer webhook, which updates the stack after each push, pulling its images, starts the service on it. To go back after a bad deploy, set `IMPORTER_TAG` in the stack's environment to the `sha-` tag of an earlier image, which CI pushes beside each `latest`, e.g. `IMPORTER_TAG=sha-1a2b3c4`: the service runs that image until the variable is removed and the stack updated with its images pulled again (see [Changing its settings](#changing-its-settings)). The other variables are the stack's, passed by name as the web service has them, and a stack update without any of those the importer needs fails, saying which, rather than start a service that posts nothing, not even alerts, as it would without `DISCORD_LOG_WEBHOOK`, or links owners' alerts to `http://localhost`, as it would without `HOST`. So check that the stack's environment has each of them, as the script's env file does. `BATTLEMETRICS_ORGANIZATION` may be left out, as the importer, like the web server and the bot, then uses CBL's organisation, 56746.
 
 ```yaml
 importer:
-  # The importer image of one commit, set in the stack's environment, e.g. IMPORTER_TAG=sha-1a2b3c4.
-  image: werewolfboy13/cblimporter:${IMPORTER_TAG:?set IMPORTER_TAG to the sha- tag of the importer image to run}
+  # latest, which every merge deploys, unless the stack's environment pins an earlier image to go
+  # back to, e.g. IMPORTER_TAG=sha-1a2b3c4.
+  image: werewolfboy13/cblimporter:${IMPORTER_TAG:-latest}
   container_name: cbl-importer
   depends_on:
     db:
@@ -741,9 +744,9 @@ importer:
 
 To move from the script to the service:
 
-1. Merge, and wait for CI to push `werewolfboy13/cblimporter:sha-<commit>`.
+1. Merge, and wait for CI to push the new `werewolfboy13/cblimporter:latest`.
 2. Stop the script's schedule, so it starts no more runs, and let a run that is under way end: `docker wait cblimporter` waits for it.
-3. Add `IMPORTER_TAG=sha-<commit>` to the stack's environment, paste the service under `services:`, and update the stack. The service waits for the database, takes the service lock, standing by while a run still holds it, and starts its first cycle.
+3. Paste the service under `services:`, with no `IMPORTER_TAG` in the stack's environment, and update the stack, pulling its images. The service waits for the database, takes the service lock, standing by while a run still holds it, and starts its first cycle.
 4. Check the first cycles: their JSON lines (above), the health check, which turns healthy at its first check, 30 seconds after the start, and the status message in the log channel. The first cycle may read every list in full, which takes about 9 minutes in production.
 5. Keep the script for runs by hand: a run it starts while the service runs, also between cycles, is skipped, with exit code 75. To run it by hand, stop the service with `docker stop cbl-importer`, run the script, and start the service again with `docker start cbl-importer`. Do it while nothing is being merged: an update of the stack, which the CI webhook makes after every push to master, starts the stopped service again, and a run the script starts after that is skipped. A run already under way holds the locks, so the service then stands by until the run ends.
 
@@ -760,4 +763,4 @@ Change a setting in the service's environment, in the stack editor, and update t
 - **`IMPORTER_LOOP_DISCORD`**: `changes`, `status` or `both`, as above, at any time. Going to `changes` leaves the status message as it was last edited, saying the service stopped, until the service goes back to `status` or `both`, when it edits the message again.
 - **`IMPORTER_STATUS_AT_BOTTOM`**: `1` or `0`, as above, at any time. Going to `0` leaves the status message where it is, and edits it there from then on; going back to `1` moves it to the bottom again, at the restart.
 - **`IMPORTER_CYCLE_SECONDS`**: start at `600`. Once the export recalculation only recalculates the players whose bans changed, and after a clean day, go to `120`, then `60`. The lists keep their slots, so their full reads stay spread over the new cycles. Keep `IMPORTER_MAX_CYCLE_SECONDS` longer than the longest cycle, one that reads every list in full, about 9 minutes in production, and the health check's window, two cycles and the time limit, follows both.
-- **`IMPORTER_TAG`**: set it to the `sha-` tag of each importer change that is merged, to run it. Setting it back to an earlier tag goes back to that commit, as long as its image has the importer service (see above).
+- **`IMPORTER_TAG`**: leave it out, so the service runs `latest`, which every merge deploys. To go back, set it to the `sha-` tag of an earlier image, as long as that image has the importer service (see above), and every feature that `floors` names, or it stops at the floor (see [Floors](#floors)). While it is set, merges deploy the web server and the bot but leave the importer as it is, as the webhook's updates pull the importer only at the pinned tag, so once a merge has fixed what it went back from, remove it and update the stack with its images pulled again, e.g. with Portainer's option to re-pull them. Without that pull, the stack would start the host's copy of `latest`, which is still the image it went back from, until the next merge's webhook pulls a newer one.

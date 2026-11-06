@@ -314,14 +314,17 @@ function judgeFloors(floors, steps) {
 // What the importer posts when a check finds it below its floor (see judgeFloors), with the
 // statements that fix a row that cannot be read, which only a person can do. The statement that
 // sets the row again has a placeholder, <features>, so it fails as it is, rather than set the floor
-// to nothing. The image to change is the one IMPORTER_TAG names in loop mode, and the script's in
-// once mode.
+// to nothing. The importer service runs latest, which a deploy replaces with a newer image, unless
+// master was reverted to code that lacks the same, or IMPORTER_TAG pins an older image, which
+// stays until the tag is changed, or removed and latest pulled again. A run by hand runs the image
+// it names.
 function describeFloorAlert({ missing, everyStep, unreadable }, steps) {
   const stale = 'bans lifted meanwhile keep applying';
-  const newer = 'until IMPORTER_TAG names a newer image, or the script runs one';
   if (unreadable)
     return `The floors row in ImporterState cannot be read, so this importer cannot tell what the data needs, and runs no step. Nothing is imported, exports stay as they are, and ${stale}, until the row is fixed by hand. \`SELECT value FROM ImporterState WHERE name = '${FLOORS_ROW}';\` shows it. \`UPDATE ImporterState SET value = JSON_OBJECT('importer', JSON_ARRAY(<features>), 'raised', JSON_ARRAY()), updatedAt = UTC_TIMESTAMP(3) WHERE name = '${FLOORS_ROW}';\` sets it again, once <features> is replaced by the features the data needs, each in quotes, e.g. 'game-rule', or by nothing if it needs none (see Floors in the importer's README).`;
   const lacks = `This importer image lacks ${inWords(missing)}, which the data needs`;
+  const pronoun = missing.length > 1 ? 'them' : 'it';
+  const newer = `until the importer runs a newer image. On latest, a deploy brings one, unless master was reverted to code that lacks ${pronoun} too: then a merge that brings ${pronoun} back ends this, or, once no data that needs ${pronoun} is left, lowering the floor by hand does (see Floors in the importer's README). If IMPORTER_TAG pins an older image, set it to a newer one, or remove it and update the stack with its images pulled again. A run by hand needs a newer image too`;
   if (everyStep)
     return `${lacks}, and it cannot know what that guards, so it runs no step. Nothing is imported, exports stay as they are, and ${stale}, ${newer}.`;
   const guarded = steps.filter(({ needs }) => missing.includes(needs)).map(({ name }) => name);

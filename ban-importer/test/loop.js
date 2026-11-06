@@ -3657,7 +3657,7 @@ function floorSteps(service, during = {}) {
 }
 const stepsRun = (service) => service.events.filter((event) => FLOOR_STEPS.includes(event));
 const LACKS_GAME_RULE =
-  'This importer image lacks game-rule, which the data needs, so it skips updateExportBans. Exports stay as they are, and bans lifted meanwhile keep applying, until IMPORTER_TAG names a newer image, or the script runs one.';
+  "This importer image lacks game-rule, which the data needs, so it skips updateExportBans. Exports stay as they are, and bans lifted meanwhile keep applying, until the importer runs a newer image. On latest, a deploy brings one, unless master was reverted to code that lacks it too: then a merge that brings it back ends this, or, once no data that needs it is left, lowering the floor by hand does (see Floors in the importer's README). If IMPORTER_TAG pins an older image, set it to a newer one, or remove it and update the stack with its images pulled again. A run by hand needs a newer image too.";
 const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
 const cycleEmbeds = (service) =>
   service.posts.map(({ embed }) => embed.title).filter((title) => title.startsWith('CBL update'));
