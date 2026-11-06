@@ -2075,7 +2075,7 @@ function floorSteps(importer, during = {}) {
 }
 const stepsRun = (importer) => importer.events.filter((event) => FLOOR_STEPS.includes(event));
 const LACKS_GAME_RULE =
-  'This importer image lacks game-rule, which the data needs, so it skips updateExportBans. Exports stay as they are, and bans lifted meanwhile keep applying, until IMPORTER_TAG names a newer image, or the script runs one.';
+  "This importer image lacks game-rule, which the data needs, so it skips updateExportBans. Exports stay as they are, and bans lifted meanwhile keep applying, until the importer runs a newer image. On latest, a deploy brings one, unless master was reverted to code that lacks it too: then a merge that brings it back ends this, or, once no data that needs it is left, lowering the floor by hand does (see Floors in the importer's README). If IMPORTER_TAG pins an older image, set it to a newer one, or remove it and update the stack with its images pulled again. A run by hand needs a newer image too.";
 const SKIPPED_REASON =
   'This importer image lacks game-rule, which the data needs, so it skipped updateExportBans.';
 const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
@@ -2282,7 +2282,7 @@ const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
   assert.strictEqual(await importer.run(floorSteps(importer)), 4);
   assert.deepStrictEqual(stepsRun(importer), ['importBans', 'expireBans']);
   assert.deepStrictEqual(importer.important(), [
-    'This importer image lacks game-rule and native-false, which the data needs, so it skips updateExportBans and exportExportBans. Exports stay as they are, and bans lifted meanwhile keep applying, until IMPORTER_TAG names a newer image, or the script runs one.'
+    "This importer image lacks game-rule and native-false, which the data needs, so it skips updateExportBans and exportExportBans. Exports stay as they are, and bans lifted meanwhile keep applying, until the importer runs a newer image. On latest, a deploy brings one, unless master was reverted to code that lacks them too: then a merge that brings them back ends this, or, once no data that needs them is left, lowering the floor by hand does (see Floors in the importer's README). If IMPORTER_TAG pins an older image, set it to a newer one, or remove it and update the stack with its images pulled again. A run by hand needs a newer image too."
   ]);
   assert.deepStrictEqual(importer.record().belowFloor, {
     missing: ['game-rule', 'native-false'],
@@ -2554,7 +2554,7 @@ const floorRow = (...importer) => ({ floors: { importer, raised: [] } });
   assert.strictEqual(await importer.run(floorSteps(importer)), 4);
   assert.deepStrictEqual(stepsRun(importer), []);
   assert.deepStrictEqual(importer.important(), [
-    'This importer image lacks a-later-feature and game-rule, which the data needs, and it cannot know what that guards, so it runs no step. Nothing is imported, exports stay as they are, and bans lifted meanwhile keep applying, until IMPORTER_TAG names a newer image, or the script runs one.'
+    "This importer image lacks a-later-feature and game-rule, which the data needs, and it cannot know what that guards, so it runs no step. Nothing is imported, exports stay as they are, and bans lifted meanwhile keep applying, until the importer runs a newer image. On latest, a deploy brings one, unless master was reverted to code that lacks them too: then a merge that brings them back ends this, or, once no data that needs them is left, lowering the floor by hand does (see Floors in the importer's README). If IMPORTER_TAG pins an older image, set it to a newer one, or remove it and update the stack with its images pulled again. A run by hand needs a newer image too."
   ]);
   const record = importer.record();
   assert.strictEqual(record.outcome, 'belowFloor');
