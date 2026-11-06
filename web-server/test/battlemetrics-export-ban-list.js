@@ -266,11 +266,12 @@ assert.deepStrictEqual(
   logged().map(([description]) => description),
   [
     'Failed to create the BattleMetrics ban list for export ban list:',
-    'Failed to delete the export ban list with no BattleMetrics ban list:'
+    'Failed to delete the unfinished export ban list:'
   ]
 );
 assert.deepStrictEqual(logged()[1][1], {
   exportBanListID: 13,
+  battlemetricsID: null,
   name: 'Error',
   message: 'Database unavailable'
 });
@@ -347,6 +348,100 @@ assert.deepStrictEqual(posted, [
   `[WebServer][1] Steam user owner created export ban list Server's List "Test" (ID: 15, BattleMetrics): ${SETTINGS}. Making its BattleMetrics ban list list-15 failed: TypeError: ${bug.message}`
 ]);
 assert.deepStrictEqual(important, []);
+
+// When BattleMetrics makes the ban list but it cannot be saved to the list, which ExportBanList
+// marks with the stage 'saving', the list records no ban list, and nothing saves one to it later,
+// so it is deleted as one without a ban list is, while it is still the user's, and the owner is
+// told that it was not created, so saving again does not make a second list. The one line names
+// the ban list, which nothing records, to be removed on BattleMetrics by hand, and is posted as
+// an important line, ahead of others.
+const saveError = new Error('Lock wait timeout exceeded; try restarting transaction');
+const unsavedList = (id) => ({
+  id,
+  battlemetricsID: null,
+  battlemetricsBanListName,
+  async createBattlemetricsBanList() {
+    this.battlemetricsID = `list-${id}`;
+    throw Object.assign(saveError, { stage: 'saving' });
+  },
+  async destroy() {
+    assert.fail('The list was deleted by its ID alone.');
+  }
+});
+const NOT_SAVED =
+  'Your export ban list could not be saved with its BattleMetrics ban list, so it was not created. Please try again later.';
+// A list that is kept, as it is no longer the user's, may record the ban list after all, as the
+// save may have gone through without the database saying so, so the line says to check it first.
+const keptUnsaved = (id) =>
+  `BattleMetrics ban list list-${id} must be removed on BattleMetrics by hand, unless export ban list ${id} records it after all, as the save may have gone through without the database saying so.`;
+for (const [id, rows, outcome] of [
+  [
+    16,
+    1,
+    'so the list was deleted. Nothing records BattleMetrics ban list list-16, which must be removed on BattleMetrics by hand.'
+  ],
+  [
+    17,
+    0,
+    `and it was no longer theirs, as it had been given to another user or removed meanwhile, so it was left as it is. ${keptUnsaved(17)}`
+  ]
+]) {
+  logs.length = 0;
+  posted.length = 0;
+  important.length = 0;
+  deletions.length = 0;
+  deletedRows = rows;
+  created = unsavedList(id);
+  await assert.rejects(create(), { message: NOT_SAVED });
+  assert.deepStrictEqual(deletions, [{ id, owner: 'owner' }]);
+  assert.deepStrictEqual(logged(), [
+    [
+      'Failed to save the BattleMetrics ban list to export ban list:',
+      {
+        exportBanListID: id,
+        battlemetricsID: `list-${id}`,
+        name: 'Error',
+        message: saveError.message
+      }
+    ]
+  ]);
+  assert.deepStrictEqual(posted, [
+    `[WebServer][1] Steam user owner could not create export ban list Server's List "Test" (ID: ${id}, BattleMetrics), as saving its BattleMetrics ban list list-${id} to it failed, ${outcome} Error: ${saveError.message}`
+  ]);
+  assert.deepStrictEqual(important, posted);
+}
+
+// If that list cannot be deleted either, its owner is asked to delete it, and the one line gives
+// both failures, and says to check the kept list before removing the ban list. The console gives
+// the list's ban list too.
+logs.length = 0;
+posted.length = 0;
+important.length = 0;
+deletions.length = 0;
+deletedRows = new Error('Database unavailable');
+created = unsavedList(18);
+await assert.rejects(create(), {
+  message:
+    'Your export ban list could not be saved with its BattleMetrics ban list. Please delete it and try again later.'
+});
+assert.deepStrictEqual(
+  logged().map(([description]) => description),
+  [
+    'Failed to save the BattleMetrics ban list to export ban list:',
+    'Failed to delete the unfinished export ban list:'
+  ]
+);
+assert.deepStrictEqual(logged()[1][1], {
+  exportBanListID: 18,
+  battlemetricsID: 'list-18',
+  name: 'Error',
+  message: 'Database unavailable'
+});
+assert.deepStrictEqual(posted, [
+  `[WebServer][1] Steam user owner could not create export ban list Server's List "Test" (ID: 18, BattleMetrics), as saving its BattleMetrics ban list list-18 to it failed, and the list could not be deleted either, so its owner was asked to delete it. ${keptUnsaved(18)} Error: ${saveError.message}, Error: Database unavailable`
+]);
+assert.deepStrictEqual(important, posted);
+deletedRows = 1;
 
 // A list made without trouble is returned, and nothing is logged. A remote list makes no
 // BattleMetrics requests. Each posts one line, saying who created which list, with its settings.

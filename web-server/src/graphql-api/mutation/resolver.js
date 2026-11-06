@@ -200,13 +200,12 @@ async function checkUnchanged(list, settings, configs, transaction) {
 }
 
 // The log channel's line, up to the error, for a new BattleMetrics list that records a ban list
-// but was not finished, from the stage that createBattlemetricsBanList's error gives.
+// but was not finished, from the stage that createBattlemetricsBanList's error gives. A list whose
+// ban list could not be saved to it records none, and is deleted instead.
 function describeUnfinished(exportBanList, error) {
   const list = describeList(exportBanList);
   const settings = describeSettings(exportBanList);
   const id = exportBanList.battlemetricsID;
-  if (error.stage === 'saving')
-    return `created export ban list ${list}: ${settings}. BattleMetrics ban list ${id} was made for it, but saving it to the list failed, so nothing records the ban list, which must be removed on BattleMetrics by hand:`;
   if (error.stage === 'invite')
     return `created export ban list ${list} with BattleMetrics ban list ${id}: ${settings}. Its invite could not be made, which saving the list tries again:`;
   return `created export ban list ${list}: ${settings}. Making its BattleMetrics ban list ${id} failed:`;
@@ -324,61 +323,77 @@ export default {
           );
 
           // Without a BattleMetrics ban list, the export ban list could never be used, so it is
-          // deleted, and the owner can try again. It is deleted on its own rather than created in
-          // one transaction with its BattleMetrics ban list, as f6630b9 tried:
+          // deleted, and the owner can try again. So is a list whose BattleMetrics ban list was
+          // made but could not be saved to it: the list records no ban list either, and nothing
+          // saves one to it later, so the owner, still on the create form, would otherwise make a
+          // second list by saving again. It is deleted on its own rather than created in one
+          // transaction with its BattleMetrics ban list, as f6630b9 tried:
           // createBattlemetricsBanList saves the list outside the transaction, so the save waited
           // on the list's uncommitted row until MySQL gave up. The list's own transaction above has
           // ended before the BattleMetrics ban list is made, which can take a while within the
           // BattleMetrics budget, and the Discord bot can give the list to another user meanwhile.
           // So it is deleted only while it is still the user's, in one statement, which locks the
           // row as it checks the owner.
-          if (!exportBanLsit.battlemetricsID) {
-            const failed = `could not create export ban list ${describeList(exportBanLsit)}, as making its BattleMetrics ban list failed`;
-            // A ban list BattleMetrics may have made without saying so is recorded nowhere, so the
-            // line says what an admin should look for on BattleMetrics, and is posted ahead of
-            // others.
-            const unrecorded = error.ambiguous
-              ? ` BattleMetrics may have made the ban list anyway, which nothing records: look for ${quote(exportBanLsit.battlemetricsBanListName())} among CBL's ban lists on BattleMetrics, and remove it.`
-              : '';
-            const postFailure = error.ambiguous ? auditCleanup : audit;
+          const unsaved = error.stage === 'saving';
+          if (!exportBanLsit.battlemetricsID || unsaved) {
+            const list = describeList(exportBanLsit);
+            const failed = unsaved
+              ? `could not create export ban list ${list}, as saving its BattleMetrics ban list ${exportBanLsit.battlemetricsID} to it failed`
+              : `could not create export ban list ${list}, as making its BattleMetrics ban list failed`;
+            // A ban list BattleMetrics made, or may have made without saying so, that nothing
+            // records must be removed by hand, so the line says which one, or what an admin should
+            // look for on BattleMetrics, and is posted ahead of others. The save of a ban list may
+            // have gone through without the database saying so, e.g. as the connection was lost,
+            // so a list that is kept may record its ban list after all, which removing the ban
+            // list would then break: the line for a kept list says to check it first.
+            let unrecorded = '';
+            let unrecordedIfKept = '';
+            if (unsaved) {
+              const { id, battlemetricsID } = exportBanLsit;
+              unrecorded = ` Nothing records BattleMetrics ban list ${battlemetricsID}, which must be removed on BattleMetrics by hand.`;
+              unrecordedIfKept = ` BattleMetrics ban list ${battlemetricsID} must be removed on BattleMetrics by hand, unless export ban list ${id} records it after all, as the save may have gone through without the database saying so.`;
+            } else if (error.ambiguous) {
+              unrecorded = ` BattleMetrics may have made the ban list anyway, which nothing records: look for ${quote(exportBanLsit.battlemetricsBanListName())} among CBL's ban lists on BattleMetrics, and remove it.`;
+              unrecordedIfKept = unrecorded;
+            }
+            const postFailure = unrecorded ? auditCleanup : audit;
+            // The owner is told what failed: when BattleMetrics made the ban list, a remote list
+            // would not have helped.
+            const notCreated = unsaved
+              ? 'Your export ban list could not be saved with its BattleMetrics ban list, so it was not created. Please try again later.'
+              : 'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later, or choose Remote as its type: a remote export ban list does not need BattleMetrics.';
+            const notDeleted = unsaved
+              ? 'Your export ban list could not be saved with its BattleMetrics ban list. Please delete it and try again later.'
+              : 'BattleMetrics could not create a ban list for your export ban list. Please delete it, then try again later or create it again with Remote as its type: a remote export ban list does not need BattleMetrics.';
             let deleted;
             try {
               deleted = await ExportBanList.destroy({
                 where: { id: exportBanLsit.id, owner: context.user.id }
               });
             } catch (destroyError) {
-              console.error(
-                'Failed to delete the export ban list with no BattleMetrics ban list:',
-                {
-                  exportBanListID: exportBanLsit.id,
-                  name: destroyError.name,
-                  message: destroyError.message
-                }
-              );
+              console.error('Failed to delete the unfinished export ban list:', {
+                exportBanListID: exportBanLsit.id,
+                battlemetricsID: exportBanLsit.battlemetricsID,
+                name: destroyError.name,
+                message: destroyError.message
+              });
               postFailure(
                 context,
-                `${failed}, and the list could not be deleted either, so its owner was asked to delete it.${unrecorded}`,
+                `${failed}, and the list could not be deleted either, so its owner was asked to delete it.${unrecordedIfKept}`,
                 error,
                 destroyError
               );
-              throw new Error(
-                'BattleMetrics could not create a ban list for your export ban list. Please delete it, then try again later or create it again with Remote as its type: a remote export ban list does not need BattleMetrics.'
-              );
+              throw new Error(notDeleted);
             }
             // A list that is no longer the user's is left to its new owner, who can delete it.
             const outcome =
               deleted > 0
-                ? 'so the list was deleted'
-                : 'and it was no longer theirs, as it had been given to another user or removed meanwhile, so it was left as it is';
-            postFailure(context, `${failed}, ${outcome}.${unrecorded}`, error);
-            throw new Error(
-              'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later, or choose Remote as its type: a remote export ban list does not need BattleMetrics.'
-            );
+                ? `so the list was deleted.${unrecorded}`
+                : `and it was no longer theirs, as it had been given to another user or removed meanwhile, so it was left as it is.${unrecordedIfKept}`;
+            postFailure(context, `${failed}, ${outcome}`, error);
+            throw new Error(notCreated);
           }
-          // A ban list the list could not be saved with is recorded nowhere, and must be removed
-          // by hand, so that line is posted ahead of others.
-          const postUnfinished = error.stage === 'saving' ? auditCleanup : audit;
-          postUnfinished(context, describeUnfinished(exportBanLsit, error), error);
+          audit(context, describeUnfinished(exportBanLsit, error), error);
 
           // A list that has its BattleMetrics ban list but not its invite is created, and saving it
           // makes the invite again, as updateExportBanList does. So it is returned, as saving it
