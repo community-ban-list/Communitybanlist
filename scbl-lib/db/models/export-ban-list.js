@@ -39,9 +39,10 @@ const formatNumber = (value) => value.toLocaleString('en-US');
 const LOCK_WAIT_TIMEOUT = 1205;
 const DEADLOCK = 1213;
 
-// How many times inTransaction runs a transaction MySQL ends in a deadlock, in all, and the most it
-// waits before the second, in milliseconds. The wait is random, so transactions that met in a
-// deadlock run again at different times, and its most doubles each time: 0.1, 0.2 and 0.4 s.
+// How many times inTransaction runs a transaction MySQL ends in a deadlock, and destroyUnfinished
+// its statement, in all, and the most each waits before the second, in milliseconds. The wait is
+// random, so work that met in a deadlock runs again at different times, and its most doubles each
+// time: 0.1, 0.2 and 0.4 s.
 const DEADLOCK_ATTEMPTS = 4;
 const DEADLOCK_WAIT = 100;
 
@@ -57,11 +58,14 @@ const errorNumber = (error) => (error?.original ?? error?.parent)?.errno;
 // 64 characters, so a long database name is cut short.
 const DELETION_LOCK = "LEFT(CONCAT('cbl-export-ban-list-deletion:', ?, ':', DATABASE()), 64)";
 
-// How long to wait for the deletion lock's connection to close before closing it at once.
+// How long closeConnection waits for a connection to close before closing it at once.
 const CLOSE_TIMEOUT = 5 * 1000;
 
-// Close the deletion lock's connection, which frees the lock: telling MySQL first, or at once if
-// that takes too long.
+// Close a connection opened outside the pool (openConnection): the deletion lock's, which frees the
+// lock, or destroyUnfinished's. It tells MySQL first, or closes at once if that takes too long.
+// mysql2's end() resolves once the connection's earlier statements have finished, as it sends
+// MySQL the quit command, without waiting for MySQL to close the connection. Both callers wait for
+// their statements first, so the time limit only guards against a statement still running.
 async function closeConnection(connection) {
   let timer;
   const timeout = new Promise((resolve, reject) => {
