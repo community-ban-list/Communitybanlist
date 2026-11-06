@@ -595,9 +595,9 @@ for (const [query, message] of [
   await checkShown(query, message, { user: 'owner' });
 
 // A new BattleMetrics list whose BattleMetrics ban list could not be made, as ExportBanList's
-// creation of it fails: the list is deleted, or its owner is asked to delete it when it cannot be,
-// and when the ban list was made but its invite was not, the owner is shown what BattleMetrics
-// answered (scbl-lib/apis/create-api-client.js).
+// creation of it fails: the list is deleted, or its owner is asked to delete it when it cannot be.
+// When the ban list was made but its invite was not, the list is created, and its owner is given it
+// with no error, as saving the list makes the invite again.
 const banListRefused = await battlemetricsError('post', 'ban-lists', {
   status: 422,
   data: { errors: [{ title: 'Invalid name' }] }
@@ -611,7 +611,7 @@ createList = createBattlemetricsList({
 });
 await checkShown(
   mutation('createExportBanList', { ...LIST, type: 'battlemetrics' }),
-  'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.',
+  'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later, or choose Remote as its type: a remote export ban list does not need BattleMetrics.',
   { user: 'not-made' }
 );
 createList = createBattlemetricsList({
@@ -624,7 +624,7 @@ createList = createBattlemetricsList({
 });
 await checkShown(
   mutation('createExportBanList', { ...LIST, type: 'battlemetrics' }),
-  'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later.',
+  'BattleMetrics could not create a ban list for your export ban list. Please delete it, then try again later or create it again with Remote as its type: a remote export ban list does not need BattleMetrics.',
   { user: 'not-made-or-deleted' }
 );
 const inviteFailed = await battlemetricsError('post', 'ban-lists/123/relationships/invites', {
@@ -636,11 +636,20 @@ createList = createBattlemetricsList({
     throw Object.assign(inviteFailed, { stage: 'invite' });
   }
 });
-await checkShown(
+logged.length = 0;
+const noInvite = await run(
+  api,
   mutation('createExportBanList', { ...LIST, type: 'battlemetrics' }),
-  'BattleMetrics POST ban-lists/123/relationships/invites failed: HTTP 500, so it may have been carried out',
-  { user: 'no-invite' }
+  {
+    user: 'no-invite'
+  }
 );
+assert.strictEqual(noInvite.errors, undefined, JSON.stringify(noInvite.errors));
+const createdWithoutInvite = [...lists.values()].find((list) => list.owner === 'no-invite');
+assert.ok(createdWithoutInvite, 'The list is kept.');
+assert.strictEqual(createdWithoutInvite.battlemetricsID, '123');
+assert.deepStrictEqual(noInvite.data, { createExportBanList: { id: createdWithoutInvite.id } });
+assert.deepStrictEqual(hiddenLines(), []);
 resetModels();
 
 // A list whose BattleMetrics ban list could not be deleted, with the errors scbl-lib's deletion

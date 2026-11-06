@@ -854,7 +854,7 @@ async function removal(db, checked) {
   making.open();
   await assert.rejects(creating, {
     message:
-      'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.'
+      'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later, or choose Remote as its type: a remote export ban list does not need BattleMetrics.'
   });
   assert.strictEqual(ownerOf(db, id), 'B');
   assert.deepStrictEqual(db.writes, [`create ExportBanList ${id}`, `update ExportBanList ${id}`]);

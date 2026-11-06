@@ -203,7 +203,7 @@ created = {
 };
 await assert.rejects(create(), {
   message:
-    'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.'
+    'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later, or choose Remote as its type: a remote export ban list does not need BattleMetrics.'
 });
 assert.deepStrictEqual(deletions, [{ id: 9, owner: 'owner' }]);
 assert.deepStrictEqual(logged(), [
@@ -236,7 +236,7 @@ deletedRows = 0;
 created = { ...created, id: 14 };
 await assert.rejects(create(), {
   message:
-    'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.'
+    'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later, or choose Remote as its type: a remote export ban list does not need BattleMetrics.'
 });
 assert.deepStrictEqual(deletions, [{ id: 14, owner: 'owner' }]);
 assert.deepStrictEqual(posted, [
@@ -260,7 +260,7 @@ created = {
 };
 await assert.rejects(create(), {
   message:
-    'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later.'
+    'BattleMetrics could not create a ban list for your export ban list. Please delete it, then try again later or create it again with Remote as its type: a remote export ban list does not need BattleMetrics.'
 });
 assert.deepStrictEqual(
   logged().map(([description]) => description),
@@ -279,10 +279,12 @@ assert.deepStrictEqual(posted, [
 ]);
 assert.deepStrictEqual(important, posted);
 
-// When only the invite fails, the list keeps its BattleMetrics ban list and the owner gets the
-// error, and the log gives the BattleMetrics ban list that was created. The line says the list was
-// created, with its ban list, and that its invite was not, which ExportBanList marks with the
-// stage 'invite'.
+// When only the invite fails, the list keeps its BattleMetrics ban list and is created, and the
+// owner is given it with no error, as saving it makes the invite again, so the website leaves the
+// create form rather than leaving the owner there to make a second list. The log gives the
+// BattleMetrics ban list that was created. The line says the list was created, with its ban list,
+// and that its invite was not, which ExportBanList marks with the stage 'invite', and no other line
+// is posted.
 logs.length = 0;
 posted.length = 0;
 important.length = 0;
@@ -304,15 +306,46 @@ created = {
     assert.fail('The list was deleted.');
   }
 };
-await assert.rejects(create(), (error) => error === inviteError);
+assert.strictEqual(await create(), created);
 assert.deepStrictEqual(deletions, []);
 assert.strictEqual(logs.length, 1);
+assert.strictEqual(
+  logged()[0][0],
+  'Failed to create the BattleMetrics invite for export ban list:'
+);
 assert.strictEqual(logged()[0][1].battlemetricsID, 'list-10');
 assert.strictEqual(logged()[0][1].ambiguous, false);
 assert.deepStrictEqual(posted, [
   `[WebServer][1] Steam user owner created export ban list Server's List "Test" (ID: 10, BattleMetrics) with BattleMetrics ban list list-10: ${SETTINGS}. Its invite could not be made, which saving the list tries again: ApiError: ${inviteError.message}`
 ]);
 // The invite is made again when the list is saved, so nothing is left to clean up by hand.
+assert.deepStrictEqual(important, []);
+
+// Any other failure once the ban list is made, such as a bug's, still reaches the owner, and the
+// list, which records its ban list, is kept.
+logs.length = 0;
+posted.length = 0;
+const bug = new TypeError('Cannot read properties of undefined');
+created = {
+  id: 15,
+  battlemetricsID: null,
+  async createBattlemetricsBanList() {
+    this.battlemetricsID = 'list-15';
+    throw bug;
+  },
+  async destroy() {
+    assert.fail('The list was deleted.');
+  }
+};
+await assert.rejects(create(), (error) => error === bug);
+assert.deepStrictEqual(deletions, []);
+assert.deepStrictEqual(
+  logged().map(([description]) => description),
+  ['Failed to create the BattleMetrics ban list for export ban list:']
+);
+assert.deepStrictEqual(posted, [
+  `[WebServer][1] Steam user owner created export ban list Server's List "Test" (ID: 15, BattleMetrics): ${SETTINGS}. Making its BattleMetrics ban list list-15 failed: TypeError: ${bug.message}`
+]);
 assert.deepStrictEqual(important, []);
 
 // A list made without trouble is returned, and nothing is logged. A remote list makes no

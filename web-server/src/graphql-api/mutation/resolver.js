@@ -212,6 +212,14 @@ function describeUnfinished(exportBanList, error) {
   return `created export ban list ${list}: ${settings}. Making its BattleMetrics ban list ${id} failed:`;
 }
 
+// What the console says failed in making a new list's BattleMetrics ban list, by the stage that
+// createBattlemetricsBanList's error gives, when BattleMetrics made the ban list. Otherwise it
+// failed to make the ban list, or may have made it without saying so.
+const CREATION_FAILURES = {
+  saving: 'Failed to save the BattleMetrics ban list to export ban list:',
+  invite: 'Failed to create the BattleMetrics invite for export ban list:'
+};
+
 // How a deletion ended on BattleMetrics, for the log channel's line, from what deleteExportBanList
 // gives and the BattleMetrics ban list the list recorded before it. 'gone' only says BattleMetrics
 // did not know the ban list, which it also says of one CBL's key cannot see, so the line says no
@@ -306,10 +314,11 @@ export default {
         try {
           await exportBanLsit.createBattlemetricsBanList();
         } catch (error) {
-          // The owner sees the message, but only this says which list it was, and whether
-          // BattleMetrics may have created a ban list that the list does not record.
+          // Only this says which list it was, and whether BattleMetrics may have created a ban list
+          // that the list does not record.
           logBattlemetricsFailure(
-            'Failed to create the BattleMetrics ban list for export ban list:',
+            CREATION_FAILURES[error.stage] ??
+              'Failed to create the BattleMetrics ban list for export ban list:',
             exportBanLsit,
             error
           );
@@ -353,7 +362,7 @@ export default {
                 destroyError
               );
               throw new Error(
-                'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later.'
+                'BattleMetrics could not create a ban list for your export ban list. Please delete it, then try again later or create it again with Remote as its type: a remote export ban list does not need BattleMetrics.'
               );
             }
             // A list that is no longer the user's is left to its new owner, who can delete it.
@@ -363,13 +372,20 @@ export default {
                 : 'and it was no longer theirs, as it had been given to another user or removed meanwhile, so it was left as it is';
             postFailure(context, `${failed}, ${outcome}.${unrecorded}`, error);
             throw new Error(
-              'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.'
+              'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later, or choose Remote as its type: a remote export ban list does not need BattleMetrics.'
             );
           }
           // A ban list the list could not be saved with is recorded nowhere, and must be removed
           // by hand, so that line is posted ahead of others.
           const postUnfinished = error.stage === 'saving' ? auditCleanup : audit;
           postUnfinished(context, describeUnfinished(exportBanLsit, error), error);
+
+          // A list that has its BattleMetrics ban list but not its invite is created, and saving it
+          // makes the invite again, as updateExportBanList does. So it is returned, as saving it
+          // does then, and the owner is not shown the error: the website leaves the create form
+          // only for a list it is given, and the owner, still on the form, would make a second
+          // list by saving again. The list page says that the invite is missing.
+          if (error.stage === 'invite') return exportBanLsit;
           throw error;
         }
       }
