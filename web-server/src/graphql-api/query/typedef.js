@@ -29,7 +29,10 @@ export default gql`
       orderDirection: OrderDirection
     ): SteamUserConnection
 
-    steamUser(id: String!): SteamUser
+    steamUser(
+      "A player's SteamID64, or the EOS ID, in lowercase, that a player is listed under when their bans give no SteamID64."
+      id: String!
+    ): SteamUser
 
     loggedInSteamUser: SteamUser
   }

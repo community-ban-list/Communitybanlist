@@ -1,7 +1,17 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Link, useParams } from 'react-router';
 
-import { Alert, Card, CardBody, Col, Container, Row, Table, UncontrolledTooltip } from 'reactstrap';
+import {
+  Alert,
+  Button,
+  Card,
+  CardBody,
+  Col,
+  Container,
+  Row,
+  Table,
+  UncontrolledTooltip
+} from 'reactstrap';
 
 import { gql } from '@apollo/client';
 import { useQuery } from '@apollo/client/react';
@@ -11,6 +21,8 @@ import Layout from '../layout/layout.jsx';
 import SteamUserSearchBox from '../../components/steam-user-search-box.jsx';
 
 import steamAvatar from '../../assets/img/misc/avatar.jpg';
+
+import { accountKind, parsePlayerInput } from 'scbl-lib/player-ids';
 
 import {
   BanDates,
@@ -86,12 +98,70 @@ function PausedBan() {
   );
 }
 
+// A button that copies a player's ID, where the browser lets the page copy text, and says whether
+// it did. The browser can refuse, e.g. when the page is not focused; the ID can still be selected.
+const COPY_LABELS = { ready: 'Copy', copied: 'Copied', failed: 'Copy failed' };
+function CopyButton(props) {
+  const [state, setState] = useState('ready');
+  if (typeof navigator === 'undefined' || !navigator.clipboard) return null;
+  return (
+    <Button
+      size="sm"
+      color="secondary"
+      outline
+      className="ms-2"
+      aria-label={state === 'ready' ? 'Copy EOS ID' : COPY_LABELS[state]}
+      aria-live="polite"
+      onClick={() =>
+        navigator.clipboard.writeText(props.text).then(
+          () => setState('copied'),
+          () => setState('failed')
+        )
+      }
+    >
+      {COPY_LABELS[state]}
+    </Button>
+  );
+}
+
+// The top of the page of a player whose bans give only their EOS ID, who has no Steam profile.
+function EosProfile(props) {
+  const { id, name } = props.steamUser;
+  return (
+    <CardBody className="text-center border-bottom">
+      <h4>EOS Player</h4>
+      <img alt="Default avatar" src={steamAvatar} width="184px" className="rounded-circle mb-4" />
+      <h5>{name || 'Unknown name'}</h5>
+      <div className="mb-2">
+        <strong>EOS ID: </strong>
+        <code className="user-select-all text-break">{id}</code>
+        <CopyButton text={id} />
+      </div>
+      <small className="text-muted">
+        This player's bans give their EOS ID and no Steam 64 ID, so they are listed under their EOS
+        ID.
+      </small>
+      <h4 className="mt-3">Community Tools:</h4>
+      <h6>
+        <a
+          href={`https://www.battlemetrics.com/rcon/players?filter[search]=${id}&method=quick&redirect=1`}
+          target="_blank"
+          rel="noopener noreferrer nofollow"
+        >
+          BM RCON Link
+        </a>
+      </h6>
+    </CardBody>
+  );
+}
+
 export default function () {
   const { search } = useParams();
-  const isValidSteam64ID = search && search.match(/^[0-9]{17}$/);
+  // The player's ID as CBL stores it, or null when the search is not a player's ID.
+  const player = parsePlayerInput(search);
 
-  const { loading, error, data } = isValidSteam64ID
-    ? useQuery(GET_PLAYER, { variables: { id: search } })
+  const { loading, error, data } = player
+    ? useQuery(GET_PLAYER, { variables: { id: player.id } })
     : { loading: null, error: null, data: null };
 
   return (
@@ -128,7 +198,7 @@ export default function () {
                 </div>
               </CardBody>
             )}
-            {data && data.steamUser === null && (
+            {data && data.steamUser === null && player.kind === 'steam' && (
               <CardBody>
                 <div className="text-center mt-2 mb-2">Unknown Steam User</div>
                 <div className="btn-wrapper text-center">
@@ -139,87 +209,106 @@ export default function () {
                 </div>
               </CardBody>
             )}
+            {data && data.steamUser === null && player.kind === 'eos' && (
+              <CardBody>
+                <div className="text-center mt-2 mb-2">Unknown EOS ID</div>
+                <div className="btn-wrapper text-center">
+                  <i className="fas fa-question fa-4x" />
+                </div>
+                <div className="text-center mt-2 mb-2">No bans are stored under this EOS ID.</div>
+                <div className="text-center mt-2 mb-2">
+                  Steam players have an EOS ID too, but most of their bans are listed under their
+                  Steam 64 ID, so search for that as well. An Epic account ID looks like an EOS ID
+                  but is a different number: see our <Link to="/faq">FAQ</Link>.
+                </div>
+              </CardBody>
+            )}
+            {data && data.steamUser && accountKind(data.steamUser.id) === 'eos' && (
+              <EosProfile steamUser={data.steamUser} />
+            )}
             {data && data.steamUser && (
               <>
-                <CardBody className="text-center border-bottom">
-                  <h4>Steam Profile</h4>
-                  <img
-                    alt={`${data.steamUser.name || data.steamUser.id}'s avatar`}
-                    src={data.steamUser.avatarFull || steamAvatar}
-                    width="184px"
-                    className="rounded-circle mb-4"
-                  />
-                  <h5>
-                    <a
-                      href={`https://steamcommunity.com/profiles/${data.steamUser.id}`}
-                      target="_blank"
-                      rel="noopener noreferrer nofollow"
-                    >
-                      {data.steamUser.name || data.steamUser.id}
-                    </a>
-                  </h5>
-                  <small>
-                    <strong>Last Refreshed: </strong>{' '}
-                    {data.steamUser.lastRefreshedInfo ? (
-                      <FormattedDate date={data.steamUser.lastRefreshedInfo} />
-                    ) : (
-                      'Queued for refresh.'
-                    )}
-                  </small>
-                  <br />
-                  <div>{/* Start Community Tools Links */}</div>
-                  <h4>Community Tools:</h4>
-                  <h6>
-                    <a
-                      href={`https://www.battlemetrics.com/rcon/players?filter[search]=${data.steamUser.id}&method=quick&redirect=1`}
-                      target="_blank"
-                      rel="noopener noreferrer nofollow"
-                    >
-                      BM RCON Link
-                    </a>
+                {accountKind(data.steamUser.id) !== 'eos' && (
+                  <CardBody className="text-center border-bottom">
+                    <h4>Steam Profile</h4>
+                    <img
+                      alt={`${data.steamUser.name || data.steamUser.id}'s avatar`}
+                      src={data.steamUser.avatarFull || steamAvatar}
+                      width="184px"
+                      className="rounded-circle mb-4"
+                    />
+                    <h5>
+                      <a
+                        href={`https://steamcommunity.com/profiles/${data.steamUser.id}`}
+                        target="_blank"
+                        rel="noopener noreferrer nofollow"
+                      >
+                        {data.steamUser.name || data.steamUser.id}
+                      </a>
+                    </h5>
+                    <small>
+                      <strong>Last Refreshed: </strong>{' '}
+                      {data.steamUser.lastRefreshedInfo ? (
+                        <FormattedDate date={data.steamUser.lastRefreshedInfo} />
+                      ) : (
+                        'Queued for refresh.'
+                      )}
+                    </small>
                     <br />
-                    <a
-                      href={`https://steamid.uk/profile/${data.steamUser.id}`}
-                      target="_blank"
-                      rel="noopener noreferrer nofollow"
-                    >
-                      SteamID.UK
-                    </a>
-                    <br />
-                    <a
-                      href={`https://steamrep.com/search?q=${data.steamUser.id}`}
-                      target="_blank"
-                      rel="noopener noreferrer nofollow"
-                    >
-                      SteamRep
-                    </a>
-                    <br />
-                    <a
-                      href={`https://steamdb.info/calculator/${data.steamUser.id}`}
-                      target="_blank"
-                      rel="noopener noreferrer nofollow"
-                    >
-                      SteamDB
-                    </a>
-                    <br />
-                    <a
-                      href={`https://www.etools.ch/searchSubmit.do?query=%22${data.steamUser.id}%22`}
-                      target="_blank"
-                      rel="noopener noreferrer nofollow"
-                    >
-                      etools.ch
-                    </a>
-                    <br />
-                    <a
-                      href={`https://rep.tf/${data.steamUser.id}`}
-                      target="_blank"
-                      rel="noopener noreferrer nofollow"
-                    >
-                      Rep.TF
-                    </a>
-                  </h6>
-                  <div>{/* End Community Tools Links */}</div>
-                </CardBody>
+                    <div>{/* Start Community Tools Links */}</div>
+                    <h4>Community Tools:</h4>
+                    <h6>
+                      <a
+                        href={`https://www.battlemetrics.com/rcon/players?filter[search]=${data.steamUser.id}&method=quick&redirect=1`}
+                        target="_blank"
+                        rel="noopener noreferrer nofollow"
+                      >
+                        BM RCON Link
+                      </a>
+                      <br />
+                      <a
+                        href={`https://steamid.uk/profile/${data.steamUser.id}`}
+                        target="_blank"
+                        rel="noopener noreferrer nofollow"
+                      >
+                        SteamID.UK
+                      </a>
+                      <br />
+                      <a
+                        href={`https://steamrep.com/search?q=${data.steamUser.id}`}
+                        target="_blank"
+                        rel="noopener noreferrer nofollow"
+                      >
+                        SteamRep
+                      </a>
+                      <br />
+                      <a
+                        href={`https://steamdb.info/calculator/${data.steamUser.id}`}
+                        target="_blank"
+                        rel="noopener noreferrer nofollow"
+                      >
+                        SteamDB
+                      </a>
+                      <br />
+                      <a
+                        href={`https://www.etools.ch/searchSubmit.do?query=%22${data.steamUser.id}%22`}
+                        target="_blank"
+                        rel="noopener noreferrer nofollow"
+                      >
+                        etools.ch
+                      </a>
+                      <br />
+                      <a
+                        href={`https://rep.tf/${data.steamUser.id}`}
+                        target="_blank"
+                        rel="noopener noreferrer nofollow"
+                      >
+                        Rep.TF
+                      </a>
+                    </h6>
+                    <div>{/* End Community Tools Links */}</div>
+                  </CardBody>
+                )}
                 <CardBody className="text-center border-bottom">
                   <h4>Reputation</h4>
                   <Row>
@@ -446,7 +535,7 @@ export default function () {
                 </CardBody>
               </>
             )}
-            {!isValidSteam64ID && <RecentlyViewedSteamUsers />}
+            {!player && <RecentlyViewedSteamUsers />}
           </Card>
         </Container>
       </section>
