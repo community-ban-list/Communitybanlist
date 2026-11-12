@@ -192,11 +192,16 @@ for (const excluded of [undefined, null, '2', [0], [-1], [1.5], ['2'], [2, 2], [
 // own, outside any transaction, leaving out the bans of the lists paused as the run saw them, the
 // run whose start it is given. core.js is loaded with the real reputation-points.js and the
 // excluded-ban-lists.js it imports, a stand-in for paused-lists.js, and empty stand-ins for its
-// other imports, named from its import statements.
+// other imports, named from its import statements. Its clock is the test's: each statement takes
+// statementMs, after retryMs of attempts that failed and the waits after them.
 {
   const queries = [];
   const reads = [];
+  const posted = [];
   let paused = [];
+  let now = Date.parse('2026-11-11T12:00:00.000Z');
+  let statementMs = 0;
+  let retryMs = 0;
   const stubs = {
     './paused-lists.js': {
       default: async (settings) => {
@@ -209,12 +214,23 @@ for (const excluded of [undefined, null, '2', [0], [-1], [1.5], ['2'], [2, 2], [
         QueryTypes: { BULKUPDATE: 'BULKUPDATE' },
         async query(sql, options) {
           queries.push({ sql, options });
+          now += statementMs;
           return 3;
         }
       }
     },
-    'scbl-lib/utils': { Logger: { verbose() {} } },
-    './apply-list.js': { retryOperation: (operation) => operation() }
+    'scbl-lib/utils': {
+      Logger: {
+        verbose() {},
+        important: (module, message) => posted.push([module, message])
+      }
+    },
+    './apply-list.js': {
+      retryOperation: (operation) => {
+        now += retryMs;
+        return operation();
+      }
+    }
   };
   const url = new URL('../src/core.js', import.meta.url);
   const source = await readFile(url, 'utf8');
@@ -254,6 +270,7 @@ for (const excluded of [undefined, null, '2', [0], [-1], [1.5], ['2'], [2, 2], [
     );
   });
   await module.evaluate();
+  vm.runInContext('Date', context).now = () => now;
   await module.namespace.default.updateReputationPoints({ startedAt: 1000 });
   assert.strictEqual(queries.length, 1);
   assert.strictEqual(queries[0].sql, RECALCULATE_POINTS);
@@ -269,6 +286,35 @@ for (const excluded of [undefined, null, '2', [0], [-1], [1.5], ['2'], [2, 2], [
   assert.strictEqual(queries.length, 2);
   assert.strictEqual(queries[1].sql, recalculatePoints([2, 7]));
   assert.deepStrictEqual({ ...reads.at(-1) }, { startedAt: 2000 });
+
+  // A statement that takes more than 12 seconds, with its retries, is posted, with how long it took
+  // and how many players it changed; one that takes 12 seconds or less is not. Each case is the time
+  // of the statement that worked, of the attempts before it and their waits, and whether it posts.
+  for (const [ms, retries, post] of [
+    [12000, 0, false],
+    [12001, 0, true],
+    [41500, 0, true],
+    [7000, 5000, false],
+    [7100, 5000, true]
+  ]) {
+    posted.length = 0;
+    statementMs = ms;
+    retryMs = retries;
+    await module.namespace.default.updateReputationPoints({ startedAt: 3000 });
+    const took = ((ms + retries) / 1000).toFixed(1);
+    assert.deepStrictEqual(
+      posted,
+      post
+        ? [
+            [
+              'Core',
+              `Recalculating reputation points took ${took}s, over 12s, and changed 3 Steam users. Other writes to Steam users wait while it runs.`
+            ]
+          ]
+        : [],
+      `${ms} and ${retries}`
+    );
+  }
 }
 
 // The rule is written in reputation-points.js only: no other file of the importer works out points
@@ -286,5 +332,5 @@ for (const excluded of [undefined, null, '2', [0], [-1], [1.5], ['2'], [2, 2], [
 }
 
 console.log(
-  'Reputation points checks passed: the recalculation unchanged token for token and sent as before, the check joining the same table of points, paused lists left out of every read of the bans, and the rule written in one place.'
+  'Reputation points checks passed: the recalculation unchanged token for token and sent as before, posted when it takes over 12 seconds, the check joining the same table of points, paused lists left out of every read of the bans, and the rule written in one place.'
 );

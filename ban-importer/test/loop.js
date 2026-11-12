@@ -5,6 +5,7 @@ import { format } from 'util';
 import vm from 'vm';
 
 import { IMPORTER_FEATURES, IMPORTER_GAMES, KNOWN_FEATURES } from '../../scbl-lib/floors.js';
+import { accountKind } from '../../scbl-lib/player-ids.js';
 import describeError from '../../scbl-lib/utils/describe-error.js';
 import isNewerMessage, { newerMessage } from '../../scbl-lib/utils/message-id.js';
 import floorsTable from './helpers/floors-table.js';
@@ -532,6 +533,8 @@ async function loadLoop({
       QueryTypes: { SELECT: 'SELECT' }
     },
     'scbl-lib/floors': floorNames,
+    // What the real apply-list.js imports too.
+    'scbl-lib/player-ids': { accountKind },
     // What the real scbl-lib/db/floors.js imports.
     '../floors.js': floorNames,
     './sequelize.js': { default: floors, QueryTypes: { SELECT: 'SELECT' } },
@@ -3718,7 +3721,7 @@ const staleLines = (service) => service.discord.filter((line) => line.includes('
   );
   assert.ok(service.records().every((record) => !('belowFloor' in record)));
   assert.deepStrictEqual(copy(service.floors.rows.get('features:importer')), {
-    features: ['native-false'],
+    features: ['native-false', 'eos-import'],
     games: ['squad'],
     gitSha: 'abc1234'
   });

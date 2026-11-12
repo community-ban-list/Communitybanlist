@@ -357,6 +357,7 @@ const INVALID = [
     new: 404,
     updated: 493,
     missing: 3,
+    notSteam: 0,
     skipped: 4,
     unsaved: 0,
     left: 254,
@@ -437,6 +438,7 @@ const INVALID = [
     new: 0,
     updated: 200,
     missing: 0,
+    notSteam: 0,
     skipped: 0,
     unsaved: 0,
     left: 54,
@@ -466,6 +468,7 @@ const INVALID = [
     new: 0,
     updated: 1,
     missing: 2,
+    notSteam: 0,
     skipped: 0,
     unsaved: 0,
     left: 0,
@@ -475,6 +478,54 @@ const INVALID = [
   assert.strictEqual(state.get(CURSOR), steamID(1001));
   await update({ at: NOW + DAY + 3 * 60 * 60 * SECOND });
   assert.deepStrictEqual(calls, []);
+}
+
+// A player of an EOS ID, whose bans the importer saved for their EOS ID, is not a Steam player: it
+// is never sent to Steam, but marked as looked at, as an ID that is not a SteamID is, and counted
+// on its own, as not a Steam player, apart from the IDs that are neither kind.
+{
+  reset();
+  const EOS = ['0002a1b2c3d4e5f60718293a4b5c6d7e', 'e0000000000000000000000000000001'];
+  for (const n of range(1, 3)) addUser(steamID(n), { createdAt: NOW - DAY + n * SECOND });
+  EOS.forEach((id, index) => addUser(id, { createdAt: NOW - 2 * DAY - index * SECOND }));
+  addUser(INVALID[1], { createdAt: NOW - 3 * DAY });
+  const counts = await update();
+  assert.deepStrictEqual(counts, {
+    due: 6,
+    new: 6,
+    updated: 3,
+    missing: 0,
+    notSteam: 2,
+    skipped: 1,
+    unsaved: 0,
+    left: 0,
+    calls: 1
+  });
+  assert.deepStrictEqual(asked(), range(1, 3).reverse().map(steamID));
+  assert.ok(asked().every((id) => !EOS.includes(id)));
+  assert.deepStrictEqual(
+    events.find(([what]) => what === 'checked'),
+    ['checked', [...EOS, INVALID[1]]]
+  );
+  for (const id of EOS) assert.strictEqual(users.get(id).lastRefreshedInfo, NOW);
+  assert.deepStrictEqual(
+    logs
+      .filter(({ message }) => /^Skipped /.test(message))
+      .map(({ level, message }) => [level, message]),
+    [
+      [2, `Skipped 2 players of EOS IDs, who are not Steam players: ${EOS.join(', ')}`],
+      [2, `Skipped 1 Steam users whose IDs are not SteamIDs: ${INVALID[1]}`]
+    ]
+  );
+  assert.strictEqual(
+    logs.filter(({ message }) =>
+      /^Finished updating Steam users: 3 updated, 0 not found on Steam, 2 not Steam players, 1 skipped and 0 not saved, with 1 calls, and 0 left for later runs\./.test(
+        message
+      )
+    ).length,
+    1
+  );
+  assert.deepStrictEqual(levelOne(), []);
 }
 
 // Each player's refresh interval is 7 days, give or take a day, from their ID, so players refreshed
@@ -679,6 +730,7 @@ for (const [players, cadence, count] of [
     new: 50,
     updated: 150,
     missing: 0,
+    notSteam: 0,
     skipped: 0,
     unsaved: 0,
     left: 100,
@@ -755,6 +807,7 @@ for (const [players, cadence, count] of [
     new: 300,
     updated: 0,
     missing: 0,
+    notSteam: 0,
     skipped: 0,
     unsaved: 0,
     left: 300,
@@ -934,5 +987,5 @@ for (const [err, why] of [
 }
 
 console.log(
-  'Steam profile checks passed: the budget of each run from its schedule, new players first and in the slots of those due, the refresh interval, players Steam leaves out tried again a day later, invalid IDs never sent, saves, failed calls and stops.'
+  'Steam profile checks passed: the budget of each run from its schedule, new players first and in the slots of those due, the refresh interval, players Steam leaves out tried again a day later, invalid IDs and players of EOS IDs never sent, saves, failed calls and stops.'
 );

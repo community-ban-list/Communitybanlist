@@ -3,8 +3,9 @@
 // them as MySQL would, and keeps each row as the driver gives it, with its JSON parsed, by name, in
 // rows. With events, each statement is also noted there, so a test can see when it came. errors
 // says what all statements of a kind fail with, until it is cleared, and onStatement, when set, is
-// told the kind of each statement as it is sent, which sent keeps. The importer never raises a
-// floor itself yet, so a raise's statements fail here.
+// told the kind of each statement as it is sent, which sent keeps. The importer raises a floor only
+// as it saves its first ban for an EOS ID (see saveBans in ban-importer.js), which the steps of
+// these tests never do, so a raise's statements fail here.
 const STATEMENTS = [
   [
     'heartbeat',

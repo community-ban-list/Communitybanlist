@@ -443,9 +443,9 @@ for (const phase of ['expireBans', 'updateSteamUserInfo']) {
 
 // The steps' counts are described in their own words: the import as in its summary line, also when
 // it stopped part-way, the bans marked expired and the players queued for them, the Steam profiles
-// updated, and those Steam did not have, that were skipped, not saved or left for later runs, the
-// players recalculated and the export bans created and deleted, with how many were on each type of
-// list. Other counts are listed as they are.
+// updated, and those Steam did not have, that are not Steam players, that were skipped, not saved
+// or left for later runs, the players recalculated and the export bans created and deleted, with
+// how many were on each type of list. Other counts are listed as they are.
 for (const [name, counts, expected, progress] of [
   [
     'importBans',
@@ -514,6 +514,12 @@ for (const [name, counts, expected, progress] of [
     'updateSteamUserInfo',
     { due: 5243, new: 12, updated: 493, missing: 3, skipped: 4, unsaved: 0, left: 4743, calls: 5 },
     '493 of 5,243 updated, 3 not found on Steam, 4 skipped as not SteamIDs, 4,743 left for later runs'
+  ],
+  // Players of EOS IDs are not Steam players, and are counted on their own.
+  [
+    'updateSteamUserInfo',
+    { due: 40, new: 40, updated: 35, missing: 0, notSteam: 3, skipped: 2, unsaved: 0, left: 0 },
+    '35 of 40 updated, 3 not Steam players, 2 skipped as not SteamIDs'
   ],
   [
     'updateSteamUserInfo',

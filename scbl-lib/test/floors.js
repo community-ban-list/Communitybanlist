@@ -226,10 +226,10 @@ const { exports: entries } = JSON.parse(
 assert.strictEqual(entries['./floors'], './floors.js');
 assert.strictEqual(entries['./db/floors'], './db/floors.js');
 
-// This commit's importer has one feature, and every feature it has can be raised.
-assert.deepStrictEqual(copy(IMPORTER_FEATURES), ['native-false']);
+// This commit's importer has two features, and every feature it has can be raised.
+assert.deepStrictEqual(copy(IMPORTER_FEATURES), ['native-false', 'eos-import']);
 assert.deepStrictEqual(copy(IMPORTER_GAMES), ['squad']);
-assert.deepStrictEqual(copy(KNOWN_FEATURES), ['game-rule', 'native-false']);
+assert.deepStrictEqual(copy(KNOWN_FEATURES), ['eos-import', 'game-rule', 'native-false']);
 assert.ok(IMPORTER_FEATURES.every((feature) => KNOWN_FEATURES.includes(feature)));
 assert.deepStrictEqual([FLOORS_ROW, HEARTBEAT_ROW], ['floors', 'features:importer']);
 

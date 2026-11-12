@@ -5,14 +5,17 @@
 // This file has no imports, so it can be loaded on its own.
 
 // The features this commit's importer has:
-// - native-false: it posts new BattleMetrics export bans with native bans off.
-export const IMPORTER_FEATURES = ['native-false'];
+// - native-false: it posts new BattleMetrics export bans with native bans off;
+// - eos-import: it imports bans for EOS IDs, and moves a ban between a SteamID's account and an EOS
+//   ID's as its IDs change, by the rules for removing bans.
+export const IMPORTER_FEATURES = ['native-false', 'eos-import'];
 
 // The games whose bans this commit's importer counts.
 export const IMPORTER_GAMES = ['squad'];
 
 // Every name that can be raised as a floor. A name not listed here is refused when it is raised, as
 // an importer that does not know a name in its floor stops every step:
+// - eos-import, as above, which the importer raises with the first ban it saves for an EOS ID;
 // - game-rule: a rule, which a later version adds, for counting bans by game;
 // - native-false, as above.
-export const KNOWN_FEATURES = ['game-rule', 'native-false'];
+export const KNOWN_FEATURES = ['eos-import', 'game-rule', 'native-false'];

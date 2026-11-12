@@ -60,6 +60,7 @@ const {
   NOT_VISIBLE,
   readAccessCheck,
   readBanListIDs,
+  readEosImport,
   readSwitch,
   readVisibleBanLists,
   sourceKey,
@@ -152,6 +153,35 @@ for (const [value, ids] of [
   ['3,,4,', ['3', '4']]
 ])
   assert.deepStrictEqual([...readBanListIDs(value)], ids, JSON.stringify(value));
+
+// IMPORTER_EOS_IMPORT names no list when it is not given or empty, every BattleMetrics list with
+// all, in any case and with spaces or quotes around it, and otherwise the lists whose IDs it gives,
+// separated by commas, as text. A part that is not a ban list's ID is left out, with a warning, and
+// so is all among IDs, which then names only those.
+const eosImport = (value) => {
+  const { all, ids, warning } = readEosImport(value);
+  return { all, ids: [...ids], ...(warning === undefined ? {} : { warning }) };
+};
+for (const value of [undefined, null, '', '  ', '""'])
+  assert.deepStrictEqual(eosImport(value), { all: false, ids: [] }, String(value));
+for (const value of ['all', 'ALL', ' All ', '"all"', "'aLL'"])
+  assert.deepStrictEqual(eosImport(value), { all: true, ids: [] }, value);
+assert.deepStrictEqual(eosImport(' "110, 23 ,7" '), { all: false, ids: ['110', '23', '7'] });
+assert.deepStrictEqual(eosImport('110,,23'), { all: false, ids: ['110', '23'] });
+assert.deepStrictEqual(eosImport('110,list 23,all'), {
+  all: false,
+  ids: ['110'],
+  warning:
+    'Warning: IMPORTER_EOS_IMPORT must be all, or ban list IDs separated by commas, so it leaves out "list 23", "all", which are not ban list IDs.'
+});
+assert.deepStrictEqual(eosImport('07'), {
+  all: false,
+  ids: [],
+  warning:
+    'Warning: IMPORTER_EOS_IMPORT must be all, or ban list IDs separated by commas, so it leaves out "07", which is not a ban list ID.'
+});
+for (const value of ['0', '-3', '1.5', 'yes'])
+  assert.deepStrictEqual(eosImport(value).ids, [], value);
 
 // IMPORTER_ACCESS_CHECK is on unless it is 0, false, off or no, in any case and with spaces around
 // it. An invalid value leaves it on, with a warning.

@@ -216,8 +216,8 @@ export function compareReads(a, b) {
 }
 
 // What a head poll's pages say, once read. pages are the pages read, newest first, each with the
-// IDs of all of its bans (uids), with or without a SteamID, BattleMetrics' count of the list's bans
-// on it (total) and whether another page follows (next). known has the IDs of the bans seen before:
+// IDs of all of its bans (uids), kept or skipped, BattleMetrics' count of the list's bans on it
+// (total) and whether another page follows (next). known has the IDs of the bans seen before:
 // on the list's newest page at its last read, or stored. previousTotal is BattleMetrics' count at
 // the list's last read, and drift whether the counts are compared. Returns:
 // - complete: the pages reach the list's last page, so they are all of it;
@@ -227,9 +227,10 @@ export function compareReads(a, b) {
 // - drift: when the count on the first page is not the one at the last read plus the new bans, it
 //   and the count expected, { total, expected }, and otherwise null. Bans added on top of the list
 //   only add to both, so any other difference means a ban was removed, or added or moved below the
-//   pages read, which only a full read finds. Counts and IDs are BattleMetrics' own, with or without
-//   a SteamID, so bans without one, which are never stored, make no difference. A list whose count
-//   is missing cannot be compared.
+//   pages read, which only a full read finds. Counts and IDs are BattleMetrics' own, of every ban,
+//   so the bans the fetcher skips, which are never stored, as those without a SteamID are unless
+//   their list imports EOS IDs, make no difference. A list whose count is missing cannot be
+//   compared.
 export function checkHead({
   pages,
   known,

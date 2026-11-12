@@ -2,7 +2,7 @@ import axios from 'axios';
 import { createHash } from 'crypto';
 
 import { battlemetrics } from 'scbl-lib/apis';
-import { findSteamIDIn, parseRemoteLine } from 'scbl-lib/player-ids';
+import { findSteamIDIn, normaliseEosID, parseRemoteLine } from 'scbl-lib/player-ids';
 import { classifyBanReason, Logger } from 'scbl-lib/utils';
 
 import { stopIfRequested } from './run-control.js';
@@ -60,8 +60,8 @@ const BATTLEMETRICS_MAX_PAGES = 2000;
 const BATTLEMETRICS_EXTRA_PAGES = 50;
 
 // A read of all of a BattleMetrics list is complete only if the number of different bans it read,
-// with or without a SteamID, is within this many of BattleMetrics' count of the list's bans on its
-// first page, plus however much that count changed by its last page.
+// kept or skipped, is within this many of BattleMetrics' count of the list's bans on its first page,
+// plus however much that count changed by its last page.
 const COUNT_TOLERANCE = 2;
 
 // A read may also find more bans than BattleMetrics counts, by this many, or this share of the
@@ -114,7 +114,7 @@ function pageAddress(params) {
 // The SteamIDs of the player banned, from a BattleMetrics ban's steamID identifiers: each valid one
 // once, in the order the ban gives them, as { steamID, manual }, where manual says whether an admin
 // added it by hand rather than BattleMetrics linking it to the player. A ban without any is
-// skipped.
+// skipped, unless it has an EOS ID and its list imports EOS IDs (see readNextPage).
 export function findSteamIDs(identifiers) {
   const steamIDs = [];
   for (const identifier of Array.isArray(identifiers) ? identifiers : []) {
@@ -135,9 +135,37 @@ export function findSteamIDs(identifiers) {
 
 // The player a new ban is for, of its SteamIDs: the first that an admin added by hand, as that is
 // the account the admin meant, or else the first. A ban already saved keeps its player while that
-// is still one of its SteamIDs (see chooseSteamUser in apply-list.js).
+// is still one of its SteamIDs (see placeBan in apply-list.js).
 function firstChoice(steamIDs) {
   return (steamIDs.find(({ manual }) => manual) ?? steamIDs[0]).steamID;
+}
+
+// The EOS IDs of the player banned, from a BattleMetrics ban's eosID identifiers, of any game, added
+// by hand or not: each valid one once, lowercased, as CBL stores it (see normaliseEosID), in the
+// order the ban gives them, as { eosID, manual }, as findSteamIDs gives SteamIDs. Other Epic
+// identifiers, such as epicID and egsID, are not EOS IDs, and are ignored.
+export function findEosIDs(identifiers) {
+  const eosIDs = [];
+  for (const identifier of Array.isArray(identifiers) ? identifiers : []) {
+    if (!identifier || identifier.type !== 'eosID') continue;
+    const eosID = normaliseEosID(identifier.identifier);
+    if (!eosID) continue;
+    const manual = identifier.manual === true;
+    const known = eosIDs.find((entry) => entry.eosID === eosID);
+    if (known) known.manual ||= manual;
+    else eosIDs.push({ eosID, manual });
+  }
+  return eosIDs;
+}
+
+// The player a new ban with EOS IDs but no SteamID is for, of its EOS IDs: the lowest that an admin
+// added by hand, or else the lowest. By value, rather than by the order BattleMetrics gives them, so
+// a ban with two EOS IDs is for the same player on every read. A ban already saved keeps its player
+// while that is still one of its EOS IDs (see placeBan in apply-list.js).
+function placeEosID(eosIDs) {
+  const lowest = (entries) =>
+    entries.reduce((low, { eosID }) => (low === null || eosID < low ? eosID : low), null);
+  return lowest(eosIDs.filter(({ manual }) => manual)) ?? lowest(eosIDs);
 }
 
 function sha256(text) {
@@ -180,25 +208,36 @@ export default class BanFetcher {
   // after it (follow), and the other pages of a read of all of a list (full). While a page of a
   // BattleMetrics list is read, reading says which, as { id, page }, the list's ID and the page's
   // number, the first 1, for the import's report of a list it is still reading, e.g. as the
-  // importer service ends a cycle at once, and otherwise it is null.
+  // importer service ends a cycle at once, and otherwise it is null. eosImport says which
+  // BattleMetrics lists keep their bans that have an EOS ID but no SteamID (see eosImportFor), as
+  // IMPORTER_EOS_IMPORT gives them (see readEosImport in ban-list-sync.js).
   constructor({
     countCheck = true,
     countCheckSkip = new Set(),
+    eosImport = { all: false, ids: new Set() },
     newestFirst = true,
     requests = { head: 0, follow: 0, full: 0 }
   } = {}) {
     this.countCheck = countCheck;
     this.countCheckSkip = countCheckSkip;
+    this.eosImport = eosImport;
     this.newestFirst = newestFirst;
     this.requests = requests;
     this.reading = null;
   }
 
+  // Whether a BattleMetrics list keeps its bans that have an EOS ID but no SteamID: every list, or
+  // those whose IDs, as text, the setting names. Remote lists never do, as CBL takes only their
+  // Steam lines, so this is asked only of BattleMetrics lists.
+  eosImportFor(banList) {
+    return this.eosImport.all || this.eosImport.ids.has(String(banList.id));
+  }
+
   // Fetch all of a ban list, or throw if any part of it cannot be fetched, so the bans that could
   // not be read never look removed. Returns:
-  // - bans: the bans, each with its SteamIDs (steamIDs) and the player a new ban is for
-  //   (steamUser);
-  // - rawCount: the number of records the list gave, including those without a SteamID;
+  // - bans: the bans, each with the player a new ban is for (steamUser), and for a BattleMetrics
+  //   list, its SteamIDs (steamIDs) and EOS IDs (eosIDs), either of which may be empty;
+  // - rawCount: the number of records the list gave, including those it skipped;
   // - firstMetaTotal: BattleMetrics' count of the list's bans, or null;
   // - complete: whether the read is complete, so that the bans it did not find may be removed, and
   //   if it is not, why not (incomplete). A BattleMetrics list is read in full by following its
@@ -209,7 +248,7 @@ export default class BanFetcher {
   //   those of previous, the ones the list was last imported with, if given. A list whose file is
   //   unchanged is not read again, so it has no bans here;
   // - for a BattleMetrics list, head: when it was read newest first, the IDs of all the bans on its
-  //   first page, its newest, with or without a SteamID (uids), and BattleMetrics' count on it
+  //   first page, its newest, kept or skipped (uids), and BattleMetrics' count on it
   //   (total), which later head polls compare their pages with, and otherwise null.
   // A BattleMetrics list whose read a head poll began (read, see fetchBattlemetricsHead) is read on
   // from where the poll stopped, so the pages it read are not read again. A BattleMetrics list that
@@ -325,12 +364,16 @@ export default class BanFetcher {
       return { bans: [], rawCount: 0, firstMetaTotal: null, complete: true, remote };
 
     const bans = [];
+    // The lines that ban an EOS ID, which are counted to say so when the file has no other bans.
+    let eosLines = 0;
 
     // Loop over each line of the ban file.
     for (const line of data.split('\n')) {
       // Split the line to get the steam user, expiry data and reason. Skip the line if no ban is
-      // contained on it, or if it bans an EOS ID, as CBL takes only SteamIDs from ban lists.
+      // contained on it, or if it bans an EOS ID, as CBL takes only SteamIDs from remote ban lists,
+      // whatever IMPORTER_EOS_IMPORT says.
       const ban = parseRemoteLine(line);
+      if (ban?.kind === 'eos') eosLines++;
       if (ban?.kind !== 'steam') continue;
 
       const { value: steamUser, reason } = ban;
@@ -356,7 +399,12 @@ export default class BanFetcher {
       });
     }
 
-    // Anything else with no bans in it, such as an error page, is not a ban list.
+    // Anything else with no bans in it, such as an error page, is not a ban list. One whose only bans
+    // are of EOS IDs says so, as CBL does not import those from remote ban lists.
+    if (bans.length === 0 && eosLines > 0)
+      throw new Error(
+        `The remote ban list has no bans in the \`steamID:expiry //reason\` format. It has ${eosLines.toLocaleString('en-US')} ${eosLines === 1 ? 'line' : 'lines'} with an EOS ID, which CBL does not import from remote ban lists.`
+      );
     if (bans.length === 0)
       throw new Error(
         'The remote ban list has no bans in the `steamID:expiry //reason` format, so it may be an error page.'
@@ -433,9 +481,10 @@ export default class BanFetcher {
 
   // Read the next page of a read of a BattleMetrics list, as startBattlemetricsRead began it, with
   // one request, counted as kind: head, follow or full. Returns the page, which the read keeps too:
-  // - bans: its bans that have a SteamID, each with its SteamIDs (steamIDs) and the player a new ban
-  //   is for (steamUser);
-  // - uids: the IDs of all its bans, with or without a SteamID, in its order;
+  // - bans: its bans that have a SteamID, and, for a list that imports EOS IDs (see eosImportFor),
+  //   those that have an EOS ID but no SteamID, each with its SteamIDs (steamIDs) and EOS IDs
+  //   (eosIDs), either of which may be empty, and the player a new ban is for (steamUser);
+  // - uids: the IDs of all its bans, kept or skipped, in its order;
   // - rawCount: how many bans it gave;
   // - total, active and expired: BattleMetrics' counts of the list's bans, of those still running
   //   and of those that have expired, or null for any it did not give;
@@ -541,11 +590,15 @@ export default class BanFetcher {
         throw new Error('BattleMetrics returned a ban without an ID.');
       page.uids.push(attributes.uid);
 
-      // Get the SteamIDs of the player banned.
+      // Get the SteamIDs and EOS IDs of the player banned. A ban with a SteamID is for one of its
+      // SteamIDs, whatever EOS IDs it has. One without a SteamID, but with an EOS ID, is for one of
+      // its EOS IDs, on a list that imports EOS IDs. Any other is skipped.
       const steamIDs = findSteamIDs(attributes.identifiers);
-
-      // Sometimes there is no SteamID in the response. If this is the case we ignore the ban.
-      if (steamIDs.length === 0) continue;
+      const eosIDs = findEosIDs(attributes.identifiers);
+      let steamUser;
+      if (steamIDs.length > 0) steamUser = firstChoice(steamIDs);
+      else if (eosIDs.length > 0 && this.eosImportFor(banList)) steamUser = placeEosID(eosIDs);
+      else continue;
 
       // Turn the dates into date objects or null if permanent ban.
       const created = new Date(attributes.timestamp);
@@ -555,8 +608,9 @@ export default class BanFetcher {
       page.bans.push({
         id: `${banList.id},${attributes.uid}`,
 
-        steamUser: firstChoice(steamIDs),
+        steamUser,
         steamIDs,
+        eosIDs,
 
         created,
         expires,
@@ -616,7 +670,7 @@ export default class BanFetcher {
     read ??= this.startBattlemetricsRead(banList);
     while (read.next) await this.readBattlemetricsPage(read, 'full');
 
-    // The count check counts the different bans read, with or without a SteamID.
+    // The count check counts the different bans read, kept or skipped.
     const uids = new Set(read.pages.flatMap((page) => page.uids));
     const [newest] = read.pages;
     return {
