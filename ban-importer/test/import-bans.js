@@ -7821,6 +7821,32 @@ const queued = (id) => steamUsers.get(id)?.lastRefreshedReputationPoints === nul
   assert.deepStrictEqual([dry.created, written(), floorRaises], [1, [], []]);
 }
 
+// A raise that fails is not remembered: in the same import, the next list that saves a ban for an
+// EOS ID raises the floor again, before it saves any of its bans.
+{
+  reset();
+  env.IMPORTER_EOS_IMPORT = 'all';
+  battlemetricsList(305, [], [[eosOnlyBan('e1', eosAccount(1))]]);
+  battlemetricsList(306, [], [[eosOnlyBan('f1', eosAccount(2))]]);
+  raiseError = new Error("Table 'cbl.ImporterState' doesn't exist");
+  events.length = 0;
+  const results = await new BanImporter().importBans();
+  assert.deepStrictEqual(
+    Array.from(results, (result) => [result.id, result.error ?? null, result.created]).sort(),
+    [
+      [305, "Error: Table 'cbl.ImporterState' doesn't exist", 0],
+      [306, null, 1]
+    ]
+  );
+  assert.deepStrictEqual(
+    events
+      .filter(([type]) => type === 'raise floor' || type === 'write')
+      .map(([type, ids]) => (type === 'write' ? `write ${ids.join(', ')}` : type)),
+    ['raise floor', 'raise floor', 'write 306,f1']
+  );
+  assert.deepStrictEqual([storedIDs(305), storedIDs(306)], [[], ['306,f1']]);
+}
+
 // Account changes. A ban stored for an EOS ID that now has a SteamID changes to its SteamID's account
 // (an upgrade), and one with EOS IDs but no SteamID, on a list in the setting, changes to its EOS
 // ID's account, from a Steam account (a downgrade) or from another EOS ID's. They are timed by the
@@ -8084,41 +8110,54 @@ for (const moves of ['0', '1']) {
 
 // Account changes are never counted as removals. Here 30 downgrades of a list of 100, a large part
 // of it, reach it over two reads, too few at a time to be a large loss, so they wait: the confirming
-// read makes them all and removes none, and its line, which says it moved them, is not posted as
-// one that removed a large part of the list. Nor does an admin's confirmation count them among the
-// bans it would have removed without it: here it also removes 30 bans the list lost at once, a large
-// loss that would otherwise be held, and its line does not say that a large part of the list would
-// have been removed as usual.
+// read makes them all and removes none, and its line says it moved a large part of the list, by the
+// measure of the line that says a read removed a large part of a list, and is posted, as that line
+// is. Moving 24 of them, fewer than that, is not posted. Nor does an admin's confirmation count them
+// among the bans it would have removed without it: here it also removes 30 bans the list lost at
+// once, a large loss that would otherwise be held, and its line does not say that a large part of
+// the list would have been removed as usual, though it says that a large part moved.
 const downgrades = (from, to) =>
   Array.from({ length: to - from }, (_, i) =>
     eosOnlyBan(`c${from + i}`, eosAccount(800 + from + i))
   );
-for (const id of [322, 323]) {
+for (const [id, moving] of [
+  [322, 30],
+  [323, 30],
+  [324, 24]
+]) {
   reset();
   env.IMPORTER_EOS_IMPORT = String(id);
   battlemetricsList(id, pairs('c', 0, 100), [[...pairs('c', 20, 100), ...downgrades(0, 20)]]);
   let [read] = await run();
   assert.deepStrictEqual([read.hold, read.pending, read.accountChangesWaiting], [null, 20, 20]);
-  battlemetricsLists.set(`bm-${id}`, [[...pairs('c', 30, 100), ...downgrades(0, 30)]]);
+  battlemetricsLists.set(`bm-${id}`, [[...pairs('c', moving, 100), ...downgrades(0, moving)]]);
   [read] = await run();
-  assert.deepStrictEqual([read.hold, read.pending, read.accountChangesWaiting], [null, 30, 30]);
+  assert.deepStrictEqual(
+    [read.hold, read.pending, read.accountChangesWaiting],
+    [null, moving, moving]
+  );
   age(id, 11);
   logs.length = 0;
   events.length = 0;
-  if (id === 322) {
+  if (id !== 323) {
     [read] = await run();
     assert.deepStrictEqual(
       [read.accountChanges, read.removed, read.pending, removedIDs()],
-      [30, 0, 0, []]
+      [moving, 0, 0, []]
     );
-    assert.strictEqual(
-      logged(
-        2,
-        /^Imported ban list \(ID: 322\): 100 bans fetched, 0 new, 30 updated, 30 bans moved to their new accounts\.$/
-      ).length,
-      1
-    );
-    assert.deepStrictEqual(warnings(), []);
+    const line = `Imported ban list (ID: ${id}): 100 bans fetched, 0 new, ${moving} updated, ${moving} bans moved to their new accounts.`;
+    if (id === 322)
+      assert.deepStrictEqual(warnings(), [
+        {
+          level: 1,
+          important: true,
+          message: `${line} The 30 bans that moved to their new accounts are a large part of its 100 stored bans.`
+        }
+      ]);
+    else {
+      assert.deepStrictEqual(warnings(), []);
+      assert.strictEqual(logged(2, /^Imported ban list \(ID: 324\): /)[0].message, line);
+    }
   } else {
     battlemetricsLists.set(`bm-${id}`, [[...pairs('c', 30, 70), ...downgrades(0, 30)]]);
     env.IMPORTER_ALLOW_MASS_REMOVAL = String(id);
@@ -8130,10 +8169,33 @@ for (const id of [322, 323]) {
     assert.deepStrictEqual(
       warnings().map(({ message }) => message),
       [
-        'Imported ban list (ID: 323): 70 bans fetched, 0 new, 30 updated, 30 removed, 30 bans moved to their new accounts, as IMPORTER_ALLOW_MASS_REMOVAL names the list. Remove it from the setting once the removal is done.'
+        'Imported ban list (ID: 323): 70 bans fetched, 0 new, 30 updated, 30 removed, 30 bans moved to their new accounts, as IMPORTER_ALLOW_MASS_REMOVAL names the list. Remove it from the setting once the removal is done. The 30 bans that moved to their new accounts are a large part of its 100 stored bans.'
       ]
     );
   }
+}
+
+// In a dry run, the line says the bans would move, and goes to the console only, as every line of a
+// dry run does.
+{
+  reset();
+  env.IMPORTER_EOS_IMPORT = '325';
+  battlemetricsList(325, pairs('c', 0, 100), [[...pairs('c', 20, 100), ...downgrades(0, 20)]]);
+  await run();
+  battlemetricsLists.set('bm-325', [[...pairs('c', 30, 100), ...downgrades(0, 30)]]);
+  await run();
+  age(325, 11);
+  env.IMPORTER_DRY_RUN = '1';
+  logs.length = 0;
+  const [dry] = await run();
+  assert.deepStrictEqual([dry.accountChanges, written()], [30, []]);
+  assert.strictEqual(
+    logged(
+      2,
+      /^Checked ban list \(ID: 325\): 100 bans fetched, 0 new, 30 updated, 30 bans would move to their new accounts\. The 30 bans that would move to their new accounts are a large part of its 100 stored bans\. Nothing was written, as IMPORTER_DRY_RUN is on\.$/
+    ).length,
+    1
+  );
 }
 
 // A list whose every fetched ban changed found bans, so it is not taken for one that gave none,
@@ -8157,7 +8219,7 @@ for (const id of [322, 323]) {
   assert.strictEqual(
     logged(
       1,
-      /^Imported ban list \(ID: 330\): 12 bans fetched, 0 new, 0 updated, 12 bans waiting to move to their new accounts\. Kept all 12 of its stored bans, as it no longer has any of them, which more likely means that its source broke\. Of them, 12 are bans whose account changed, kept on their stored accounts\. They are kept until one of them comes back\. If the list really replaced all of its bans, set IMPORTER_ALLOW_MASS_REMOVAL=330 for one run\.$/
+      /^Imported ban list \(ID: 330\): 12 bans fetched, 0 new, 0 updated, 12 bans waiting to move to their new accounts\. Kept all 12 of its stored bans, as it no longer has any of them, which more likely means that its source broke\. Of them, 12 are bans whose account changed, kept on their stored accounts, which a confirmation moves to their new accounts\. They are kept until one of them comes back\. If the list really replaced all of its bans, set IMPORTER_ALLOW_MASS_REMOVAL=330 for one run\.$/
     ).length,
     1
   );
@@ -8228,6 +8290,134 @@ for (const id of [322, 323]) {
   assert.strictEqual(bans.get('332,h0').steamUser, steamID(600));
 }
 
+// A list of fewer than 10 bans whose every fetched ban changed account, e.g. as its source stopped
+// giving SteamIDs but still gives EOS IDs, is held as one that gave no bans, as such a list was held
+// before account changes, when those bans were skipped: they stay on their accounts, with no
+// record, its line is posted on every read, and IMPORTER_ALLOW_MASS_REMOVAL moves them to their new
+// accounts. A list of 10 is held as one that lost all of its bans, with records, as it found bans.
+{
+  reset();
+  env.IMPORTER_EOS_IMPORT = '334,335';
+  battlemetricsList(334, pairs('m', 0, 5), [
+    Array.from({ length: 5 }, (_, i) => eosOnlyBan(`m${i}`, eosAccount(950 + i)))
+  ]);
+  battlemetricsList(335, pairs('m', 0, 10), [
+    Array.from({ length: 10 }, (_, i) => eosOnlyBan(`m${i}`, eosAccount(960 + i)))
+  ]);
+  const of = (results, id) => results.find((result) => result.id === id);
+  let results = await run();
+  const small = of(results, 334);
+  assert.deepStrictEqual(
+    [
+      small.hold,
+      small.held,
+      small.pending,
+      small.accountChanges,
+      small.accountChangesWaiting,
+      pendingIDs(334),
+      holdReason(334)
+    ],
+    ['empty', 5, 0, 0, 5, [], undefined]
+  );
+  assert.strictEqual(bans.get('334,m0').steamUser, steamID(0));
+  const posted = () =>
+    logged(
+      1,
+      /^Imported ban list \(ID: 334\): it returned only bans whose account changed \(5\), which more likely means that its source broke, so its 5 stored bans were kept on their accounts\. If their accounts really changed, set IMPORTER_ALLOW_MASS_REMOVAL=334 for one run\.$/
+    ).length;
+  assert.strictEqual(posted(), 1);
+  const ten = of(results, 335);
+  assert.deepStrictEqual(
+    [ten.hold, ten.held, ten.accountChanges, heldIDs(335).length, holdReason(335)],
+    ['full', 10, 0, 10, 'full']
+  );
+  assert.strictEqual(bans.get('335,m0').steamUser, steamID(0));
+
+  logs.length = 0;
+  results = await run();
+  assert.deepStrictEqual([of(results, 334).hold, posted()], ['empty', 1]);
+  env.IMPORTER_ALLOW_MASS_REMOVAL = '334';
+  results = await run();
+  assert.deepStrictEqual(
+    [of(results, 334).hold, of(results, 334).accountChanges, of(results, 334).removed],
+    [null, 5, 0]
+  );
+  assert.strictEqual(bans.get('334,m0').steamUser, eosAccount(950));
+}
+
+// An account change takes a ban from its stored account, as a removal does, so a read that would
+// make one needs the run lock before it saves any of its bans: a run that has lost it saves none of
+// them, and stops.
+{
+  reset();
+  battlemetricsList(
+    342,
+    [...pairs('s', 0, 30), ['u0', eosAccount(1)]],
+    [[...pairs('s', 0, 30), dualBan('u0', steamID(901), eosAccount(1)), ['n0', steamID(950)]]]
+  );
+  const lockless = await loadImporter();
+  lockless.control.setRunLock({ isHeld: async () => false });
+  events.length = 0;
+  const lost = await new lockless.BanImporter().importBans().catch((err) => err);
+  assert.deepStrictEqual(
+    [lost.reason, bans.get('342,u0').steamUser, written(), storedIDs(342).length],
+    [lockless.control.LOCK_LOST, eosAccount(1), [], 31]
+  );
+}
+
+// A hold that ends as its bans come back says how many of those still missing were removed, and how
+// many moved to their new accounts, as their accounts changed, or are removed and move once a
+// confirming read finds them so. Here a list of 30 is held as it lost them all, and then, of the 30:
+// 29 come back and the last with another account, which moves at once; 20 come back and 10 with
+// other accounts, which wait; and 15 come back, 5 with other accounts, while 10 are still gone.
+for (const [id, back, changed, expected] of [
+  [
+    336,
+    29,
+    1,
+    'as 29 of them came back. The other one, whose account changed, moved to its new account.'
+  ],
+  [
+    337,
+    20,
+    10,
+    'as 20 of them came back. The other 10, whose account changed, move to their new accounts once a complete read of it at least 10 minutes from now confirms it.'
+  ],
+  [
+    338,
+    15,
+    5,
+    'as 15 of them came back. Of the other 15, 10 that it still does not have are removed, and 5 whose account changed move to their new accounts, once a complete read of it at least 10 minutes from now confirms it.'
+  ]
+]) {
+  reset();
+  env.IMPORTER_EOS_IMPORT = String(id);
+  battlemetricsList(id, pairs('a', 0, 30), [pairs('n', 0, 2)]);
+  let [read] = await run();
+  assert.deepStrictEqual([read.hold, heldIDs(id).length], ['full', 30]);
+  battlemetricsLists.set(`bm-${id}`, [
+    [
+      ...pairs('n', 0, 2),
+      ...pairs('a', 30 - back, 30),
+      ...Array.from({ length: changed }, (_, i) => eosOnlyBan(`a${i}`, eosAccount(970 + i)))
+    ]
+  ]);
+  logs.length = 0;
+  [read] = await run();
+  assert.deepStrictEqual(
+    [read.hold, read.holdEnded.changed, read.accountChanges, read.accountChangesWaiting],
+    [null, changed, id === 336 ? 1 : 0, id === 336 ? 0 : changed],
+    String(id)
+  );
+  const [line] = logged(1, new RegExp(`^Imported ban list \\(ID: ${id}\\): `));
+  assert.ok(line.message.endsWith(expected), line.message);
+  assert.ok(
+    line.message.includes(
+      ' Stopped holding the 30 bans it had when it lost all of its bans at once'
+    )
+  );
+}
+
 // A burst of account changes that is a large loss of the list, here 25 upgrades of a list of 100,
 // is held for an admin, as a large loss is, on their stored accounts, which no confirming read
 // changes.
@@ -8262,7 +8452,7 @@ for (const id of [322, 323]) {
   assert.strictEqual(
     logged(
       1,
-      /^Imported ban list \(ID: 333\): 100 bans fetched, 0 new, 0 updated, 25 bans waiting to move to their new accounts\. Kept the 25 of its 100 stored bans that it lost at once, .* Of them, 25 are bans whose account changed, kept on their stored accounts\. They are kept until fewer than 25 of them are missing/
+      /^Imported ban list \(ID: 333\): 100 bans fetched, 0 new, 0 updated, 25 bans waiting to move to their new accounts\. Kept the 25 of its 100 stored bans that it lost at once, .* Of them, 25 are bans whose account changed, kept on their stored accounts, which a confirmation moves to their new accounts\. They are kept until fewer than 25 of them are missing/
     ).length,
     1
   );
@@ -8274,8 +8464,9 @@ for (const id of [322, 323]) {
   );
 }
 
-// An account change that cannot be saved keeps its record, and its stored account, while the others
-// are made, and their records dropped. None of them is ever removed. The next read makes it.
+// An account change that cannot be saved keeps its record, and its stored account, so it is counted
+// as one that waits, while the others are made, and their records dropped. None of them is ever
+// removed. The next read makes it.
 {
   reset();
   battlemetricsList(
@@ -8291,7 +8482,10 @@ for (const id of [322, 323]) {
   ]);
   events.length = 0;
   const [partly] = await run();
-  assert.deepStrictEqual([partly.accountChanges, partly.failed, partly.removed], [9, 1, 0]);
+  assert.deepStrictEqual(
+    [partly.accountChanges, partly.accountChangesWaiting, partly.failed, partly.removed],
+    [9, 1, 1, 0]
+  );
   assert.deepStrictEqual(
     [pendingIDs(340), bans.get('340,u3').steamUser],
     [['340,u3'], eosAccount(103)]

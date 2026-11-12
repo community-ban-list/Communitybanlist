@@ -19,6 +19,7 @@ import {
   fewestHeld,
   findAccountChanges,
   flagOf,
+  FULL_REMOVAL_BANS,
   isLargeLoss,
   isMissingBanList,
   planRemovals,
@@ -787,6 +788,9 @@ export default class BanImporter {
       // now, which are written for their new accounts, and queue both their accounts for an update.
       at.stage = 'saving its bans';
       const applyChanges = new Set(removal ? removal.applied.map(({ id }) => id) : []);
+      // An account change takes a ban from its stored account, as a removal does, so it needs the
+      // run lock too: a run that has lost it saves none of the read's bans, and stops.
+      if (applyChanges.size > 0 && !this.dryRun) await checkRunLock();
       const diff = diffBans(bans, stored, { applyMoves: this.applySteamIDMoves, applyChanges });
       result.moves = diff.moves.length;
       result.accountChangesWaiting = diff.changes.length - applyChanges.size;
@@ -1374,7 +1378,8 @@ export default class BanImporter {
   // Once the run is asked to stop, no more batches are started, and this returns when the batch
   // under way, with its players' updates, has been saved. The bans not saved are fetched again by
   // the next run. The account changes written for their new accounts, by the IDs applied has, are
-  // counted, and added to moved, once they are saved.
+  // counted, and added to moved, once they are saved, and one that cannot be saved is counted as
+  // one that waits, as it keeps its stored account.
   //
   // The first ban that this process saves for an EOS ID raises the importer's floor to eos-import
   // first, in a transaction of its own (see raiseImporterFloor), so an older image that checks
@@ -1406,6 +1411,8 @@ export default class BanImporter {
         onFailed: (write, err) => {
           result.failed++;
           result.failure = result.failure || describeError(err);
+          // An account change that could not be saved keeps its stored account, so it waits.
+          if (applied.has(write.id)) result.accountChangesWaiting++;
           Logger.verbose(
             'BanImporter',
             2,
@@ -1451,11 +1458,12 @@ export default class BanImporter {
   // The bans whose account changed (changes, see findAccountChanges in apply-list.js) are missing
   // from their stored accounts, so they are planned as missing, and are not found again: a record
   // they have is kept, and one held is not back. The read still found them, so they count among
-  // the bans it found (fetched), and a list whose every fetched ban changed is never taken for one
-  // that gave no bans. They count towards a large loss, and towards a list losing all of its bans,
-  // as the bans it no longer has do. Such a ban that the rules would remove is written for its new
-  // account instead (applied), and never removed; one they keep waits, or is held, on its stored
-  // account, recorded as a ban the list no longer has is.
+  // the bans it found (fetched), and a list of at least FULL_REMOVAL_BANS bans whose every fetched
+  // ban changed is never taken for one that gave no bans, though one of fewer is (see rules). They
+  // count towards a large loss, and towards a list losing all of its bans, as the bans it no longer
+  // has do. Such a ban that the rules would remove is written for its new account instead
+  // (applied), and never removed; one they keep waits, or is held, on its stored account, recorded
+  // as a ban the list no longer has is.
   async planMissingBans(banList, bans, stored, pending, result, changes = new Map()) {
     const now = this.clock();
     const found = new Set(bans.filter((ban) => !changes.has(ban.id)).map((ban) => ban.id));
@@ -1490,10 +1498,14 @@ export default class BanImporter {
 
     const bySetting = this.allowMassRemoval.has(String(banList.id));
     const confirmed = bySetting || this.fullRemovalAllowed(banList, now);
+    // A list of fewer than FULL_REMOVAL_BANS bans whose every fetched ban changed account is taken
+    // for one that gave no bans, which keeps them all, as a list that lost its SteamIDs all at once
+    // more likely broke: so it is held as before account changes, when such bans were skipped. A
+    // larger list is held as it lost all of its bans, with records, as it found bans.
     const rules = {
       missing: missing.map((ban) => ban.id),
       stored: stored.length,
-      fetched: bans.length,
+      fetched: stored.length < FULL_REMOVAL_BANS ? found.size : bans.length,
       pending: new Map([...pending].map(([banId, { firstMissingAt }]) => [banId, firstMissingAt])),
       held: new Set(heldAt.keys()),
       firstHeld: new Set(firstHeld),
@@ -1940,7 +1952,7 @@ export default class BanImporter {
     const oneHeld = result.changedHeld === 1;
     const heldChanges =
       result.changedHeld > 0
-        ? ` Of them, ${oneHeld ? 'one is a ban' : `${formatCount(result.changedHeld)} are bans`} whose account changed, kept on ${oneHeld ? 'its' : 'their'} stored account${oneHeld ? '' : 's'}.`
+        ? ` Of them, ${oneHeld ? 'one is a ban' : `${formatCount(result.changedHeld)} are bans`} whose account changed, kept on ${oneHeld ? 'its' : 'their'} stored account${oneHeld ? '' : 's'}, which a confirmation moves to ${oneHeld ? 'its new account' : 'their new accounts'}.`
         : '';
     // A hold an earlier run began that ended in this read: which it was, of how many bans, and since
     // when. One that ended as its bans came back says why, and what becomes of the bans still
@@ -1965,19 +1977,31 @@ export default class BanImporter {
         why += `, which leaves fewer than ${formatCount(ended.fewest)} missing`;
       endedLine = ` Stopped holding the ${heldBans(ended)}, as ${why}.`;
       const one = ended.missing === 1;
-      const rest = one
-        ? ' The other one, which it still does not have,'
-        : ` The other ${formatCount(ended.missing)}, which it still does not have,`;
-      // Those whose account changed move to their new accounts rather than being removed.
-      const orMoved = ended.changed > 0 ? ', or moved to new accounts' : '';
-      if (ended.missing > 0 && ended.removed)
-        endedLine += `${rest} ${one ? 'was' : 'were'} removed${orMoved}.`;
-      else if (ended.missing > 0) {
-        const until =
-          ended.changed > 0 ? 'confirms it' : `still does not have ${one ? 'it' : 'them'}`;
-        endedLine += `${rest} ${one ? 'is' : 'are'} removed${orMoved ? `${orMoved},` : ''} once a complete read of it at least ${CONFIRM_AFTER / 60000} minutes from now ${until}.`;
-        releasedWaiting = ended.missing;
+      const now = ended.removed;
+      const later = `once a complete read of it at least ${CONFIRM_AFTER / 60000} minutes from now`;
+      // Those whose account changed move to their new accounts rather than being removed, so the
+      // line says how many of each it removed, and moved, or removes, and moves, later.
+      const changed = ended.changed ?? 0;
+      const gone = ended.missing - changed;
+      const its = (count) => (count === 1 ? 'its new account' : 'their new accounts');
+      if (ended.missing > 0 && changed === 0) {
+        const rest = one
+          ? ' The other one, which it still does not have,'
+          : ` The other ${formatCount(ended.missing)}, which it still does not have,`;
+        if (now) endedLine += `${rest} ${one ? 'was' : 'were'} removed.`;
+        else
+          endedLine += `${rest} ${one ? 'is' : 'are'} removed ${later} still does not have ${one ? 'it' : 'them'}.`;
+      } else if (ended.missing > 0 && gone === 0) {
+        const rest = one ? ' The other one,' : ` The other ${formatCount(ended.missing)},`;
+        endedLine += now
+          ? `${rest} whose account changed, moved to ${its(changed)}.`
+          : `${rest} whose account changed, ${one ? 'moves' : 'move'} to ${its(changed)} ${later} confirms it.`;
+      } else if (ended.missing > 0) {
+        const removes = `${formatCount(gone)} that it still does not have ${now ? (gone === 1 ? 'was' : 'were') : gone === 1 ? 'is' : 'are'} removed`;
+        const moves = `${formatCount(changed)} whose account changed ${now ? 'moved' : changed === 1 ? 'moves' : 'move'} to ${its(changed)}`;
+        endedLine += ` Of the other ${formatCount(ended.missing)}, ${removes}, and ${moves}${now ? '' : `, ${later} confirms it`}.`;
       }
+      if (ended.missing > 0 && !now) releasedWaiting = ended.missing;
     }
     // A read that removed a large part of the list's bans, as a confirming read found them still
     // missing, e.g. those of a list held as it lost all of them, once one came back, says so, right
@@ -1994,6 +2018,10 @@ export default class BanImporter {
         ? ` Of them, ${formatCount(asUsual)}, a large part of its ${formatCount(result.stored)} stored bans, would have been removed without an admin's confirmation too, ${apart}.`
         : ` That is a large part of its ${formatCount(result.stored)} stored bans, removed ${apart}.`;
     }
+    // So does a read that moved a large part of the list's bans to their new accounts, by the same
+    // measure, also in a read an admin confirmed, or would have moved them, in a dry run.
+    if (isLargeLoss(result.accountChanges, result.stored))
+      many += ` The ${formatCount(result.accountChanges)} bans that ${this.dryRun ? 'would move' : 'moved'} to their new accounts are a large part of its ${formatCount(result.stored)} stored bans.`;
 
     if (result.stopped) {
       // The import's summary leaves the list out, so this says what it saved before the run
@@ -2027,6 +2055,13 @@ export default class BanImporter {
       // posted about when a read of all of it keeps them.
       const held = result.held > 0 ? `, ${formatCount(result.held)} held` : '';
       log(result.failed > 0 || again, `${imported}: ${counts.join(', ')}${held}.${dryRun}`);
+    } else if (result.hold === 'empty' && result.fetched > 0) {
+      // A list of fewer than 10 bans whose every fetched ban changed account is held as one that
+      // gave no bans (see planMissingBans).
+      log(
+        true,
+        `${imported}: it returned only bans whose account changed (${formatCount(result.fetched)}), which more likely means that its source broke, so its ${result.stored} stored bans were kept on their accounts. If their accounts really changed, set IMPORTER_ALLOW_MASS_REMOVAL=${result.id} for one run.${dryRun}`
+      );
     } else if (result.hold === 'empty') {
       // Only a BattleMetrics list gives bans that it skips, which a list that imports EOS IDs keeps
       // when they have one.
