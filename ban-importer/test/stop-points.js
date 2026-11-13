@@ -234,6 +234,12 @@ async function loadBanImporter(lists, { onFetch = () => {}, options, syncs = [] 
           }
         }
       },
+      // Its bans are all for SteamIDs, so the importer never raises its floor here.
+      'scbl-lib/db/floors': {
+        async raiseImporterFloor() {
+          throw new Error('The importer raised its floor');
+        }
+      },
       'scbl-lib/db/importer-models': {
         BanListSync: {
           findAll: async () => syncs.map((row) => ({ ...row })),

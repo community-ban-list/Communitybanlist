@@ -247,12 +247,14 @@ const DETAILS = {
       : `${players}, ${found} and ${were(mismatched)} queued`;
   },
   // Of the profiles due, how many were updated, and how many Steam did not have, were skipped as
-  // their IDs are not SteamIDs, could not be saved, or are left for later runs, when there were any.
-  updateSteamUserInfo: ({ due, updated, missing, skipped, unsaved, left }) => {
+  // players of EOS IDs, who are not Steam players, or as their other IDs are not SteamIDs, could
+  // not be saved, or are left for later runs, when there were any.
+  updateSteamUserInfo: ({ due, updated, missing, notSteam, skipped, unsaved, left }) => {
     if (!isCount(due) || !isCount(updated)) return null;
     if (due === 0) return 'none were due';
     const others = [
       [missing, 'not found on Steam'],
+      [notSteam, 'not Steam players'],
       [skipped, 'skipped as not SteamIDs'],
       [unsaved, 'not saved'],
       [left, 'left for later runs']

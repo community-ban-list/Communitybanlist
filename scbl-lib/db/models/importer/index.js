@@ -13,8 +13,9 @@ import ImporterState from './importer-state.js';
 // here, and nothing else in them:
 // - ImporterState: the row lastLogMessage, which the web server and the bot write (see
 //   scbl-lib/db/log-channel.js), and the row floors, which they only ever raise, as the importer
-//   does, with the first data that needs a newer importer, though no version raises it yet (see
-//   scbl-lib/db/floors.js). The row features:importer in that file is the importer's own.
+//   does, with the first data that needs a newer importer, though as yet only the importer raises
+//   it, with the first ban it saves for an EOS ID (see scbl-lib/db/floors.js). The row
+//   features:importer in that file is the importer's own.
 // - BanListSuspensions: the bot adds rows, sets their resumedAt, and suspends a resuming list again
 //   by setting its suspendedAt, suspendedBy and reason anew and clearing its resumedAt; the
 //   importer deletes them (see scbl-lib/db/ban-list-suspensions.js). A list's row also goes with

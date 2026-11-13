@@ -2,7 +2,7 @@ import { steam } from 'scbl-lib/apis';
 import { sequelize } from 'scbl-lib/db';
 import { ImporterState } from 'scbl-lib/db/importer-models';
 import { QueryTypes } from 'scbl-lib/db/sequelize';
-import { isSteamID } from 'scbl-lib/player-ids';
+import { accountKind, isSteamID } from 'scbl-lib/player-ids';
 import { Logger } from 'scbl-lib/utils';
 
 import { isRetryable, retryOperation, sqlTime } from './apply-list.js';
@@ -16,7 +16,8 @@ import { reportProgress, stopIfRequested } from './run-control.js';
 // order of their IDs, carrying on from where the last run stopped. It asks Steam for 100 players a
 // call, and saves each call's profiles with one statement. A player Steam leaves out of its answer,
 // e.g. as the account no longer exists, is tried again a day later rather than on every run, and a
-// player whose ID is not a SteamID is never sent to Steam.
+// player whose ID is not a SteamID, such as a player of an EOS ID, who is not a Steam player, is
+// never sent to Steam.
 
 // A run takes this many players who were never refreshed, or were queued for a refresh, the newest
 // first, as the export ban lists' alerts name the players they add. When there are more, e.g. after
@@ -241,7 +242,8 @@ export function nextCursor(ids, dealtWith) {
 
 // Refresh the Steam profiles of the players that are due, within the run's budget, counting in
 // counts how many were due, of those how many were new, and how many it updated, found missing on
-// Steam, skipped as not SteamIDs and could not save, how many are left for later runs, and how many
+// Steam, skipped as players of EOS IDs, who are not Steam players (notSteam), skipped as their other
+// IDs are not SteamIDs (skipped) and could not save, how many are left for later runs, and how many
 // calls it made, also when the step stops part-way. It counts nothing until it has counted the
 // players due. A run that is asked to stop does so between calls. now is the time the players' last
 // refresh is compared with, refreshPerRun the setting of how many players due a refresh it takes
@@ -269,6 +271,7 @@ export async function updateSteamUserInfo(
     new: Number(backlog?.new ?? 0),
     updated: 0,
     missing: 0,
+    notSteam: 0,
     skipped: 0,
     unsaved: 0,
     left: 0,
@@ -318,18 +321,31 @@ export async function updateSteamUserInfo(
   };
   counts.left = counts.due;
 
-  // A player whose ID is not a SteamID is never sent to Steam, which could only fail the call.
+  // A player whose ID is not a SteamID is never sent to Steam, which could only fail the call. Of
+  // them, the players of EOS IDs are not Steam players, and are counted on their own, apart from
+  // the IDs that are neither kind, e.g. of a player saved before SteamIDs were checked.
   const steamIDs = ids.filter(isSteamID);
   const invalid = ids.filter((id) => !isSteamID(id));
   if (invalid.length > 0) {
     await forIDs(MARK_CHECKED, time, invalid);
-    counts.skipped = invalid.length;
+    const eos = invalid.filter((id) => accountKind(id) === 'eos');
+    const other = invalid.filter((id) => accountKind(id) !== 'eos');
+    counts.notSteam = eos.length;
+    counts.skipped = other.length;
     dealt(invalid);
-    Logger.verbose(
-      'Steam',
-      2,
-      `Skipped ${invalid.length} Steam users whose IDs are not SteamIDs: ${invalid.slice(0, 10).join(', ')}${invalid.length > 10 ? ', ...' : ''}`
-    );
+    const some = (list) => `${list.slice(0, 10).join(', ')}${list.length > 10 ? ', ...' : ''}`;
+    if (eos.length > 0)
+      Logger.verbose(
+        'Steam',
+        2,
+        `Skipped ${eos.length} players of EOS IDs, who are not Steam players: ${some(eos)}`
+      );
+    if (other.length > 0)
+      Logger.verbose(
+        'Steam',
+        2,
+        `Skipped ${other.length} Steam users whose IDs are not SteamIDs: ${some(other)}`
+      );
   }
 
   // The profiles that could not be saved, each logged in the console as it happens, and posted
@@ -426,6 +442,6 @@ export async function updateSteamUserInfo(
   Logger.verbose(
     'Steam',
     2,
-    `Finished updating Steam users: ${counts.updated} updated, ${counts.missing} not found on Steam, ${counts.skipped} skipped and ${counts.unsaved} not saved, with ${counts.calls} calls, and ${counts.left} left for later runs. Took ${((Date.now() - startTime) / 1000).toFixed(2)}s`
+    `Finished updating Steam users: ${counts.updated} updated, ${counts.missing} not found on Steam, ${counts.notSteam} not Steam players, ${counts.skipped} skipped and ${counts.unsaved} not saved, with ${counts.calls} calls, and ${counts.left} left for later runs. Took ${((Date.now() - startTime) / 1000).toFixed(2)}s`
   );
 }

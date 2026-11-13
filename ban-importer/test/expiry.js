@@ -154,10 +154,12 @@ const dependencies = {
 const load = async (path) =>
   new vm.SourceTextModule(await readFile(new URL(path, import.meta.url), 'utf8'), { context });
 const runControl = await load('../src/run-control.js');
+const playerIds = load('../../scbl-lib/player-ids.js');
 const applyList = load('../src/apply-list.js');
 const module = await load('../src/expiry.js');
 const link = async (specifier) => {
   if (specifier === './run-control.js') return runControl;
+  if (specifier === 'scbl-lib/player-ids') return playerIds;
   if (specifier === './apply-list.js') return applyList;
   const exports = dependencies[specifier];
   assert.ok(exports, `Unexpected dependency: ${specifier}`);

@@ -66,7 +66,8 @@ if (TASKS_TO_COMPLETE.IMPORT_BANS)
   steps.push({
     name: 'importBans',
     run: (settings) => banImporter.importBans(settings),
-    counts: () => banImporter.report()
+    counts: () => banImporter.report(),
+    needs: 'eos-import'
   });
 if (TASKS_TO_COMPLETE.EXPIRE_BANS && writes)
   steps.push(counted('expireBans', (counts) => expireBans(counts)));

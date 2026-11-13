@@ -5,6 +5,7 @@ import {
   ValidationError,
   isDatabaseUnavailable
 } from 'scbl-lib/db/sequelize';
+import { accountKind } from 'scbl-lib/player-ids';
 import { describeError, Logger } from 'scbl-lib/utils';
 
 import { isStopping } from './run-control.js';
@@ -14,7 +15,8 @@ import { isStopping } from './run-control.js';
 // the bans fetched, here in JavaScript, and only the bans that are new or changed are written, in
 // transactions of BATCH_SIZE bans that also add their players and queue those players for an
 // update. The bans the list no longer has are removed by the rules of planRemovals, also in
-// transactions of BATCH_SIZE bans. ban-importer.js decides what is applied to each list.
+// transactions of BATCH_SIZE bans, and the same rules time the bans whose account changed (see
+// placeBan). ban-importer.js decides what is applied to each list.
 
 // Thank god for this function.
 
@@ -106,15 +108,48 @@ function same(field, value, stored) {
   return Object.is(COMPARED[field](value), COMPARED[field](stored));
 }
 
-// The player a fetched ban is for, given the player its stored ban has, if it has one: the stored
-// player while that is still one of the ban's SteamIDs, so a ban never moves only because its
-// SteamIDs are given in another order, and otherwise the player the fetcher chose for a new ban,
-// the first SteamID an admin added by hand, or else the first.
-export function chooseSteamUser(ban, storedSteamUser) {
-  const steamIDs = ban.steamIDs ?? [{ steamID: ban.steamUser }];
-  if (storedSteamUser !== undefined && steamIDs.some(({ steamID }) => steamID === storedSteamUser))
-    return storedSteamUser;
-  return ban.steamUser;
+// The player a fetched ban that is stored is for, given the player its stored ban has, and what
+// that is (kind): the stored player while its ID is still on the ban ('keep'), so a ban never moves
+// only because its IDs are given in another order, or an admin added another; and otherwise the
+// player the fetcher chose for a new ban, the ban's steamUser, which is a Steam move ('move') or
+// an account change ('change'). Returns { steamUser, kind }:
+// - a ban without steamIDs, a remote list's, or one made from the stored bans of a remote list
+//   whose file is unchanged, keeps its player, as its player is its ID;
+// - a ban with SteamIDs keeps its player while that is one of them. Otherwise, a ban stored for an
+//   EOS ID changes to its SteamID's account, on every list, whatever IMPORTER_EOS_IMPORT says; any
+//   other moves to another of its SteamIDs, a Steam move, as IMPORTER_APPLY_STEAMID_MOVES decides,
+//   also when its stored player is not a SteamID, as of a player saved before SteamIDs were
+//   checked;
+// - a ban with EOS IDs but no SteamID, of a list that imports them, keeps its player while that is
+//   one of its EOS IDs, and otherwise changes to its EOS ID's account, from a Steam account whose
+//   SteamID the ban lost, or from another EOS ID's account.
+// The rules for removing bans decide when an account change is made (see diffBans).
+export function placeBan(ban, storedSteamUser) {
+  const keep = { steamUser: storedSteamUser, kind: 'keep' };
+  if (!Array.isArray(ban.steamIDs)) return keep;
+  if (ban.steamIDs.length > 0) {
+    if (ban.steamIDs.some(({ steamID }) => steamID === storedSteamUser)) return keep;
+    const kind = accountKind(storedSteamUser) === 'eos' ? 'change' : 'move';
+    return { steamUser: ban.steamUser, kind };
+  }
+  const eosIDs = Array.isArray(ban.eosIDs) ? ban.eosIDs : [];
+  if (eosIDs.length === 0 || eosIDs.some(({ eosID }) => eosID === storedSteamUser)) return keep;
+  return { steamUser: ban.steamUser, kind: 'change' };
+}
+
+// The fetched bans that are stored whose account changed, as placeBan says, by ID, each with the
+// player its stored ban has (from) and the one it changes to (to).
+export function findAccountChanges(fetched, stored) {
+  const storedBans = new Map(stored.map((row) => [row.id, row]));
+  const changes = new Map();
+  for (const ban of fetched) {
+    const old = storedBans.get(ban.id);
+    if (!old) continue;
+    const placed = placeBan(ban, old.steamUser);
+    if (placed.kind === 'change')
+      changes.set(ban.id, { from: old.steamUser, to: placed.steamUser });
+  }
+  return changes;
 }
 
 // The values of a fetched ban to write, for the player given.
@@ -136,29 +171,40 @@ function toWrite(ban, steamUser) {
 // - added: the bans that are new, to write;
 // - changed: the bans whose values differ from the stored ones, to write, each with the fields that
 //   differ (fields) and the player its stored ban has (previousSteamUser);
-// - moves: the bans whose stored player is no longer one of their SteamIDs, each with that player
-//   (from) and the one it would move to (to). Only with applyMoves is a ban moved, which makes it
-//   changed, and otherwise it keeps its stored player;
+// - moves: the bans whose stored player is no longer one of their SteamIDs, a Steam move, as
+//   placeBan says, each with that player (from) and the one it would move to (to). Only with
+//   applyMoves is a ban moved, which makes it changed, and otherwise it keeps its stored player;
+// - changes: the bans whose account changed, as placeBan says, each with the player its stored ban
+//   has (from) and the one it changes to (to). Only a ban whose ID applyChanges has is written for
+//   its new account, which makes it changed, as the rules for removing bans would remove it from
+//   its stored account now (see planMissingBans in ban-importer.js), and otherwise it keeps its
+//   stored player. A Steam move is never one of them, nor is an account change ever a Steam move,
+//   so applyMoves never makes one;
 // - unchanged: how many bans are as they are stored, which are not written.
+// A ban that keeps its stored player still has its other values written when they changed.
 // Dates are compared by their time, 1 and 0 as true and false, and a missing value as NULL.
-export function diffBans(fetched, stored, { applyMoves = false } = {}) {
+export function diffBans(fetched, stored, { applyMoves = false, applyChanges = new Set() } = {}) {
   const storedBans = new Map(stored.map((row) => [row.id, row]));
   const added = [];
   const changed = [];
   const moves = [];
+  const changes = [];
   let unchanged = 0;
   for (const ban of fetched) {
     const old = storedBans.get(ban.id);
     if (!old) {
-      added.push(toWrite(ban, chooseSteamUser(ban)));
+      added.push(toWrite(ban, ban.steamUser));
       continue;
     }
 
     let steamUser = old.steamUser;
-    const chosen = chooseSteamUser(ban, old.steamUser);
-    if (chosen !== old.steamUser) {
-      moves.push({ id: ban.id, from: old.steamUser, to: chosen });
-      if (applyMoves) steamUser = chosen;
+    const placed = placeBan(ban, old.steamUser);
+    if (placed.kind === 'move') {
+      moves.push({ id: ban.id, from: old.steamUser, to: placed.steamUser });
+      if (applyMoves) steamUser = placed.steamUser;
+    } else if (placed.kind === 'change') {
+      changes.push({ id: ban.id, from: old.steamUser, to: placed.steamUser });
+      if (applyChanges.has(ban.id)) steamUser = placed.steamUser;
     }
 
     const write = toWrite(ban, steamUser);
@@ -166,7 +212,7 @@ export function diffBans(fetched, stored, { applyMoves = false } = {}) {
     if (fields.length === 0) unchanged++;
     else changed.push({ ...write, fields, previousSteamUser: old.steamUser });
   }
-  return { added, changed, moves, unchanged };
+  return { added, changed, moves, changes, unchanged };
 }
 
 // How long a ban must have been missing from complete reads of its list, from the first that did

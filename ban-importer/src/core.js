@@ -35,6 +35,13 @@ const invalidWebhookLists = new Set();
 // Both are emptied when the export push starts, so they last one run, or in loop mode one cycle,
 // rather than growing for as long as the importer service runs.
 
+// A recalculation of reputation points that takes longer than this, its retries included, is
+// posted to the log channel, as the statement locks the players' rows while it runs, and other
+// writes to them wait for it: one that takes much longer can make a bot command or a sign-in wait
+// past MySQL's lock wait. An import that queues many players at once, e.g. a list that moved many
+// bans to their new accounts, which queues two players for each, makes it slower.
+const SLOW_REPUTATION_POINTS_MS = 12 * 1000;
+
 export default class Core {
   // The statements that recalculate players' reputation points and ranks each run on their own,
   // outside a transaction, and lock the players and bans they read as they go. A bot command that
@@ -83,9 +90,16 @@ export default class Core {
     const profileStartTime = Date.now();
     const { excluded } = await pausedBanLists({ startedAt });
     const statement = recalculatePoints(excluded);
+    const statementStartTime = Date.now();
     const affectedRows = await retryOperation(() =>
       sequelize.query(statement, { type: sequelize.QueryTypes.BULKUPDATE })
     );
+    const statementMs = Date.now() - statementStartTime;
+    if (statementMs > SLOW_REPUTATION_POINTS_MS)
+      Logger.important(
+        'Core',
+        `Recalculating reputation points took ${(statementMs / 1000).toFixed(1)}s, over ${SLOW_REPUTATION_POINTS_MS / 1000}s, and changed ${affectedRows} Steam users. Other writes to Steam users wait while it runs.`
+      );
     Logger.verbose(
       'Core',
       2,

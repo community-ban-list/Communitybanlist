@@ -256,10 +256,12 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
   assert.deepStrictEqual(index.calls, ['importBans']);
 }
 
-// The steps that must not run on an image without some feature name it, and only those: the export
-// recalculation and the export push, the only steps that write export bans or send them. The run,
-// or the service, is told to check the floors, unless this is a dry run, which only imports, and
-// writes nothing. A newer image's dry run must not claim features that the service lacks.
+// The steps that must not run on an image without some feature name it, and only those: the import,
+// which an image without eos-import would get wrong once bans are stored for EOS IDs, and the
+// export recalculation and the export push, the only steps that write export bans or send them.
+// The run, or the service, is told to check the floors, unless this is a dry run, which only
+// imports, and writes nothing. A newer image's dry run must not claim features that the service
+// lacks, and it checks no floors, so its import's needs make no difference.
 {
   const needs = (index) =>
     Array.from(index.steps()).map(({ name, needs: feature }) => [name, feature]);
@@ -270,7 +272,7 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
     const index = await loadIndex({ env });
     assert.deepStrictEqual(index.started, [runner]);
     assert.deepStrictEqual(needs(index), [
-      ['importBans', undefined],
+      ['importBans', 'eos-import'],
       ['expireBans', undefined],
       ['checkReputationPoints', undefined],
       ['updateSteamUserInfo', undefined],
@@ -291,7 +293,7 @@ async function loadIndex({ dryRun = false, env = {} } = {}) {
 
     const dryRun = await loadIndex({ env, dryRun: true });
     assert.deepStrictEqual(dryRun.started, [runner]);
-    assert.deepStrictEqual(needs(dryRun), [['importBans', undefined]]);
+    assert.deepStrictEqual(needs(dryRun), [['importBans', 'eos-import']]);
     assert.deepStrictEqual({ ...dryRun.startOptions[0] }, { checkFloors: false });
   }
 }

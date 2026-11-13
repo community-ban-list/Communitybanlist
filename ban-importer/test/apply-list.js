@@ -114,9 +114,11 @@ const dependencies = {
 const load = async (path) =>
   new vm.SourceTextModule(await readFile(new URL(path, import.meta.url), 'utf8'), { context });
 const runControl = await load('../src/run-control.js');
+const playerIds = await load('../../scbl-lib/player-ids.js');
 const module = await load('../src/apply-list.js');
 await module.link(async (specifier) => {
   if (specifier === './run-control.js') return runControl;
+  if (specifier === 'scbl-lib/player-ids') return playerIds;
   const exports = dependencies[specifier];
   assert.ok(exports, `Unexpected dependency: ${specifier}`);
   return new vm.SyntheticModule(
@@ -130,13 +132,13 @@ await module.link(async (specifier) => {
 await module.evaluate();
 const {
   BATCH_SIZE,
-  chooseSteamUser,
   clearHoldReason,
   clearPendingRemovals,
   COMPARED_FIELDS,
   CONFIRM_AFTER,
   diffBans,
   fewestHeld,
+  findAccountChanges,
   flagOf,
   FULL_REMOVAL_BANS,
   isLargeLoss,
@@ -145,6 +147,7 @@ const {
   LARGE_REMOVAL_BANS,
   LARGE_REMOVAL_SHARE,
   largeLossBans,
+  placeBan,
   planRemovals,
   readHold,
   readPendingRemovals,
@@ -296,7 +299,13 @@ let diff = diffBans(
   [fetchedBan('a'), fetchedBan('b', { expires: null }), fetchedBan('c', { expired: true })],
   [storedBan('a'), storedBan('b', { expires: null }), storedBan('c', { expired: 1 })]
 );
-assert.deepStrictEqual(plain(diff), { added: [], changed: [], moves: [], unchanged: 3 });
+assert.deepStrictEqual(plain(diff), {
+  added: [],
+  changed: [],
+  moves: [],
+  changes: [],
+  unchanged: 3
+});
 
 // Each value that differs makes the ban changed, by itself: an expiry a millisecond later, one
 // added or removed, the ban expiring, its reasons and its note. Only the fields that differ are
@@ -342,31 +351,86 @@ assert.deepStrictEqual([diff.changed.length, diff.unchanged], [0, 0]);
 // Which player a ban is for. A ban keeps its stored player while that is still one of its SteamIDs,
 // whatever their order and whichever an admin added, so a ban never moves only because BattleMetrics
 // lists its SteamIDs another way. Once the stored player is gone from it, it moves to the player the
-// fetcher chose for it: the first SteamID an admin added, or else the first. A new ban is for that
-// player too, and so is a remote ban, which has one SteamID.
+// fetcher chose for it: the first SteamID an admin added, or else the first, a Steam move. A remote
+// ban, which has no SteamIDs but its player, keeps its player.
 const ids = (...entries) =>
   entries.map(([n, manual]) => ({ steamID: steamID(n), manual: Boolean(manual) }));
-const banWith = (steamIDs, steamUser) => ({ id: '1,a', steamIDs, steamUser });
-assert.strictEqual(
-  chooseSteamUser(banWith(ids([2, true], [1]), steamID(2)), steamID(1)),
-  steamID(1)
-);
-assert.strictEqual(
-  chooseSteamUser(banWith(ids([1], [2, true]), steamID(2)), steamID(1)),
-  steamID(1)
-);
-assert.strictEqual(
-  chooseSteamUser(banWith(ids([3], [2, true]), steamID(2)), steamID(1)),
-  steamID(2)
-);
-assert.strictEqual(chooseSteamUser(banWith(ids([3], [4]), steamID(3)), steamID(1)), steamID(3));
-assert.strictEqual(chooseSteamUser(banWith(ids([3], [2, true]), steamID(2))), steamID(2));
-assert.strictEqual(chooseSteamUser({ id: '1,x', steamUser: steamID(5) }, steamID(5)), steamID(5));
-// A stored player that is malformed, from before SteamIDs were checked, is not one of the ban's.
-assert.strictEqual(
-  chooseSteamUser(banWith(ids([1, true]), steamID(1)), `${steamID(1)}/`),
-  steamID(1)
-);
+const banWith = (steamIDs, steamUser, eosIDs = []) => ({ id: '1,a', steamIDs, eosIDs, steamUser });
+const placed = (ban, stored) => plain(placeBan(ban, stored));
+assert.deepStrictEqual(placed(banWith(ids([2, true], [1]), steamID(2)), steamID(1)), {
+  steamUser: steamID(1),
+  kind: 'keep'
+});
+assert.deepStrictEqual(placed(banWith(ids([1], [2, true]), steamID(2)), steamID(1)), {
+  steamUser: steamID(1),
+  kind: 'keep'
+});
+assert.deepStrictEqual(placed(banWith(ids([3], [2, true]), steamID(2)), steamID(1)), {
+  steamUser: steamID(2),
+  kind: 'move'
+});
+assert.deepStrictEqual(placed(banWith(ids([3], [4]), steamID(3)), steamID(1)), {
+  steamUser: steamID(3),
+  kind: 'move'
+});
+assert.deepStrictEqual(placed({ id: '1,x', steamUser: steamID(5) }, steamID(5)), {
+  steamUser: steamID(5),
+  kind: 'keep'
+});
+// A stored player that is malformed, from before SteamIDs were checked, is not one of the ban's,
+// and moves as a Steam move.
+assert.deepStrictEqual(placed(banWith(ids([1, true]), steamID(1)), `${steamID(1)}/`), {
+  steamUser: steamID(1),
+  kind: 'move'
+});
+
+// A ban stored for an EOS ID, as CBL stores them, that now has a SteamID changes to its SteamID's
+// account, an account change, never a Steam move: also while the EOS ID is still on the ban, and
+// whichever list it is on. A ban with EOS IDs but no SteamID keeps its stored player while that is
+// one of its EOS IDs, so an EOS ID an admin adds later changes nothing, and otherwise changes to the
+// EOS ID the fetcher chose: from a Steam account whose SteamID the ban lost, or from another EOS
+// ID's account. A ban with neither, which the fetcher never keeps, keeps its player.
+const eos = (n) => n.toString(16).padStart(32, '0');
+const eosIDs = (...entries) =>
+  entries.map(([n, manual]) => ({ eosID: eos(n), manual: Boolean(manual) }));
+assert.deepStrictEqual(placed(banWith(ids([2]), steamID(2), eosIDs([1])), eos(1)), {
+  steamUser: steamID(2),
+  kind: 'change'
+});
+assert.deepStrictEqual(placed(banWith(ids([2]), steamID(2)), eos(1)), {
+  steamUser: steamID(2),
+  kind: 'change'
+});
+assert.deepStrictEqual(placed(banWith([], eos(1), eosIDs([1])), eos(1)), {
+  steamUser: eos(1),
+  kind: 'keep'
+});
+assert.deepStrictEqual(placed(banWith([], eos(1), eosIDs([1], [2, true])), eos(2)), {
+  steamUser: eos(2),
+  kind: 'keep'
+});
+assert.deepStrictEqual(placed(banWith([], eos(1), eosIDs([1, true], [2])), eos(2)), {
+  steamUser: eos(2),
+  kind: 'keep'
+});
+assert.deepStrictEqual(placed(banWith([], eos(1), eosIDs([1])), steamID(1)), {
+  steamUser: eos(1),
+  kind: 'change'
+});
+assert.deepStrictEqual(placed(banWith([], eos(3), eosIDs([3])), eos(1)), {
+  steamUser: eos(3),
+  kind: 'change'
+});
+assert.deepStrictEqual(placed(banWith([], undefined), steamID(1)), {
+  steamUser: steamID(1),
+  kind: 'keep'
+});
+// An EOS ID in capitals is not one as CBL stores it, so a ban stored for it moves as before, as a
+// Steam move.
+assert.deepStrictEqual(placed(banWith(ids([2]), steamID(2)), eos(0xabc).toUpperCase()), {
+  steamUser: steamID(2),
+  kind: 'move'
+});
 
 // A ban whose stored player is no longer one of its SteamIDs is a move. Without applyMoves it is
 // counted but keeps its stored player, so a ban with nothing else changed is not written, and one
@@ -405,6 +469,87 @@ assert.deepStrictEqual(
   ]
 );
 assert.strictEqual(diff.unchanged, 1);
+assert.deepStrictEqual(plain(diff.changes), []);
+
+// A ban whose account changed is an account change, never a move, whatever applyMoves says. Only one
+// whose ID applyChanges has is written for its new account, with its old player named, so both are
+// queued; any other keeps its stored player, so one with nothing else changed is not written, and
+// one with something else changed is written with its stored player. findAccountChanges finds the
+// same, by ID, and nothing for a new ban.
+const upgraded = fetchedBan('u', {
+  steamUser: steamID(2),
+  steamIDs: ids([2]),
+  eosIDs: eosIDs([1])
+});
+const downgraded = fetchedBan('d', {
+  steamUser: eos(4),
+  steamIDs: [],
+  eosIDs: eosIDs([4]),
+  reason: 'Toxic'
+});
+const eosToEos = fetchedBan('e', { steamUser: eos(5), steamIDs: [], eosIDs: eosIDs([5]) });
+const eosKept = fetchedBan('k', {
+  steamUser: eos(6),
+  steamIDs: [],
+  eosIDs: eosIDs([6], [7, true])
+});
+const newEos = fetchedBan('n', { steamUser: eos(8), steamIDs: [], eosIDs: eosIDs([8]) });
+const storedEos = [
+  storedBan('u', { steamUser: eos(1) }),
+  storedBan('d'),
+  storedBan('e', { steamUser: eos(9) }),
+  storedBan('k', { steamUser: eos(6) })
+];
+const fetchedEos = [upgraded, downgraded, eosToEos, eosKept, newEos];
+for (const applyMoves of [false, true]) {
+  diff = diffBans(fetchedEos, storedEos, { applyMoves });
+  assert.deepStrictEqual(plain(diff.moves), [], String(applyMoves));
+  assert.deepStrictEqual(
+    plain(diff.changes),
+    [
+      { id: '1,u', from: eos(1), to: steamID(2) },
+      { id: '1,d', from: steamID(1), to: eos(4) },
+      { id: '1,e', from: eos(9), to: eos(5) }
+    ],
+    String(applyMoves)
+  );
+  assert.deepStrictEqual(
+    Array.from(diff.changed, ({ id, steamUser, previousSteamUser, fields }) => [
+      id,
+      steamUser,
+      previousSteamUser,
+      [...fields]
+    ]),
+    [['1,d', steamID(1), steamID(1), ['reason']]],
+    String(applyMoves)
+  );
+  assert.deepStrictEqual(
+    plain(diff.added).map(({ id, steamUser }) => [id, steamUser]),
+    [['1,n', eos(8)]]
+  );
+  assert.strictEqual(diff.unchanged, 3, String(applyMoves));
+}
+diff = diffBans(fetchedEos, storedEos, { applyChanges: new Set(['1,u', '1,d']) });
+assert.deepStrictEqual(
+  Array.from(diff.changed, ({ id, steamUser, previousSteamUser, fields }) => [
+    id,
+    steamUser,
+    previousSteamUser,
+    [...fields]
+  ]),
+  [
+    ['1,u', steamID(2), eos(1), ['steamUser']],
+    ['1,d', eos(4), steamID(1), ['steamUser', 'reason']]
+  ]
+);
+assert.strictEqual(diff.changes.length, 3);
+assert.strictEqual(diff.unchanged, 2);
+assert.deepStrictEqual(plain([...findAccountChanges(fetchedEos, storedEos)]), [
+  ['1,u', { from: eos(1), to: steamID(2) }],
+  ['1,d', { from: steamID(1), to: eos(4) }],
+  ['1,e', { from: eos(9), to: eos(5) }]
+]);
+assert.deepStrictEqual(plain([...findAccountChanges([newEos], storedEos)]), []);
 
 // Which of the bans missing from a complete read of a list are removed, kept for a later read, or
 // held for an admin. Each case is [the rules' inputs, what they decide].
@@ -1554,5 +1699,5 @@ assert.deepStrictEqual(batches, [2, 2]);
 assert.strictEqual(events.filter(([type]) => type === 'commit').length, 2);
 
 console.log(
-  'Apply checks passed: values compared, players kept and moved, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, with their bans, records of missing bans, counted a statement at a time, with their IDs, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
+  'Apply checks passed: values compared, players kept, moved and changed to new accounts, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, with their bans, records of missing bans, counted a statement at a time, with their IDs, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
 );

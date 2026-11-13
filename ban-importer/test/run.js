@@ -5,6 +5,7 @@ import { format } from 'util';
 import vm from 'vm';
 
 import { IMPORTER_FEATURES, IMPORTER_GAMES, KNOWN_FEATURES } from '../../scbl-lib/floors.js';
+import { accountKind } from '../../scbl-lib/player-ids.js';
 import describeError from '../../scbl-lib/utils/describe-error.js';
 import floorsTable from './helpers/floors-table.js';
 
@@ -250,6 +251,8 @@ async function loadRun({
       QueryTypes: { SELECT: 'SELECT' }
     },
     'scbl-lib/floors': floorNames,
+    // What the real apply-list.js imports too.
+    'scbl-lib/player-ids': { accountKind },
     // What the real scbl-lib/db/floors.js imports.
     '../floors.js': floorNames,
     './sequelize.js': { default: floors, QueryTypes: { SELECT: 'SELECT' } },
