@@ -8524,7 +8524,9 @@ for (const [id, moving] of [
 // many moved to their new accounts, as their accounts changed, or are removed and move once a
 // confirming read finds them so. Here a list of 30 is held as it lost them all, and then, of the 30:
 // 29 come back and the last with another account, which moves at once; 20 come back and 10 with
-// other accounts, which wait; and 15 come back, 5 with other accounts, while 10 are still gone.
+// other accounts, which wait; 15 come back, 5 with other accounts, while 10 are still gone, which
+// wait; and 25 come back, 3 with other accounts, while 2 are still gone, or 28, 1 and 1, which are
+// removed, and move, at once, as fewer than 10 are still missing.
 for (const [id, back, changed, expected] of [
   [
     336,
@@ -8543,6 +8545,18 @@ for (const [id, back, changed, expected] of [
     15,
     5,
     'as 15 of them came back. Of the other 15, 10 that it still does not have are removed, and 5 whose account changed move to their new accounts, once a complete read of it at least 10 minutes from now confirms it.'
+  ],
+  [
+    339,
+    25,
+    3,
+    'as 25 of them came back. Of the other 5, 2 that it still does not have were removed, and 3 whose account changed moved to their new accounts.'
+  ],
+  [
+    343,
+    28,
+    1,
+    'as 28 of them came back. Of the other 2, 1 that it still does not have was removed, and 1 whose account changed moved to its new account.'
   ]
 ]) {
   reset();
@@ -8558,12 +8572,33 @@ for (const [id, back, changed, expected] of [
     ]
   ]);
   logs.length = 0;
+  events.length = 0;
   [read] = await run();
+  const atOnce = 30 - back < 10;
+  const gone = 30 - back - changed;
   assert.deepStrictEqual(
-    [read.hold, read.holdEnded.changed, read.accountChanges, read.accountChangesWaiting],
-    [null, changed, id === 336 ? 1 : 0, id === 336 ? 0 : changed],
+    [
+      read.hold,
+      read.holdEnded.changed,
+      read.accountChanges,
+      read.accountChangesWaiting,
+      read.removed
+    ],
+    [null, changed, atOnce ? changed : 0, atOnce ? 0 : changed, atOnce ? gone : 0],
     String(id)
   );
+  if (atOnce) {
+    assert.deepStrictEqual(
+      Array.from({ length: changed }, (_, i) => bans.get(`${id},a${i}`).steamUser),
+      Array.from({ length: changed }, (_, i) => eosAccount(970 + i)),
+      String(id)
+    );
+    assert.deepStrictEqual(
+      [removedIDs().sort(), pendingIDs(id)],
+      [Array.from({ length: gone }, (_, i) => `${id},a${changed + i}`).sort(), []],
+      String(id)
+    );
+  }
   const [line] = logged(1, new RegExp(`^Imported ban list \\(ID: ${id}\\): `));
   assert.ok(line.message.endsWith(expected), line.message);
   assert.ok(
