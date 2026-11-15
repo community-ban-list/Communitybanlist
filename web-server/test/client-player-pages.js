@@ -294,14 +294,18 @@ for (const [id, steamUser] of [
 }
 
 // A SteamID64 in its address, whether or not anything is on record under it, gets a note that
-// bans which give only the player's EOS ID are listed under that ID, with a link to search for it.
-// An EOS ID, or no ID, gets no such note.
+// bans which give only the player's EOS ID are listed under that ID, with a link to search for it
+// and where to find it. An EOS ID, or no ID, gets no such note.
 const EOS_NOTE = /any ban we list that gives only your EOS ID is listed under that ID instead/;
 for (const steamUser of [null, player(STEAM_ID, { name: 'Someone' })]) {
   const { html } = render(`/banned/${STEAM_ID}`, { steamUser });
   assert.match(html, /We looked up the bans listed under your Steam 64 ID\./);
   assert.match(html, EOS_NOTE);
   assert.match(html, /href="\/search"[^>]*>search for your EOS ID<\/a>/);
+  assert.match(
+    html,
+    /The admins of a server you\s+play on can see your EOS ID in their admin tools\./
+  );
   assert.match(html, /href="\/faq"[^>]*>FAQ<\/a> has more about EOS IDs\./);
 }
 for (const [address, data] of [

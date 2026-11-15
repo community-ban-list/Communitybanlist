@@ -159,8 +159,9 @@ function Foreword(props) {
             <p>
               We looked up the bans listed under your Steam 64 ID. Steam players have an EOS ID too,
               and any ban we list that gives only your EOS ID is listed under that ID instead, so{' '}
-              <Link to="/search">search for your EOS ID</Link> as well. Our{' '}
-              <Link to="/faq">FAQ</Link> has more about EOS IDs.
+              <Link to="/search">search for your EOS ID</Link> as well. The admins of a server you
+              play on can see your EOS ID in their admin tools. Our <Link to="/faq">FAQ</Link> has
+              more about EOS IDs.
             </p>
           )}
           <p>
