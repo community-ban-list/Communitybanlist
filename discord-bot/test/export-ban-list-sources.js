@@ -91,8 +91,14 @@ function banListRecord(values) {
     }
   };
 }
-// What a remote ban list's host answers with.
+// What a remote ban list's host answers with, and BattleMetrics, for a ban list's first page of
+// bans, and for the ban lists the CBL organisation can see, which an error fails, and how many times
+// those were read.
 let remoteFile = '';
+let battlemetricsBans = { data: [{ type: 'ban' }], links: {} };
+let visibleBanLists = [PARTNER_ID, NEW_PARTNER_ID, OTHER_PARTNER_ID];
+let visibleError = null;
+let visibleReads = 0;
 const stubs = {
   'discord.js': discord,
   axios: {
@@ -102,7 +108,7 @@ const stubs = {
         async get(path, config) {
           requests.push(path);
           requestParams.push(config?.params ?? null);
-          if (path === 'bans') return { data: { data: [{ type: 'ban' }], links: {} } };
+          if (path === 'bans') return { data: battlemetricsBans };
           return { data: { data: { attributes: { name: 'Partner bans' } } } };
         }
       })
@@ -145,6 +151,11 @@ const stubs = {
       async findAll({ where }) {
         if (exportLookupError) throw exportLookupError;
         return exportBanLists.filter((exportBanList) => matches(exportBanList, where));
+      },
+      async findVisibleBattlemetricsBanLists() {
+        visibleReads++;
+        if (visibleError) throw visibleError;
+        return new Set(visibleBanLists);
       }
     },
     Organisation: {
@@ -325,6 +336,73 @@ assert.deepStrictEqual(writes, [
   ['save', 8]
 ]);
 assert.strictEqual(audits.length, 3);
+// The test fetch also asked BattleMetrics which ban lists the CBL organisation can see, which it
+// lists among them, so nothing more was said. skip_check asks nothing.
+assert.strictEqual(visibleReads, 1);
+
+const refusedWith = (message) => (err) => {
+  assert.ok(err instanceof UserError, String(err));
+  assert.strictEqual(err.message, message);
+  return true;
+};
+
+// A BattleMetrics list that gives no bans but still counts some is one CBL may see but not its
+// bans, which the ban importer fails as one CBL cannot read, so the check refuses it in the
+// importer's words, without suggesting skip_check. One that counts none, or gives no count, is
+// empty, as the importer takes it, which skip_check saves.
+const UNLISTED_ID = 'facade00-ba5e-4b00-a000-0000000000ff';
+battlemetricsBans = { data: [], links: {}, meta: { active: 100, expired: 150, total: 250 } };
+await assert.rejects(
+  checkBanListSource('battlemetrics', UNLISTED_ID),
+  refusedWith(
+    'BattleMetrics counts 250 bans on the list but gave none of them, so CBL may not be allowed to see its bans, and the ban importer would fail to import it.'
+  )
+);
+for (const meta of [{ total: 0 }, undefined, { total: 'many' }]) {
+  battlemetricsBans = { data: [], links: {}, meta };
+  await assert.rejects(
+    checkBanListSource('battlemetrics', UNLISTED_ID),
+    refusedWith(
+      "Found no bans on the BattleMetrics ban list. Check the ID and that the CBL BattleMetrics organisation has accepted the list's invite, or use `skip_check` if the list is meant to be empty."
+    )
+  );
+}
+battlemetricsBans = { data: [{ type: 'ban' }, { type: 'ban' }], links: { next: 'page 2' } };
+
+// A list that BattleMetrics does not list among the ban lists the CBL organisation can see is
+// still saved, with a warning in the importer's words, as the importer saves its new bans but
+// removes none of them while BattleMetrics does not list it. The IDs are compared as the importer
+// compares them, here one BattleMetrics gives in capitals without hyphens, and a list whose
+// visibility could not be checked is saved without a word.
+visibleReads = 0;
+const UNLISTED =
+  'Found 2+ bans on the BattleMetrics ban list "Partner bans". **BattleMetrics does not list it among the ban lists the CBL organisation can see**, so its new bans are saved, but none are removed while BattleMetrics does not list it.';
+assert.strictEqual(await checkBanListSource('battlemetrics', UNLISTED_ID), UNLISTED);
+visibleBanLists = [UNLISTED_ID.toUpperCase().replace(/-/g, '')];
+assert.strictEqual(
+  await checkBanListSource('battlemetrics', UNLISTED_ID),
+  'Found 2+ bans on the BattleMetrics ban list "Partner bans".'
+);
+visibleBanLists = [PARTNER_ID];
+visibleError = new Error('BattleMetrics GET ban-lists failed: HTTP 503');
+assert.strictEqual(
+  await checkBanListSource('battlemetrics', UNLISTED_ID),
+  'Found 2+ bans on the BattleMetrics ban list "Partner bans".'
+);
+visibleError = null;
+assert.strictEqual(visibleReads, 3);
+writes.length = 0;
+const [unlisted] = await run('banlist', 'add', {
+  ...partner,
+  name: 'Unlisted',
+  source: UNLISTED_ID
+});
+assert.strictEqual(
+  unlisted.content,
+  `Added **Partner Org** / **Unlisted**. ${UNLISTED} Its bans are imported on the next ban importer run.`
+);
+assert.deepStrictEqual(writes, [['create', UNLISTED_ID]]);
+battlemetricsBans = { data: [{ type: 'ban' }], links: {} };
 
 // A remote list's check counts the bans the ban importer would take from it: not the lines that ban
 // an EOS ID, however they end, nor a number that is too long or is not a player's account.
@@ -345,11 +423,6 @@ assert.strictEqual(
 // bans, which skip_check saves. Any other the importer would fail on every cycle, which the check
 // says in the importer's words, without suggesting skip_check: one whose only bans are of EOS IDs,
 // and anything else, such as an error page or a placeholder.
-const refusedWith = (message) => (err) => {
-  assert.ok(err instanceof UserError, String(err));
-  assert.strictEqual(err.message, message);
-  return true;
-};
 for (const body of ['', ' \r\n\n', '\uFEFF', undefined]) {
   remoteFile = body;
   await assert.rejects(
@@ -389,5 +462,5 @@ for (const body of ['<html>Not a ban list</html>', '# No bans yet', '{"bans":[]}
 }
 
 console.log(
-  "Export ban list source checks passed: IDs, links, each command, skip_check, partners' lists, remote lines and remote files the importer would fail."
+  "Export ban list source checks passed: IDs, links, each command, skip_check, partners' lists, hidden bans and lists BattleMetrics does not list for CBL, remote lines and remote files the importer would fail."
 );

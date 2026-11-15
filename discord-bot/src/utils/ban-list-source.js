@@ -1,7 +1,9 @@
 import axios from 'axios';
 
 import { BATTLEMETRICS_API_KEY } from 'scbl-lib/config';
+import { ExportBanList } from 'scbl-lib/db/models';
 import { parseRemoteFile } from 'scbl-lib/player-ids';
+import { isSameBattlemetricsID } from 'scbl-lib/utils';
 
 import { plural } from './format.js';
 import UserError from './user-error.js';
@@ -105,7 +107,17 @@ async function checkBattlemetricsSource(source) {
     );
   }
 
-  if (!data || !Array.isArray(data.data) || data.data.length === 0)
+  // BattleMetrics answers a list that CBL may see, but not its bans, with no bans that it still
+  // counts. The ban importer fails such a list as one CBL cannot read, as it has not emptied, so it
+  // is refused in the importer's words, without suggesting skip_check. A list that counts no bans,
+  // or gives no count, is empty, as the importer takes it.
+  const bans = Array.isArray(data?.data) ? data.data : [];
+  const total = data?.meta?.total;
+  if (bans.length === 0 && Number.isInteger(total) && total > 0)
+    throw new UserError(
+      `BattleMetrics counts ${plural(total, 'ban')} on the list but gave none of them, so CBL may not be allowed to see its bans, and the ban importer would fail to import it.`
+    );
+  if (bans.length === 0)
     throw new UserError(
       "Found no bans on the BattleMetrics ban list. Check the ID and that the CBL BattleMetrics organisation has accepted the list's invite, or use `skip_check` if the list is meant to be empty."
     );
@@ -116,7 +128,27 @@ async function checkBattlemetricsSource(source) {
     .catch(() => null);
   const name = banList?.data?.data?.attributes?.name;
 
-  const bans =
-    data.links && data.links.next ? `${data.data.length}+ bans` : plural(data.data.length, 'ban');
-  return name ? `Found ${bans} on the BattleMetrics ban list "${name}".` : `Found ${bans}.`;
+  const count = data.links && data.links.next ? `${bans.length}+ bans` : plural(bans.length, 'ban');
+  const found = name
+    ? `Found ${count} on the BattleMetrics ban list "${name}".`
+    : `Found ${count}.`;
+  if ((await isListedForCBL(source)) !== false) return found;
+  return `${found} **BattleMetrics does not list it among the ban lists the CBL organisation can see**, so its new bans are saved, but none are removed while BattleMetrics does not list it.`;
+}
+
+// Whether BattleMetrics lists the source among the ban lists the CBL organisation can see, as the
+// ban importer's access check asks: true or false, or null when BattleMetrics could not be asked.
+// The importer saves the new bans of a list that BattleMetrics does not list, but removes none of
+// them, so the check warns of that, without refusing the list, and a list that could not be
+// checked is saved without a word, as the importer goes without its check then too. The IDs are
+// those /exportbanlist reads, compared ignoring case, hyphens and spaces, as the importer compares
+// them. The request goes through scbl-lib's BattleMetrics API, as /exportbanlist's does, once the
+// list's bans were read.
+async function isListedForCBL(source) {
+  try {
+    const visible = await ExportBanList.findVisibleBattlemetricsBanLists();
+    return [...visible].some((id) => isSameBattlemetricsID(id, source));
+  } catch {
+    return null;
+  }
 }
