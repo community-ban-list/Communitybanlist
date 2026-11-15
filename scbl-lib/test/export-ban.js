@@ -2,6 +2,8 @@ import assert from 'assert';
 import { readFile } from 'fs/promises';
 import vm from 'vm';
 
+import * as playerIDs from '../player-ids.js';
+
 // Exercise how an export ban claims, makes, finds and deletes its BattleMetrics ban, without a
 // database or network requests. The ExportBans table is a Map that the stand-in for Sequelize's
 // Model updates as MySQL would, and BattleMetrics is a stand-in that keeps each ban list's bans.
@@ -185,6 +187,7 @@ async function loadExportBan(env = {}) {
     '../../apis/index.js': { battlemetrics },
     './battlemetrics.js': { default: battlemetrics },
     '../../config.js': { BATTLEMETRICS_ORGANIZATION: '42' },
+    '../../player-ids.js': playerIDs,
     '../../utils/index.js': {
       Logger: { verbose: (module, level, message) => logs.push({ level, message }) }
     }
@@ -260,6 +263,27 @@ function reset() {
   onDelete = deleteBan;
   onRead = () => {};
   linkChanges = {};
+}
+
+// An export ban whose player's ID is not a SteamID gets no BattleMetrics ban, whether it is new, is
+// claimed or has a ban recorded: nothing is claimed, written or sent, and it does not count as a
+// failure, as nothing throws.
+for (const id of ['0123456789abcdef0123456789abcdef', '12345678901234567', '7656119796026573a']) {
+  for (const battlemetricsID of [null, 'pending', '12345']) {
+    reset();
+    const ban = exportBan(1, { id: `${id},7`, steamUser: id, battlemetricsID });
+    assert.strictEqual(await ban.createBattlemetricsBan(new Map()), 'skipped');
+    assert.deepStrictEqual(writes, []);
+    assert.deepStrictEqual(requests, []);
+    assert.strictEqual(row(ban.id).status, 'TO_BE_CREATED');
+    assert.strictEqual(row(ban.id).battlemetricsID, battlemetricsID);
+    assert.deepStrictEqual(logs, [
+      {
+        level: 2,
+        message: `Export ban (ID: ${id},7) gets no Battlemetrics ban, as its player's ID is not a SteamID.`
+      }
+    ]);
+  }
 }
 
 // A new export ban is claimed before its ban is made: its battlemetricsID becomes 'pending', if it

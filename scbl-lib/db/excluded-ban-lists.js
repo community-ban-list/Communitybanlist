@@ -22,7 +22,7 @@ export function checkExcludedBanLists(ids) {
 
 // The condition that leaves out the bans of the lists with these IDs, for a ban as alias, e.g.
 // "B.banList NOT IN (7, 46)", or null when there are none, so that a statement with no list to
-// leave out is the one it was before lists could be paused. The IDs are checked (see
+// leave out has no condition on ban lists. The IDs are checked (see
 // checkExcludedBanLists) and written into the condition as numbers, in order, so the statement
 // takes no replacements for them.
 export function excludedBanListsSQL(ids, alias = 'B') {

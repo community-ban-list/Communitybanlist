@@ -27,9 +27,15 @@
   "devDependencies": {
     "@apollo/client": "^4.3.2",
     "@hookform/resolvers": "^5.9.1",
+    "classnames": "^2.2.6",
     "jwt-decode": "^4.0.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "react-hook-form": "^7.89.0",
+    "react-router": "^7.18.4",
+    "reactstrap": "^9.2.3",
     "rxjs": "^7.8.2",
+    "vite": "^8.3.3",
     "yup": "^1.7.1"
   }
 }

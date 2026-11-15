@@ -6,6 +6,8 @@ import vm from 'vm';
 import Router from '@koa/router';
 import Koa from 'koa';
 
+import * as playerIDs from '../../scbl-lib/player-ids.js';
+
 // Exercise the /export/:id route without a database. The stand-in for ExportBan records each
 // query and answers it from these rows, as MySQL would.
 const Op = { in: Symbol('in') };
@@ -16,6 +18,9 @@ const rows = [
   { steamUser: '76561198000000004', exportBanList: 7, status: null },
   { steamUser: '76561198000000005', exportBanList: 8, status: 'CREATED' },
   { steamUser: '76561198000000006', exportBanList: 7, status: 'CREATED' },
+  { steamUser: '0123456789abcdef0123456789abcdef', exportBanList: 7, status: 'CREATED' },
+  { steamUser: '12345678901234567', exportBanList: 7, status: 'TO_BE_CREATED' },
+  { steamUser: '0123456789abcdef0123456789abcdef', exportBanList: 16, status: 'CREATED' },
   { steamUser: ' <b>76561198000000007</b>', exportBanList: 9, status: 'CREATED' },
   { steamUser: '76561198000000010', exportBanList: 9, status: 'CREATED' },
   { steamUser: '\t<b>76561198000000008</b>', exportBanList: 11, status: 'CREATED' },
@@ -30,6 +35,9 @@ const rows = [
   { steamUser: '76561198000000010', exportBanList: 15, status: 'CREATED' }
 ];
 const queries = [];
+// Whether the rule on players' IDs lets every row through, to see what the route does with a row
+// that holds anything at all.
+let everyRowPasses = false;
 const ExportBan = {
   async findAll(options) {
     queries.push(options);
@@ -42,7 +50,8 @@ const ExportBan = {
 const dependencies = {
   '@koa/router': { default: Router },
   'scbl-lib/db/models': { ExportBan },
-  'scbl-lib/db/sequelize': { Op }
+  'scbl-lib/db/sequelize': { Op },
+  'scbl-lib/player-ids': { isSteamID: (id) => everyRowPasses || playerIDs.isSteamID(id) }
 };
 
 // Evaluate the route in this context, so the queries it builds can be compared as they are.
@@ -83,8 +92,8 @@ const query = (id) => ({
 });
 
 // A list serves the players who are on it now, in the order the rows come back: not those waiting
-// to be removed (TO_BE_DELETED), nor rows without a status. Only the Steam IDs are fetched, as
-// plain rows.
+// to be removed (TO_BE_DELETED), nor rows without a status, nor any ID that is not a SteamID. Only
+// the IDs are fetched, as plain rows.
 const body = '76561198000000001:0\n76561198000000003:0\n76561198000000006:0';
 assert.deepStrictEqual(await get('/export/7'), {
   status: 200,
@@ -102,8 +111,25 @@ for (const id of ['07', '7.txt', '7.0', '+7', ' 7', '\n7', '0.7e1', '.7e1']) {
   assert.deepStrictEqual(queries.splice(0), [query(7)], `Query for ${JSON.stringify(id)}`);
 }
 
-// A list is always served as plain text, whatever its first line holds, rather than with a type
-// Koa guesses from the body. A HEAD request gets the same type.
+// What a row holds is served only when it is a SteamID. A HEAD request gets the same type.
+for (const list of [9, 11, 12, 13, 14, 15]) {
+  const text = '76561198000000010:0';
+  const expected = {
+    status: 200,
+    type: 'text/plain; charset=utf-8',
+    length: Buffer.byteLength(text),
+    body: text
+  };
+  for (const method of ['GET', 'HEAD']) {
+    const response = await get(`/export/${list}`, method);
+    assert.deepStrictEqual(response, expected, `${method} /export/${list}`);
+    assert.deepStrictEqual(queries.splice(0), [query(list)], `Query for ${method} ${list}`);
+  }
+}
+
+// A list is always served as plain text, whatever its first line holds, rather than with a type Koa
+// guesses from the body.
+everyRowPasses = true;
 for (const list of [9, 11, 12, 13, 14, 15]) {
   const first = rows.find((row) => row.exportBanList === list).steamUser;
   const text = `${first}:0\n76561198000000010:0`;
@@ -119,9 +145,13 @@ for (const list of [9, 11, 12, 13, 14, 15]) {
     assert.deepStrictEqual(queries.splice(0), [query(list)], `Query for ${method} ${list}`);
   }
 }
+everyRowPasses = false;
 
-// A list that does not exist gets an empty list, such as list 10, which /export/1e1 names.
+// A list that does not exist gets an empty list, such as list 10, which /export/1e1 names, and so
+// does one with no SteamIDs on it.
 const empty = { status: 200, type: 'text/plain; charset=utf-8', length: 0, body: '' };
+assert.deepStrictEqual(await get('/export/16'), empty);
+assert.deepStrictEqual(queries.splice(0), [query(16)]);
 for (const [id, list] of Object.entries({ 99: 99, '1e1': 10 })) {
   assert.deepStrictEqual(await get(`/export/${id}`), empty, `Response for ${JSON.stringify(id)}`);
   assert.deepStrictEqual(queries.splice(0), [query(list)], `Query for ${JSON.stringify(id)}`);

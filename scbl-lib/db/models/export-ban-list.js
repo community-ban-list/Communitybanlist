@@ -39,11 +39,16 @@ const formatNumber = (value) => value.toLocaleString('en-US');
 const LOCK_WAIT_TIMEOUT = 1205;
 const DEADLOCK = 1213;
 
-// How many times inTransaction runs a transaction MySQL ends in a deadlock, in all, and the most it
-// waits before the second, in milliseconds. The wait is random, so transactions that met in a
-// deadlock run again at different times, and its most doubles each time: 0.1, 0.2 and 0.4 s.
+// How many times inTransaction runs a transaction MySQL ends in a deadlock, and destroyUnfinished
+// its statement, in all, and the most each waits before the second, in milliseconds. The wait is
+// random, so work that met in a deadlock runs again at different times, and its most doubles each
+// time: 0.1, 0.2 and 0.4 s.
 const DEADLOCK_ATTEMPTS = 4;
 const DEADLOCK_WAIT = 100;
+
+// How long destroyUnfinished waits for a lock, in seconds, in place of MySQL's
+// innodb_lock_wait_timeout, 50 seconds by default.
+const UNFINISHED_LOCK_WAIT = 10;
 
 // MySQL's error number for an error Sequelize gives, which holds MySQL's own error.
 const errorNumber = (error) => (error?.original ?? error?.parent)?.errno;
@@ -53,11 +58,15 @@ const errorNumber = (error) => (error?.original ?? error?.parent)?.errno;
 // 64 characters, so a long database name is cut short.
 const DELETION_LOCK = "LEFT(CONCAT('cbl-export-ban-list-deletion:', ?, ':', DATABASE()), 64)";
 
-// How long to wait for the deletion lock's connection to close before closing it at once.
+// How long closeConnection waits for mysql2's end() before closing the connection at once.
 const CLOSE_TIMEOUT = 5 * 1000;
 
-// Close the deletion lock's connection, which frees the lock: telling MySQL first, or at once if
-// that takes too long.
+// Close a connection opened outside the pool (openConnection): the deletion lock's, which frees the
+// lock, or destroyUnfinished's. It tells MySQL first, or closes at once if that takes too long.
+// mysql2's end() resolves once the connection's earlier statements have finished, as it sends
+// MySQL the quit command, or at once on a lost connection, without waiting for MySQL to close the
+// connection. Both callers wait for their statements first, so the time limit only guards against
+// a statement still running.
 async function closeConnection(connection) {
   let timer;
   const timeout = new Promise((resolve, reject) => {
@@ -435,6 +444,45 @@ class ExportBanList extends Sequelize.Model {
       transaction
     });
     return lists.length;
+  }
+
+  // Delete a new list the website could not finish, as its BattleMetrics ban list could not be made
+  // or saved to it, only while the Steam user still owns it, as the Discord bot can give it to
+  // another user meanwhile, and give how many rows were deleted: 0 when it was given away or
+  // removed. The website does this while the list's owner waits for an answer, after waiting for
+  // BattleMetrics, and maybe for a lock that made saving the list fail, so the deletion waits at
+  // most UNFINISHED_LOCK_WAIT seconds for each lock, not MySQL's 50 by default, which could keep
+  // the owner waiting longer than a proxy in front of the website allows.
+  //
+  // MySQL's SET_VAR hint cannot set innodb_lock_wait_timeout, so it is set for the session, on a
+  // connection of its own, outside Sequelize's pool, which is closed afterwards: a session setting
+  // made on one of the pool's connections would stay with it, and Sequelize rolls a transaction
+  // back itself when MySQL ends it in a deadlock, after which nothing more can run in it to set the
+  // connection back. The deletion is one statement, which deletes the row with its configs and
+  // export bans, so MySQL rolls all of it back when it waits too long for a lock or ends it in a
+  // deadlock, e.g. with the ban importer, which writes the list's export bans. One ended in a
+  // deadlock is run again, after a short random wait, as inTransaction runs a transaction again.
+  // mysql2's errors are given as they are: the website only logs and posts them.
+  static async destroyUnfinished(id, owner) {
+    const connection = await openConnection();
+    try {
+      await connection.query(`SET SESSION innodb_lock_wait_timeout = ${UNFINISHED_LOCK_WAIT}`);
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const [{ affectedRows }] = await connection.query(
+            'DELETE FROM ExportBanLists WHERE id = ? AND owner = ?',
+            [id, owner]
+          );
+          return affectedRows;
+        } catch (error) {
+          if (error?.errno !== DEADLOCK || attempt >= DEADLOCK_ATTEMPTS) throw error;
+          const wait = Math.random() * DEADLOCK_WAIT * 2 ** (attempt - 1);
+          await new Promise((resolve) => setTimeout(resolve, wait));
+        }
+      }
+    } finally {
+      await closeConnection(connection);
+    }
   }
 
   // Run deletion() while holding the list's deletion lock, and give what it gives. A transfer, and a

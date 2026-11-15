@@ -194,7 +194,9 @@ const REAL = {
   'scbl-lib/db/excluded-ban-lists': new URL(
     '../../scbl-lib/db/excluded-ban-lists.js',
     import.meta.url
-  ).href
+  ).href,
+  // What the real apply-list.js imports.
+  'scbl-lib/player-ids': new URL('../../scbl-lib/player-ids.js', import.meta.url).href
 };
 function moduleFor(specifier, referencingModule) {
   const key = specifier.startsWith('.')

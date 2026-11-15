@@ -122,8 +122,8 @@ function putBack(views) {
 
 // Save the views that are waiting now, without waiting for the interval, e.g. before the web server
 // stops. It waits for a save that is running first, so it still makes one save at a time. Like any
-// save, it never rejects. Views of rows that are locked stay waiting. Nothing calls it yet: the web
-// server's shutdown should await it before it closes the database.
+// save, it never rejects. Views of rows that are locked stay waiting. The web server's shutdown
+// awaits it before it closes the database (see src/shutdown.js).
 export async function flushViews() {
   clearTimeout(timer);
   timer = null;

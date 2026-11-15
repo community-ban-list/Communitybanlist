@@ -5,6 +5,7 @@ import vm from 'vm';
 import * as discord from 'discord.js';
 
 import { readLimits } from '../../scbl-lib/export-list-limits.js';
+import * as playerIDs from '../../scbl-lib/player-ids.js';
 import * as scblUtils from '../../scbl-lib/utils/index.js';
 
 // /exportbanlist remove_outside_limits with the real ExportBanList, whose checkLimits finds the
@@ -181,6 +182,7 @@ const stubs = {
   'discord.js': discord,
   axios: { default: { create: () => ({}) } },
   'scbl-lib/config': { BATTLEMETRICS_API_KEY: 'test-key' },
+  'scbl-lib/player-ids': playerIDs,
   'scbl-lib/db': { sequelize: { models }, isRunLockHeld: async () => false },
   'scbl-lib/db/models': {
     Ban: {},

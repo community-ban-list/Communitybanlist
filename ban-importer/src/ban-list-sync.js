@@ -21,8 +21,8 @@ export const STATES = {
   ACCESS_LOST: 'access_lost',
   // Its source is one of CBL's own export ban lists, so it is neither imported nor swept.
   SELF_IMPORT: 'self_import',
-  // It was imported, but some of the bans it no longer has were kept for now: until a later
-  // complete read of the list confirms that they are gone, or, for a list that lost all of its
+  // It was imported, but some of the bans it no longer has, or whose account changed, were kept for
+  // now: until a later complete read of the list confirms that, or, for a list that lost all of its
   // bans, until an admin confirms it or one of them comes back, and for one that lost a large part
   // of them at once, until an admin confirms it or those still missing are no longer a large part
   // of the bans it had then, or has, if fewer.
@@ -123,6 +123,25 @@ export function readBanListIDs(value) {
       .map((id) => id.trim())
       .filter(Boolean)
   );
+}
+
+// Read IMPORTER_EOS_IMPORT, which names the BattleMetrics lists that keep their bans that have an
+// EOS ID but no SteamID: all of them with all, in any case, or those whose IDs it gives, separated
+// by commas, with spaces or quotes around it, as text, or none when it is not given. A part that is
+// not a ban list's ID, such as all among IDs, is left out, with a warning to log that says so.
+// Returns { all, ids, warning }.
+export function readEosImport(value) {
+  const setting = unquote(value);
+  if (setting.toLowerCase() === 'all') return { all: true, ids: new Set() };
+  const parts = readBanListIDs(setting);
+  const ids = new Set([...parts].filter((part) => /^[1-9][0-9]*$/.test(part)));
+  const invalid = [...parts].filter((part) => !ids.has(part));
+  if (invalid.length === 0) return { all: false, ids };
+  return {
+    all: false,
+    ids,
+    warning: `Warning: IMPORTER_EOS_IMPORT must be all, or ban list IDs separated by commas, so it leaves out ${invalid.map((part) => `"${part}"`).join(', ')}, which ${invalid.length === 1 ? 'is not a ban list ID' : 'are not ban list IDs'}.`
+  };
 }
 
 // Read IMPORTER_ACCESS_CHECK, which turns the access check off when it is 0, false, off or no. It is

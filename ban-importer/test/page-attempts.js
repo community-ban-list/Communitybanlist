@@ -174,7 +174,7 @@ const fetcherModule = await load('../src/ban-fetcher.js', {
   'scbl-lib/apis': { battlemetrics: request },
   'scbl-lib/utils': { classifyBanReason, Logger: { verbose() {} } },
   './run-control.js': control,
-  './steam-id.js': await load('../src/steam-id.js')
+  'scbl-lib/player-ids': await load('../../scbl-lib/player-ids.js')
 });
 const BanFetcher = fetcherModule.namespace.default;
 const banList = { id: 1, type: 'battlemetrics', source: 'bm-1' };

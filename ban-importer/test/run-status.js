@@ -443,9 +443,9 @@ for (const phase of ['expireBans', 'updateSteamUserInfo']) {
 
 // The steps' counts are described in their own words: the import as in its summary line, also when
 // it stopped part-way, the bans marked expired and the players queued for them, the Steam profiles
-// updated, and those Steam did not have, that were skipped, not saved or left for later runs, the
-// players recalculated and the export bans created and deleted, with how many were on each type of
-// list. Other counts are listed as they are.
+// updated, and those Steam did not have, that are not Steam players, that were skipped, not saved
+// or left for later runs, the players recalculated and the export bans created and deleted, with
+// how many were on each type of list. Other counts are listed as they are.
 for (const [name, counts, expected, progress] of [
   [
     'importBans',
@@ -514,6 +514,12 @@ for (const [name, counts, expected, progress] of [
     'updateSteamUserInfo',
     { due: 5243, new: 12, updated: 493, missing: 3, skipped: 4, unsaved: 0, left: 4743, calls: 5 },
     '493 of 5,243 updated, 3 not found on Steam, 4 skipped as not SteamIDs, 4,743 left for later runs'
+  ],
+  // Players of EOS IDs are not Steam players, and are counted on their own.
+  [
+    'updateSteamUserInfo',
+    { due: 40, new: 40, updated: 35, missing: 0, notSteam: 3, skipped: 2, unsaved: 0, left: 0 },
+    '35 of 40 updated, 3 not Steam players, 2 skipped as not SteamIDs'
   ],
   [
     'updateSteamUserInfo',
@@ -1052,6 +1058,124 @@ for (const state of [
     '✅ **Reputation check** · 0.5s',
     '▫️ Steam profiles · not run'
   ]);
+}
+
+// A run below its floor finished, so its embed has a title and a colour of their own, names no
+// phase it ended in, whichever came last, only why, and shows each step it skipped with a mark of
+// its own, and what the step needs, rather than leaving it out as a step that had nothing to do.
+{
+  const SKIPPED = { ran: false, belowFloor: true, needs: 'game-rule' };
+  const reason =
+    'This importer image lacks game-rule, which the data needs, so it skipped updateExportBans.';
+  const below = {
+    completed: [...SETUP, ...STEPS],
+    counts: { ...COUNTS, updateExportBans: SKIPPED },
+    reason
+  };
+  const finishedLines = [
+    '✅ **Import** · 8m 20s',
+    DETAILS.importBans,
+    '✅ **Expired bans** · 0.1s',
+    DETAILS.expireBans,
+    '✅ **Steam profiles** · 14s',
+    DETAILS.updateSteamUserInfo,
+    '✅ **Orphaned players** · 0.1s',
+    '✅ **Reputation points** · 0.7s',
+    '✅ **Reputation ranks** · 5.3s',
+    '⛔ Export recalculation · skipped below the floor, as it needs game-rule',
+    '✅ **Export push** · 1.5s',
+    DETAILS.exportExportBans
+  ];
+  for (const phase of ['exportExportBans', 'updateExportBans', undefined]) {
+    const embed = render(ended('belowFloor', { ...below, phase }));
+    assert.strictEqual(embed.title, 'CBL update run finished below its floor');
+    assert.strictEqual(TITLES.belowFloor, embed.title);
+    assert.strictEqual(embed.color, 0xf1c40f);
+    assert.strictEqual(COLORS.belowFloor, 0xf1c40f);
+    assert.deepStrictEqual(lines(embed), [
+      `Started <t:${UNIX}:f> · took **9m 34s** · commit \`28388ba\``,
+      `**Reason** ${reason}`,
+      '',
+      ...finishedLines
+    ]);
+    assert.deepStrictEqual(embed.footer, { text: 'Ended' });
+  }
+  assert.strictEqual(
+    render({ ...ended('belowFloor', below), cycle: 12 }).title,
+    'CBL update cycle 12 finished below its floor'
+  );
+  // A step that had nothing to do stays left out, also when it came last, as the run did finish.
+  assert.ok(
+    !render(
+      ended('belowFloor', {
+        steps: ['checkReputationPoints', ...STEPS],
+        phase: 'checkReputationPoints',
+        completed: ['checkReputationPoints', ...STEPS],
+        counts: { ...below.counts, checkReputationPoints: { ran: false, off: true } },
+        reason
+      })
+    ).description.includes('Reputation check')
+  );
+
+  // A step skipped below the floor shows while the run goes, and in a run that ended otherwise,
+  // also when the run ended in it. Others that had nothing to do stay left out.
+  const running = render({
+    ...ended('running', { completed: STEPS.slice(0, 7), phase: 'exportExportBans' }),
+    counts: { updateExportBans: SKIPPED }
+  });
+  assert.ok(
+    lines(running).includes(
+      '⛔ Export recalculation · skipped below the floor, as it needs game-rule'
+    )
+  );
+  for (const outcome of ['stopped', 'failed']) {
+    const stopped = lines(
+      render(
+        ended(outcome, {
+          completed: STEPS.slice(0, 7),
+          phase: 'updateExportBans',
+          counts: { updateExportBans: SKIPPED },
+          reason: 'Stopped, as it received SIGTERM'
+        })
+      )
+    );
+    assert.ok(stopped.includes('**Phase** Export recalculation'), outcome);
+    assert.ok(
+      stopped.includes('⛔ Export recalculation · skipped below the floor, as it needs game-rule'),
+      outcome
+    );
+    assert.ok(stopped.includes('▫️ Export push · not run'), outcome);
+  }
+  const notDue = render(
+    ended('finished', {
+      completed: ['checkReputationPoints', ...STEPS],
+      steps: ['checkReputationPoints', ...STEPS],
+      counts: { checkReputationPoints: { ran: false, off: true } }
+    })
+  );
+  assert.ok(!notDue.description.includes('Reputation check'));
+
+  // A skipped step's details fit Discord, and a step skipped with nothing named says no more.
+  const allSkipped = render(
+    ended('belowFloor', {
+      completed: STEPS,
+      counts: Object.fromEntries(STEPS.map((name) => [name, { ran: false, belowFloor: true }])),
+      reason: 'x'.repeat(5000)
+    })
+  );
+  assert.deepStrictEqual(lines(allSkipped).slice(-2), [
+    '⛔ Export recalculation · skipped below the floor',
+    '⛔ Export push · skipped below the floor'
+  ]);
+  const long = render(
+    ended('belowFloor', {
+      completed: STEPS,
+      counts: {
+        updateExportBans: { ran: false, belowFloor: true, needs: `*${'n'.repeat(5000)}` }
+      }
+    })
+  );
+  assert.ok(lines(long).some((line) => line.includes('as it needs \\*n') && line.length < 200));
 }
 
 // A cycle of the importer service, which posts its embed once it has ended, is named as one in its

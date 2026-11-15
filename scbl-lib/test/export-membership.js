@@ -36,14 +36,19 @@ const module = new vm.SourceTextModule(
   await readFile(new URL('../db/export-membership.js', import.meta.url), 'utf8'),
   { context }
 );
-// Its other import, the piece that leaves out paused ban lists, has no imports, and is loaded as it
-// is.
+// Its other imports, the piece that leaves out paused ban lists and the rule on players' IDs, have
+// no imports, and are loaded as they are.
 const excludedPiece = new vm.SourceTextModule(
   await readFile(new URL('../db/excluded-ban-lists.js', import.meta.url), 'utf8'),
   { context }
 );
+const playerIDsPiece = new vm.SourceTextModule(
+  await readFile(new URL('../player-ids.js', import.meta.url), 'utf8'),
+  { context }
+);
 await module.link((specifier) => {
   if (specifier === './excluded-ban-lists.js') return excludedPiece;
+  if (specifier === '../player-ids.js') return playerIDsPiece;
   assert.strictEqual(specifier, './sequelize.js');
   return new vm.SyntheticModule(
     ['default', 'QueryTypes'],
@@ -62,13 +67,16 @@ const { SCORING_FIELDS, countMembers, countPlayersWithBans, findMembers, members
 const PIECES = {
   EXPIRED: 'B.expired',
   COUNTED: '(EBL.maxBanAge = 0 OR EBL.maxBanAge >= DATEDIFF(NOW(), B.created))',
+  EXPORTABLE:
+    "(CHAR_LENGTH(B.steamUser) = 17 AND B.steamUser BETWEEN '76561197960265729' AND '76561202255233023' AND REGEXP_LIKE(B.steamUser, '^[0-9]{17}$', 'c'))",
   ACTIVE_POINTS: 'MAX(IF(B.expired, 0, IFNULL(EBLC.activePoints, EBL.defaultActivePoints)))',
   EXPIRED_POINTS: 'SUM(IF(B.expired, IFNULL(EBLC.expiredPoints, EBL.defaultExpiredPoints), 0))',
   QUALIFIES: 'SUM(activePoints) + SUM(expiredPoints) >= MAX(threshold)'
 };
 
 // The statement the importer ran before it moved here. The move must not change what it does, so
-// apart from spacing it is the same.
+// apart from spacing it is the same, but for the check that a player's ID is a SteamID64, added
+// since.
 const IMPORTER_STATEMENT = `
   SELECT
     CONCAT(steamUser, ",", exportBanList) AS "id",
@@ -106,7 +114,7 @@ const IMPORTER_STATEMENT = `
     WHERE (
       EBL.maxBanAge = 0 OR
       EBL.maxBanAge >= DATEDIFF(NOW(), B.created)
-    ) AND B.steamUser IN (?)
+    ) AND (CHAR_LENGTH(B.steamUser) = 17 AND B.steamUser BETWEEN '76561197960265729' AND '76561202255233023' AND REGEXP_LIKE(B.steamUser, '^[0-9]{17}$', 'c')) AND B.steamUser IN (?)
     GROUP BY EBL.id, B.steamUser, B.banList
   ) A
   GROUP BY exportBanList, steamUser
@@ -208,7 +216,7 @@ assert.strictEqual(
         LEFT JOIN (SELECT ? AS banList, ? AS activePoints, ? AS expiredPoints UNION ALL SELECT ?, ?, ?
                    UNION ALL SELECT ?, ?, ? UNION ALL SELECT ?, ?, ?) EBLC
           ON B.banList = EBLC.banList
-        WHERE (EBL.maxBanAge = 0 OR EBL.maxBanAge >= DATEDIFF(NOW(), B.created))
+        WHERE (EBL.maxBanAge = 0 OR EBL.maxBanAge >= DATEDIFF(NOW(), B.created)) AND ${PIECES.EXPORTABLE}
         GROUP BY B.steamUser, B.banList
       ) A
       GROUP BY steamUser
@@ -355,10 +363,7 @@ answer = () => [{ players: 12 }];
 assert.strictEqual(await countMembers(settings, configs, { excludedBanLists: [46, 7] }), 12);
 assert.strictEqual(
   tidy(queries[1].sql),
-  tidy(count.sql).replace(
-    'DATEDIFF(NOW(), B.created))',
-    `DATEDIFF(NOW(), B.created)) AND ${PAUSED}`
-  )
+  tidy(count.sql).replace(PIECES.EXPORTABLE, () => `${PIECES.EXPORTABLE} AND ${PAUSED}`)
 );
 assert.deepStrictEqual(copy(queries[1].options.replacements), replacements);
 assert.strictEqual(times(queries[0].sql, PAUSED), 1);
@@ -384,10 +389,7 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(
   tidy(queries[0].sql),
-  tidy(count.sql).replace(
-    'DATEDIFF(NOW(), B.created))',
-    `DATEDIFF(NOW(), B.created)) AND ${PAUSED}`
-  )
+  tidy(count.sql).replace(PIECES.EXPORTABLE, () => `${PIECES.EXPORTABLE} AND ${PAUSED}`)
 );
 assert.strictEqual(queries[1].sql, count.sql);
 
@@ -430,5 +432,5 @@ await assert.rejects(
 assert.strictEqual(queries.length, 0);
 
 console.log(
-  "Export membership checks passed: the importer's statement unchanged, counts built from the same pieces, with every setting and config, and paused ban lists left out of each alike."
+  "Export membership checks passed: the importer's statement as it was, but for the ID check, counts built from the same pieces, with every setting and config, and paused ban lists left out of each alike."
 );

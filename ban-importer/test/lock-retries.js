@@ -3,6 +3,7 @@ import { readFile } from 'fs/promises';
 import vm from 'vm';
 
 import * as excludedBanLists from '../../scbl-lib/db/excluded-ban-lists.js';
+import * as playerIds from '../../scbl-lib/player-ids.js';
 import describeError from '../../scbl-lib/utils/describe-error.js';
 
 // Check that the statements that recalculate players' reputation points, ranks and export bans are
@@ -176,6 +177,8 @@ const stubs = {
   'scbl-lib/db/excluded-ban-lists': { ...excludedBanLists },
   'scbl-lib/db/export-membership': { membershipForPlayers },
   'scbl-lib/db/models': { ExportBan, ExportBanList, SteamUser },
+  // What the real apply-list.js imports.
+  'scbl-lib/player-ids': { ...playerIds },
   'scbl-lib/db/sequelize': {
     ForeignKeyConstraintError,
     isDatabaseUnavailable: () => false,

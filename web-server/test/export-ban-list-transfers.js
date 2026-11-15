@@ -368,6 +368,13 @@ function database() {
       });
       return deleted;
     },
+    // The website's deletion of a new list it could not finish: the same DELETE, as a statement
+    // of its own, run again after a deadlock.
+    destroyUnfinished(id, owner) {
+      return inTransaction((transaction) =>
+        models.ExportBanList.destroy({ where: { id, owner }, transaction })
+      );
+    },
     async whileDeleting(id, deletion) {
       await beforeDeleting.get(id)?.until;
       if (deleting.has(id))
@@ -854,7 +861,7 @@ async function removal(db, checked) {
   making.open();
   await assert.rejects(creating, {
     message:
-      'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.'
+      'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later, or choose Remote as its type: a remote export ban list does not need BattleMetrics.'
   });
   assert.strictEqual(ownerOf(db, id), 'B');
   assert.deepStrictEqual(db.writes, [`create ExportBanList ${id}`, `update ExportBanList ${id}`]);

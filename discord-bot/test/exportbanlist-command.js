@@ -4,6 +4,7 @@ import vm from 'vm';
 
 import * as discord from 'discord.js';
 
+import * as playerIDs from '../../scbl-lib/player-ids.js';
 import * as scblUtils from '../../scbl-lib/utils/index.js';
 
 // Run /exportbanlist without Discord, the database or BattleMetrics. Package imports are replaced
@@ -371,6 +372,7 @@ const stubs = {
   'discord.js': discord,
   axios: { default: { create: () => ({}) } },
   'scbl-lib/config': { BATTLEMETRICS_API_KEY: 'test-key' },
+  'scbl-lib/player-ids': playerIDs,
   'scbl-lib/db': {
     sequelize: { models: { SteamUser } },
     async isRunLockHeld() {
@@ -2131,7 +2133,9 @@ for (const given of [
   `${NEW_OWNER.slice(0, -1)}x`,
   `https://steamcommunity.com/profiles/${NEW_OWNER}`,
   'STEAM_0:1:20011',
-  '-7656119810000000'
+  '-7656119810000000',
+  // 17 digits, but not a player's account.
+  '12345678901234567'
 ]) {
   reset();
   addList(12, 'remote');

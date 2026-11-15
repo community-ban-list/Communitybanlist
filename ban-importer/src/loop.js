@@ -231,8 +231,10 @@ function memoryNow() {
 // locks, a cycle did not stop within 60 seconds of its time limit, or it failed, and 3 when a
 // second signal ended it at once during a cycle. A second signal between cycles, or while the
 // service ends, exits with the code it was stopping with, and so does a service whose cycle did not
-// reach a safe point within 45 seconds of the first signal. Each step is { name, run, counts } (see
-// RunState in run.js).
+// reach a safe point within 45 seconds of the first signal. Each step is
+// { name, needs, run, counts } (see RunState in run.js), and checkFloors, which only a dry run
+// turns off, says whether each cycle checks the importer's floors. A cycle below its floor is not a
+// failure, and does not change the service's own exit code.
 //
 // While it goes, it keeps a health server, for the Docker health check (see
 // health-check-server.js). It posts the alerts that runs post, in every mode, and, as
@@ -241,7 +243,7 @@ function memoryNow() {
 // IMPORTER_STATUS_AT_BOTTOM, on unless it is 0, it keeps its status message below the other
 // messages CBL's services post to the log channel (see keepAtBottom). Nothing it posts waits for
 // Discord.
-export default async function runLoop(steps) {
+export default async function runLoop(steps, { checkFloors = true } = {}) {
   const cycleSeconds = readSeconds('IMPORTER_CYCLE_SECONDS', DEFAULT_CYCLE_SECONDS);
   const maxCycleSeconds = readSeconds('IMPORTER_MAX_CYCLE_SECONDS', DEFAULT_MAX_CYCLE_SECONDS);
   // Staleness and the Steam step's budget go by how often cycles start, unless
@@ -257,9 +259,11 @@ export default async function runLoop(steps) {
   // What the service is doing, for the health check: when it took the service lock, the cycle
   // under way and the last one that ended, and what it is waiting for, if anything: the database,
   // or the service lock or the run lock (lock). A cycle that ended within two cycles and the time
-  // limit keeps it healthy. The status message shows what the cycle under way waits for too.
+  // limit keeps it healthy. The status message shows what the cycle under way waits for too. While
+  // the latest check of the floors found the image below its floor, belowFloor says what it lacks.
   const health = {
     stopping: false,
+    belowFloor: null,
     lockedAt: null,
     cycles: 0,
     cycle: null,
@@ -1175,17 +1179,21 @@ export default async function runLoop(steps) {
   // then for the run lock, each for as long as it takes, and holds the run lock until it has ended,
   // when it frees it, unless the service is stopping, which frees both locks as it ends. Its time
   // limit starts once it holds the run lock. The first cycle also connects and applies the
-  // importer's migrations, as a run does, and so does each cycle after it until one has. Never
-  // throws.
+  // importer's migrations, as a run does, and so does each cycle after it until one has. It throws
+  // only for a step whose needs is not one feature that the importer knows (see RunState), before
+  // anything else, which ends the service.
   const runCycle = async (number) => {
     // A cycle the last one was stopped for, e.g. by its time limit, does not stop this one, unless
     // the service is stopping.
     clearStop();
     if (stopping !== null) requestStop(stopping);
-    const cycle = new RunState(steps);
+    const cycle = new RunState(steps, { checkFloors });
     const { record } = cycle;
     record.cycle = number;
     cycle.onChange = updateStatus;
+    cycle.onFloorCheck = (found) => {
+      health.belowFloor = found && { missing: found.missing, unreadable: found.unreadable };
+    };
     current = cycle;
     health.cycle = number;
     const before = { lines: Logger.channelLines, requests: battlemetricsRequestCount() };
@@ -1268,7 +1276,7 @@ export default async function runLoop(steps) {
       // The steps are also told how often cycles really start, which the import plans its full
       // reads by, whatever IMPORTER_CADENCE_SECONDS says.
       await cycle.runSteps({ cadenceSeconds, cycleSeconds });
-      code = EXIT_CODES.FINISHED;
+      [code, reason] = cycle.endOfSteps();
       console.log(
         `Finished CBL update cycle ${number} in ${((Date.now() - record.startedAt) / 1000).toFixed(2)}s.`
       );

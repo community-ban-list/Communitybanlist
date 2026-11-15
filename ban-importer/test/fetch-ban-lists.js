@@ -57,10 +57,10 @@ const context = vm.createContext({
 const load = async (path) =>
   new vm.SourceTextModule(await readFile(new URL(path, import.meta.url), 'utf8'), { context });
 const module = await load('../src/ban-fetcher.js');
-// The fetcher finds SteamIDs with the real steam-id.js.
-const steamIDModule = await load('../src/steam-id.js');
+// The fetcher finds SteamIDs with the real player-ids.js.
+const playerIDsModule = await load('../../scbl-lib/player-ids.js');
 await module.link((specifier) => {
-  if (specifier === './steam-id.js') return steamIDModule;
+  if (specifier === 'scbl-lib/player-ids') return playerIDsModule;
   const exports = dependencies[specifier];
   assert.ok(exports, `Unexpected dependency: ${specifier}`);
   return new vm.SyntheticModule(
@@ -73,7 +73,7 @@ await module.link((specifier) => {
 });
 await module.evaluate();
 const BanFetcher = module.namespace.default;
-const { findSteamIDs } = module.namespace;
+const { findEosIDs, findSteamIDs } = module.namespace;
 // The count check is on unless it is turned off.
 const fetcher = new BanFetcher();
 watched = fetcher;
@@ -139,6 +139,62 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(list.rawCount, 4);
 assert.strictEqual(list.firstMetaTotal, null);
+
+// A line that bans an EOS ID brings no ban, in either case and with a prefix that ends before the
+// ID, even when the ID's last 17 characters are a SteamID's digits. A SteamID on a line with a prefix
+// still does, one of letters included, and a number of 17 digits that is not a player's account does
+// not.
+reset();
+answers(
+  [
+    '0123456789abcdef0123456789abcdef:0 //An EOS ID',
+    '0123456789ABCDEF0123456789ABCDEF:0 //In capitals',
+    'Admin [EOSID 00000000000000000000000000000001] Banned:0123456789abcdef0123456789abcdef:0 //With a prefix',
+    'Banned76561198000000009:0 //After letters',
+    `${'a'.repeat(15)}76561198000000008:0 //Ends in a SteamID's digits`,
+    'Admin [SteamID 76561198000000002] Banned:76561198000000004:0 //Banned by an admin',
+    '12345678901234567:0 //Not an account'
+  ].join('\n')
+);
+list = await fetcher.fetchBanList(remoteList);
+assert.deepStrictEqual(
+  Array.from(list.bans, (ban) => [ban.id, ban.steamUser, ban.rawReason]),
+  [
+    ['7,76561198000000009,null', '76561198000000009', 'After letters'],
+    ['7,76561198000000004,null', '76561198000000004', 'Banned by an admin']
+  ]
+);
+
+// A file with only EOS IDs has no ban CBL takes, so it fails as any other file with none, but says
+// how many lines with an EOS ID it has, which CBL does not import from remote lists, whatever
+// IMPORTER_EOS_IMPORT says. A file with no ban at all still says it may be an error page.
+for (const [body, lines] of [
+  ['0123456789abcdef0123456789abcdef:0 //An EOS ID', '1 line'],
+  [
+    [
+      '0123456789abcdef0123456789abcdef:0 //An EOS ID',
+      'Not a ban',
+      '0123456789ABCDEF0123456789ABCDE0:4102444800 //Another'
+    ].join('\n'),
+    '2 lines'
+  ]
+])
+  for (const remoteFetcher of [
+    fetcher,
+    new BanFetcher({ eosImport: { all: true, ids: new Set() } })
+  ]) {
+    reset();
+    answers(body);
+    await assert.rejects(remoteFetcher.fetchBanList(remoteList), {
+      message: `The remote ban list has no bans in the \`steamID:expiry //reason\` format. It has ${lines} with an EOS ID, which CBL does not import from remote ban lists.`
+    });
+  }
+reset();
+answers('<html>Not a ban list</html>');
+await assert.rejects(fetcher.fetchBanList(remoteList), {
+  message:
+    'The remote ban list has no bans in the `steamID:expiry //reason` format, so it may be an error page.'
+});
 
 // An empty or blank file is a list with no bans, fetched once.
 for (const body of ['', ' \r\n\n', '﻿', undefined]) {
@@ -747,6 +803,129 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(list.complete, true);
 
+// A ban's EOS IDs are its eosID identifiers whose whole value, trimmed, is 32 hexadecimal
+// characters, of any game, added by hand or not: each once, lowercased, in the order the ban gives
+// them, with whether an admin added it by hand. A shortened or masked one is not an EOS ID, nor is
+// any other identifier, an Epic one (epicID, egsID) included.
+const eosID = (n) => n.toString(16).padStart(32, '0');
+const EOS_A = 'abcdef0123456789abcdef0123456789';
+const EOS_B = '0123456789abcdef0123456789abcdef';
+assert.deepStrictEqual(
+  plain(
+    findEosIDs([
+      { type: 'eosID', identifier: ` ${EOS_A.toUpperCase()} `, metadata: { game: 'other' } },
+      { type: 'eosID', identifier: EOS_B, manual: true },
+      { type: 'eosID', identifier: EOS_A, manual: true },
+      { type: 'eosID', identifier: EOS_B.slice(1) },
+      { type: 'eosID', identifier: `${EOS_B}0` },
+      { type: 'eosID', identifier: `${EOS_B.slice(0, 28)}****` },
+      { type: 'eosID', identifier: 12 },
+      { type: 'epicID', identifier: eosID(1) },
+      { type: 'egsID', identifier: eosID(2) },
+      { type: 'steamID', identifier: eosID(3) },
+      null
+    ])
+  ),
+  [
+    { eosID: EOS_A, manual: true },
+    { eosID: EOS_B, manual: true }
+  ]
+);
+assert.deepStrictEqual(plain(findEosIDs(undefined)), []);
+
+// A ban with no valid SteamID but an EOS ID is kept only from a list that imports EOS IDs, every
+// list with all or those whose IDs the setting names, for its EOS ID: the lowest that an admin added
+// by hand, or else the lowest, lowercased, so a ban with two EOS IDs is for the same one whichever
+// order BattleMetrics gives them in. It has no SteamIDs, and all of its EOS IDs. A ban with a
+// SteamID is for its SteamID, as before, with its EOS IDs too, whatever the setting. A ban with an
+// invalid EOS ID, or only an Epic ID, is skipped either way, and so is every such ban of a list the
+// setting does not name. Skipped or kept, every ban counts, and is on the list's newest page.
+const eosBans = (order) => ({
+  first: {
+    meta: { total: 9 },
+    data: [
+      ban('t', [{ type: 'eosID', identifier: EOS_A.toUpperCase() }]),
+      ban('u', [{ type: 'eosID', identifier: EOS_A, manual: true }]),
+      ban(
+        'v',
+        order([
+          { type: 'eosID', identifier: eosID(9) },
+          { type: 'eosID', identifier: eosID(3) }
+        ])
+      ),
+      ban(
+        'w',
+        order([
+          { type: 'eosID', identifier: eosID(2) },
+          { type: 'eosID', identifier: eosID(7), manual: true },
+          { type: 'eosID', identifier: eosID(5), manual: true }
+        ])
+      ),
+      ban('x', [
+        { type: 'eosID', identifier: EOS_B },
+        { type: 'eosID', identifier: EOS_B.toUpperCase(), manual: true }
+      ]),
+      ban('y', [{ type: 'eosID', identifier: EOS_B }, ...steam(8)]),
+      ban('z', [{ type: 'eosID', identifier: 'abc' }]),
+      ban('za', [{ type: 'epicID', identifier: EOS_B }]),
+      ban('zb', [
+        { type: 'steamID', identifier: '1234' },
+        { type: 'eosID', identifier: EOS_B }
+      ])
+    ],
+    links: {}
+  }
+});
+const eosRows = (bans) =>
+  Array.from(bans, (ban) => [
+    ban.id,
+    ban.steamUser,
+    plain(ban.steamIDs).map(({ steamID }) => steamID),
+    plain(ban.eosIDs)
+  ]);
+for (const order of [(entries) => entries, (entries) => [...entries].reverse()])
+  for (const eosImport of [
+    { all: true, ids: new Set() },
+    { all: false, ids: new Set(['3']) }
+  ]) {
+    reset();
+    book(eosBans(order));
+    list = await new BanFetcher({ eosImport }).fetchBanList(banList);
+    const v = order([eosID(9), eosID(3)]).map((id) => ({ eosID: id, manual: false }));
+    const w = order([
+      { eosID: eosID(2), manual: false },
+      { eosID: eosID(7), manual: true },
+      { eosID: eosID(5), manual: true }
+    ]);
+    assert.deepStrictEqual(eosRows(list.bans), [
+      ['3,t', EOS_A, [], [{ eosID: EOS_A, manual: false }]],
+      ['3,u', EOS_A, [], [{ eosID: EOS_A, manual: true }]],
+      ['3,v', eosID(3), [], v],
+      ['3,w', eosID(5), [], w],
+      ['3,x', EOS_B, [], [{ eosID: EOS_B, manual: true }]],
+      ['3,y', steamID(8), [steamID(8)], [{ eosID: EOS_B, manual: false }]],
+      ['3,zb', EOS_B, [], [{ eosID: EOS_B, manual: false }]]
+    ]);
+    assert.deepStrictEqual([list.rawCount, list.complete], [9, true]);
+    assert.deepStrictEqual(plain(list.head.uids), ['t', 'u', 'v', 'w', 'x', 'y', 'z', 'za', 'zb']);
+  }
+for (const eosImport of [undefined, { all: false, ids: new Set(['4', '30']) }]) {
+  reset();
+  book(eosBans((entries) => entries));
+  list = await new BanFetcher(eosImport && { eosImport }).fetchBanList(banList);
+  assert.deepStrictEqual(eosRows(list.bans), [
+    ['3,y', steamID(8), [steamID(8)], [{ eosID: EOS_B, manual: false }]]
+  ]);
+  assert.deepStrictEqual([list.rawCount, list.complete], [9, true]);
+}
+// Which lists import EOS IDs: every one with all, and otherwise those the setting names, by their
+// IDs as text.
+const lists = new BanFetcher({ eosImport: { all: false, ids: new Set(['3']) } });
+assert.deepStrictEqual(
+  [lists.eosImportFor({ id: 3 }), lists.eosImportFor({ id: 4 }), fetcher.eosImportFor({ id: 3 })],
+  [true, false, false]
+);
+
 // A list read to its last page is complete, with the count check, only if the number of different
 // bans it read, with or without a SteamID, is no more than 2 short of BattleMetrics' count on its
 // first page, plus however much the count changed by its last page. A read may be over the count by
@@ -1151,5 +1330,5 @@ await assert.rejects(fetcher.fetchBanList(remoteList), /the server answered HTTP
 }
 
 console.log(
-  "Ban list fetch checks passed: remote bodies, limits and retries, remote files kept and asked about, BattleMetrics paging, expired bans asked for on every page, each page's attempts' time limits and stops, the page under way and the page a read failed on, the count check, reads longer than the count, counts that change too much, lists left out of the check, SteamIDs, hidden bans, and head polls read on in full."
+  "Ban list fetch checks passed: remote bodies, limits and retries, remote files kept and asked about, BattleMetrics paging, expired bans asked for on every page, each page's attempts' time limits and stops, the page under way and the page a read failed on, the count check, reads longer than the count, counts that change too much, lists left out of the check, SteamIDs, EOS IDs kept for the lists that import them, remote files of EOS IDs only, hidden bans, and head polls read on in full."
 );

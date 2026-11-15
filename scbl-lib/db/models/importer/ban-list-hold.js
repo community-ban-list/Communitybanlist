@@ -26,7 +26,7 @@ export default sequelize.define(
     // The bans the list had before the read that began the hold. A 'large' hold lasts while its
     // bans still missing are a large part of them, so the list's growth since never ends it, and
     // the importer lowers it as the list shrinks while the hold lasts. A 'large' hold that took in
-    // a 'full' one has the bans that hold held.
+    // a 'full' one has the bans that hold began with.
     storedCount: {
       type: DataTypes.INTEGER.UNSIGNED,
       allowNull: false

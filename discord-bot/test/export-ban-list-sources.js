@@ -4,6 +4,7 @@ import vm from 'vm';
 
 import * as discord from 'discord.js';
 
+import * as playerIDs from '../../scbl-lib/player-ids.js';
 import isSameBattlemetricsID from '../../scbl-lib/utils/battlemetrics-id.js';
 
 // Run the bot's commands without Discord, the database or BattleMetrics. Package imports are
@@ -89,10 +90,13 @@ function banListRecord(values) {
     }
   };
 }
+// What a remote ban list's host answers with.
+let remoteFile = '';
 const stubs = {
   'discord.js': discord,
   axios: {
     default: {
+      get: async () => ({ data: remoteFile }),
       create: () => ({
         async get(path, config) {
           requests.push(path);
@@ -104,6 +108,7 @@ const stubs = {
     }
   },
   'scbl-lib/config': { BATTLEMETRICS_API_KEY: 'test-key' },
+  'scbl-lib/player-ids': playerIDs,
   'scbl-lib/db': {
     sequelize: {
       async transaction(callback) {
@@ -176,7 +181,7 @@ const stubs = {
 };
 
 const { default: commands } = await load('../src/commands/index.js');
-const { checkBanListSourceUnused, parseBanListSource, UserError } =
+const { checkBanListSource, checkBanListSourceUnused, parseBanListSource, UserError } =
   await load('../src/utils/index.js');
 
 async function run(command, subcommand, options) {
@@ -319,6 +324,27 @@ assert.deepStrictEqual(writes, [
 ]);
 assert.strictEqual(audits.length, 3);
 
+// A remote list's check counts the bans the ban importer would take from it: not the lines that ban
+// an EOS ID, however they end, nor a number that is too long or is not a player's account.
+remoteFile = [
+  '76561198000000001:0 //Cheating',
+  'Admin [SteamID 76561198000000002] Banned:76561198000000003:0 //Banned by an admin',
+  '0123456789abcdef0123456789abcdef:0 //An EOS ID',
+  `${'a'.repeat(15)}76561198000000004:0 //An EOS ID ending in a SteamID's digits`,
+  '176561198000000005:0 //A longer number',
+  '12345678901234567:0 //Not an account',
+  'Not a ban'
+].join('\n');
+assert.strictEqual(
+  await checkBanListSource('remote', 'https://example.com/bans.txt'),
+  'Found 2 bans.'
+);
+remoteFile = '0123456789abcdef0123456789abcdef:0 //An EOS ID';
+await assert.rejects(
+  checkBanListSource('remote', 'https://example.com/bans.txt'),
+  (err) => err instanceof UserError && err.message.includes('found no bans')
+);
+
 console.log(
-  "Export ban list source checks passed: IDs, links, each command, skip_check and partners' lists."
+  "Export ban list source checks passed: IDs, links, each command, skip_check, partners' lists and remote lines."
 );

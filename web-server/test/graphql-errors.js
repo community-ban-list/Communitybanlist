@@ -216,11 +216,12 @@ const models = {
       return list?.owner === where.owner ? list : null;
     },
     create: async (values) => createList(values),
-    // A list whose BattleMetrics ban list could not be made is removed by its ID and owner, which
-    // the stand-in passes on to that list's own row.
-    destroy: async ({ where }) => {
-      const list = lists.get(where.id);
-      if (list?.owner !== where.owner) return 0;
+    // A new list that could not be finished, as its BattleMetrics ban list could not be made or
+    // saved to it, is removed by its ID and owner, which the stand-in passes on to that list's
+    // own row.
+    destroyUnfinished: async (id, owner) => {
+      const list = lists.get(id);
+      if (list?.owner !== owner) return 0;
       await list.destroy();
       return 1;
     },
@@ -595,9 +596,9 @@ for (const [query, message] of [
   await checkShown(query, message, { user: 'owner' });
 
 // A new BattleMetrics list whose BattleMetrics ban list could not be made, as ExportBanList's
-// creation of it fails: the list is deleted, or its owner is asked to delete it when it cannot be,
-// and when the ban list was made but its invite was not, the owner is shown what BattleMetrics
-// answered (scbl-lib/apis/create-api-client.js).
+// creation of it fails: the list is deleted, or its owner is asked to delete it when it cannot be.
+// When the ban list was made but its invite was not, the list is created, and its owner is given it
+// with no error, as saving the list makes the invite again.
 const banListRefused = await battlemetricsError('post', 'ban-lists', {
   status: 422,
   data: { errors: [{ title: 'Invalid name' }] }
@@ -611,7 +612,7 @@ createList = createBattlemetricsList({
 });
 await checkShown(
   mutation('createExportBanList', { ...LIST, type: 'battlemetrics' }),
-  'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later.',
+  'BattleMetrics could not create a ban list for your export ban list, so it was not created. Please try again later, or choose Remote as its type: a remote export ban list does not need BattleMetrics.',
   { user: 'not-made' }
 );
 createList = createBattlemetricsList({
@@ -624,7 +625,7 @@ createList = createBattlemetricsList({
 });
 await checkShown(
   mutation('createExportBanList', { ...LIST, type: 'battlemetrics' }),
-  'BattleMetrics could not create a ban list for your export ban list. Please delete it and try again later.',
+  'BattleMetrics could not create a ban list for your export ban list. Please delete it, then try again later or create it again with Remote as its type: a remote export ban list does not need BattleMetrics.',
   { user: 'not-made-or-deleted' }
 );
 const inviteFailed = await battlemetricsError('post', 'ban-lists/123/relationships/invites', {
@@ -636,10 +637,47 @@ createList = createBattlemetricsList({
     throw Object.assign(inviteFailed, { stage: 'invite' });
   }
 });
+logged.length = 0;
+const noInvite = await run(
+  api,
+  mutation('createExportBanList', { ...LIST, type: 'battlemetrics' }),
+  {
+    user: 'no-invite'
+  }
+);
+assert.strictEqual(noInvite.errors, undefined, JSON.stringify(noInvite.errors));
+const createdWithoutInvite = [...lists.values()].find((list) => list.owner === 'no-invite');
+assert.ok(createdWithoutInvite, 'The list is kept.');
+assert.strictEqual(createdWithoutInvite.battlemetricsID, '123');
+assert.deepStrictEqual(noInvite.data, { createExportBanList: { id: createdWithoutInvite.id } });
+assert.deepStrictEqual(hiddenLines(), []);
+// When the ban list was made but could not be saved to the list, as the database gave up waiting
+// for a lock, the list is deleted, and its owner is told it was not created, rather than only that
+// the server had an error, or that the list could not be deleted either.
+const unrecorded = lockWait();
+const unsavedList = (values) =>
+  createBattlemetricsList({
+    async createBattlemetricsBanList() {
+      this.battlemetricsID = '124';
+      throw Object.assign(unrecorded, { stage: 'saving' });
+    },
+    ...values
+  });
+createList = unsavedList();
 await checkShown(
   mutation('createExportBanList', { ...LIST, type: 'battlemetrics' }),
-  'BattleMetrics POST ban-lists/123/relationships/invites failed: HTTP 500, so it may have been carried out',
-  { user: 'no-invite' }
+  'Your export ban list could not be saved with its BattleMetrics ban list, so it was not created. Please try again later.',
+  { user: 'unrecorded' }
+);
+createList = unsavedList({
+  async destroy() {
+    throw deadlock();
+  }
+});
+await checkShown(
+  mutation('createExportBanList', { ...LIST, type: 'battlemetrics' }),
+  'Your export ban list could not be saved with its BattleMetrics ban list. Please delete it and try again later.',
+  { user: 'unrecorded-not-deleted' }
 );
 resetModels();
 
@@ -768,21 +806,6 @@ await checkHidden(
   ['deleteExportBanList'],
   { user: 'database-deleter' }
 );
-// A new BattleMetrics list whose BattleMetrics ban list was made but could not be saved with it.
-const unrecorded = lockWait();
-createList = createBattlemetricsList({
-  async createBattlemetricsBanList() {
-    this.battlemetricsID = '124';
-    throw Object.assign(unrecorded, { stage: 'saving' });
-  }
-});
-await checkHidden(
-  mutation('createExportBanList', { ...LIST, type: 'battlemetrics' }),
-  unrecorded,
-  ['createExportBanList'],
-  { user: 'unrecorded' }
-);
-resetModels();
 
 // Errors from the database, from bugs and from the packages the API uses, any of which any request
 // can meet, here as the organisations are looked up, or a ban list's organisation.
