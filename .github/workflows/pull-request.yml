@@ -126,9 +126,12 @@ jobs:
       - name: Install dependencies
         run: yarn install
 
+      # With no database the test would skip itself and pass, as it does in the Test job.
+      # TEST_DATABASE_REQUIRED makes it fail instead, so this job can't pass without the checks.
       - name: Run the export membership statements on MySQL
         env:
           TEST_DATABASE_URI: mysql://cbl_test:cbl_test@127.0.0.1:3306/cbl_test
+          TEST_DATABASE_REQUIRED: '1'
         run: node --experimental-vm-modules scbl-lib/test/export-membership-mysql.js
 
   # Each image's build stage installs its dependencies and runs its tests. The base images come from

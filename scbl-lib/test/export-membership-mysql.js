@@ -12,9 +12,17 @@ import { fileURLToPath } from 'url';
 // mysql://<user>:<password>@<host>:3306/<database>, which the pull request checks start for it. It
 // makes the tables there, and drops them when it ends. It refuses a database that already has
 // tables, so it can never change one that holds anything. Without TEST_DATABASE_URI it does nothing
-// and passes, as in the image builds, which have no database.
+// and passes, as in the Test job and the image builds, which have no database. The job that starts
+// a database for it also sets TEST_DATABASE_REQUIRED, with which a missing TEST_DATABASE_URI fails
+// the test instead, so that job can't pass without running the checks.
 const TEST_DATABASE_URI = process.env.TEST_DATABASE_URI;
 if (!TEST_DATABASE_URI) {
+  if (process.env.TEST_DATABASE_REQUIRED) {
+    console.error(
+      'TEST_DATABASE_REQUIRED is set but TEST_DATABASE_URI is not, so the export membership checks on MySQL cannot run.'
+    );
+    process.exit(1);
+  }
   console.log('Skipped the export membership checks on MySQL, as TEST_DATABASE_URI is not set.');
   process.exit(0);
 }
