@@ -1,5 +1,3 @@
-import { createHash } from 'crypto';
-
 import { readBattlemetricsPages } from 'scbl-lib/apis';
 import { normaliseBattlemetricsID } from 'scbl-lib/utils';
 
@@ -164,14 +162,6 @@ export async function readVisibleBanLists() {
     ids.add(id);
   }
   return ids;
-}
-
-// A SHA-256 of a list's type and source, by which its row tells that its source was changed since
-// the row was written.
-export function sourceKey({ type, source }) {
-  return createHash('sha256')
-    .update(JSON.stringify([type ?? null, source ?? null]))
-    .digest('hex');
 }
 
 // A problem with a list as its row keeps it: on one line, without any address, as a remote list's

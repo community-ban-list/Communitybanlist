@@ -6,6 +6,7 @@ import {
 } from 'scbl-lib/db/ban-list-suspensions';
 import { BanListSync } from 'scbl-lib/db/importer-models';
 import { QueryTypes } from 'scbl-lib/db/sequelize';
+import { sourceKey } from 'scbl-lib/utils';
 
 import UserError from './user-error.js';
 
@@ -68,13 +69,30 @@ export async function markSourceChanged(banList, transaction) {
 const REMOVALS = `SELECT banList, COUNT(*) AS bans, COUNT(heldAt) AS held
   FROM BanListPendingRemovals WHERE banList IN (:banListIDs) GROUP BY banList`;
 
-// The status of the ban lists with these IDs: { paused, syncs, removals }, each a Map by ban list
-// ID, of their paused rows, their BanListSyncs rows and the bans held back from removing them,
-// { waiting, held }. Fails with the bot's answer when the importer's tables are missing.
-export async function readStatus(banListIDs) {
-  if (banListIDs.length === 0) return { paused: new Map(), syncs: new Map(), removals: new Map() };
+// Whether the ban importer has yet to finish reading the ban list's type or source, as it tells by
+// the list's BanListSyncs row: 'other' when the row is of another source, by its sourceKey, so
+// nothing in it is of the list's source now, 'replacing' when the row is of the list's source but
+// the importer has not finished replacing the old source's bans with those of the new one
+// (replacePending), as when its first attempt at a new source failed or did not read all of it, or
+// the list was given back its source before the importer read the one it was changed to, or null
+// when it has finished.
+function sourceChange(banList, row) {
+  if (row.sourceKey !== sourceKey(banList)) return 'other';
+  return Number(row.replacePending) ? 'replacing' : null;
+}
+
+// The status of the ban lists given: { paused, syncs, removals }, each a Map by ban list ID, of
+// their paused rows, their BanListSyncs rows, each with its sourceChange, and the bans held back
+// from removing them, { waiting, held }. A list whose new type or source the importer has yet to
+// finish reading has no removals: those it holds back are its old source's, or of bans deleted with
+// it, until the importer has read the new one in full. Fails with the bot's answer when the
+// importer's tables are missing.
+export async function readStatus(banLists) {
+  if (banLists.length === 0) return { paused: new Map(), syncs: new Map(), removals: new Map() };
+  const banListIDs = banLists.map((banList) => banList.id);
+  const byID = new Map(banLists.map((banList) => [banList.id, banList]));
   try {
-    const [paused, syncs, removals] = await Promise.all([
+    const [paused, rows, removals] = await Promise.all([
       readPausedBanLists({ missingTable: 'throw' }),
       BanListSync.findAll({ where: { banList: banListIDs }, raw: true }),
       sequelize.query(REMOVALS, {
@@ -82,14 +100,22 @@ export async function readStatus(banListIDs) {
         replacements: { banListIDs }
       })
     ]);
+    const syncs = new Map(
+      rows.map((row) => {
+        const id = Number(row.banList);
+        return [id, { ...row, sourceChange: sourceChange(byID.get(id), row) }];
+      })
+    );
     return {
       paused: new Map(paused.map((row) => [row.banList, row])),
-      syncs: new Map(syncs.map((row) => [Number(row.banList), row])),
+      syncs,
       removals: new Map(
-        removals.map(({ banList, bans, held }) => [
-          Number(banList),
-          { waiting: Number(bans) - Number(held), held: Number(held) }
-        ])
+        removals
+          .filter(({ banList }) => !syncs.get(Number(banList))?.sourceChange)
+          .map(({ banList, bans, held }) => [
+            Number(banList),
+            { waiting: Number(bans) - Number(held), held: Number(held) }
+          ])
       )
     };
   } catch (err) {

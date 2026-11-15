@@ -119,16 +119,37 @@ const IMPORT_STATES = {
   self_import: "Not imported, as its source is one of CBL's own export ban lists"
 };
 
+// The states in which the ban importer cannot finish reading a list: its import fails, CBL cannot
+// read it, or it is one of CBL's own export ban lists.
+const STUCK_STATES = ['failing', 'access_lost', 'self_import'];
+
 // A time, as Discord shows it in each reader's own time zone, relative to now, or never.
 const when = (value) => (value ? time(new Date(value), TimestampStyles.RelativeTime) : 'never');
 const count = (value) =>
   value === null || value === undefined ? 'unknown' : plural(Number(value), 'ban');
 
+// Whether the list's row, of a list whose new type or source the importer has yet to finish reading
+// (see readStatus), says why it cannot: the row is of the list's source, so its state and error are
+// of the importer's latest attempt at it, and that attempt could not read it.
+const stuck = (sync) => sync.sourceChange === 'replacing' && STUCK_STATES.includes(sync.state);
+
 // How the ban importer last imported a list, on a few lines, from its BanListSyncs row (sync), or
 // that it has not imported it yet, and the bans it holds back from removing (removals: waiting for a
-// confirming read, and held for an admin).
+// confirming read, and held for an admin). For a list whose new type or source the importer has yet
+// to finish reading, it says so instead, with why it cannot, if the row says (see stuck): nothing
+// else in the row is of the new source's bans.
 export function describeImport(sync, removals = { waiting: 0, held: 0 }) {
   if (!sync) return 'Not imported yet.';
+  if (sync.sourceChange) {
+    const changed = [
+      'Its type or source was changed, and the ban importer has not finished reading the new one yet.'
+    ];
+    if (stuck(sync)) {
+      changed.push(`${IMPORT_STATES[sync.state]} · last imported ${when(sync.lastSuccessAt)}`);
+      if (sync.lastError) changed.push(`Last error: ${escapeMarkdown(sync.lastError)}`);
+    }
+    return changed.join('\n');
+  }
   const lines = [
     `${IMPORT_STATES[sync.state] ?? escapeMarkdown(String(sync.state))} · last imported ${when(sync.lastSuccessAt)} · last read in full ${when(sync.lastFullScanAt)}`,
     `${count(sync.storedCount)} stored${sync.headTotal === null || sync.headTotal === undefined ? '' : ` · ${count(sync.headTotal)} on BattleMetrics`}`
@@ -141,9 +162,15 @@ export function describeImport(sync, removals = { waiting: 0, held: 0 }) {
   return lines.join('\n');
 }
 
-// How the ban importer last imported a list, on one line: its state and when, for a list of lists.
+// How the ban importer last imported a list, on one line: its state and when, for a list of lists,
+// or, for a list whose new type or source it has yet to finish reading, that, and why it cannot,
+// if the row says (see describeImport).
 export function summariseImport(sync) {
   if (!sync) return 'not imported yet';
+  if (sync.sourceChange) {
+    const changed = 'type or source changed, not read in full yet';
+    return stuck(sync) ? `${changed} · ${IMPORT_STATES[sync.state]}` : changed;
+  }
   return `${IMPORT_STATES[sync.state] ?? escapeMarkdown(String(sync.state))} · last imported ${when(sync.lastSuccessAt)}`;
 }
 

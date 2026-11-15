@@ -5,6 +5,7 @@ import vm from 'vm';
 import * as discord from 'discord.js';
 
 import * as playerIDs from '../../scbl-lib/player-ids.js';
+import sourceKey from '../../scbl-lib/utils/ban-list-source-key.js';
 import isSameBattlemetricsID from '../../scbl-lib/utils/battlemetrics-id.js';
 
 // Run the bot's commands without Discord, the database or BattleMetrics. Package imports are
@@ -176,7 +177,8 @@ const stubs = {
   'scbl-lib/db/sequelize': { Op, QueryTypes: { SELECT: 'SELECT' } },
   'scbl-lib/utils': {
     isSameBattlemetricsID,
-    Logger: { verbose: (...args) => audits.push(args.slice(2).join('')) }
+    Logger: { verbose: (...args) => audits.push(args.slice(2).join('')) },
+    sourceKey
   }
 };
 

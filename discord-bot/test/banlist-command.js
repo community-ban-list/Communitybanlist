@@ -2,6 +2,8 @@ import assert from 'assert';
 import { readFile } from 'fs/promises';
 import vm from 'vm';
 
+import sourceKey from '../../scbl-lib/utils/ban-list-source-key.js';
+
 // Exercise /banlist update, remove, suspend, resume and status without Discord or a database. The
 // command and the helpers that change the database are the real ones; the database, the table of
 // paused lists, Discord and the source checks are stand-ins that record what is done.
@@ -157,13 +159,35 @@ const builder = () =>
         }
     }
   );
+// An embed keeps its fields, so a status's can be read, and leaves out the rest.
+class EmbedBuilder {
+  fields = [];
+  addFields(...fields) {
+    this.fields.push(...fields);
+    return this;
+  }
+
+  setColor() {
+    return this;
+  }
+
+  setTitle() {
+    return this;
+  }
+
+  setDescription() {
+    return this;
+  }
+
+  setFooter() {
+    return this;
+  }
+}
 const discord = {
   SlashCommandBuilder: function SlashCommandBuilder() {
     return builder();
   },
-  EmbedBuilder: function EmbedBuilder() {
-    return builder();
-  },
+  EmbedBuilder,
   escapeMarkdown: (text) => text,
   time: (date) => String(date),
   TimestampStyles: {}
@@ -201,7 +225,9 @@ const database = {
   'scbl-lib/db/models': { Ban, BanList, ExportBanListConfig, Organisation: {} },
   'scbl-lib/db/sequelize': { Op: { ne: 'ne' }, QueryTypes: { SELECT: 'SELECT' } },
   'scbl-lib/db/ban-list-suspensions': suspensions,
-  'scbl-lib/db/importer-models': { BanListSync }
+  'scbl-lib/db/importer-models': { BanListSync },
+  // The importer's key of a list's type and source, the real one, which the importer shares.
+  'scbl-lib/utils': { sourceKey }
 };
 const format = await load('../src/utils/format.js', { 'discord.js': discord });
 const deletion = await load('../src/utils/delete-ban-lists.js', {
@@ -709,12 +735,14 @@ assert.strictEqual(
 );
 
 // The status of one list, or of every list, reads whether each is paused, its BanListSyncs row and
-// the bans held back from removing it, and changes nothing.
+// the bans held back from removing it, and changes nothing. The row here is of the list's source.
 reset(3, 2);
 pausedRows = [paused({ reason: 'Dispute' })];
 syncRows = [
   {
     banList: 5,
+    sourceKey: sourceKey(record),
+    replacePending: 0,
     state: 'held',
     lastSuccessAt: new Date('2026-10-29T11:00:00.000Z'),
     lastFullScanAt: new Date('2026-10-29T10:00:00.000Z'),
@@ -727,6 +755,11 @@ removalRows = [{ banList: 5, bans: '3', held: '1' }];
 await run('status', { banlist: '5' });
 assert.strictEqual(replies.length, 1);
 assert.strictEqual(replies[0].embeds.length, 1);
+const importOf = (reply) => reply.embeds[0].fields.find(({ name }) => name === 'Import').value;
+assert.strictEqual(
+  importOf(replies[0]),
+  `Imported, with removals held until they are confirmed · last imported ${String(new Date('2026-10-29T11:00:00.000Z'))} · last read in full ${String(new Date('2026-10-29T10:00:00.000Z'))}\n3 bans stored · 4 bans on BattleMetrics\nRemovals: 2 bans waiting for a confirming read, 1 ban held for an admin`
+);
 await run('status', {});
 assert.strictEqual(replies.length, 2);
 assert.deepStrictEqual(replies[1], {
@@ -737,7 +770,7 @@ assert.deepStrictEqual(replies[1], {
 });
 assert.ok(!calls.some(([call]) => ['begin', 'flags', 'suspend', 'resume', 'save'].includes(call)));
 const { readStatus } = status;
-const read = await readStatus([5]);
+const read = await readStatus([record]);
 // Made in the module's context, so copied into this one to compare.
 assert.deepStrictEqual({ ...read.removals.get(5) }, { waiting: 2, held: 1 });
 assert.strictEqual(read.paused.get(5).reason, 'Dispute');
@@ -757,6 +790,101 @@ assert.deepStrictEqual(
   [null, 'suspended', 'resuming']
 );
 
+// Once a list's type or source was changed, until the ban importer has finished reading the new one,
+// its row and the bans held back from removing it are of its old source, or of bans deleted with
+// it, so its status says only that its source was changed. Here the row is still of the old source,
+// as the importer has not tried the list since, and held 1,200 bans the change deleted.
+const changedSync = {
+  banList: 5,
+  sourceKey: sourceKey({ type: 'remote', source: 'https://old.test/bans.txt' }),
+  replacePending: 1,
+  state: 'held',
+  lastSuccessAt: new Date('2026-10-29T11:00:00.000Z'),
+  lastFullScanAt: new Date('2026-10-29T10:00:00.000Z'),
+  storedCount: 1200,
+  headTotal: null,
+  lastError: 'Could not fetch the remote ban list: HTTP 503.'
+};
+const CHANGED =
+  'Its type or source was changed, and the ban importer has not finished reading the new one yet.';
+reset(0, 0);
+syncRows = [{ ...changedSync }];
+removalRows = [{ banList: 5, bans: '1200', held: '1200' }];
+await run('status', { banlist: '5' });
+assert.strictEqual(importOf(replies[0]), CHANGED);
+await run('status', {});
+assert.deepStrictEqual(replies[1].lines, [
+  '**Org** / **Main** (#5) · type or source changed, not read in full yet'
+]);
+const changed = await readStatus([record]);
+assert.strictEqual(changed.syncs.get(5).sourceChange, 'other');
+assert.strictEqual(changed.removals.has(5), false);
+
+// So is a row of the list's source that says the importer has not finished replacing the old
+// source's bans, as when the source was changed back before the importer read the one it was
+// changed to: its state and counts are from before the change. A row of another source says so
+// even when the importer has finished with it, as it no longer has the list's source.
+reset(0, 0);
+syncRows = [{ ...changedSync, sourceKey: sourceKey(record) }];
+removalRows = [{ banList: 5, bans: '1200', held: '1200' }];
+await run('status', { banlist: '5' });
+await run('status', {});
+assert.deepStrictEqual(
+  [importOf(replies[0]), replies[1].lines],
+  [CHANGED, ['**Org** / **Main** (#5) · type or source changed, not read in full yet']]
+);
+assert.strictEqual((await readStatus([record])).syncs.get(5).sourceChange, 'replacing');
+syncRows = [{ ...changedSync, replacePending: 0 }];
+assert.strictEqual(format.describeImport((await readStatus([record])).syncs.get(5)), CHANGED);
+
+// A row of the list's source whose replacing has not finished, as the importer's attempt at the new
+// source failed, or found that CBL cannot read it, says why, as that is of the new source, but not
+// its counts, nor the old source's removals.
+for (const [state, label, error] of [
+  ['failing', 'Failing', 'Could not fetch the remote ban list: HTTP 404.'],
+  [
+    'access_lost',
+    'CBL cannot read it on BattleMetrics',
+    'BattleMetrics answers that it does not know the list (HTTP 404, Unknown ban list), so its bans are not checked for removal.'
+  ]
+]) {
+  reset(0, 0);
+  syncRows = [
+    {
+      ...changedSync,
+      sourceKey: sourceKey(record),
+      state,
+      lastSuccessAt: null,
+      lastFullScanAt: null,
+      storedCount: 0,
+      headTotal: 250,
+      lastError: error
+    }
+  ];
+  removalRows = [{ banList: 5, bans: '40', held: '40' }];
+  await run('status', { banlist: '5' });
+  await run('status', {});
+  assert.strictEqual(
+    importOf(replies[0]),
+    `${CHANGED}\n${label} · last imported never\nLast error: ${error}`
+  );
+  assert.deepStrictEqual(replies[1].lines, [
+    `**Org** / **Main** (#5) · type or source changed, not read in full yet · ${label}`
+  ]);
+}
+
+// Resuming a list whose new type or source the importer has yet to finish reading asks only that,
+// as the importer replaces its bans with the new source's without holding them for an admin.
+reset(0, 0);
+pausedRows = [paused()];
+syncRows = [{ ...changedSync }];
+await run('resume', { banlist: '5' });
+assert.strictEqual(
+  prompts[0].content,
+  "Resume **Org** / **Main**? Its type or source was changed, and the ban importer has not finished reading the new one yet: it reads it in full on its next cycle, and the list counts again once it has caught up with it. /banlist status shows when. Export bans follow from the cycle after it counts again, and players' reputation points within 1 cycle of it."
+);
+assert.deepStrictEqual(calls.at(-1), ['resume', 5]);
+
 console.log(
-  "Ban list command checks passed: renames keep bans, source changes delete them once confirmed and only while no import runs, and mark the importer's row, also when changed back, removal, suspending and resuming lists, which then queue no players, and their status."
+  "Ban list command checks passed: renames keep bans, source changes delete them once confirmed and only while no import runs, and mark the importer's row, also when changed back, removal, suspending and resuming lists, which then queue no players, and their status, which leaves out a changed source's old state."
 );
