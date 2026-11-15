@@ -985,20 +985,31 @@ assert.strictEqual(importOf(replies.at(-1)), UNREAD);
 
 // Resuming a list the importer has not read since its type or source was changed, or whose old bans
 // it has not finished replacing, asks only that, as the importer replaces them with the new
-// source's without holding them for an admin.
+// source's without holding them for an admin. Here the list has no bans, as /banlist update deleted
+// them with the change. One that still has bans, as its source was changed by hand, which keeps its
+// old ones, or as the importer has saved some of the new source's, catches up only once the
+// importer's reads have confirmed those the new source does not have, as any list does, so the
+// question says that too.
+const CONFIRMING =
+  ': once its reads have confirmed which of its 12 bans on 5 players the new source does not have, which takes at least 10 more minutes when there are any';
 for (const [sync, changedLine] of [
   [changedSync, UNREAD],
   [replacingSync, REPLACING]
 ]) {
-  reset(0, 0);
-  pausedRows = [paused()];
-  syncRows = [{ ...sync }];
-  await run('resume', { banlist: '5' });
-  assert.strictEqual(
-    prompts[0].content,
-    `Resume **Org** / **Main**? ${changedLine} The ban importer reads it in full on its next cycle, and the list counts again once it has caught up with it. /banlist status shows when. Export bans follow from the cycle after it counts again, and players' reputation points within 1 cycle of it.`
-  );
-  assert.deepStrictEqual(calls.at(-1), ['resume', 5]);
+  for (const [bans, steamUsers, confirming] of [
+    [0, 0, ''],
+    [12, 5, CONFIRMING]
+  ]) {
+    reset(bans, steamUsers);
+    pausedRows = [paused()];
+    syncRows = [{ ...sync }];
+    await run('resume', { banlist: '5' });
+    assert.strictEqual(
+      prompts[0].content,
+      `Resume **Org** / **Main**? ${changedLine} The ban importer reads it in full on its next cycle, and the list counts again once it has caught up with it${confirming}. /banlist status shows when. Export bans follow from the cycle after it counts again, and players' reputation points within 1 cycle of it.`
+    );
+    assert.deepStrictEqual(calls.at(-1), ['resume', 5]);
+  }
 }
 
 // Names and reasons are as admins typed them, so the log keeps each on one line and shows it as
