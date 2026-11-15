@@ -98,7 +98,7 @@ function banListRecord(values) {
 // bans, and for the ban lists the CBL organisation can see, which an error fails, how many times
 // those were read, and the time limit each read had.
 let remoteFile = '';
-let battlemetricsBans = { data: [{ type: 'ban' }], links: {} };
+let battlemetricsBans = { data: [{ type: 'ban' }], links: {}, meta: { total: 1 } };
 let visibleBanLists = [PARTNER_ID, NEW_PARTNER_ID, OTHER_PARTNER_ID];
 let visibleError = null;
 let visibleReads = 0;
@@ -397,9 +397,10 @@ const refusedWith = (message) => (err) => {
 
 // A BattleMetrics list that gives no bans but still counts some is one CBL may see but not its
 // bans, which the ban importer fails as one CBL cannot read, so the check refuses it in the
-// importer's words, without suggesting skip_check. So is one that gives no count, which the
-// importer, with its count check on, as by default, fails as it cannot check that its read got
-// every ban. Only one that counts none is empty, which skip_check saves.
+// importer's words, without suggesting skip_check. So is one that gives no count, whether it gives
+// bans or not, which the importer, with its count check on, as by default, fails as it cannot check
+// that its read got every ban. Only one that gives no bans and counts none is empty, which
+// skip_check saves.
 const UNLISTED_ID = 'facade00-ba5e-4b00-a000-0000000000ff';
 battlemetricsBans = { data: [], links: {}, meta: { active: 100, expired: 150, total: 250 } };
 await assert.rejects(
@@ -408,15 +409,18 @@ await assert.rejects(
     'BattleMetrics counts 250 bans on the list but gave none of them, so CBL may not be allowed to see its bans, and the ban importer would fail to import it.'
   )
 );
-for (const meta of [undefined, {}, { total: 'many' }, { total: -1 }, { total: 2.5 }]) {
-  battlemetricsBans = { data: [], links: {}, meta };
-  await assert.rejects(
-    checkBanListSource('battlemetrics', UNLISTED_ID),
-    refusedWith(
-      'BattleMetrics gave no bans on the list and no count of its bans, so it could not be checked that every ban was read, and the ban importer would fail to import it.'
-    ),
-    JSON.stringify(meta)
-  );
+const noCounts = [undefined, {}, { total: 'many' }, { total: '2' }, { total: -1 }, { total: 2.5 }];
+for (const data of [[], [{ type: 'ban' }, { type: 'ban' }]]) {
+  for (const meta of noCounts) {
+    battlemetricsBans = { data, links: {}, meta };
+    await assert.rejects(
+      checkBanListSource('battlemetrics', UNLISTED_ID),
+      refusedWith(
+        "BattleMetrics gave no count of the list's bans, so it could not be checked that every ban was read, and the ban importer would fail to import it."
+      ),
+      JSON.stringify({ bans: data.length, meta })
+    );
+  }
 }
 battlemetricsBans = { data: [], links: {}, meta: { total: 0 } };
 await assert.rejects(
@@ -425,7 +429,11 @@ await assert.rejects(
     "Found no bans on the BattleMetrics ban list. Check the ID and that the CBL BattleMetrics organisation has accepted the list's invite, or use `skip_check` if the list is meant to be empty."
   )
 );
-battlemetricsBans = { data: [{ type: 'ban' }, { type: 'ban' }], links: { next: 'page 2' } };
+battlemetricsBans = {
+  data: [{ type: 'ban' }, { type: 'ban' }],
+  links: { next: 'page 2' },
+  meta: { total: 150 }
+};
 
 // A list that BattleMetrics does not list among the ban lists the CBL organisation can see is
 // still saved, with a warning in the importer's words, as the importer saves its new bans but
@@ -526,7 +534,7 @@ assert.strictEqual(await checking, LISTED);
 hold = null;
 visiblePageSize = 3;
 visibleBanLists = [PARTNER_ID, NEW_PARTNER_ID, OTHER_PARTNER_ID];
-battlemetricsBans = { data: [{ type: 'ban' }], links: {} };
+battlemetricsBans = { data: [{ type: 'ban' }], links: {}, meta: { total: 1 } };
 
 // A remote list's check counts the bans the ban importer would take from it: not the lines that ban
 // an EOS ID, however they end, nor a number that is too long or is not a player's account.
@@ -607,5 +615,5 @@ assert.ok(
 );
 
 console.log(
-  "Export ban list source checks passed: IDs, links, each command, skip_check, partners' lists, hidden bans and lists BattleMetrics does not list for CBL, read a page at a time within one time limit, remote lines and remote files the importer would fail, and names in the log."
+  "Export ban list source checks passed: IDs, links, each command, skip_check, partners' lists, hidden bans, lists without a count and lists BattleMetrics does not list for CBL, read a page at a time within one time limit, remote lines and remote files the importer would fail, and names in the log."
 );
