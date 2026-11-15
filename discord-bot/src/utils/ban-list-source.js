@@ -110,13 +110,20 @@ async function checkBattlemetricsSource(source) {
 
   // BattleMetrics answers a list that CBL may see, but not its bans, with no bans that it still
   // counts. The ban importer fails such a list as one CBL cannot read, as it has not emptied, so it
-  // is refused in the importer's words, without suggesting skip_check. A list that counts no bans,
-  // or gives no count, is empty, as the importer takes it.
+  // is refused in the importer's words, without suggesting skip_check. Only a list that counts no
+  // bans is empty: the importer, with its count check on, as by default, fails a read that gives no
+  // count, as it cannot check that the read got every ban, so a list with no bans and no count is
+  // refused in its words too.
   const bans = Array.isArray(data?.data) ? data.data : [];
   const total = data?.meta?.total;
-  if (bans.length === 0 && Number.isInteger(total) && total > 0)
+  const counted = Number.isInteger(total) && total >= 0;
+  if (bans.length === 0 && counted && total > 0)
     throw new UserError(
       `BattleMetrics counts ${plural(total, 'ban')} on the list but gave none of them, so CBL may not be allowed to see its bans, and the ban importer would fail to import it.`
+    );
+  if (bans.length === 0 && !counted)
+    throw new UserError(
+      'BattleMetrics gave no bans on the list and no count of its bans, so it could not be checked that every ban was read, and the ban importer would fail to import it.'
     );
   if (bans.length === 0)
     throw new UserError(

@@ -397,8 +397,9 @@ const refusedWith = (message) => (err) => {
 
 // A BattleMetrics list that gives no bans but still counts some is one CBL may see but not its
 // bans, which the ban importer fails as one CBL cannot read, so the check refuses it in the
-// importer's words, without suggesting skip_check. One that counts none, or gives no count, is
-// empty, as the importer takes it, which skip_check saves.
+// importer's words, without suggesting skip_check. So is one that gives no count, which the
+// importer, with its count check on, as by default, fails as it cannot check that its read got
+// every ban. Only one that counts none is empty, which skip_check saves.
 const UNLISTED_ID = 'facade00-ba5e-4b00-a000-0000000000ff';
 battlemetricsBans = { data: [], links: {}, meta: { active: 100, expired: 150, total: 250 } };
 await assert.rejects(
@@ -407,15 +408,23 @@ await assert.rejects(
     'BattleMetrics counts 250 bans on the list but gave none of them, so CBL may not be allowed to see its bans, and the ban importer would fail to import it.'
   )
 );
-for (const meta of [{ total: 0 }, undefined, { total: 'many' }]) {
+for (const meta of [undefined, {}, { total: 'many' }, { total: -1 }, { total: 2.5 }]) {
   battlemetricsBans = { data: [], links: {}, meta };
   await assert.rejects(
     checkBanListSource('battlemetrics', UNLISTED_ID),
     refusedWith(
-      "Found no bans on the BattleMetrics ban list. Check the ID and that the CBL BattleMetrics organisation has accepted the list's invite, or use `skip_check` if the list is meant to be empty."
-    )
+      'BattleMetrics gave no bans on the list and no count of its bans, so it could not be checked that every ban was read, and the ban importer would fail to import it.'
+    ),
+    JSON.stringify(meta)
   );
 }
+battlemetricsBans = { data: [], links: {}, meta: { total: 0 } };
+await assert.rejects(
+  checkBanListSource('battlemetrics', UNLISTED_ID),
+  refusedWith(
+    "Found no bans on the BattleMetrics ban list. Check the ID and that the CBL BattleMetrics organisation has accepted the list's invite, or use `skip_check` if the list is meant to be empty."
+  )
+);
 battlemetricsBans = { data: [{ type: 'ban' }, { type: 'ban' }], links: { next: 'page 2' } };
 
 // A list that BattleMetrics does not list among the ban lists the CBL organisation can see is
