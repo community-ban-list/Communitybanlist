@@ -19,17 +19,21 @@ let counts = { bans: 0, steamUsers: 0, exportBanListConfigs: 0 };
 let importerRunning = false;
 
 // The paused lists' rows, the ban importer's rows of BanListSyncs and of BanListPendingRemovals,
-// whether the importer has made its tables yet, what a suspension answers, when not as the rows
-// say, and the error marking a list's row fails with, if any.
+// the IDs of the bans the lists still have, whether the importer has made its tables yet, what a
+// suspension answers, when not as the rows say, and the error marking a list's row fails with, if
+// any.
 let pausedRows = [];
 let syncRows = [];
 let removalRows = [];
+let storedBans = [];
 let tablesMissing = false;
 let suspendAnswer = null;
 let markError = null;
 // The paused lists the importer's reputation check last settled players without.
 let settled = [];
 const SUSPENDED_AT = new Date('2026-10-29T12:00:00.000Z');
+// When the ban list was last saved, by /banlist update.
+const CHANGED_AT = new Date('2026-10-29T11:30:00.000Z');
 const noTable = () =>
   Object.assign(new Error("Table 'cbl.BanListSuspensions' doesn't exist"), {
     original: { errno: 1146 }
@@ -88,10 +92,23 @@ const sequelize = {
     }
   },
   async query(sql, { replacements, transaction }) {
-    // The bans the importer holds back from removing, for /banlist status.
+    // The bans the importer holds back from removing, for /banlist status, and which of them the
+    // lists still have.
     if (sql.includes('FROM BanListPendingRemovals')) {
+      assert.strictEqual(
+        sql,
+        'SELECT banList, banId, heldAt FROM BanListPendingRemovals WHERE banList IN (:banListIDs)'
+      );
       if (tablesMissing) throw noTable();
-      return removalRows.filter(({ banList }) => replacements.banListIDs.includes(banList));
+      return removalRows
+        .filter(({ banList }) => replacements.banListIDs.includes(banList))
+        .map((row) => ({ ...row }));
+    }
+    if (/^SELECT .* FROM Bans /.test(sql)) {
+      assert.strictEqual(sql, 'SELECT id, banList FROM Bans WHERE id IN (:banIds)');
+      return storedBans
+        .filter((id) => replacements.banIds.includes(id))
+        .map((id) => ({ id, banList: Number(id.split(',')[0]) }));
     }
     // The mark on a list's row that its source was changed, which sets nothing else, and nothing
     // for a list without a row.
@@ -296,6 +313,7 @@ function reset(bans = 0, steamUsers = 0, exportBanListConfigs = 0) {
   pausedRows = [];
   syncRows = [];
   removalRows = [];
+  storedBans = [];
   tablesMissing = false;
   suspendAnswer = null;
   markError = null;
@@ -306,6 +324,7 @@ function reset(bans = 0, steamUsers = 0, exportBanListConfigs = 0) {
     name: 'Main',
     type: 'battlemetrics',
     source: 'old-list',
+    updatedAt: CHANGED_AT,
     Organisation: { id: 2, name: 'Org' },
     async save(options) {
       calls.push(['save', options?.transaction?.id, this.type, this.source, this.name]);
@@ -741,6 +760,15 @@ assert.strictEqual(
   "Removed **Org** / **Main**. Affected players' reputation is recalculated on the next ban importer run."
 );
 
+// A record of a ban of list 5 that the ban importer holds back from removing: held for an admin, or
+// waiting for a confirming read.
+const removal = (banId, held = false) => ({
+  banList: 5,
+  banId,
+  heldAt: held ? new Date('2026-10-29T10:30:00.000Z') : null
+});
+const banIDs = (prefix, n) => Array.from({ length: n }, (_, i) => `5,${prefix}${i}`);
+
 // The status of one list, or of every list, reads whether each is paused, its BanListSyncs row and
 // the bans held back from removing it, and changes nothing. The row here is of the list's source.
 reset(3, 2);
@@ -758,7 +786,8 @@ syncRows = [
     lastError: null
   }
 ];
-removalRows = [{ banList: 5, bans: '3', held: '1' }];
+removalRows = [removal('5,a', true), removal('5,b'), removal('5,c')];
+storedBans = ['5,a', '5,b', '5,c'];
 await run('status', { banlist: '5' });
 assert.strictEqual(replies.length, 1);
 assert.strictEqual(replies[0].embeds.length, 1);
@@ -782,6 +811,7 @@ const read = await readStatus([record]);
 assert.deepStrictEqual({ ...read.removals.get(5) }, { waiting: 2, held: 1 });
 assert.strictEqual(read.paused.get(5).reason, 'Dispute');
 assert.strictEqual(read.syncs.get(5).state, 'held');
+assert.strictEqual(read.syncs.get(5).sourceChange, null);
 assert.strictEqual(
   format.describeImport(read.syncs.get(5), read.removals.get(5)),
   `Imported, with removals held until they are confirmed · last imported ${String(new Date('2026-10-29T11:00:00.000Z'))} · last read in full ${String(new Date('2026-10-29T10:00:00.000Z'))}\n3 bans stored · 4 bans on BattleMetrics\nRemovals: 2 bans waiting for a confirming read, 1 ban held for an admin`
@@ -797,100 +827,151 @@ assert.deepStrictEqual(
   [null, 'suspended', 'resuming']
 );
 
-// Once a list's type or source was changed, until the ban importer has finished reading the new one,
-// its row and the bans held back from removing it are of its old source, or of bans deleted with
-// it, so its status says only that its source was changed. Here the row is still of the old source,
-// as the importer has not tried the list since, and held 1,200 bans the change deleted.
+// Once a list's type or source was changed, until the ban importer has read it since, its row and
+// the bans held back from removing it are of its old source, so its status says only that its
+// source was changed: not the row's state, counts or error, nor its removals, also of bans the list
+// still has, as a source changed by hand keeps its old bans until the importer replaces them. Here
+// the row is still of the old source, as the importer has not tried the list since, and held 1,200
+// bans, or failed, or lost access.
 const changedSync = {
   banList: 5,
   sourceKey: sourceKey({ type: 'remote', source: 'https://old.test/bans.txt' }),
   replacePending: 1,
   state: 'held',
+  lastAttemptAt: new Date('2026-10-29T11:00:00.000Z'),
   lastSuccessAt: new Date('2026-10-29T11:00:00.000Z'),
   lastFullScanAt: new Date('2026-10-29T10:00:00.000Z'),
   storedCount: 1200,
   headTotal: null,
-  lastError: 'Could not fetch the remote ban list: HTTP 503.'
+  lastError: null
 };
-const CHANGED =
-  'Its type or source was changed, and the ban importer has not finished reading the new one yet.';
-reset(0, 0);
-syncRows = [{ ...changedSync }];
-removalRows = [{ banList: 5, bans: '1200', held: '1200' }];
-await run('status', { banlist: '5' });
-assert.strictEqual(importOf(replies[0]), CHANGED);
-await run('status', {});
-assert.deepStrictEqual(replies[1].lines, [
-  '**Org** / **Main** (#5) · type or source changed, not read in full yet'
-]);
-const changed = await readStatus([record]);
-assert.strictEqual(changed.syncs.get(5).sourceChange, 'other');
-assert.strictEqual(changed.removals.has(5), false);
-
-// So is a row of the list's source that says the importer has not finished replacing the old
-// source's bans, as when the source was changed back before the importer read the one it was
-// changed to: its state and counts are from before the change. A row of another source says so
-// even when the importer has finished with it, as it no longer has the list's source.
-reset(0, 0);
-syncRows = [{ ...changedSync, sourceKey: sourceKey(record) }];
-removalRows = [{ banList: 5, bans: '1200', held: '1200' }];
-await run('status', { banlist: '5' });
-await run('status', {});
-assert.deepStrictEqual(
-  [importOf(replies[0]), replies[1].lines],
-  [CHANGED, ['**Org** / **Main** (#5) · type or source changed, not read in full yet']]
-);
-assert.strictEqual((await readStatus([record])).syncs.get(5).sourceChange, 'replacing');
-syncRows = [{ ...changedSync, replacePending: 0 }];
-assert.strictEqual(format.describeImport((await readStatus([record])).syncs.get(5)), CHANGED);
-
-// A row of the list's source whose replacing has not finished, as the importer's attempt at the new
-// source failed, or found that CBL cannot read it, says why, as that is of the new source, but not
-// its counts, nor the old source's removals.
-for (const [state, label, error] of [
-  ['failing', 'Failing', 'Could not fetch the remote ban list: HTTP 404.'],
-  [
-    'access_lost',
-    'CBL cannot read it on BattleMetrics',
-    'BattleMetrics answers that it does not know the list (HTTP 404, Unknown ban list), so its bans are not checked for removal.'
-  ]
-]) {
+const oldStates = [
+  {},
+  { state: 'failing', lastError: 'Could not fetch the remote ban list: HTTP 503.' },
+  {
+    state: 'access_lost',
+    lastError:
+      'BattleMetrics answers that it does not know the list (HTTP 404, Unknown ban list), so its bans are not checked for removal.'
+  }
+];
+const UNREAD = 'Its type or source was changed, and the ban importer has not read it since.';
+const UNREAD_LINE = '**Org** / **Main** (#5) · type or source changed, not read since';
+for (const fields of oldStates) {
   reset(0, 0);
-  syncRows = [
-    {
-      ...changedSync,
-      sourceKey: sourceKey(record),
-      state,
-      lastSuccessAt: null,
-      lastFullScanAt: null,
-      storedCount: 0,
-      headTotal: 250,
-      lastError: error
-    }
-  ];
-  removalRows = [{ banList: 5, bans: '40', held: '40' }];
+  syncRows = [{ ...changedSync, ...fields }];
+  removalRows = banIDs('old', 1200).map((banId) => removal(banId, true));
+  storedBans = banIDs('old', 1200);
   await run('status', { banlist: '5' });
   await run('status', {});
-  assert.strictEqual(
-    importOf(replies[0]),
-    `${CHANGED}\n${label} · last imported never\nLast error: ${error}`
+  assert.deepStrictEqual(
+    [importOf(replies[0]), replies[1].lines],
+    [UNREAD, [UNREAD_LINE]],
+    JSON.stringify(fields)
   );
-  assert.deepStrictEqual(replies[1].lines, [
-    `**Org** / **Main** (#5) · type or source changed, not read in full yet · ${label}`
-  ]);
+}
+const changed = await readStatus([record]);
+assert.strictEqual(changed.syncs.get(5).sourceChange, 'unread');
+assert.strictEqual(changed.removals.has(5), false);
+// A row of another source says so even when the importer has finished with it, as it no longer has
+// the list's source.
+syncRows = [{ ...changedSync, replacePending: 0 }];
+assert.strictEqual(format.describeImport((await readStatus([record])).syncs.get(5)), UNREAD);
+
+// So does a row of the list's source that says the old bans are still to be replaced, but whose
+// latest attempt is from before the list was last saved, as when the source was changed back before
+// the importer read the one it was changed to: its state, counts and error are from before the
+// change, and the bans it held were deleted with it.
+for (const fields of oldStates) {
+  reset(0, 0);
+  syncRows = [{ ...changedSync, sourceKey: sourceKey(record), ...fields }];
+  removalRows = banIDs('old', 1200).map((banId) => removal(banId, true));
+  await run('status', { banlist: '5' });
+  await run('status', {});
+  assert.deepStrictEqual(
+    [importOf(replies[0]), replies[1].lines],
+    [UNREAD, [UNREAD_LINE]],
+    JSON.stringify(fields)
+  );
+  assert.strictEqual((await readStatus([record])).syncs.get(5).sourceChange, 'unread');
 }
 
-// Resuming a list whose new type or source the importer has yet to finish reading asks only that,
-// as the importer replaces its bans with the new source's without holding them for an admin.
+// Once the importer has tried the list since, its row is of the list's source, so the status gives
+// all of it, saying first that the importer has not finished replacing the old bans, while the row
+// says so. Here BattleMetrics does not list the new source for CBL, so the importer reads it in full
+// and saves its bans on every run, but removes none of its bans, and has not replaced the old ones.
+// The records of the bans the change deleted are left out, as the importer leaves them out.
+const ATTEMPTED_AT = new Date('2026-10-29T11:40:00.000Z');
+const replacingSync = {
+  ...changedSync,
+  sourceKey: sourceKey(record),
+  state: 'access_lost',
+  lastAttemptAt: ATTEMPTED_AT,
+  lastSuccessAt: ATTEMPTED_AT,
+  lastFullScanAt: ATTEMPTED_AT,
+  storedCount: 12,
+  headTotal: 12,
+  lastError:
+    'Its source is not among the BattleMetrics ban lists the CBL organisation can see, so its bans are not checked for removal.'
+};
+const REPLACING =
+  'Its type or source was changed, and the ban importer has not finished replacing its old bans yet.';
 reset(0, 0);
-pausedRows = [paused()];
-syncRows = [{ ...changedSync }];
-await run('resume', { banlist: '5' });
+syncRows = [{ ...replacingSync }];
+removalRows = banIDs('old', 40).map((banId) => removal(banId, true));
+storedBans = banIDs('new', 12);
+await run('status', { banlist: '5' });
+await run('status', {});
 assert.strictEqual(
-  prompts[0].content,
-  "Resume **Org** / **Main**? Its type or source was changed, and the ban importer has not finished reading the new one yet: it reads it in full on its next cycle, and the list counts again once it has caught up with it. /banlist status shows when. Export bans follow from the cycle after it counts again, and players' reputation points within 1 cycle of it."
+  importOf(replies[0]),
+  `${REPLACING}\nCBL cannot read it on BattleMetrics · last imported ${String(ATTEMPTED_AT)} · last read in full ${String(ATTEMPTED_AT)}\n12 bans stored · 12 bans on BattleMetrics\nLast error: ${replacingSync.lastError}`
 );
-assert.deepStrictEqual(calls.at(-1), ['resume', 5]);
+assert.deepStrictEqual(replies[1].lines, [
+  `**Org** / **Main** (#5) · type or source changed, old bans not replaced yet · CBL cannot read it on BattleMetrics · last imported ${String(ATTEMPTED_AT)}`
+]);
+const replacing = await readStatus([record]);
+assert.strictEqual(replacing.syncs.get(5).sourceChange, 'replacing');
+assert.strictEqual(replacing.removals.has(5), false);
+// A source changed by hand still has its old bans, and the importer's first complete read of the
+// new source left those it did not find waiting for a confirming read, which the status gives, as
+// the list still has them, though not the records of bans it no longer has. Once the replacing is
+// done, the row no longer says so, and nor does the status.
+reset(0, 0);
+syncRows = [{ ...replacingSync, state: 'held', storedCount: 40, headTotal: 10, lastError: null }];
+removalRows = [
+  ...banIDs('old', 30).map((banId) => removal(banId)),
+  ...banIDs('gone', 5).map((banId) => removal(banId, true))
+];
+storedBans = [...banIDs('old', 30), ...banIDs('new', 10)];
+await run('status', { banlist: '5' });
+await run('status', {});
+const heldLine = `Imported, with removals held until they are confirmed · last imported ${String(ATTEMPTED_AT)}`;
+assert.strictEqual(
+  importOf(replies[0]),
+  `${REPLACING}\n${heldLine} · last read in full ${String(ATTEMPTED_AT)}\n40 bans stored · 10 bans on BattleMetrics\nRemovals: 30 bans waiting for a confirming read, 0 bans held for an admin`
+);
+assert.deepStrictEqual(replies[1].lines, [
+  `**Org** / **Main** (#5) · type or source changed, old bans not replaced yet · ${heldLine} · 30 removals held`
+]);
+syncRows[0].replacePending = 0;
+assert.strictEqual(format.summariseImport((await readStatus([record])).syncs.get(5)), heldLine);
+
+// Resuming a list the importer has not read since its type or source was changed, or whose old bans
+// it has not finished replacing, asks only that, as the importer replaces them with the new
+// source's without holding them for an admin.
+for (const [sync, changedLine] of [
+  [changedSync, UNREAD],
+  [replacingSync, REPLACING]
+]) {
+  reset(0, 0);
+  pausedRows = [paused()];
+  syncRows = [{ ...sync }];
+  await run('resume', { banlist: '5' });
+  assert.strictEqual(
+    prompts[0].content,
+    `Resume **Org** / **Main**? ${changedLine} The ban importer reads it in full on its next cycle, and the list counts again once it has caught up with it. /banlist status shows when. Export bans follow from the cycle after it counts again, and players' reputation points within 1 cycle of it.`
+  );
+  assert.deepStrictEqual(calls.at(-1), ['resume', 5]);
+}
 
 // Names and reasons are as admins typed them, so the log keeps each on one line and shows it as
 // written, as the website's lines show names (logText): a line break cannot start what looks like
@@ -920,5 +1001,5 @@ assert.deepStrictEqual(audits, [
 assert.strictEqual(replies.at(-1).content, 'Updated **Org_\u202eA** / **New\n_name_**.');
 
 console.log(
-  "Ban list command checks passed: renames keep bans, source changes delete them once confirmed and only while no import runs, and mark the importer's row, also when changed back, removal, suspending and resuming lists, which then queue no players, and their status, which leaves out a changed source's old state."
+  "Ban list command checks passed: renames keep bans, source changes delete them once confirmed and only while no import runs, and mark the importer's row, also when changed back, removal, suspending and resuming lists, which then queue no players, and their status, which leaves out a changed source's old state until the importer has read the list since, and then gives the new one's while its old bans are being replaced."
 );

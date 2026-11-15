@@ -66,27 +66,67 @@ export async function markSourceChanged(banList, transaction) {
   }
 }
 
-const REMOVALS = `SELECT banList, COUNT(*) AS bans, COUNT(heldAt) AS held
-  FROM BanListPendingRemovals WHERE banList IN (:banListIDs) GROUP BY banList`;
+const REMOVALS =
+  'SELECT banList, banId, heldAt FROM BanListPendingRemovals WHERE banList IN (:banListIDs)';
+const STORED = 'SELECT id, banList FROM Bans WHERE id IN (:banIds)';
 
-// Whether the ban importer has yet to finish reading the ban list's type or source, as it tells by
-// the list's BanListSyncs row: 'other' when the row is of another source, by its sourceKey, so
-// nothing in it is of the list's source now, 'replacing' when the row is of the list's source but
-// the importer has not finished replacing the old source's bans with those of the new one
-// (replacePending), as when its first attempt at a new source failed or did not read all of it, or
-// the list was given back its source before the importer read the one it was changed to, or null
-// when it has finished.
+// The bans the ban importer holds back from removing the lists with these IDs, { waiting, held },
+// by ban list ID, as the importer counts them: only the records of bans the list still has. The
+// records of the bans /banlist update deleted with a new type or source stay until the importer has
+// read the new source in full. A record's banId refers to Bans.id without a foreign key, so the two
+// are compared here, as the importer compares them, rather than joined on.
+async function readRemovals(banListIDs) {
+  const records = await sequelize.query(REMOVALS, {
+    type: QueryTypes.SELECT,
+    replacements: { banListIDs }
+  });
+  if (records.length === 0) return new Map();
+  const stored = await sequelize.query(STORED, {
+    type: QueryTypes.SELECT,
+    replacements: { banIds: records.map(({ banId }) => banId) }
+  });
+  const kept = new Set(stored.map(({ id, banList }) => `${Number(banList)},${id}`));
+  const removals = new Map();
+  for (const { banList, banId, heldAt } of records) {
+    if (!kept.has(`${Number(banList)},${banId}`)) continue;
+    const counts = removals.get(Number(banList)) ?? { waiting: 0, held: 0 };
+    if (heldAt === null) counts.waiting++;
+    else counts.held++;
+    removals.set(Number(banList), counts);
+  }
+  return removals;
+}
+
+// Whether the ban importer has yet to read the ban list since its type or source was changed, or to
+// finish replacing its old bans with those of its new source, as it tells by the list's
+// BanListSyncs row:
+// - 'unread' when it has not read the list since, so nothing in the row is of its source now: the
+//   row is of another source, by its sourceKey, or of the list's source but from before the change,
+//   as when the source was changed back before the importer read the one it was changed to. The
+//   row then says the old bans are still to be replaced (replacePending), but its latest attempt is
+//   from before the list was last saved (updatedAt), which only /banlist update does;
+// - 'replacing' when the row is of an attempt at the list's source since then, so its state and
+//   counts are of that source, but the importer has not finished replacing the old bans
+//   (replacePending): its attempts failed, did not read all of the list, or could not remove the
+//   bans it no longer has, e.g. as BattleMetrics does not list it for CBL, or wait for a read to
+//   confirm them gone;
+// - null when it has finished.
+// So a list whose old bans are still being replaced, renamed since the importer's latest attempt at
+// it, is taken for one not read since, until the importer's next attempt.
 function sourceChange(banList, row) {
-  if (row.sourceKey !== sourceKey(banList)) return 'other';
-  return Number(row.replacePending) ? 'replacing' : null;
+  if (row.sourceKey !== sourceKey(banList)) return 'unread';
+  if (!Number(row.replacePending)) return null;
+  const attempted = row.lastAttemptAt ? new Date(row.lastAttemptAt).getTime() : null;
+  return attempted !== null && attempted > new Date(banList.updatedAt).getTime()
+    ? 'replacing'
+    : 'unread';
 }
 
 // The status of the ban lists given: { paused, syncs, removals }, each a Map by ban list ID, of
 // their paused rows, their BanListSyncs rows, each with its sourceChange, and the bans held back
-// from removing them, { waiting, held }. A list whose new type or source the importer has yet to
-// finish reading has no removals: those it holds back are its old source's, or of bans deleted with
-// it, until the importer has read the new one in full. Fails with the bot's answer when the
-// importer's tables are missing.
+// from removing them, { waiting, held } (see readRemovals). A list the importer has not read since
+// its type or source was changed has no removals: those it holds back are its old source's. Fails
+// with the bot's answer when the importer's tables are missing.
 export async function readStatus(banLists) {
   if (banLists.length === 0) return { paused: new Map(), syncs: new Map(), removals: new Map() };
   const banListIDs = banLists.map((banList) => banList.id);
@@ -95,10 +135,7 @@ export async function readStatus(banLists) {
     const [paused, rows, removals] = await Promise.all([
       readPausedBanLists({ missingTable: 'throw' }),
       BanListSync.findAll({ where: { banList: banListIDs }, raw: true }),
-      sequelize.query(REMOVALS, {
-        type: QueryTypes.SELECT,
-        replacements: { banListIDs }
-      })
+      readRemovals(banListIDs)
     ]);
     const syncs = new Map(
       rows.map((row) => {
@@ -109,14 +146,7 @@ export async function readStatus(banLists) {
     return {
       paused: new Map(paused.map((row) => [row.banList, row])),
       syncs,
-      removals: new Map(
-        removals
-          .filter(({ banList }) => !syncs.get(Number(banList))?.sourceChange)
-          .map(({ banList, bans, held }) => [
-            Number(banList),
-            { waiting: Number(bans) - Number(held), held: Number(held) }
-          ])
-      )
+      removals: new Map([...removals].filter(([id]) => syncs.get(id)?.sourceChange !== 'unread'))
     };
   } catch (err) {
     return tablesMissing(err);

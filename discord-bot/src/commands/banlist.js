@@ -29,6 +29,7 @@ import {
   findBanList,
   findOrganisation,
   describePause,
+  describeSourceChange,
   formatBanListName,
   formatBanListType,
   markSourceChanged,
@@ -343,14 +344,15 @@ async function resume(interaction) {
   if (pauseState(before) === 'resuming')
     throw new UserError(`${listName} is resuming already.\n${describePause(before)}`);
 
-  // A list given a new type or source that the importer has yet to finish reading (see readStatus)
-  // has its bans replaced by the new source's, which the importer never holds for an admin, and
-  // /banlist update deleted the old ones with the change, so the question does not say what their
-  // removals take, only that the list counts again once the importer has caught up with it.
+  // A list given a new type or source whose old bans the importer has yet to finish replacing (see
+  // readStatus) has them replaced by the new source's, which the importer never holds for an admin,
+  // and /banlist update deleted the old ones with the change, so the question does not say what
+  // their removals take, only that the list counts again once the importer has caught up with it.
   const bans = await summariseBanListBans([banList.id]);
   const { syncs } = await readStatus([banList]);
-  const catchUp = syncs.get(banList.id)?.sourceChange
-    ? 'Its type or source was changed, and the ban importer has not finished reading the new one yet: it reads it in full on its next cycle, and the list counts again once it has caught up with it.'
+  const changed = describeSourceChange(syncs.get(banList.id));
+  const catchUp = changed
+    ? `${changed} The ban importer reads it in full on its next cycle, and the list counts again once it has caught up with it.`
     : `The ban importer reads it in full on its next cycle, and its ${describeBanListDeletion(bans)} count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes at least 10 more minutes when there are any, and longer when it seems to have lost all of them, or a large part of them at once.`;
   const confirmed = await confirm(
     interaction,
