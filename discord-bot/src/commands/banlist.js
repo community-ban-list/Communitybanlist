@@ -232,11 +232,13 @@ async function update(interaction) {
   // settled them (see readQueueSkips), as read once the change is confirmed. A new type or source
   // also marks the list's row of the importer's, so the importer reads the new source in full
   // afresh, also when it had no bans to delete, e.g. as the source is changed back before the
-  // importer read the one it was changed to (see markSourceChanged).
+  // importer read the one it was changed to (see markSourceChanged). A rename alone leaves the
+  // list's updatedAt as it was, as /banlist status takes that for when its type or source was last
+  // changed (see readStatus).
   const skips = deletion ? await readQueueSkips([banList.id]) : [];
   await sequelize.transaction(async (transaction) => {
     if (deletion) await deleteBansOfBanLists([banList.id], transaction, { paused: skips });
-    await banList.save({ transaction });
+    await banList.save({ transaction, silent: check === undefined });
     if (check !== undefined) await markSourceChanged(banList.id, transaction);
   });
   const deleted = deletion ? `, deleting ${deletion}` : '';

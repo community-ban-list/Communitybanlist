@@ -34,8 +34,10 @@ let markError = null;
 // The paused lists the importer's reputation check last settled players without.
 let settled = [];
 const SUSPENDED_AT = new Date('2026-10-29T12:00:00.000Z');
-// When the ban list was last saved, by /banlist update.
+// When the ban list's type or source was last changed, by /banlist update, and when a save moves
+// its updatedAt to, as Sequelize moves it on any save that is not silent.
 const CHANGED_AT = new Date('2026-10-29T11:30:00.000Z');
+const SAVED_AT = new Date('2026-10-29T11:50:00.000Z');
 const noTable = () =>
   Object.assign(new Error("Table 'cbl.BanListSuspensions' doesn't exist"), {
     original: { errno: 1146 }
@@ -331,6 +333,7 @@ function reset(bans = 0, steamUsers = 0, exportBanListConfigs = 0) {
     Organisation: { id: 2, name: 'Org' },
     async save(options) {
       calls.push(['save', options?.transaction?.id, this.type, this.source, this.name]);
+      if (!options?.silent) this.updatedAt = SAVED_AT;
     }
   };
 }
@@ -891,9 +894,9 @@ syncRows = [{ ...changedSync, replacePending: 0 }];
 assert.strictEqual(format.describeImport((await readStatus([record])).syncs.get(5)), UNREAD);
 
 // So does a row of the list's source that says the old bans are still to be replaced, but whose
-// latest attempt is from before the list was last saved, as when the source was changed back before
-// the importer read the one it was changed to: its state, counts and error are from before the
-// change, and the bans it held were deleted with it.
+// latest attempt is from before the list's type or source was last changed, as when the source was
+// changed back before the importer read the one it was changed to: its state, counts and error are
+// from before the change, and the bans it held were deleted with it.
 for (const fields of oldStates) {
   reset(0, 0);
   syncRows = [{ ...changedSync, sourceKey: sourceKey(record), ...fields }];
@@ -928,16 +931,14 @@ const replacingSync = {
 };
 const REPLACING =
   'Its type or source was changed, and the ban importer has not finished replacing its old bans yet.';
+const REPLACING_IMPORT = `${REPLACING}\nCBL cannot read it on BattleMetrics · last imported ${String(ATTEMPTED_AT)} · last read in full ${String(ATTEMPTED_AT)}\n12 bans stored · 12 bans on BattleMetrics\nLast error: ${replacingSync.lastError}`;
 reset(0, 0);
 syncRows = [{ ...replacingSync }];
 removalRows = banIDs('old', 40).map((banId) => removal(banId, true));
 storedBans = banIDs('new', 12);
 await run('status', { banlist: '5' });
 await run('status', {});
-assert.strictEqual(
-  importOf(replies[0]),
-  `${REPLACING}\nCBL cannot read it on BattleMetrics · last imported ${String(ATTEMPTED_AT)} · last read in full ${String(ATTEMPTED_AT)}\n12 bans stored · 12 bans on BattleMetrics\nLast error: ${replacingSync.lastError}`
-);
+assert.strictEqual(importOf(replies[0]), REPLACING_IMPORT);
 assert.deepStrictEqual(replies[1].lines, [
   `**Org** / **Main** (#5) · type or source changed, old bans not replaced yet · CBL cannot read it on BattleMetrics · last imported ${String(ATTEMPTED_AT)}`
 ]);
@@ -967,6 +968,20 @@ assert.deepStrictEqual(replies[1].lines, [
 ]);
 syncRows[0].replacePending = 0;
 assert.strictEqual(format.summariseImport((await readStatus([record])).syncs.get(5)), heldLine);
+
+// A rename leaves the list's updatedAt as it was, so a list whose old bans are still being replaced
+// keeps its status, rather than being taken for one the importer has not read since the change. A
+// new type or source moves it, so once the source is changed and changed back, the same row, of
+// the source the list is back to, is taken for one from before the change.
+reset(0, 0);
+syncRows = [{ ...replacingSync }];
+await run('update', { banlist: '5', name: 'Renamed' });
+await run('status', { banlist: '5' });
+assert.strictEqual(importOf(replies.at(-1)), REPLACING_IMPORT);
+await run('update', { banlist: '5', source: 'new-list' });
+await run('update', { banlist: '5', source: 'old-list' });
+await run('status', { banlist: '5' });
+assert.strictEqual(importOf(replies.at(-1)), UNREAD);
 
 // Resuming a list the importer has not read since its type or source was changed, or whose old bans
 // it has not finished replacing, asks only that, as the importer replaces them with the new
@@ -1014,5 +1029,5 @@ assert.deepStrictEqual(audits, [
 assert.strictEqual(replies.at(-1).content, 'Updated **Org_\u202eA** / **New\n_name_**.');
 
 console.log(
-  "Ban list command checks passed: renames keep bans, source changes delete them once confirmed and only while no import runs, and mark the importer's row, also when changed back, removal, suspending and resuming lists, which then queue no players, and their status, which leaves out a changed source's old state until the importer has read the list since, and then gives the new one's while its old bans are being replaced."
+  "Ban list command checks passed: renames keep bans, source changes delete them once confirmed and only while no import runs, and mark the importer's row, also when changed back, removal, suspending and resuming lists, which then queue no players, and their status, which leaves out a changed source's old state until the importer has read the list since, and then gives the new one's while its old bans are being replaced, also once the list is renamed."
 );
