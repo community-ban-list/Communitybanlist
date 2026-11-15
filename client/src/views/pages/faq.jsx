@@ -30,13 +30,11 @@ const sections = [
         question: 'How often is CommunityBanList.com updated?',
         answer: (
           <>
-            CommunityBanList.com updates automatically several times an hour. Each update checks our
-            partner organisations' ban lists for new bans, and each list is also read in full
-            regularly, so a new or changed ban usually reaches our website, players' reputation
-            points and export ban lists, including those on BattleMetrics, within an hour, and often
-            much sooner. Steam user profile information, such as names and avatars, is updated less
-            often: about once a week, or soon after we import new or updated bans belonging to that
-            user.
+            CommunityBanList.com updates automatically several times an hour. A new or changed ban
+            usually reaches our website, players' reputation points and export ban lists, including
+            those on BattleMetrics, within an hour, and often much sooner. Steam user profile
+            information, such as names and avatars, is updated less often: about once a week, or
+            soon after we import new or updated bans belonging to that user.
           </>
         )
       },
@@ -166,11 +164,11 @@ const sections = [
         answer: (
           <>
             CommunityBanList.com updates automatically several times an hour, so a removed ban
-            usually disappears from our website, and export ban lists are updated, within an hour.
-            When an organisation removes many bans at once, we check its list again a little later
-            before removing them, and if it removes a large part of its list at once, the bans stay
-            until one of our admins confirms the change, which can take longer. Please be patient.
-            If the ban is still listed after a few hours, let us know on our{' '}
+            usually disappears from our website and from export ban lists within an hour. When an
+            organisation removes many bans at once, we check its list again a little later before
+            removing them, and if it removes a large part of its list at once, the bans stay until
+            one of our admins confirms the change, which can take longer. Please be patient. If the
+            ban is still listed after a few hours, let us know on our{' '}
             <a href={DISCORD_INVITE} target="_blank" rel="noopener noreferrer">
               Discord
             </a>
