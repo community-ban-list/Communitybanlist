@@ -792,6 +792,33 @@ assert.strictEqual(
   'Could not remove export ban list **List 17** (#17). Deleting it from the database failed: Lock wait timeout exceeded'
 );
 
+// A deletion the database was too busy for, as the shared deletion runs it again after a deadlock
+// and marks the error busy when MySQL still ends it in one, or when it waits too long for a lock,
+// is said plainly, in the reply and the log: nothing more was deleted, and running the command
+// again finishes the removal. Here its BattleMetrics ban list was deleted before the row could not
+// be.
+const BUSY =
+  'Deleting it from the database failed, as the database was busy with other changes, so nothing more was deleted. Run the command again to finish removing it.';
+reset();
+addList(19, 'battlemetrics', { battlemetricsID: 'bm-19' });
+visible = new Set(['bm-19']);
+deletions.set(
+  19,
+  Object.assign(new Error('Deadlock found when trying to get lock; try restarting transaction'), {
+    stage: 'database deletion',
+    busy: true
+  })
+);
+await run('remove', { id: 19 });
+assert.strictEqual(
+  contentOf(replies.at(-1)),
+  `Could not remove export ban list **List 19** (#19). ${BUSY}`
+);
+assert.deepStrictEqual(audits, [
+  `admin (1) could not remove export ban list "List 19" (ID: 19, BattleMetrics, BattleMetrics ID: bm-19) of Steam user "Owner 19" (ID: 76561198000000019), which had 0 players: ${BUSY}`
+]);
+assert.ok(rows.has(19));
+
 // A list that does not exist is refused, and one deleted while the removal was confirmed is left.
 reset();
 await assert.rejects(run('remove', { id: 404 }), (err) => {
@@ -1871,6 +1898,33 @@ assert.strictEqual(
   `#100 "List 100": failed: Deleting it from the database failed: ${long}`
 );
 assert.deepStrictEqual(summary.attachments, []);
+
+// A deletion the database was too busy for says so plainly here too, in the summary and the log.
+reset();
+addList(96, 'remote');
+deletions.set(
+  96,
+  Object.assign(new Error('Lock wait timeout exceeded; try restarting transaction'), {
+    stage: 'database deletion',
+    busy: true
+  })
+);
+await run('remove_outside_limits');
+summary = replies.at(-1);
+assert.strictEqual(
+  summary.content,
+  "Removed 0 of the 1 export ban list outside today's limits. 1 failed."
+);
+assert.strictEqual(
+  embedOf(summary).description,
+  `**List 96** (#96): failed: ${discord.escapeMarkdown(BUSY)}`
+);
+assert.ok(
+  audits.includes(
+    `[important] admin (1) could not remove export ban list "List 96" (ID: 96, Remote) of Steam user "Owner 96" (ID: 76561198000000096), outside today's limits with 0 players: ${BUSY}`
+  )
+);
+assert.ok(rows.has(96));
 
 // Discord lets the reply be edited for 15 minutes. A removal that runs past them carries on, and
 // its results and summary are only logged; nor does a reply that can no longer be edited stop it.

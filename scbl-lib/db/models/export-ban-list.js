@@ -165,6 +165,13 @@ function destroyIfOwnedBy(exportBanList, owner) {
   });
 }
 
+// Delete a list's row, which takes its export bans and configs with it, whoever owns the list, as
+// the Discord bot does. It runs in inTransaction, as destroyIfOwnedBy does, so it is run again if
+// MySQL ends it in a deadlock, e.g. with the importer, which writes the list's export bans.
+function destroyWhoeverOwns(exportBanList) {
+  return ExportBanList.inTransaction((transaction) => exportBanList.destroy({ transaction }));
+}
+
 // Throw an error with the stage of a list's creation it failed in, for the caller to say what
 // failed, as deleteExportBanList's errors give theirs.
 const failedAt = (stage) => (error) => {
@@ -631,7 +638,10 @@ class ExportBanList extends Sequelize.Model {
   // important, so these lines are posted that way too and reach the channel in order with its own.
   //
   // A caller that deletes a list for its owner, as the website does, passes owner, their Steam ID,
-  // and the row is then only deleted while they still own the list (see destroyIfOwnedBy).
+  // and the row is then only deleted while they still own the list (see destroyIfOwnedBy). Either
+  // way the row's deletion is run again after a deadlock, and when MySQL still ends it in one, or
+  // it waits too long for a lock, its error is marked busy, as nothing more was deleted and the
+  // deletion can be run again shortly (see inTransaction).
   async deleteExportBanList({ important = false, owner } = {}) {
     let stage = 'battlemetrics';
     try {
@@ -640,7 +650,7 @@ class ExportBanList extends Sequelize.Model {
           ? await this.deleteBattlemetricsBanList({ important })
           : 'none';
       stage = 'database deletion';
-      if (owner === undefined) await this.destroy();
+      if (owner === undefined) await destroyWhoeverOwns(this);
       else await destroyIfOwnedBy(this, owner);
       return outcome;
     } catch (error) {
