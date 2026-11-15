@@ -197,7 +197,8 @@ async function update(interaction) {
   // suspended. The importer would replace them itself, as it does for a source changed by hand, but
   // a list of 10 or more bans would keep them counting until a read confirmed them gone, at least
   // 10 minutes after its first read of the new source, so deleting them here makes them stop
-  // counting at once.
+  // counting at once. The question gives what the check found of the new source, as it may warn of
+  // something the admin would rather not delete the bans for.
   let deletion = null;
   let paused = null;
   if (check !== undefined) {
@@ -211,7 +212,7 @@ async function update(interaction) {
       deletion = describeBanListDeletion(bans);
       const confirmed = await confirm(
         interaction,
-        `Change the source of ${currentName}? This deletes its ${deletion}, and the new source's bans are ${imported}.`,
+        `Change the source of ${currentName}? This deletes its ${deletion}, and the new source's bans are ${imported}. ${check}`,
         'Change source'
       );
       if (!confirmed) return;

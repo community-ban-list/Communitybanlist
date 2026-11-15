@@ -17,6 +17,8 @@ let confirmAnswer = true;
 let counts = { bans: 0, steamUsers: 0, exportBanListConfigs: 0 };
 // Whether a ban importer run holds its run lock.
 let importerRunning = false;
+// What the check of a new source says it found.
+let checkResult = 'Found 3 bans.';
 
 // The paused lists' rows, the ban importer's rows of BanListSyncs and of BanListPendingRemovals,
 // the IDs of the bans the lists still have, whether the importer has made its tables yet, what a
@@ -276,7 +278,7 @@ const utils = {
   banListTypeOption: option,
   async checkBanListSourceOption(interaction, type, source) {
     calls.push(['check source', type, source]);
-    return 'Found 3 bans.';
+    return checkResult;
   },
   async checkBanListSourceUnused() {},
   async confirm(interaction, content, confirmLabel) {
@@ -310,6 +312,7 @@ function reset(bans = 0, steamUsers = 0, exportBanListConfigs = 0) {
   transactions = 0;
   confirmAnswer = true;
   importerRunning = false;
+  checkResult = 'Found 3 bans.';
   pausedRows = [];
   syncRows = [];
   removalRows = [];
@@ -362,13 +365,14 @@ assert.deepStrictEqual(audits, [
 
 // A new source deletes the list's bans, which came from the old one, in the same transaction that
 // saves the source and marks the list's row of the ban importer's, once the change is confirmed and
-// no ban importer run is under way. The players are queued for an update.
+// no ban importer run is under way. The question gives what the check found of the new source. The
+// players are queued for an update.
 reset(3, 2);
 await run('update', { banlist: '5', source: 'new-list' });
 assert.deepStrictEqual(prompts, [
   {
     content:
-      "Change the source of **Org** / **Main**? This deletes its 3 bans on 2 players, and the new source's bans are imported on the next ban importer run.",
+      "Change the source of **Org** / **Main**? This deletes its 3 bans on 2 players, and the new source's bans are imported on the next ban importer run. Found 3 bans.",
     confirmLabel: 'Change source'
   }
 ]);
@@ -411,11 +415,20 @@ assert.deepStrictEqual(calls.slice(-8), [
   ['commit', 1]
 ]);
 
-// Nothing is changed when the change is not confirmed.
+// Nothing is changed when the change is not confirmed, as when the check warns of the new source,
+// here that BattleMetrics does not list it for CBL, which the question gives before any ban is
+// deleted.
 reset(3, 2);
+checkResult =
+  'Found 2+ bans on the BattleMetrics ban list "Partner bans". **BattleMetrics does not list it among the ban lists the CBL organisation can see**, so its new bans are saved, but none are removed while BattleMetrics does not list it.';
 confirmAnswer = false;
 await run('update', { banlist: '5', source: 'new-list' });
-assert.strictEqual(prompts.length, 1);
+assert.deepStrictEqual(
+  prompts.map(({ content }) => content),
+  [
+    `Change the source of **Org** / **Main**? This deletes its 3 bans on 2 players, and the new source's bans are imported on the next ban importer run. ${checkResult}`
+  ]
+);
 assert.ok(
   !calls.some(([call]) =>
     ['check run lock', 'begin', 'flags', 'destroy bans', 'save', 'mark source changed'].includes(
@@ -707,7 +720,7 @@ settled = [5];
 await run('update', { banlist: '5', source: 'new-list' });
 assert.strictEqual(
   prompts[0].content,
-  "Change the source of **Org** / **Main**? This deletes its 3 bans on 2 players, and the new source's bans are imported once it is resumed."
+  "Change the source of **Org** / **Main**? This deletes its 3 bans on 2 players, and the new source's bans are imported once it is resumed. Found 3 bans."
 );
 assert.deepStrictEqual(calls.slice(-5), [
   ['begin', 1],
@@ -725,7 +738,7 @@ reset(3, 2);
 pausedRows = [paused({ resumedAt: new Date(SUSPENDED_AT.getTime() + 1) })];
 settled = [5];
 await run('update', { banlist: '5', source: 'new-list' });
-assert.match(prompts[0].content, /imported on the next ban importer run\.$/);
+assert.match(prompts[0].content, /imported on the next ban importer run\. Found 3 bans\.$/);
 assert.ok(!calls.some(([call]) => call === 'flags'));
 // A list paused since the importer's reputation check last ran has players it has not settled, so
 // they are queued as for any list.
