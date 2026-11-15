@@ -37,22 +37,30 @@ const select = (sql, replacements = []) =>
   sequelize.query(sql, { type: QueryTypes.SELECT, replacements });
 const run = (sql, replacements = []) => sequelize.query(sql, { replacements });
 
-// The players, by letter. Each is a SteamID64, which can be on a list.
-const PLAYERS = Object.fromEntries(
-  [...'ABCDEFGHIJKLMN'].map((letter, index) => [
-    letter,
-    `765611980000000${String(index + 1).padStart(2, '0')}`
-  ])
-);
+// The players, by letter. Each is a SteamID64, which can be on a list: O has the lowest there is,
+// and P the highest.
+const PLAYERS = {
+  ...Object.fromEntries(
+    [...'ABCDEFGHIJKLMNQR'].map((letter, index) => [
+      letter,
+      `765611980000000${String(index + 1).padStart(2, '0')}`
+    ])
+  ),
+  O: '76561197960265729',
+  P: '76561202255233023'
+};
 // Players whose IDs are not SteamID64s, which can never be on a list however many bans they have:
-// an EOS ID, the IDs either side of the SteamID64 range, 17 characters that are not all digits,
-// and 16 digits.
+// an EOS ID, the IDs just outside the SteamID64 range, 17 characters that are not all digits, 16
+// digits, and 17 digits in the range followed by a line break. MySQL's regular expression takes
+// that last one, as its $ also matches before a final line break, so only the length check keeps
+// it off.
 const NOT_EXPORTABLE = [
   '0123456789abcdef0123456789abcdef',
   '76561197960265728',
   '76561202255233024',
   '7656119800000000a',
-  '7656119800000001'
+  '7656119800000001',
+  '76561198000000077\n'
 ];
 // The owner of the export ban lists, who has no bans.
 const OWNER = '76561198000000099';
@@ -62,10 +70,17 @@ const steamUsers = [...Object.values(PLAYERS), ...NOT_EXPORTABLE];
 const BAN_LISTS = [1, 2, 3, 4];
 const PAUSED = 4;
 
-// Each player's bans, as [ban list, age, expired]. The age is in UTC days, as the rule counts it:
-// a ban of age 2 was created at noon two days ago. 'null' is a ban with no created time,
-// 'day 30 start' one created at midnight 30 days ago, 'day 31 end' one created a second before
-// that, and 'future' one created tomorrow. Expired may be NULL, which counts as not expired.
+// Each player's bans, as [ban list, age, expired, expiry]. The age is in UTC days, as the rule
+// counts it: a ban of age 2 was created at noon two days ago. 'null' is a ban with no created
+// time, 'day 30 start' one created at midnight 30 days ago, 'day 31 end' one created a second
+// before that, and 'future' one created tomorrow. Expired may be NULL, which counts as not
+// expired. The expiry is NULL unless it is given: 'passed', an hour ago, or 'to come', in 30 days.
+//
+// The rule goes by the expired flag alone, so Q's ban counts as active although its expiry has
+// passed, as a ban's does until the importer marks it expired, and so does R's, whose expiry is to
+// come. A rule that went by the expiry as well would take Q off lists 1, 2 and 9, and one that read
+// it the wrong way round would take R off them. So a change to how expiry is decided (EXPIRED in
+// export-membership.js) must change what Q and R are expected on.
 const BANS = {
   A: [
     [1, 1, false],
@@ -104,7 +119,11 @@ const BANS = {
     [1, 20, true],
     [2, 20, false],
     [4, 20, false]
-  ]
+  ],
+  O: [[1, 1, false]],
+  P: [[1, 1, false]],
+  Q: [[1, 1, false, 'passed']],
+  R: [[1, 1, false, 'to come']]
 };
 
 // When a ban of each age was created, in SQL, from the UTC day the bans are seeded on.
@@ -116,9 +135,19 @@ function createdSQL(age) {
   return `UTC_DATE() - INTERVAL ${Number(age)} DAY + INTERVAL 12 HOUR`;
 }
 
-// The export ban lists, each with its settings, its configs as [ban list, active points, expired
-// points], and the players on it: with every ban counted, and with the bans of ban list 4 left out
-// (paused), where that differs. The players were worked out by hand from the rule in
+// When a ban expires, in SQL, from the UTC time the bans are seeded at.
+function expiresSQL(expiry) {
+  if (expiry === 'passed') return 'UTC_TIMESTAMP() - INTERVAL 1 HOUR';
+  if (expiry === 'to come') return 'UTC_TIMESTAMP() + INTERVAL 30 DAY';
+  assert.strictEqual(expiry, undefined, `Unknown expiry ${expiry}`);
+  return 'NULL';
+}
+
+// The export ban lists, each with its settings as [threshold, default active points, default
+// expired points, maxBanAge], its configs as [ban list, active points, expired points], and the
+// players on it: with every ban counted, and with the bans of ban list 4 left out (paused), where
+// that differs. Some settings and configs are ones the website refuses now, such as negative
+// points, but the columns can hold them. The players were worked out by hand from the rule in
 // export-membership.js, not by running it.
 const EXPORT_BAN_LISTS = [
   {
@@ -127,8 +156,8 @@ const EXPORT_BAN_LISTS = [
     // (B). The players whose IDs are not SteamID64s are on no list.
     settings: [3, 3, 1, 0],
     configs: [],
-    members: 'ABCDEFGHILMN',
-    paused: 'ABCDEFGILMN'
+    members: 'ABCDEFGHILMNOPQR',
+    paused: 'ABCDEFGILMNOPQR'
   },
   {
     // Bans up to 30 days old: a ban created at the start of the 30th day back counts (E), one a
@@ -136,8 +165,8 @@ const EXPORT_BAN_LISTS = [
     // ban created tomorrow counts (G).
     settings: [3, 3, 1, 30],
     configs: [],
-    members: 'ABCEGHLMN',
-    paused: 'ABCEGLMN'
+    members: 'ABCEGHLMNOPQR',
+    paused: 'ABCEGLMNOPQR'
   },
   {
     // Active points count once for each ban list (L has two active bans on one, 3 points), and
@@ -150,8 +179,9 @@ const EXPORT_BAN_LISTS = [
   {
     // Configs: of several for one ban list, the largest active points count and every one's
     // expired points add up, duplicates too (ban list 1: 4 active and 3 expired points). A config
-    // whose points are NULL takes the list's defaults (ban list 2), and a 0/0 config scores nothing
-    // (ban list 3). Ban list 4 has none, so it takes the defaults.
+    // whose active points are NULL takes the list's default (ban list 2, which A and N need), and
+    // ban list 4 has no config, so it takes the defaults (which N needs). Ban list 3's 0/0 config
+    // decides no place here; list 11 has one that does, and a config with NULL expired points.
     settings: [5, 1, 0, 0],
     configs: [
       [1, 2, 1],
@@ -177,8 +207,8 @@ const EXPORT_BAN_LISTS = [
     members: 'ADJN'
   },
   {
-    // A threshold of 0, and negative points. Points can add up to less than nothing (A, B, H). An
-    // expired ban scores 0 active points, which beat negative ones (M).
+    // A threshold of 0, and negative points. Points can add up to less than nothing, which keeps
+    // A, B and H off it.
     settings: [0, 3, 1, 0],
     configs: [[1, -5, -5]],
     members: 'DIJN',
@@ -194,13 +224,48 @@ const EXPORT_BAN_LISTS = [
     // Bans up to 1 day old: of A's bans 1, 2 and 3 days old, only the first counts.
     settings: [3, 3, 1, 1],
     configs: [],
-    members: 'ACGLM'
+    members: 'ACGLMOPQR'
   },
   {
     // With no maxBanAge, no ban counts.
     settings: [1, 3, 1, null],
     configs: [],
     members: ''
+  },
+  {
+    // Configs with NULL and 0 points. Ban list 1's config has active points and NULL expired
+    // points, and takes the list's default for those only: 2 active points, which keep C, E, F, G,
+    // L, O, P, Q and R off it, and 3 expired points, which B and M need. Ban list 3's 0/0 config
+    // scores nothing rather than the defaults, which keeps I off it.
+    settings: [3, 3, 3, 0],
+    configs: [
+      [1, 2, null],
+      [3, 0, 0]
+    ],
+    members: 'ABDHJMN'
+  },
+  {
+    // An expired ban scores 0 active points, which beat negative ones. M has an active and an
+    // expired ban on ban list 1, so scores 0 active points there rather than -5, and is on it with
+    // the expired ban's 2 points.
+    settings: [0, 3, 1, 0],
+    configs: [[1, -5, 2]],
+    members: 'BDHIJMN'
+  },
+  {
+    // A maxBanAge of -1 counts only bans created on a later day than today (G), not bans of any
+    // age, as 0 does.
+    settings: [3, 3, 1, -1],
+    configs: [],
+    members: 'G'
+  },
+  {
+    // A negative threshold, which players whose points add up to less than nothing can reach: C,
+    // E, F, G, L, M, O, P, Q and R have -2 points, while B, with -6, is off it. K has no bans, so
+    // is on no list whatever its threshold.
+    settings: [-3, 3, 1, 0],
+    configs: [[1, -2, -2]],
+    members: 'ACDEFGHIJLMNOPQR'
   }
 ].map((list, index) => ({ id: index + 1, ...list }));
 
@@ -272,25 +337,25 @@ async function seed() {
       );
 }
 
-// Add the bans, in place of any there are. Their created times are worked out by MySQL, from the
-// UTC day it is then.
+// Add the bans, in place of any there are. Their created and expiry times are worked out by MySQL,
+// from the UTC time it is then.
 async function seedBans() {
   await run('DELETE FROM Bans');
   const bans = [
     ...Object.entries(BANS).flatMap(([letter, bans]) =>
       bans.map((ban) => [PLAYERS[letter], ...ban])
     ),
-    // Each player whose ID is not a SteamID64 has an active ban on every ban list, which would put
-    // them on every list but the empty ones.
+    // Each player whose ID is not a SteamID64 has an active ban a day old on every ban list,
+    // enough for most of the lists, so only their ID keeps them off.
     ...NOT_EXPORTABLE.flatMap((steamUser) =>
       BAN_LISTS.map((banList) => [steamUser, banList, 1, false])
     )
   ];
   let number = 0;
-  for (const [steamUser, banList, age, expired] of bans)
+  for (const [steamUser, banList, age, expired, expiry] of bans)
     await run(
-      `INSERT INTO Bans (id, created, expired, reason, steamUser, banList, createdAt, updatedAt)
-       VALUES (?, ${createdSQL(age)}, ?, 'Made-up ban', ?, ?, NOW(), NOW())`,
+      `INSERT INTO Bans (id, created, expires, expired, reason, steamUser, banList, createdAt, updatedAt)
+       VALUES (?, ${createdSQL(age)}, ${expiresSQL(expiry)}, ?, 'Made-up ban', ?, ?, NOW(), NOW())`,
       [`test-ban-${++number}`, expired, steamUser, banList]
     );
 }
@@ -421,7 +486,10 @@ try {
       0,
       `The comparison script failed:\n${result.stdout}${result.stderr}`
     );
-    assert.match(result.stdout, /Compared 10 export ban lists, .*: every list agrees\./);
+    assert.match(
+      result.stdout,
+      new RegExp(`Compared ${EXPORT_BAN_LISTS.length} export ban lists, .*: every list agrees\\.`)
+    );
     assert.strictEqual(
       result.stdout.includes(`Leaving out the bans of paused ban lists ${PAUSED}.`),
       paused
