@@ -19,11 +19,15 @@ registries:
 
 updates:
   # The root package.json covers every workspace, and yarn.lock. Minor and patch updates come in one
-  # pull request a week, and each major update in a pull request of its own.
+  # pull request a week, and each major update in a pull request of its own. A release is proposed
+  # only once it is a week old, so a broken or compromised release has longer to be found and
+  # withdrawn first. Security updates never wait for this.
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       minor-and-patch:
         patterns:
@@ -53,11 +57,14 @@ updates:
         patterns:
           - '*'
 
-  # The actions the workflows use, which are pinned by commit, in one pull request.
+  # The actions the workflows use, which are pinned by commit, in one pull request. As with the
+  # packages, a release is proposed only once it is a week old.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns:
