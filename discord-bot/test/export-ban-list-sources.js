@@ -6,7 +6,9 @@ import * as discord from 'discord.js';
 
 import * as playerIDs from '../../scbl-lib/player-ids.js';
 import sourceKey from '../../scbl-lib/utils/ban-list-source-key.js';
-import isSameBattlemetricsID from '../../scbl-lib/utils/battlemetrics-id.js';
+import isSameBattlemetricsID, {
+  normaliseBattlemetricsID
+} from '../../scbl-lib/utils/battlemetrics-id.js';
 import logText from '../../scbl-lib/utils/log-text.js';
 
 // Run the bot's commands without Discord, the database or BattleMetrics. Package imports are
@@ -93,13 +95,45 @@ function banListRecord(values) {
   };
 }
 // What a remote ban list's host answers with, and BattleMetrics, for a ban list's first page of
-// bans, and for the ban lists the CBL organisation can see, which an error fails, and how many times
-// those were read.
+// bans, and for the ban lists the CBL organisation can see, which an error fails, how many times
+// those were read, and the time limit each read had.
 let remoteFile = '';
 let battlemetricsBans = { data: [{ type: 'ban' }], links: {} };
 let visibleBanLists = [PARTNER_ID, NEW_PARTNER_ID, OTHER_PARTNER_ID];
 let visibleError = null;
 let visibleReads = 0;
+const visibleSignals = [];
+// The ban lists the CBL organisation can see are given this many to a page, each page linking to
+// the next unless nextLink gives another link for a page, by its index. hold, if set, is called
+// with each request's path and config, and the request waits for what it returns.
+let visiblePageSize = 3;
+let nextLink = () => undefined;
+let hold = null;
+// The time limits AbortSignal.timeout gives, each with its time and the controller that ends it, so
+// a check can end one without waiting for it. The modules run in this test's context, so they get
+// these.
+const timeLimits = [];
+AbortSignal.timeout = (ms) => {
+  const controller = new AbortController();
+  timeLimits.push({ ms, controller });
+  return controller.signal;
+};
+function readVisible(params) {
+  if (visibleError) throw visibleError;
+  // A read that went round in circles would end only at its time limit, which never ends here.
+  assert.ok(visibleReads <= 20, 'The ban lists were read in circles');
+  const index = Number(params['page[key]'] ?? 0);
+  const page = visibleBanLists.slice(index * visiblePageSize, (index + 1) * visiblePageSize);
+  const last = (index + 1) * visiblePageSize >= visibleBanLists.length;
+  const next =
+    nextLink(index) ??
+    (last
+      ? null
+      : `https://api.battlemetrics.com/ban-lists?page%5Bkey%5D=${index + 1}&page%5Bsize%5D=100`);
+  return {
+    data: { data: page.map((id) => ({ type: 'banList', id })), links: next ? { next } : {} }
+  };
+}
 const stubs = {
   'discord.js': discord,
   axios: {
@@ -109,7 +143,13 @@ const stubs = {
         async get(path, config) {
           requests.push(path);
           requestParams.push(config?.params ?? null);
+          await hold?.(path, config);
           if (path === 'bans') return { data: battlemetricsBans };
+          if (path === 'ban-lists') {
+            visibleReads++;
+            visibleSignals.push(config?.signal);
+            return readVisible(config.params);
+          }
           return { data: { data: { attributes: { name: 'Partner bans' } } } };
         }
       })
@@ -161,11 +201,6 @@ const stubs = {
       async findAll({ where }) {
         if (exportLookupError) throw exportLookupError;
         return exportBanLists.filter((exportBanList) => matches(exportBanList, where));
-      },
-      async findVisibleBattlemetricsBanLists() {
-        visibleReads++;
-        if (visibleError) throw visibleError;
-        return new Set(visibleBanLists);
       }
     },
     Organisation: {
@@ -198,6 +233,7 @@ const stubs = {
   'scbl-lib/db/sequelize': { Op, QueryTypes: { SELECT: 'SELECT' } },
   'scbl-lib/utils': {
     isSameBattlemetricsID,
+    normaliseBattlemetricsID,
     Logger: { verbose: (...args) => audits.push(args.slice(2).join('')) },
     logText,
     sourceKey
@@ -330,13 +366,15 @@ const [fetched] = await run('banlist', 'add', {
   source: OTHER_PARTNER_ID
 });
 assert.match(fetched.content, /Found 1 ban on the BattleMetrics ban list "Partner bans"\./);
-assert.deepStrictEqual(requests, ['bans', `ban-lists/${OTHER_PARTNER_ID}`]);
+assert.deepStrictEqual(requests, ['bans', `ban-lists/${OTHER_PARTNER_ID}`, 'ban-lists']);
 // The test fetch asks for the list's bans as the importer does, 100 to a page and its expired ones
 // too, as BattleMetrics' API documentation says it hides them without filter[expired]. The list's
-// name needs no parameters.
+// name needs no parameters, and the ban lists the CBL organisation can see are read 100 to a page,
+// as the importer reads them.
 assert.deepStrictEqual(requestParams, [
   { 'filter[banList]': OTHER_PARTNER_ID, 'filter[expired]': 'true', 'page[size]': 100 },
-  null
+  null,
+  { 'page[size]': '100' }
 ]);
 await run('banlist', 'update', { banlist: '8', name: 'Mirror (to remove)' });
 // Updates save in a transaction, which would also delete the old bans if the source changed.
@@ -413,6 +451,72 @@ assert.strictEqual(
   `Added **Partner Org** / **Unlisted**. ${UNLISTED} Its bans are imported on the next ban importer run.`
 );
 assert.deepStrictEqual(writes, [['create', UNLISTED_ID]]);
+
+// The ban lists the CBL organisation can see are read a page at a time, each page by the link on
+// the one before, as the importer reads them: here the list is on the third page of three, and a
+// list on none of them is not listed. Each page is asked for once, and all of them within one time
+// limit of 30 seconds.
+const LISTED = 'Found 2+ bans on the BattleMetrics ban list "Partner bans".';
+const PAGED = [PARTNER_ID, NEW_PARTNER_ID, OTHER_PARTNER_ID, EXPORT_ID, OTHER_EXPORT_ID];
+visiblePageSize = 2;
+visibleBanLists = [...PAGED, UNLISTED_ID];
+const visibleRequests = () => requestParams.filter((params, i) => requests[i] === 'ban-lists');
+for (const list of [requests, requestParams, visibleSignals, timeLimits]) list.length = 0;
+assert.strictEqual(await checkBanListSource('battlemetrics', UNLISTED_ID), LISTED);
+assert.deepStrictEqual(visibleRequests(), [
+  { 'page[size]': '100' },
+  { 'page[key]': '1', 'page[size]': '100' },
+  { 'page[key]': '2', 'page[size]': '100' }
+]);
+assert.deepStrictEqual(
+  timeLimits.map(({ ms }) => ms),
+  [30000]
+);
+assert.ok(visibleSignals.every((signal) => signal === timeLimits[0].controller.signal));
+visibleBanLists = PAGED;
+assert.strictEqual(await checkBanListSource('battlemetrics', UNLISTED_ID), UNLISTED);
+// Only a link to the next page of the same list is followed, and each page once: a link elsewhere,
+// or back to a page read already, ends the read as one that could not be made, as does a ban list
+// without an ID, as for the importer, and the list is saved without a word.
+for (const link of [
+  'https://elsewhere.example/ban-lists?page%5Bkey%5D=1&page%5Bsize%5D=100',
+  'https://api.battlemetrics.com/bans?page%5Bkey%5D=1&page%5Bsize%5D=100',
+  'https://api.battlemetrics.com/ban-lists?page%5Bsize%5D=100'
+]) {
+  nextLink = (index) => (index === 0 ? link : undefined);
+  visibleReads = 0;
+  assert.strictEqual(await checkBanListSource('battlemetrics', UNLISTED_ID), LISTED, link);
+  assert.strictEqual(visibleReads, 1, link);
+}
+nextLink = () => undefined;
+visibleBanLists = [PARTNER_ID, null, NEW_PARTNER_ID];
+assert.strictEqual(await checkBanListSource('battlemetrics', UNLISTED_ID), LISTED);
+// A BattleMetrics that does not answer holds the reply up only until the time limit ends, after
+// which the list is saved without a word, as one whose visibility could not be checked. The list's
+// name is asked for meanwhile, not after.
+let answerName;
+hold = (path, config) => {
+  if (path === 'ban-lists')
+    return new Promise((resolve, reject) => {
+      config.signal.addEventListener('abort', () =>
+        reject(Object.assign(new Error('canceled'), { code: 'ERR_CANCELED' }))
+      );
+    });
+  if (path.startsWith('ban-lists/'))
+    return new Promise((resolve) => {
+      answerName = resolve;
+    });
+};
+for (const list of [requests, timeLimits]) list.length = 0;
+const checking = checkBanListSource('battlemetrics', UNLISTED_ID);
+await new Promise(setImmediate);
+assert.deepStrictEqual(requests, ['bans', `ban-lists/${UNLISTED_ID}`, 'ban-lists']);
+answerName();
+timeLimits[0].controller.abort();
+assert.strictEqual(await checking, LISTED);
+hold = null;
+visiblePageSize = 3;
+visibleBanLists = [PARTNER_ID, NEW_PARTNER_ID, OTHER_PARTNER_ID];
 battlemetricsBans = { data: [{ type: 'ban' }], links: {} };
 
 // A remote list's check counts the bans the ban importer would take from it: not the lines that ban
@@ -494,5 +598,5 @@ assert.ok(
 );
 
 console.log(
-  "Export ban list source checks passed: IDs, links, each command, skip_check, partners' lists, hidden bans and lists BattleMetrics does not list for CBL, remote lines and remote files the importer would fail, and names in the log."
+  "Export ban list source checks passed: IDs, links, each command, skip_check, partners' lists, hidden bans and lists BattleMetrics does not list for CBL, read a page at a time within one time limit, remote lines and remote files the importer would fail, and names in the log."
 );

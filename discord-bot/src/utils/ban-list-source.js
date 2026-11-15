@@ -1,17 +1,18 @@
 import axios from 'axios';
 
 import { BATTLEMETRICS_API_KEY } from 'scbl-lib/config';
-import { ExportBanList } from 'scbl-lib/db/models';
 import { parseRemoteFile } from 'scbl-lib/player-ids';
-import { isSameBattlemetricsID } from 'scbl-lib/utils';
+import { isSameBattlemetricsID, normaliseBattlemetricsID } from 'scbl-lib/utils';
 
 import { plural } from './format.js';
 import UserError from './user-error.js';
 
 const CHECK_TIMEOUT = 30 * 1000;
 
-// Requests are made directly rather than through scbl-lib's BattleMetrics API, which retries
-// failed requests for minutes, so that a wrong ban list ID is reported straight away.
+// Requests are made directly, each once, rather than through scbl-lib's BattleMetrics API, which
+// retries failed requests and waits out BattleMetrics' rate limits, for minutes, so that a wrong
+// ban list ID is reported straight away, and a BattleMetrics that is slow or does not answer holds
+// the reply up no longer than the check's time limits.
 const battlemetrics = axios.create({
   baseURL: 'https://api.battlemetrics.com/',
   timeout: CHECK_TIMEOUT,
@@ -122,32 +123,63 @@ async function checkBattlemetricsSource(source) {
       "Found no bans on the BattleMetrics ban list. Check the ID and that the CBL BattleMetrics organisation has accepted the list's invite, or use `skip_check` if the list is meant to be empty."
     );
 
-  // The list's name helps confirm the right list was used, but is not needed to import it.
-  const banList = await battlemetrics
-    .get(`ban-lists/${encodeURIComponent(source)}`)
-    .catch(() => null);
+  // The list's name helps confirm the right list was used, but is not needed to import it. It is
+  // read while BattleMetrics is asked whether it lists the list for CBL.
+  const [banList, listed] = await Promise.all([
+    battlemetrics.get(`ban-lists/${encodeURIComponent(source)}`).catch(() => null),
+    isListedForCBL(source)
+  ]);
   const name = banList?.data?.data?.attributes?.name;
 
   const count = data.links && data.links.next ? `${bans.length}+ bans` : plural(bans.length, 'ban');
   const found = name
     ? `Found ${count} on the BattleMetrics ban list "${name}".`
     : `Found ${count}.`;
-  if ((await isListedForCBL(source)) !== false) return found;
+  if (listed !== false) return found;
   return `${found} **BattleMetrics does not list it among the ban lists the CBL organisation can see**, so its new bans are saved, but none are removed while BattleMetrics does not list it.`;
 }
+
+// BattleMetrics' list of the ban lists the CBL organisation can see, its own and those it
+// subscribes to.
+const BAN_LISTS = new URL('https://api.battlemetrics.com/ban-lists');
 
 // Whether BattleMetrics lists the source among the ban lists the CBL organisation can see, as the
 // ban importer's access check asks: true or false, or null when BattleMetrics could not be asked.
 // The importer saves the new bans of a list that BattleMetrics does not list, but removes none of
 // them, so the check warns of that, without refusing the list, and a list that could not be
-// checked is saved without a word, as the importer goes without its check then too. The IDs are
-// those /exportbanlist reads, compared ignoring case, hyphens and spaces, as the importer compares
-// them. The request goes through scbl-lib's BattleMetrics API, as /exportbanlist's does, once the
-// list's bans were read.
+// checked is saved without a word, as the importer goes without its check then too. The list of
+// ban lists is read a page at a time, 100 to a page, as the importer reads it, and fails, as there,
+// on a ban list without an ID, and the IDs are compared ignoring case, hyphens and spaces, as the
+// importer compares them. Each page is asked for once, and all of them within CHECK_TIMEOUT, so a
+// BattleMetrics that is slow or does not answer holds the reply up no longer than that. Only links
+// to the next page of the same list are followed, each once, so a wrong link can neither send the
+// API key elsewhere nor loop.
 async function isListedForCBL(source) {
+  const signal = AbortSignal.timeout(CHECK_TIMEOUT);
+  const visited = new Set();
+  let page = new URL(BAN_LISTS);
+  page.searchParams.set('page[size]', 100);
   try {
-    const visible = await ExportBanList.findVisibleBattlemetricsBanLists();
-    return [...visible].some((id) => isSameBattlemetricsID(id, source));
+    while (page) {
+      if (
+        page.origin !== BAN_LISTS.origin ||
+        page.pathname !== BAN_LISTS.pathname ||
+        visited.has(page.href)
+      )
+        return null;
+      visited.add(page.href);
+      const { data } = await battlemetrics.get('ban-lists', {
+        params: Object.fromEntries(page.searchParams),
+        signal
+      });
+      const banLists = Array.isArray(data?.data) ? data.data : null;
+      if (!banLists || banLists.some((banList) => normaliseBattlemetricsID(banList?.id) === ''))
+        return null;
+      if (banLists.some((banList) => isSameBattlemetricsID(banList.id, source))) return true;
+      const next = data.links?.next;
+      page = next ? new URL(typeof next === 'string' ? next : next.href, BAN_LISTS) : null;
+    }
+    return false;
   } catch {
     return null;
   }
