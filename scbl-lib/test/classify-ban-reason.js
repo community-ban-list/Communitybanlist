@@ -1,0 +1,271 @@
+import assert from 'assert';
+
+import classifyBanReason from '../utils/classify-ban-reason.js';
+import * as utils from '../utils/index.js';
+
+// The importer labels each ban with the categories its reason's keywords find, and the website
+// shows the labels in place of the reason, so a keyword found inside an unrelated word shows an
+// accusation the reason never made. Each reason below is given with the labels it gets.
+
+// Reasons whose keywords are found: plurals and other forms, compounds, and the German, Turkish,
+// French, Chinese and Ukrainian keywords, which are found anywhere in a word, as before.
+const found = [
+  // Cheating.
+  ['Cheating', 'Cheating'],
+  ['Cheater, banned on sight', 'Cheating'],
+  ['Hacker', 'Cheating'],
+  ['Wallhacks', 'Cheating'],
+  ['speedhacking', 'Cheating'],
+  ['hile', 'Cheating'],
+  ['Hileci', 'Cheating'],
+  ['triche', 'Cheating'],
+  ['Tricheur', 'Cheating'],
+  ['Betrug', 'Cheating'],
+  ['Betrugsversuch', 'Cheating'],
+  ['Betrüger', 'Cheating'],
+  ['BETRÜGER', 'Cheating'],
+  ['Betrueger', 'Cheating'],
+  ['betrügen', 'Cheating'],
+  // The past participle of betrügen, which the keyword missed before.
+  ['Hat betrogen', 'Cheating'],
+  ['作弊', 'Cheating'],
+  ['Чітер', 'Cheating'],
+  ['чіти', 'Cheating'],
+  ['Софт', 'Cheating'],
+
+  // Teamkilling.
+  ['Teamkilling', 'Teamkilling'],
+  ['team kill', 'Teamkilling'],
+  ['team-kills', 'Teamkilling'],
+  ['TK', 'Teamkilling'],
+  ['TKing', 'Teamkilling'],
+  ['Intentional TK', 'Teamkilling'],
+  ['ITK', 'Teamkilling'],
+  ['ITKs', 'Teamkilling'],
+  ['3xTK', 'Teamkilling'],
+  ['5tk', 'Teamkilling'],
+  ['IntTK', 'Teamkilling'],
+  ['Teambeschuss', 'Teamkilling'],
+  ['Teamabschuss', 'Teamkilling'],
+
+  // Trolling.
+  ['Trolling', 'Trolling'],
+  ['trolled', 'Trolling'],
+  ['mictrolling', 'Trolling'],
+  ['Trollen', 'Trolling'],
+  ['getrollt', 'Trolling'],
+  ['Hasstroll', 'Trolling'],
+
+  // Griefing, also misspelt.
+  ['Griefing', 'Griefing'],
+  ['Griefer', 'Griefing'],
+  ['teamgriefing', 'Griefing'],
+  ['griefen', 'Griefing'],
+  ['gegrieft', 'Griefing'],
+  ['greifing', 'Griefing'],
+  ['greifers', 'Griefing'],
+  ['greifed the FOB', 'Griefing'],
+
+  // Wasting assets.
+  ['Wasting assets', 'Wasting Assets'],
+  ['taxi', 'Wasting Assets'],
+  ['taxiing players', 'Wasting Assets'],
+  ['Helitaxi', 'Wasting Assets'],
+  ['israf', 'Wasting Assets'],
+  ['zerstört', 'Wasting Assets'],
+  ['verschwendet', 'Wasting Assets'],
+
+  // Toxic.
+  ['toxic in chat', 'Toxic'],
+  ['Toxicity', 'Toxic'],
+  ['rude', 'Toxic'],
+  ['Rudeness', 'Toxic'],
+  ['rudely', 'Toxic'],
+  ['saygısız', 'Toxic'],
+  ['saygisiz', 'Toxic'],
+  ['hakaret', 'Toxic'],
+  ['respektlos', 'Toxic'],
+  ['Beleidigung', 'Toxic'],
+
+  // Abusive language and hate speech.
+  ['n-word', 'Abusive Language/Hate Speech'],
+  ['N word', 'Abusive Language/Hate Speech'],
+  ['nword', 'Abusive Language/Hate Speech'],
+  ['Repeated n-words in chat', 'Abusive Language/Hate Speech'],
+  ['Saying n words', 'Abusive Language/Hate Speech'],
+  ['n-wording in local', 'Abusive Language/Hate Speech'],
+  ['f-bombs', 'Abusive Language/Hate Speech'],
+  ['Dropping f bombs on admins', 'Abusive Language/Hate Speech'],
+  ['Neonazi', 'Abusive Language/Hate Speech'],
+  ['Rassismus', 'Abusive Language/Hate Speech'],
+  ['Schimpfwörter', 'Abusive Language/Hate Speech'],
+  ['küfür', 'Abusive Language/Hate Speech'],
+  ['kufur', 'Abusive Language/Hate Speech'],
+  ['malédiction', 'Abusive Language/Hate Speech'],
+  ['種族主義', 'Abusive Language/Hate Speech'],
+
+  // Camping: main camping, and mines and mining, as in mining the enemy main.
+  ['Main camping', 'Camping'],
+  ['Planted a mine at the main exit', 'Camping'],
+  ['Mines at enemy main', 'Camping'],
+  ['mined the main exit', 'Camping'],
+  ['mining the main', 'Camping'],
+  ['Mainmining', 'Camping'],
+  ['Placed landmines in enemy main', 'Camping'],
+  ['anti-tank mines in main', 'Camping'],
+  ['Minen gelegt', 'Camping'],
+  ['Landminen in der Main', 'Camping'],
+  ['Panzerminen', 'Camping'],
+  ['AT-Minen', 'Camping'],
+
+  // Helicopter ramming.
+  ['Helicopter ramming', 'Helicopter Ramming'],
+  ['heliramming', 'Helicopter Ramming'],
+  // The past tense, which the keyword missed before.
+  ['Heli rammed a friendly', 'Helicopter Ramming'],
+  ['Heli gerammt', 'Helicopter Ramming'],
+  ['rammt Fahrzeuge', 'Helicopter Ramming'],
+  ['Rammen mit Heli', 'Helicopter Ramming'],
+
+  // Impersonation and locked squads.
+  ['impersonating an admin', 'Impersonation'],
+  ['Sich als Admin ausgegeben', 'Impersonation'],
+  ['Locked squad', 'Locked Squad'],
+  ['geschlossenes Squad', 'Locked Squad'],
+
+  // Soloing vehicles.
+  ['Soloing vehicles', 'Soloing Vehicles'],
+  ['solo tank', 'Soloing Vehicles'],
+  ['Solo-Panzer', 'Soloing Vehicles'],
+  ['crewman', 'Soloing Vehicles'],
+  ['manning a tank alone', 'Soloing Vehicles'],
+  ['1 man tank', 'Soloing Vehicles'],
+  ['1-man', 'Soloing Vehicles'],
+  ['1man', 'Soloing Vehicles'],
+  ['one man', 'Soloing Vehicles'],
+  ['one-manned', 'Soloing Vehicles'],
+  ['1-manning', 'Soloing Vehicles'],
+  ['He 1-mans the tank', 'Soloing Vehicles'],
+  ['1 Mann Panzer', 'Soloing Vehicles'],
+
+  // Stealing assets.
+  ['Stealing assets', 'Stealing Assets'],
+  ['steals', 'Stealing Assets'],
+  ['çalma', 'Stealing Assets'],
+  ['gestohlen', 'Stealing Assets'],
+
+  // Advertising.
+  ['Advertising', 'Advertising'],
+  ['Werbung', 'Advertising'],
+  ['werben', 'Advertising'],
+  ['Serverwerbung', 'Advertising'],
+  ['Eigenwerbung', 'Advertising'],
+
+  // Other categories, in other languages.
+  ['istismar', 'Exploiting'],
+  ['剝削', 'Exploiting'],
+  ['ausnutzen', 'Exploiting'],
+  ['araç kural ihlali', 'Breaking Vehicle Priority Rules'],
+  ['siyaset', 'Discussing politics'],
+  ['Politik', 'Discussing politics'],
+  ['yayinci', 'Streamsniping'],
+  ['rekrutieren', 'Recruiting'],
+
+  // Several labels, in alphabetical order, and none.
+  ['Teamkilling and racism', 'Abusive Language/Hate Speech, Teamkilling'],
+  ['Breaking server rules', 'Unknown']
+];
+
+// Everyday words that hold a keyword, which no longer get its label. The reason keeps the labels
+// its other keywords find.
+const notFound = [
+  // Not cheating: whack, shack, the name Dietrich, Strich (line) and betrunken (drunk).
+  ['Whacked teammates with a shovel', 'Unknown'],
+  ['Built a shack in main', 'Unknown'],
+  ['Gebannt von Dietrich', 'Unknown'],
+  ['Name mit Unterstrich', 'Unknown'],
+  ['Betrunken im Voice', 'Unknown'],
+
+  // Not teamkilling: Mitkämpfer (fellow players) and the name Witkowski.
+  ['Beleidigung von Mitkämpfern', 'Toxic'],
+  ['Banned by Witkowski', 'Unknown'],
+
+  // Not trolling: control, Kontrolle, patrol and stroll.
+  ['controlled the drone into friendlies', 'Unknown'],
+  ['Kontrolle verloren', 'Unknown'],
+  ['Patrolling the enemy main', 'Unknown'],
+  ['strolling into the main', 'Unknown'],
+
+  // Not griefing: angreifen (attack) and Angreifer (attacker).
+  ['Hat eigene Leute angreifen wollen', 'Unknown'],
+  ['Angreifer im Spawn', 'Unknown'],
+
+  // Not wasting assets: taxing.
+  ['Taxing the server with spam', 'Spamming'],
+
+  // Not toxic: crude, intruder and intoxicated.
+  ['Crude jokes in all chat', 'Unknown'],
+  ['Intruder in the main', 'Unknown'],
+  ['Playing while intoxicated', 'Unknown'],
+
+  // Not hate speech: words and bombs after words that end in f or n.
+  ['Warned in words, then kept teamkilling', 'Teamkilling'],
+  ['Insulting admins in his own words', 'Toxic'],
+  ['Disrespect in words to admins', 'Toxic'],
+  ['Poor choice of words in chat', 'Unknown'],
+  ['Teamkilled squad with own bomb truck', 'Teamkilling'],
+  ['Ran bomb car into friendlies', 'Unknown'],
+
+  // Not camping: determined, examined, undermining, Minecraft and Termine (appointments).
+  ['Determined to grief the main', 'Griefing'],
+  ['Examined the logs', 'Unknown'],
+  ['Undermining admins', 'Unknown'],
+  ['Minecraft skin name', 'Unknown'],
+  ['Termine nicht eingehalten', 'Unknown'],
+
+  // Not ramming: programming, Programmen and cramming.
+  ['Programming macro to spam', 'Spamming'],
+  ['Cheating mit Drittanbieter-Programmen', 'Cheating'],
+  ['Cramming players into the heli', 'Unknown'],
+
+  // Not impersonation: herausgegeben (handed over).
+  ['Daten herausgegeben', 'Unknown'],
+
+  // Not a locked squad: an unlocked one.
+  ['Created an unlocked squad', 'Unknown'],
+
+  // Not soloing vehicles: the name Solomon, and one man inside other words.
+  ['Banned by Solomon', 'Unknown'],
+  ['Someone managed to ban evade', 'Unknown'],
+  ['No one managed to stop him', 'Unknown'],
+  ['Done many times before', 'Unknown'],
+  ['21 man squad', 'Unknown'],
+
+  // Not stealing assets: stealth.
+  ['Used stealth to ghost', 'Unknown'],
+
+  // Not advertising: bewerben (apply) and Bewerbung (application).
+  ['Entbannung: im Discord bewerben', 'Unknown'],
+  ['Bewerbung als Admin', 'Unknown']
+];
+
+const wrong = [...found, ...notFound]
+  .map(([reason, labels]) => ({ reason, labels, got: classifyBanReason(reason) }))
+  .filter(({ labels, got }) => got !== labels);
+assert.deepStrictEqual(wrong, [], 'reasons whose labels are wrong');
+
+// A BattleMetrics ban's note is classified only when its reason finds nothing, also when its reason
+// is missing, or held only a keyword inside another word.
+assert.strictEqual(classifyBanReason('Banned', 'Teamkilled 3 times'), 'Teamkilling');
+assert.strictEqual(classifyBanReason('Cheating', 'Teamkilled 3 times'), 'Cheating');
+assert.strictEqual(classifyBanReason(null, 'Teamkilled 3 times'), 'Teamkilling');
+assert.strictEqual(classifyBanReason('Warned in words', 'Teamkilled 3 times'), 'Teamkilling');
+assert.strictEqual(classifyBanReason('Banned', null), 'Unknown');
+assert.strictEqual(classifyBanReason(undefined), 'Unknown');
+
+// The services get it with the other utils.
+assert.strictEqual(utils.classifyBanReason, classifyBanReason);
+
+console.log(
+  `Ban reason checks passed: ${found.length} reasons keep their labels, and ${notFound.length} no longer get a label from a keyword inside another word.`
+);
