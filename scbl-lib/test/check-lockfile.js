@@ -535,6 +535,31 @@ function shellForm(commands) {
   }
 }
 
+// The programs and commands that install packages. npx and the other package runners, pnpm, Bun
+// and Corepack can each fetch packages, or a package manager, that yarn.lock does not list,
+// however they are used. yarn on its own or with only options installs, as do these yarn
+// commands, and these npm commands under each of their names.
+const packageFetchers = ['npx', 'pnpx', 'bunx', 'pnpm', 'bun', 'corepack'];
+const yarnInstalls = ['install', 'add', 'upgrade', 'create'];
+const npmInstalls = [
+  'install',
+  'i',
+  'add',
+  'ci',
+  'clean-install',
+  'install-test',
+  'it',
+  'install-ci-test',
+  'cit',
+  'update',
+  'up',
+  'upgrade',
+  'exec',
+  'x',
+  'init',
+  'create'
+];
+
 // What is wrong with a Dockerfile: a stage that starts from neither a base image pinned by digest
 // nor an earlier stage, a command that installs packages other than yarn install --frozen-lockfile
 // after the yarn.lock check, or no install at all.
@@ -571,13 +596,13 @@ function dockerfileProblems(text) {
       const [program = '', ...args] = words;
       const tool = program.split('/').pop();
       if (tool === 'node' && args[0] === 'scripts/check-lockfile.mjs') checked = true;
-      // yarn on its own or with only options installs, as do its install and add commands, and
-      // npm's.
+      // yarnpkg is another name for yarn.
       const installsPackages =
-        (tool === 'yarn' &&
+        packageFetchers.includes(tool) ||
+        (['yarn', 'yarnpkg'].includes(tool) &&
           (args.every((arg) => arg.startsWith('-')) ||
-            args.some((arg) => ['install', 'add'].includes(arg)))) ||
-        (tool === 'npm' && args.some((arg) => ['install', 'i', 'ci', 'add'].includes(arg)));
+            args.some((arg) => yarnInstalls.includes(arg)))) ||
+        (tool === 'npm' && args.some((arg) => npmInstalls.includes(arg)));
       if (!installsPackages) continue;
       installs++;
       const frozen =
@@ -632,6 +657,31 @@ for (const [changed, problem] of [
   [`${dockerfile}RUN --mount=type=cache,target=/cache npm ci\n`, 'with "npm ci", not with'],
   [`${dockerfile}RUN ["yarn", "install"]\n`, 'with "yarn install", not with'],
   [`${dockerfile}RUN <<EOF\nyarn install --frozen-lockfile\nEOF\n`, 'with "yarn install --frozen'],
+  // Adding a package runner, another package manager or another command that installs packages
+  // fails it too.
+  ...[
+    'npx left-pad',
+    'pnpx left-pad',
+    'bunx left-pad',
+    'pnpm install',
+    'bun install',
+    'corepack enable',
+    'yarnpkg install',
+    'yarn upgrade',
+    'yarn create left-pad',
+    'npm clean-install',
+    'npm install-test',
+    'npm it',
+    'npm install-ci-test',
+    'npm cit',
+    'npm update',
+    'npm up',
+    'npm upgrade',
+    'npm exec -- left-pad',
+    'npm x left-pad',
+    'npm init left-pad',
+    'npm create left-pad'
+  ].map((command) => [`${dockerfile}RUN ${command}\n`, `with "${command}", not with`]),
   [dockerfile.replace(/RUN node scripts\/check[\s\S]*?server\n/, ''), 'It installs no packages.']
 ]) {
   const problems = dockerfileProblems(changed);
