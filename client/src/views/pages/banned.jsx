@@ -155,6 +155,14 @@ function Foreword(props) {
               <Link to="/banned">enter your Steam 64 ID</Link> as well.
             </p>
           )}
+          {props.enteredSteamID && (
+            <p>
+              We looked up the bans listed under your Steam 64 ID. Steam players have an EOS ID too,
+              and any ban we list that gives only your EOS ID is listed under that ID instead, so{' '}
+              <Link to="/search">search for your EOS ID</Link> as well. Our{' '}
+              <Link to="/faq">FAQ</Link> has more about EOS IDs.
+            </p>
+          )}
           <p>
             If you have been directed to this page then it likely means that you are listed on and
             potentially banned by CommunityBanList.com
@@ -520,6 +528,7 @@ export default function () {
                       steamUser={data?.steamUser}
                       hasPlayerID={Boolean(player)}
                       unknownEosID={player?.kind === 'eos' && data?.steamUser === null}
+                      enteredSteamID={player?.kind === 'steam'}
                     />
                     <WhatIsCommunityBanList />
                     <GettingUnlistedFromCommunityBanList steamUser={data?.steamUser} />
