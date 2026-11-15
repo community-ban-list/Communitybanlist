@@ -38,6 +38,7 @@ import {
   organisationEmbed,
   pauseState,
   plural,
+  quote,
   summariseImport,
   truncate
 } from './format.js';
@@ -88,6 +89,7 @@ export {
   parseBanListSource,
   pauseState,
   plural,
+  quote,
   readPause,
   readPaused,
   readQueueSkips,

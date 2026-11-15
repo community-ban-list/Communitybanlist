@@ -3,6 +3,7 @@ import { readFile } from 'fs/promises';
 import vm from 'vm';
 
 import sourceKey from '../../scbl-lib/utils/ban-list-source-key.js';
+import logText from '../../scbl-lib/utils/log-text.js';
 
 // Exercise /banlist update, remove, suspend, resume and status without Discord or a database. The
 // command and the helpers that change the database are the real ones; the database, the table of
@@ -226,15 +227,21 @@ const database = {
   'scbl-lib/db/sequelize': { Op: { ne: 'ne' }, QueryTypes: { SELECT: 'SELECT' } },
   'scbl-lib/db/ban-list-suspensions': suspensions,
   'scbl-lib/db/importer-models': { BanListSync },
-  // The importer's key of a list's type and source, the real one, which the importer shares.
-  'scbl-lib/utils': { sourceKey }
+  // The importer's key of a list's type and source, the real one, which the importer shares, and
+  // the real logText, which keeps names in the log on one line and shown as written.
+  'scbl-lib/utils': { logText, sourceKey }
 };
-const format = await load('../src/utils/format.js', { 'discord.js': discord });
+const format = await load('../src/utils/format.js', {
+  'discord.js': discord,
+  'scbl-lib/utils': database['scbl-lib/utils']
+});
 const deletion = await load('../src/utils/delete-ban-lists.js', {
   ...database,
   './format.js': format
 });
-const { default: applyChanges } = await load('../src/utils/apply-changes.js', {});
+const { default: applyChanges } = await load('../src/utils/apply-changes.js', {
+  './format.js': format
+});
 const status = await load('../src/utils/ban-list-status.js', {
   ...database,
   './user-error.js': { default: UserError }
@@ -884,6 +891,33 @@ assert.strictEqual(
   "Resume **Org** / **Main**? Its type or source was changed, and the ban importer has not finished reading the new one yet: it reads it in full on its next cycle, and the list counts again once it has caught up with it. /banlist status shows when. Export bans follow from the cycle after it counts again, and players' reputation points within 1 cycle of it."
 );
 assert.deepStrictEqual(calls.at(-1), ['resume', 5]);
+
+// Names and reasons are as admins typed them, so the log keeps each on one line and shows it as
+// written, as the website's lines show names (logText): a line break cannot start what looks like
+// another entry, Markdown is shown as typed, and a character that turns text around becomes a
+// space. A rename gives both names so. The replies escape names with bold only, which this test's
+// escapeMarkdown leaves as they are, so they are as typed.
+reset(3, 2);
+record.name = 'Main\n**x** ||y||';
+record.Organisation = { id: 2, name: 'Org_\u202eA' };
+const LOGGED =
+  'ban list "Main \\*\\*x\\*\\* \\|\\|y\\|\\|" (ID: 5) of organisation "Org\\_ A" (ID: 2)';
+await run('suspend', { banlist: '5', reason: 'Dispute\n[DiscordBot][1] admin (1) *resumed*' });
+assert.deepStrictEqual(audits, [
+  `suspended ${LOGGED}, for the reason "Dispute \\[DiscordBot\\]\\[1\\] admin (1) \\*resumed\\*".`
+]);
+assert.strictEqual(
+  replies.at(-1).content,
+  'Suspended **Org_\u202eA** / **Main\n**x** ||y||**. Resume it with /banlist resume.'
+);
+reset(3, 2);
+record.name = 'Main\n**x** ||y||';
+record.Organisation = { id: 2, name: 'Org_\u202eA' };
+await run('update', { banlist: '5', name: 'New\n_name_' });
+assert.deepStrictEqual(audits, [
+  `updated ${LOGGED}: name "Main \\*\\*x\\*\\* \\|\\|y\\|\\|" → "New \\_name\\_".`
+]);
+assert.strictEqual(replies.at(-1).content, 'Updated **Org_\u202eA** / **New\n_name_**.');
 
 console.log(
   "Ban list command checks passed: renames keep bans, source changes delete them once confirmed and only while no import runs, and mark the importer's row, also when changed back, removal, suspending and resuming lists, which then queue no players, and their status, which leaves out a changed source's old state."

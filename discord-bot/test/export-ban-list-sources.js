@@ -7,6 +7,7 @@ import * as discord from 'discord.js';
 import * as playerIDs from '../../scbl-lib/player-ids.js';
 import sourceKey from '../../scbl-lib/utils/ban-list-source-key.js';
 import isSameBattlemetricsID from '../../scbl-lib/utils/battlemetrics-id.js';
+import logText from '../../scbl-lib/utils/log-text.js';
 
 // Run the bot's commands without Discord, the database or BattleMetrics. Package imports are
 // replaced by the stand-ins below, and relative imports load the real files, once each, as Node
@@ -129,9 +130,18 @@ const stubs = {
     }
   },
   'scbl-lib/db/models': {
-    Ban: {},
+    // No ban list here has bans to count.
+    Ban: {
+      async count() {
+        return [];
+      }
+    },
     ExportBanListConfig: {},
     BanList: {
+      // An organisation's ban lists, for the reply that shows it.
+      async findAll({ where }) {
+        return banLists.filter((banList) => matches(banList, where)).map(banListRecord);
+      },
       async findOne({ where }) {
         const banList = banLists.find((banList) => matches(banList, where));
         return banList ? banListRecord(banList) : null;
@@ -189,6 +199,7 @@ const stubs = {
   'scbl-lib/utils': {
     isSameBattlemetricsID,
     Logger: { verbose: (...args) => audits.push(args.slice(2).join('')) },
+    logText,
     sourceKey
   }
 };
@@ -461,6 +472,27 @@ for (const body of ['<html>Not a ban list</html>', '# No bans yet', '{"bans":[]}
   );
 }
 
+// The names an admin gives an organisation and its first ban list are kept on one line in the log
+// and shown as written (logText), as the website's lines show names, while the reply escapes them
+// with bold, once.
+audits.length = 0;
+const firstID = 90 + banLists.length;
+const [oddOrg] = await run('org', 'add', {
+  name: 'Odd\n**Org**',
+  banlist_name: 'First ||list||\u202e',
+  type: 'battlemetrics',
+  source: 'facade00-ba5e-4b00-a000-000000000100',
+  skip_check: true
+});
+assert.deepStrictEqual(audits, [
+  `admin (1) added organisation "Odd \\*\\*Org\\*\\*" (ID: 4) with ban list "First \\|\\|list\\|\\| " (ID: ${firstID}) and BattleMetrics source "facade00-ba5e-4b00-a000-000000000100".`
+]);
+assert.ok(
+  oddOrg.content.startsWith(
+    `Added **${discord.escapeMarkdown('Odd\n**Org**')}** with its ban list **${discord.escapeMarkdown('First ||list||\u202e')}**.`
+  )
+);
+
 console.log(
-  "Export ban list source checks passed: IDs, links, each command, skip_check, partners' lists, hidden bans and lists BattleMetrics does not list for CBL, remote lines and remote files the importer would fail."
+  "Export ban list source checks passed: IDs, links, each command, skip_check, partners' lists, hidden bans and lists BattleMetrics does not list for CBL, remote lines and remote files the importer would fail, and names in the log."
 );

@@ -21,7 +21,7 @@ Slash commands for managing partner organisations, their ban lists and users' ex
 | `/exportbanlist remove_outside_limits`                          | Remove every export ban list outside today's limits, after a preview of each and one confirmation, which waits up to 5 minutes. The owners are not told.                                                                                                                                                                                                               |
 | `/exportbanlist transfer id owner`                              | Give a user's export ban list to another Steam user, given by their SteamID64, after showing the list, its owner, the new owner and how many export ban lists the new owner has, with a warning if the new owner has not signed in to the website yet, and a confirmation. Only its owner changes, and neither owner is told.                                          |
 
-Organisations and ban lists can be picked from autocomplete suggestions. Replies are only visible to the person running the command, and every change is posted to the log webhook (`DISCORD_LOG_WEBHOOK`) with who made it.
+Organisations and ban lists can be picked from autocomplete suggestions. Replies are only visible to the person running the command, and every change is posted to the log webhook (`DISCORD_LOG_WEBHOOK`) with who made it. The names in those lines, of organisations, ban lists, export ban lists and Steam users, and a suspension's reason, are each kept on one line and shown as written, as the website's lines show names.
 
 A ban list's `source` is either:
 

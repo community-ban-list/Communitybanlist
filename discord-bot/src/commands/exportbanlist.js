@@ -11,6 +11,7 @@ import {
   formatBanListType,
   listEmbed,
   plural,
+  quote,
   readPaused,
   ReplyUpdater,
   truncate,
@@ -150,16 +151,18 @@ function formatSteamUser(id, name) {
 const formatOwner = (exportBanList) =>
   formatSteamUser(exportBanList.owner, exportBanList.SteamUser?.name);
 
-// Describe a Steam user for the audit log.
+// Describe a Steam user for the audit log. Steam names are their users' to choose, so they are kept
+// on one line and shown as written (see quote), as ExportBanList's and the website's lines are.
 const describeSteamUser = (id, name) =>
-  name ? `Steam user "${name}" (ID: ${id})` : `Steam user ${id}`;
+  name ? `Steam user ${quote(name)} (ID: ${id})` : `Steam user ${id}`;
 
 // Describe the list for the audit log, with the BattleMetrics ban list it records, or the one given.
+// Its name is its owner's to choose, so it is quoted as a Steam name is.
 function describeExportBanList(exportBanList, battlemetricsID = exportBanList.battlemetricsID) {
   const battlemetrics = battlemetricsID ? `, BattleMetrics ID: ${battlemetricsID}` : '';
   const owner = describeSteamUser(exportBanList.owner, exportBanList.SteamUser?.name);
   const type = formatBanListType(exportBanList.type);
-  return `export ban list "${exportBanList.name}" (ID: ${exportBanList.id}, ${type}${battlemetrics}) of ${owner}`;
+  return `export ban list ${quote(exportBanList.name)} (ID: ${exportBanList.id}, ${type}${battlemetrics}) of ${owner}`;
 }
 
 // The BattleMetrics ban lists the given export ban lists record.

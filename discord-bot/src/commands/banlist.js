@@ -38,6 +38,7 @@ import {
   parseBanListSource,
   pauseState,
   plural,
+  quote,
   readPause,
   readQueueSkips,
   readStatus,
@@ -324,7 +325,7 @@ async function suspend(interaction) {
 
   audit(
     interaction,
-    `suspended ${describeBanList(banList, organisation)}${reason ? `, for the reason "${reason}"` : ''}.`
+    `suspended ${describeBanList(banList, organisation)}${reason ? `, for the reason ${quote(reason)}` : ''}.`
   );
   await interaction.editReply({
     content: `Suspended ${listName}. Resume it with /banlist resume.`,

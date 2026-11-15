@@ -1,5 +1,7 @@
 import { EmbedBuilder, escapeMarkdown, time, TimestampStyles } from 'discord.js';
 
+import { logText } from 'scbl-lib/utils';
+
 // The CBL brand colour used in its Discord webhook messages.
 const COLOR = 0xffc40b;
 
@@ -24,14 +26,20 @@ export function formatBanListName(banList, organisation) {
   return `${bold(organisation.name)} / ${bold(banList.name)}`;
 }
 
+// A name, or other text someone chose, in quotes, as the audit log gives it: kept on one line and
+// shown as written (logText), as the website's lines give names, so it cannot start a line that
+// looks like another one, or hide part of its line. Only for the log: replies escape names with
+// bold.
+export const quote = (text) => `"${logText(text)}"`;
+
 // Describe the organisation for the audit log.
 export function describeOrganisation(organisation) {
-  return `organisation "${organisation.name}" (ID: ${organisation.id})`;
+  return `organisation ${quote(organisation.name)} (ID: ${organisation.id})`;
 }
 
 // Describe the ban list for the audit log.
 export function describeBanList(banList, organisation) {
-  return `ban list "${banList.name}" (ID: ${banList.id}) of ${describeOrganisation(organisation)}`;
+  return `ban list ${quote(banList.name)} (ID: ${banList.id}) of ${describeOrganisation(organisation)}`;
 }
 
 export function formatBanListType(type) {
