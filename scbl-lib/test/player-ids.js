@@ -8,6 +8,7 @@ import {
   isSteamID,
   normaliseEosID,
   parsePlayerInput,
+  parseRemoteFile,
   parseRemoteLine,
   steamIDSQL
 } from '../player-ids.js';
@@ -222,6 +223,50 @@ for (const line of [
 ])
   assert.strictEqual(parseRemoteLine(line), null, String(line));
 
+// A remote ban list's file has the bans of its lines that ban a SteamID, as the importer reads it
+// and the bot checks it, and a line's reason ends before a carriage return. A blank file is a list
+// with no bans. Any other file with no bans is not a ban list, and the problem says why, in the
+// words the importer fails it with: one whose only bans are of EOS IDs says how many lines it has
+// with one, and anything else may be an error page.
+assert.deepStrictEqual(
+  parseRemoteFile(
+    [
+      `${FIRST}:0 //Cheating`,
+      `${EOS}:0 //An EOS ID`,
+      'Not a ban',
+      `${LAST}:4102444800 //Teamkilling\r`
+    ].join('\n')
+  ),
+  {
+    bans: [ban('steam', FIRST, '0', 'Cheating'), ban('steam', LAST, '4102444800', 'Teamkilling')],
+    problem: null
+  }
+);
+for (const text of ['', ' \r\n\n', '\uFEFF', null, undefined])
+  assert.deepStrictEqual(parseRemoteFile(text), { bans: [], problem: null }, JSON.stringify(text));
+const NO_BANS = 'The remote ban list has no bans in the `steamID:expiry //reason` format';
+assert.deepStrictEqual(parseRemoteFile(`${EOS}:0 //An EOS ID`), {
+  bans: [],
+  problem: `${NO_BANS}. It has 1 line with an EOS ID, which CBL does not import from remote ban lists.`
+});
+assert.strictEqual(
+  parseRemoteFile(
+    [`${EOS.toUpperCase()}:0 //Caps`, 'Not a ban', `N/A Banned:${EOS}:0 //Banned`].join('\n')
+  ).problem,
+  `${NO_BANS}. It has 2 lines with an EOS ID, which CBL does not import from remote ban lists.`
+);
+for (const text of [
+  '<html>Not a ban list</html>',
+  '# No bans yet',
+  '{"bans":[]}',
+  '12345678901234567:0 //Not an account'
+])
+  assert.deepStrictEqual(
+    parseRemoteFile(text),
+    { bans: [], problem: `${NO_BANS}, so it may be an error page.` },
+    text
+  );
+
 console.log(
-  'Player ID checks passed: SteamIDs, EOS IDs, kinds, lookups, SQL and remote ban lines.'
+  'Player ID checks passed: SteamIDs, EOS IDs, kinds, lookups, SQL, remote ban lines and remote ban files.'
 );

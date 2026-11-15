@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 import { BATTLEMETRICS_API_KEY } from 'scbl-lib/config';
-import { parseRemoteLine } from 'scbl-lib/player-ids';
+import { parseRemoteFile } from 'scbl-lib/player-ids';
 
 import { plural } from './format.js';
 import UserError from './user-error.js';
@@ -70,16 +70,21 @@ async function checkRemoteSource(source) {
     throw new UserError(`Could not fetch the ban list: ${describeRequestError(err)}.`);
   }
 
-  // Count the lines the ban importer would take a ban from.
-  const bans = String(data)
-    .split('\n')
-    .filter((line) => parseRemoteLine(line)?.kind === 'steam').length;
-  if (bans === 0)
+  // The file is read by the ban importer's own rule. A blank file is a list with no bans, which may
+  // be meant, so skip_check saves it. Any other file with no bans, such as an error page, or one of
+  // EOS IDs only, the importer would fail on every cycle, so the check says why in its words, and
+  // does not suggest skip_check.
+  const { bans, problem } = parseRemoteFile(data);
+  if (problem)
     throw new UserError(
-      'Fetched the link but found no bans in the `steamID:expiry //reason` format. Use `skip_check` if the list is meant to be empty.'
+      `Fetched the link, but the ban importer would fail to import it: ${problem}`
+    );
+  if (bans.length === 0)
+    throw new UserError(
+      'Fetched the link, but the file is empty. Use `skip_check` if the list is meant to be empty.'
     );
 
-  return `Found ${plural(bans, 'ban')}.`;
+  return `Found ${plural(bans.length, 'ban')}.`;
 }
 
 // The list's expired bans count too, as the importer reads them. BattleMetrics' API documentation

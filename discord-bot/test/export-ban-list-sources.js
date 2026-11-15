@@ -341,12 +341,53 @@ assert.strictEqual(
   await checkBanListSource('remote', 'https://example.com/bans.txt'),
   'Found 2 bans.'
 );
-remoteFile = '0123456789abcdef0123456789abcdef:0 //An EOS ID';
-await assert.rejects(
-  checkBanListSource('remote', 'https://example.com/bans.txt'),
-  (err) => err instanceof UserError && err.message.includes('found no bans')
-);
+// A remote file with no bans goes by the ban importer's rule. Only a blank one is a list with no
+// bans, which skip_check saves. Any other the importer would fail on every cycle, which the check
+// says in the importer's words, without suggesting skip_check: one whose only bans are of EOS IDs,
+// and anything else, such as an error page or a placeholder.
+const refusedWith = (message) => (err) => {
+  assert.ok(err instanceof UserError, String(err));
+  assert.strictEqual(err.message, message);
+  return true;
+};
+for (const body of ['', ' \r\n\n', '\uFEFF', undefined]) {
+  remoteFile = body;
+  await assert.rejects(
+    checkBanListSource('remote', 'https://example.com/bans.txt'),
+    refusedWith(
+      'Fetched the link, but the file is empty. Use `skip_check` if the list is meant to be empty.'
+    )
+  );
+}
+const IMPORTER_FAILS =
+  'Fetched the link, but the ban importer would fail to import it: The remote ban list has no bans in the `steamID:expiry //reason` format';
+for (const [body, lines] of [
+  ['0123456789abcdef0123456789abcdef:0 //An EOS ID', '1 line'],
+  [
+    [
+      '0123456789abcdef0123456789abcdef:0 //An EOS ID',
+      'Not a ban',
+      '0123456789ABCDEF0123456789ABCDE0:4102444800 //Another'
+    ].join('\n'),
+    '2 lines'
+  ]
+]) {
+  remoteFile = body;
+  await assert.rejects(
+    checkBanListSource('remote', 'https://example.com/bans.txt'),
+    refusedWith(
+      `${IMPORTER_FAILS}. It has ${lines} with an EOS ID, which CBL does not import from remote ban lists.`
+    )
+  );
+}
+for (const body of ['<html>Not a ban list</html>', '# No bans yet', '{"bans":[]}']) {
+  remoteFile = body;
+  await assert.rejects(
+    checkBanListSource('remote', 'https://example.com/bans.txt'),
+    refusedWith(`${IMPORTER_FAILS}, so it may be an error page.`)
+  );
+}
 
 console.log(
-  "Export ban list source checks passed: IDs, links, each command, skip_check, partners' lists and remote lines."
+  "Export ban list source checks passed: IDs, links, each command, skip_check, partners' lists, remote lines and remote files the importer would fail."
 );
