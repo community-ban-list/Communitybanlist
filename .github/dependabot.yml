@@ -1,12 +1,15 @@
 # Dependabot proposes updates to the packages, the base images and the actions as pull requests,
 # with the matching yarn.lock and digest changes. Each is then checked and reviewed like any other
-# change before a master build deploys it.
+# change before a master build deploys it. Their pull request checks run on GitHub's own runners,
+# never on dal-1 (see .github/workflows/pull-request.yml).
 version: 2
 
 # The base images come from Docker Hardened Images, which need a login to read. The two secrets
-# are Dependabot secrets with the same names and values as the Actions secrets the image workflows
-# log in with. Dependabot's pull requests run the pull request checks with Dependabot secrets, not
-# the Actions ones, so the image build job reads the same two.
+# are Dependabot secrets with the same names as the Actions secrets the image workflows log in
+# with, for the same Docker Hub account, but DOCKERHUB_TOKEN here is a separate token that can only
+# read. The Actions one also pushes the images production runs, while Dependabot's pull requests
+# run the pull request checks with these two, so their image build job hands this token to the
+# action versions each pull request proposes.
 registries:
   dhi:
     type: docker-registry
