@@ -136,6 +136,7 @@ const {
   clearPendingRemovals,
   COMPARED_FIELDS,
   CONFIRM_AFTER,
+  countFetched,
   diffBans,
   fewestHeld,
   findAccountChanges,
@@ -550,6 +551,33 @@ assert.deepStrictEqual(plain([...findAccountChanges(fetchedEos, storedEos)]), [
   ['1,e', { from: eos(9), to: eos(5) }]
 ]);
 assert.deepStrictEqual(plain([...findAccountChanges([newEos], storedEos)]), []);
+
+// How many bans a complete read found, for the rules for removing bans: all of them, but for a list
+// of fewer than 10 bans that is missing a ban not stored for an EOS ID, only those with a SteamID,
+// as before account changes, when the others were skipped. A ban that gained a SteamID has one, and
+// so has a remote ban, or one made from a stored ban, which has no SteamIDs, as remote lists give
+// only their SteamIDs' lines. A missing ban stored for a player saved before SteamIDs were checked,
+// or for an EOS ID in capitals, is not stored for an EOS ID as CBL stores them, so it counts as one
+// stored for a SteamID does.
+const eosOnly = [downgraded, eosToEos, eosKept, newEos];
+const fetchedToCount = [
+  fetchedBan('s'),
+  upgraded,
+  ...eosOnly,
+  { id: '1,r', steamUser: steamID(3) }
+];
+const missingFor = (...players) => players.map((steamUser, i) => storedBan(`m${i}`, { steamUser }));
+assert.strictEqual(countFetched(fetchedToCount, missingFor(steamID(9)), 9), 3);
+assert.strictEqual(countFetched(fetchedToCount, missingFor(eos(9), steamID(9)), 9), 3);
+assert.strictEqual(countFetched(fetchedToCount, missingFor(`${steamID(9)}/`), 9), 3);
+assert.strictEqual(countFetched(fetchedToCount, missingFor(eos(0xabc).toUpperCase()), 9), 3);
+assert.strictEqual(countFetched(eosOnly, missingFor(steamID(9)), 9), 0);
+// A list that is missing only bans stored for EOS IDs, or none, counts every ban, and so does a list
+// of 10 or more.
+assert.strictEqual(countFetched(fetchedToCount, missingFor(eos(9), eos(10)), 9), 7);
+assert.strictEqual(countFetched(eosOnly, missingFor(eos(9)), 9), 4);
+assert.strictEqual(countFetched(fetchedToCount, [], 9), 7);
+assert.strictEqual(countFetched(eosOnly, missingFor(steamID(9)), FULL_REMOVAL_BANS), 4);
 
 // Which of the bans missing from a complete read of a list are removed, kept for a later read, or
 // held for an admin. Each case is [the rules' inputs, what they decide].
@@ -1699,5 +1727,5 @@ assert.deepStrictEqual(batches, [2, 2]);
 assert.strictEqual(events.filter(([type]) => type === 'commit').length, 2);
 
 console.log(
-  'Apply checks passed: values compared, players kept, moved and changed to new accounts, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, with their bans, records of missing bans, counted a statement at a time, with their IDs, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
+  'Apply checks passed: values compared, players kept, moved and changed to new accounts, the bans a small list found counted by their SteamIDs, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, with their bans, records of missing bans, counted a statement at a time, with their IDs, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
 );

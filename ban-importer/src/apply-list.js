@@ -263,6 +263,26 @@ export function fewestHeld(of) {
 // not recorded, as every read that finds no bans holds the list again.
 export const RECORDED_HOLDS = ['full', 'large'];
 
+// How many bans a complete read of a list found, as planRemovals takes them (fetched), of the bans
+// it fetched (bans): all of them, but for a list of fewer than FULL_REMOVAL_BANS bans (stored) that
+// is missing a ban stored for a player that is not an EOS ID's, such as one whose account changed
+// as it lost its SteamID (missing, see planMissingBans in ban-importer.js), only those that have a
+// SteamID, as bans were counted before account changes, when the bans without one were skipped. So
+// a read of such a list that returned none, e.g. as its source stopped giving SteamIDs but still
+// gives EOS IDs, is taken for one that gave no bans, which keeps them all, as a small list that
+// lost its SteamIDs all at once more likely broke, whatever bans for EOS IDs it returned, stored or
+// new. A ban that gained a SteamID has one, and so does any ban of a remote list, which gives only
+// its SteamIDs' lines, or one made from the stored bans of a remote list whose file is unchanged. A
+// small list that is missing only bans stored for EOS IDs, which no list had before account
+// changes, counts every ban, so it loses, and changes, bans as a larger list does; and a larger
+// list whose read found none of its bans, as every ban it fetched changed account, is held as it
+// lost them all, with records, as it found bans.
+export function countFetched(bans, missing, stored) {
+  if (stored >= FULL_REMOVAL_BANS) return bans.length;
+  if (missing.every(({ steamUser }) => accountKind(steamUser) === 'eos')) return bans.length;
+  return bans.filter(({ steamIDs }) => !Array.isArray(steamIDs) || steamIDs.length > 0).length;
+}
+
 // Decide what to do with the bans missing from a complete read of a list: missing is their IDs,
 // stored and fetched the numbers of bans the list had before the read and the read found, pending
 // when each ban recorded as missing before was first missing, in milliseconds, by its ID, held the
