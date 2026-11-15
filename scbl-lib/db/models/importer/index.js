@@ -20,6 +20,11 @@ import ImporterState from './importer-state.js';
 //   by setting its suspendedAt, suspendedBy and reason anew and clearing its resumedAt; the
 //   importer deletes them (see scbl-lib/db/ban-list-suspensions.js). A list's row also goes with
 //   the list, by its foreign key, when the bot removes the list.
+// - BanListSyncs: the bot sets a list's replacePending, and nothing else in its row, in the
+//   transaction of /banlist update that gives the list a new type or source, so the importer reads
+//   the new source in full afresh, also when the source is changed back before the importer read
+//   the one it was changed to (see markSourceChanged in discord-bot/src/utils/ban-list-status.js).
+//   A list with no row yet needs none, and the bot adds none.
 // A write added later, e.g. by another game's or another ID's admin commands, is listed here too.
 const IMPORTER_MODELS = [
   ImporterSchemaMigration,

@@ -8,7 +8,14 @@ import {
   skipCheckOption
 } from './ban-list-input.js';
 import { checkBanListSource, parseBanListSource } from './ban-list-source.js';
-import { NO_TABLES, readPause, readPaused, readQueueSkips, readStatus } from './ban-list-status.js';
+import {
+  markSourceChanged,
+  NO_TABLES,
+  readPause,
+  readPaused,
+  readQueueSkips,
+  readStatus
+} from './ban-list-status.js';
 import confirm from './confirm.js';
 import {
   deleteBanLists,
@@ -73,6 +80,7 @@ export {
   formatBanListName,
   formatBanListType,
   listEmbed,
+  markSourceChanged,
   NO_TABLES,
   organisationEmbed,
   organisationOption,

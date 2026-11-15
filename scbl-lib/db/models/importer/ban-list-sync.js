@@ -79,7 +79,8 @@ export default sequelize.define(
     headUids: {
       type: DataTypes.TEXT
     },
-    // Whether the list's bans are to be replaced by those of its new source.
+    // Whether the list's bans are to be replaced by those of its new source. The bot sets it when it
+    // gives the list a new type or source (see index.js).
     replacePending: {
       type: DataTypes.BOOLEAN,
       allowNull: false,

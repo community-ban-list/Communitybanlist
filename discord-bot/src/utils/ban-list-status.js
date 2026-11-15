@@ -9,9 +9,11 @@ import { QueryTypes } from 'scbl-lib/db/sequelize';
 
 import UserError from './user-error.js';
 
-// What the ban importer's tables say about ban lists, which the bot only reads here: whether each
-// is paused, how the importer last imported it, and the bans it holds back from removing. Until the
-// importer has made its tables, after it is deployed, they cannot be read, which the bot says.
+// What the ban importer's tables say about ban lists, which the bot reads here: whether each is
+// paused, how the importer last imported it, and the bans it holds back from removing. Until the
+// importer has made its tables, after it is deployed, they cannot be read, which the bot says. The
+// one thing the bot writes to them here is the mark on a list's BanListSyncs row that its source was
+// changed (see markSourceChanged).
 
 export const NO_TABLES =
   'The ban importer has not created its tables yet, so this cannot be done until its next cycle has run.';
@@ -42,6 +44,25 @@ export async function readQueueSkips(banListIDs) {
 export async function readPause(banList) {
   const [row] = await readPausedBanLists({ banList, missingTable: 'throw' }).catch(tablesMissing);
   return row ?? null;
+}
+
+const MARK_SOURCE_CHANGED = 'UPDATE BanListSyncs SET replacePending = 1 WHERE banList = ?';
+
+// Mark the ban list's BanListSyncs row, in the transaction that saves its new type or source, so the
+// ban importer replaces its bans with those of the new source: it reads the list in full afresh on
+// its next cycle, or once it is resumed, without what it kept about the source the row was written
+// for, such as a remote list's ETag or a BattleMetrics list's newest page. The row's sourceKey
+// tells the importer of a new source too, but not of a source changed back before the importer read
+// the new one: the row is then still that source's, so without the mark the importer would take its
+// file as unchanged, or poll only its newest page, and the bans the change deleted would not come
+// back. A list with no row, which the importer has never imported, needs no mark, nor does any list
+// before the importer has made its tables.
+export async function markSourceChanged(banList, transaction) {
+  try {
+    await sequelize.query(MARK_SOURCE_CHANGED, { replacements: [banList], transaction });
+  } catch (err) {
+    if (!isMissingTable(err)) throw err;
+  }
 }
 
 const REMOVALS = `SELECT banList, COUNT(*) AS bans, COUNT(heldAt) AS held

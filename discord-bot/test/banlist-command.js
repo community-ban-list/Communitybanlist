@@ -16,13 +16,14 @@ let counts = { bans: 0, steamUsers: 0, exportBanListConfigs: 0 };
 let importerRunning = false;
 
 // The paused lists' rows, the ban importer's rows of BanListSyncs and of BanListPendingRemovals,
-// whether the importer has made its tables yet, and what a suspension answers, when not as the
-// rows say.
+// whether the importer has made its tables yet, what a suspension answers, when not as the rows
+// say, and the error marking a list's row fails with, if any.
 let pausedRows = [];
 let syncRows = [];
 let removalRows = [];
 let tablesMissing = false;
 let suspendAnswer = null;
+let markError = null;
 // The paused lists the importer's reputation check last settled players without.
 let settled = [];
 const SUSPENDED_AT = new Date('2026-10-29T12:00:00.000Z');
@@ -88,6 +89,16 @@ const sequelize = {
     if (sql.includes('FROM BanListPendingRemovals')) {
       if (tablesMissing) throw noTable();
       return removalRows.filter(({ banList }) => replacements.banListIDs.includes(banList));
+    }
+    // The mark on a list's row that its source was changed, which sets nothing else, and nothing
+    // for a list without a row.
+    if (sql.startsWith('UPDATE BanListSyncs')) {
+      assert.strictEqual(sql, 'UPDATE BanListSyncs SET replacePending = 1 WHERE banList = ?');
+      calls.push(['mark source changed', transaction?.id, ...replacements]);
+      if (tablesMissing) throw noTable();
+      if (markError) throw markError;
+      for (const row of syncRows) if (row.banList === replacements[0]) row.replacePending = 1;
+      return;
     }
     // The banned players are queued for the reputation and export updates.
     assert.match(
@@ -254,6 +265,7 @@ function reset(bans = 0, steamUsers = 0, exportBanListConfigs = 0) {
   removalRows = [];
   tablesMissing = false;
   suspendAnswer = null;
+  markError = null;
   settled = [];
   counts = { bans, steamUsers, exportBanListConfigs };
   record = {
@@ -297,8 +309,8 @@ assert.deepStrictEqual(audits, [
 ]);
 
 // A new source deletes the list's bans, which came from the old one, in the same transaction that
-// saves the source, once the change is confirmed and no ban importer run is under way. The players
-// are queued for an update.
+// saves the source and marks the list's row of the ban importer's, once the change is confirmed and
+// no ban importer run is under way. The players are queued for an update.
 reset(3, 2);
 await run('update', { banlist: '5', source: 'new-list' });
 assert.deepStrictEqual(prompts, [
@@ -318,6 +330,7 @@ assert.deepStrictEqual(calls, [
   ['flags', 1, [5]],
   ['destroy bans', 1, [5]],
   ['save', 1, 'battlemetrics', 'new-list', 'Main'],
+  ['mark source changed', 1, 5],
   ['commit', 1]
 ]);
 assert.strictEqual(
@@ -335,13 +348,14 @@ assert.match(
   prompts[0].content,
   /^Change the source of \*\*Org\*\* \/ \*\*Main\*\*\? .* 1 ban on 1 player,/
 );
-assert.deepStrictEqual(calls.slice(-7), [
+assert.deepStrictEqual(calls.slice(-8), [
   ['confirm'],
   ['check run lock'],
   ['begin', 1],
   ['flags', 1, [5]],
   ['destroy bans', 1, [5]],
   ['save', 1, 'remote', 'https://x.test/b', 'Renamed'],
+  ['mark source changed', 1, 5],
   ['commit', 1]
 ]);
 
@@ -352,25 +366,96 @@ await run('update', { banlist: '5', source: 'new-list' });
 assert.strictEqual(prompts.length, 1);
 assert.ok(
   !calls.some(([call]) =>
-    ['check run lock', 'begin', 'flags', 'destroy bans', 'save'].includes(call)
+    ['check run lock', 'begin', 'flags', 'destroy bans', 'save', 'mark source changed'].includes(
+      call
+    )
   )
 );
 assert.strictEqual(audits.length, 0);
 assert.strictEqual(replies.length, 0);
 
-// A list without bans gets its new source without being asked.
+// A list without bans gets its new source without being asked, and its row is marked all the same,
+// or would be if it had one.
 reset(0, 0);
 await run('update', { banlist: '5', source: 'new-list' });
 assert.strictEqual(prompts.length, 0);
-assert.deepStrictEqual(calls.slice(-4), [
+assert.deepStrictEqual(calls.slice(-5), [
   ['check run lock'],
   ['begin', 1],
   ['save', 1, 'battlemetrics', 'new-list', 'Main'],
+  ['mark source changed', 1, 5],
   ['commit', 1]
 ]);
 assert.deepStrictEqual(audits, [
   'updated ban list "Main" (ID: 5) of organisation "Org" (ID: 2): source "old-list" → "new-list".'
 ]);
+
+// A source changed back before the ban importer read the one it was changed to leaves the list's
+// row with the source it is back to, so without the mark the importer would take that source's
+// file as unchanged, or poll only its newest page, and the bans the first change deleted would not
+// come back. So both changes mark the row, each in the transaction that saves it, including the
+// second, which has no bans to delete and asks nothing.
+reset(3, 2);
+syncRows = [{ banList: 5, sourceKey: 'o'.repeat(64), state: 'ok', replacePending: 0 }];
+await run('update', { banlist: '5', source: 'new-list' });
+assert.deepStrictEqual(calls.slice(-6), [
+  ['begin', 1],
+  ['flags', 1, [5]],
+  ['destroy bans', 1, [5]],
+  ['save', 1, 'battlemetrics', 'new-list', 'Main'],
+  ['mark source changed', 1, 5],
+  ['commit', 1]
+]);
+assert.strictEqual(syncRows[0].replacePending, 1);
+// The first change deleted the list's bans. The mark is cleared here only to see that the second
+// change sets it too.
+counts = { bans: 0, steamUsers: 0, exportBanListConfigs: 0 };
+syncRows[0].replacePending = 0;
+calls.length = 0;
+prompts.length = 0;
+await run('update', { banlist: '5', source: 'old-list' });
+assert.strictEqual(prompts.length, 0);
+assert.deepStrictEqual(calls, [
+  ['check source', 'battlemetrics', 'old-list'],
+  ['count bans', [5]],
+  ['count bans', [5]],
+  ['check run lock'],
+  ['begin', 2],
+  ['save', 2, 'battlemetrics', 'old-list', 'Main'],
+  ['mark source changed', 2, 5],
+  ['commit', 2]
+]);
+assert.strictEqual(syncRows[0].replacePending, 1);
+assert.strictEqual(
+  replies.at(-1).content,
+  'Updated **Org** / **Main**. Found 3 bans. Its bans are re-imported on the next ban importer run.'
+);
+
+// Until the importer has made its tables there is no row to mark, and the change is saved all the
+// same. Any other error marking the row rolls the change back, bans and all.
+reset(3, 2);
+tablesMissing = true;
+await run('update', { banlist: '5', source: 'new-list' });
+assert.deepStrictEqual(calls.slice(-3), [
+  ['save', 1, 'battlemetrics', 'new-list', 'Main'],
+  ['mark source changed', 1, 5],
+  ['commit', 1]
+]);
+assert.strictEqual(audits.length, 1);
+reset(3, 2);
+markError = Object.assign(new Error('Deadlock found when trying to get lock'), {
+  original: { errno: 1213 }
+});
+await assert.rejects(
+  run('update', { banlist: '5', source: 'new-list' }),
+  (err) => err === markError
+);
+assert.deepStrictEqual(calls.slice(-2), [
+  ['mark source changed', 1, 5],
+  ['rollback', 1]
+]);
+assert.strictEqual(audits.length, 0);
+assert.strictEqual(replies.length, 0);
 
 // While a ban importer run is under way, which could save the old source's bans again after they
 // are deleted, a new type or source is refused once confirmed, and nothing is changed, with or
@@ -394,7 +479,11 @@ for (const [bans, steamUsers] of [
   );
   assert.strictEqual(prompts.length, bans > 0 ? 1 : 0);
   assert.deepStrictEqual(calls.at(-1), ['check run lock']);
-  assert.ok(!calls.some(([call]) => ['begin', 'flags', 'destroy bans', 'save'].includes(call)));
+  assert.ok(
+    !calls.some(([call]) =>
+      ['begin', 'flags', 'destroy bans', 'save', 'mark source changed'].includes(call)
+    )
+  );
   assert.strictEqual(audits.length, 0);
   assert.strictEqual(replies.length, 0);
 }
@@ -568,10 +657,11 @@ assert.strictEqual(
   prompts[0].content,
   "Change the source of **Org** / **Main**? This deletes its 3 bans on 2 players, and the new source's bans are imported once it is resumed."
 );
-assert.deepStrictEqual(calls.slice(-4), [
+assert.deepStrictEqual(calls.slice(-5), [
   ['begin', 1],
   ['destroy bans', 1, [5]],
   ['save', 1, 'battlemetrics', 'new-list', 'Main'],
+  ['mark source changed', 1, 5],
   ['commit', 1]
 ]);
 assert.strictEqual(
@@ -668,5 +758,5 @@ assert.deepStrictEqual(
 );
 
 console.log(
-  'Ban list command checks passed: renames keep bans, source changes delete them once confirmed and only while no import runs, removal, suspending and resuming lists, which then queue no players, and their status.'
+  "Ban list command checks passed: renames keep bans, source changes delete them once confirmed and only while no import runs, and mark the importer's row, also when changed back, removal, suspending and resuming lists, which then queue no players, and their status."
 );

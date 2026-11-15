@@ -31,6 +31,7 @@ import {
   describePause,
   formatBanListName,
   formatBanListType,
+  markSourceChanged,
   NO_TABLES,
   organisationOption,
   paginate,
@@ -191,8 +192,10 @@ async function update(interaction) {
 
   // The list's bans came from its old source, so a new type or source deletes them, and the new
   // source's bans are imported on the next ban importer run, or once the list is resumed, if it is
-  // suspended. Left to the importer, most of them would be kept, as it holds back removing many of
-  // a list's bans at once.
+  // suspended. The importer would replace them itself, as it does for a source changed by hand, but
+  // a list of 10 or more bans would keep them counting until a read confirmed them gone, at least
+  // 10 minutes after its first read of the new source, so deleting them here makes them stop
+  // counting at once.
   let deletion = null;
   let paused = null;
   if (check !== undefined) {
@@ -223,11 +226,15 @@ async function update(interaction) {
   }
 
   // A paused list's bans count for nothing, so its players are not queued once the importer has
-  // settled them (see readQueueSkips), as read once the change is confirmed.
+  // settled them (see readQueueSkips), as read once the change is confirmed. A new type or source
+  // also marks the list's row of the importer's, so the importer reads the new source in full
+  // afresh, also when it had no bans to delete, e.g. as the source is changed back before the
+  // importer read the one it was changed to (see markSourceChanged).
   const skips = deletion ? await readQueueSkips([banList.id]) : [];
   await sequelize.transaction(async (transaction) => {
     if (deletion) await deleteBansOfBanLists([banList.id], transaction, { paused: skips });
     await banList.save({ transaction });
+    if (check !== undefined) await markSourceChanged(banList.id, transaction);
   });
   const deleted = deletion ? `, deleting ${deletion}` : '';
   audit(interaction, `updated ${description}: ${changes.join(', ')}${deleted}.`);
