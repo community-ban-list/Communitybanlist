@@ -9,7 +9,7 @@ ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
 # The dev variant includes the shell and Yarn needed to install dependencies.
 # Both stages' base images are pinned by digest, so every build of a commit starts from the same
 # images. Dependabot proposes newer digests, such as security fixes, as pull requests.
-FROM dhi.io/node:26-dev@sha256:c8939885965365c675a024d062bcb761bda4b47e95ce0323aa998ac9bc312fd6 AS build
+FROM dhi.io/node:26-dev@sha256:6d3e8e6f76812d4beb7b1ff5887458e67b33c0e82219bff4cc43d97f12e4d777 AS build
 
 WORKDIR /opt/workdir/
 
@@ -34,7 +34,7 @@ RUN node scripts/run-tests.mjs scbl-lib discord-bot
 
 # Stage 2: Runtime
 # The runtime variant has no shell or package manager and runs as the non-root node user.
-FROM dhi.io/node:26@sha256:dc87c509f7279f734d04036f696bf9aad1b8d66f34750f32c30c5b85e033187f
+FROM dhi.io/node:26@sha256:25ed2b0240365e3b459cb22934e87557115b95f1f3cf5dab5dca45f80d5987de
 
 WORKDIR /opt/workdir/
 
