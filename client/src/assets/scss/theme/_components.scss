@@ -14,6 +14,11 @@
   }
 }
 
+// Discord's badge holds only its logo, which stays white, as on its buttons (theme/_buttons.scss).
+.badge.bg-discord {
+  color: $white;
+}
+
 // Round badges that hold an icon, used in the home page's lists.
 .badge-circle {
   align-items: center;
@@ -167,7 +172,7 @@
 
   .thead-light th {
     background-color: $gray-100;
-    color: $gray-600;
+    color: $body-secondary-color;
   }
 }
 

@@ -41,7 +41,16 @@
     }
   }
 
-  --cbl-input-border-color: #{$dark-border};
+  // A field's border stands out from the dark card (3:1). Its placeholder keeps its light grey.
+  --cbl-input-border-color: #626d88;
+  --cbl-input-placeholder-color: #{$gray-500};
+
+  // Text in the theme colours (_variables.scss).
+  @each $name, $value in $text-colors-dark {
+    .text-#{$name} {
+      color: $value !important;
+    }
+  }
 
   // Icons in circles keep their colour bright on a faint tint.
   @each $name in primary, info, success, warning, danger {
@@ -51,6 +60,12 @@
       background-color: rgba($value, 0.2);
       color: $value;
     }
+  }
+
+  // The navbar menus' descriptions and the footer's links keep their lighter grey, which is easy to
+  // read on the dark panels.
+  .dropdown-media p {
+    color: $gray-600;
   }
 
   .dropdown-media:hover {
@@ -63,8 +78,12 @@
   .footer {
     background: $dark-surface;
 
-    .nav .nav-link:hover {
-      color: $gray-400;
+    .nav .nav-link {
+      color: $gray-600;
+
+      &:hover {
+        color: $gray-400;
+      }
     }
   }
 

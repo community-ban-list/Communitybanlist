@@ -1,7 +1,12 @@
+@use 'sass:map';
+
 // Buttons are uppercase and lift slightly on hover, as in the Argon theme.
 .btn {
   letter-spacing: 0.025em;
   text-transform: uppercase;
+
+  // The site's focus ring, in place of Bootstrap's pale one in the button's colour.
+  --#{$prefix}btn-focus-box-shadow: #{$btn-focus-box-shadow};
 
   &:not(.btn-link):hover {
     box-shadow: 0 7px 14px rgba(50, 50, 93, 0.1), 0 3px 6px rgba(0, 0, 0, 0.08);
@@ -41,4 +46,18 @@
   .text-#{$name} {
     color: $value !important;
   }
+}
+
+// Discord's buttons hold only its logo, which needs 3:1 on Discord's colour rather than the 4.5:1 that
+// text needs, so it stays white.
+.btn-discord {
+  $discord: map.get($brand-colors, 'discord');
+
+  @include button-variant(
+    $discord,
+    $discord,
+    $color: $white,
+    $hover-color: $white,
+    $disabled-color: $white
+  );
 }

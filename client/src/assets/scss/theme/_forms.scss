@@ -1,5 +1,27 @@
+// A field's border stands out from the white card (3:1), and its placeholder can be read (4.5:1).
+// Dark mode sets its own (theme/_dark.scss).
 :root {
-  --cbl-input-border-color: #cad1d7;
+  --cbl-input-border-color: #8493a5;
+  --cbl-input-placeholder-color: #{$body-secondary-color};
+}
+
+// A focused field shows the focus ring. Bootstrap leaves it out when fields have no shadow of their
+// own, as here.
+.form-control:focus,
+.form-select:focus,
+.form-control.is-invalid:focus,
+.form-select.is-invalid:focus {
+  box-shadow: $input-focus-box-shadow;
+}
+
+// On phones and tablets, fields have a 16px font, as iOS Safari zooms in on a focused field whose font
+// is smaller.
+@include media-breakpoint-down(lg) {
+  .form-control,
+  .form-select,
+  .input-group-text {
+    font-size: $font-size-base;
+  }
 }
 
 // An input group's icon sits inside the input's border, and the whole group gets the focus ring.
@@ -18,12 +40,16 @@
     padding-left: 0;
   }
 
-  // A button joined to an input stays flat.
+  // A button joined to an input stays flat, but shows the focus ring when it has keyboard focus.
   > .btn,
   > .btn:hover {
     box-shadow: none;
     margin-right: 0;
     transform: none;
+  }
+
+  > .btn:focus-visible {
+    box-shadow: $btn-focus-box-shadow;
   }
 
   &:focus-within {
