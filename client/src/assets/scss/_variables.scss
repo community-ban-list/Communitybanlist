@@ -133,7 +133,15 @@ $link-shade-percentage: 15%;
 
 // Typography
 
-$font-family-sans-serif: 'Open Sans', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+$font-family-sans-serif:
+  'Open Sans',
+  system-ui,
+  -apple-system,
+  'Segoe UI',
+  Roboto,
+  'Helvetica Neue',
+  Arial,
+  sans-serif;
 $font-size-base: 1rem;
 $font-size-sm: $font-size-base * 0.875;
 $font-weight-bold: 600;
@@ -156,7 +164,9 @@ $hr-margin-y: 2rem;
 
 // Shadows
 
-$box-shadow: 0 15px 35px rgba(50, 50, 93, 0.1), 0 5px 15px rgba(0, 0, 0, 0.07);
+$box-shadow:
+  0 15px 35px rgba(50, 50, 93, 0.1),
+  0 5px 15px rgba(0, 0, 0, 0.07);
 $box-shadow-lg: 0 1rem 3rem rgba($black, 0.175);
 
 // Buttons and inputs
@@ -170,7 +180,9 @@ $input-btn-font-size-sm: 0.75rem;
 
 $btn-padding-x: 1.25rem;
 $btn-font-weight: 600;
-$btn-box-shadow: 0 4px 6px rgba(50, 50, 93, 0.11), 0 1px 3px rgba(0, 0, 0, 0.08);
+$btn-box-shadow:
+  0 4px 6px rgba(50, 50, 93, 0.11),
+  0 1px 3px rgba(0, 0, 0, 0.08);
 $btn-active-box-shadow: none;
 
 // Focus rings: a white ring inside a navy one. On the white cards the navy ring stands out, and on
@@ -210,7 +222,10 @@ $card-border-color: rgba($black, 0.05);
 $dropdown-min-width: 12rem;
 $dropdown-font-size: $font-size-sm;
 $dropdown-border-width: 0;
-$dropdown-box-shadow: 0 50px 100px rgba(50, 50, 93, 0.1), 0 15px 35px rgba(50, 50, 93, 0.15), 0 5px 15px rgba(0, 0, 0, 0.1);
+$dropdown-box-shadow:
+  0 50px 100px rgba(50, 50, 93, 0.1),
+  0 15px 35px rgba(50, 50, 93, 0.15),
+  0 5px 15px rgba(0, 0, 0, 0.1);
 $dropdown-item-padding-y: 1rem;
 $dropdown-item-padding-x: 1rem;
 $dropdown-link-active-color: $default;
@@ -225,7 +240,9 @@ $badge-font-weight: 600;
 $badge-padding-y: 0.35rem;
 $badge-padding-x: 0.375rem;
 $modal-content-border-width: 0;
-$modal-content-box-shadow-xs: 0 15px 35px rgba(50, 50, 93, 0.2), 0 5px 15px rgba(0, 0, 0, 0.17);
+$modal-content-box-shadow-xs:
+  0 15px 35px rgba(50, 50, 93, 0.2),
+  0 5px 15px rgba(0, 0, 0, 0.17);
 $modal-content-box-shadow-sm-up: $modal-content-box-shadow-xs;
 $modal-backdrop-opacity: 0.16;
 $tooltip-opacity: 1;
