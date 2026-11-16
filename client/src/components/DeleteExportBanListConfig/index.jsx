@@ -20,12 +20,15 @@ const DELETE_EXPORT_BAN_LIST_CONFIG = gql`
 `;
 
 // The Delete button for an export ban list's custom points for a ban list. It asks first, and says
-// what changes: without them, that ban list's bans count for the list's default points. onDeleted is
-// called with the ban list's name once they are deleted.
+// what changes: without them, that ban list's bans count for the list's default points. A paused ban
+// list's bans count for nothing until it counts again, and the web server adds no custom points for
+// it until then. onDeleted is called with the ban list's name once they are deleted.
 export default function (props) {
   const { exportBanListConfig, exportBanList } = props;
   const { banList } = exportBanListConfig;
   const banListName = `${banList.organisation.name}'s ${banList.name}`;
+  const { defaultActivePoints: active, defaultExpiredPoints: expired } = exportBanList;
+  const defaultPoints = `${active} for an active ban and ${expired} for an expired ban`;
 
   const [confirming, setConfirming] = useState(false);
   const [deleteExportBanListConfig, { loading, error, data, reset }] = useMutation(
@@ -65,11 +68,18 @@ export default function (props) {
         onCancel={() => setConfirming(false)}
         onConfirm={() => deleteExportBanListConfig({ variables: { id: exportBanListConfig.id } })}
       >
-        <p className="mb-0">
-          Bans on {banListName} will count for this export ban list's default points:{' '}
-          {exportBanList.defaultActivePoints} for an active ban and{' '}
-          {exportBanList.defaultExpiredPoints} for an expired ban.
-        </p>
+        {banList.paused ? (
+          <p className="mb-0">
+            {banListName} is paused, so its bans count for nothing for now. Once it counts again,
+            they will count for this export ban list's default points: {defaultPoints}. Custom
+            points for it cannot be added back while it is paused.
+          </p>
+        ) : (
+          <p className="mb-0">
+            Bans on {banListName} will count for this export ban list's default points:{' '}
+            {defaultPoints}.
+          </p>
+        )}
       </ConfirmModal>
     </>
   );

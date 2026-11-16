@@ -41,10 +41,11 @@ function removeFromCache(cache, { data }) {
 }
 
 // The Delete button for an export ban list. A deleted list cannot be brought back, so it asks
-// first, and says what the deletion removes: the servers that use the list lose its bans, and a
-// BattleMetrics list's ban list on BattleMetrics is deleted too, with its invites and its
-// subscribers, as ExportBanList's deleteExportBanList does. A list that never got its BattleMetrics
-// ban list has none to delete. onDeleted is called with the list's name once it is deleted.
+// first, and says what the deletion removes: the servers that use the list lose all of its bans, as
+// its export bans go with it, and a BattleMetrics list's ban list on BattleMetrics is deleted too,
+// with its invites and its subscribers, as ExportBanList's deleteExportBanList does. A list that
+// never got its BattleMetrics ban list has none to delete. onDeleted is called with the list's name
+// once it is deleted.
 export default function (props) {
   const { exportBanList } = props;
   const [confirming, setConfirming] = useState(false);
@@ -88,7 +89,10 @@ export default function (props) {
         onCancel={() => setConfirming(false)}
         onConfirm={() => deleteExportBanList({ variables: { id: exportBanList.id } })}
       >
-        <p>Servers using this export ban list will stop getting its bans.</p>
+        <p>
+          Servers using this export ban list lose all of its bans, so the players it bans can join
+          them again.
+        </p>
         {exportBanList.type === 'battlemetrics' && exportBanList.battlemetricsID && (
           <p>
             Its BattleMetrics ban list is deleted too: its share invite stops working, and the

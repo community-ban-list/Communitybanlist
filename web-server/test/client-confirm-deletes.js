@@ -13,12 +13,13 @@ import { transformWithOxc } from 'vite';
 
 // Checks that the client asks before it deletes an export ban list or a list's custom points for a
 // ban list: Delete only opens a dialog that names what is deleted and says what that does, Cancel
-// and Escape send nothing, and only the dialog's own button, which names the action, deletes. While
-// the deletion runs its buttons do nothing, a failed one shows the web server's message, and the
-// page says when one has worked. The client's files are compiled the way its build compiles
-// them, loaded with the client's own packages, and rendered to HTML, with stand-ins for the GraphQL
-// requests. A dialog is rendered in place, as reactstrap only shows one in a browser; its focus
-// handling is reactstrap's and the browser's.
+// and Escape send nothing, and only the dialog's own button, which names the action, deletes, once
+// the dialog has been open for a moment. While the deletion runs its buttons do nothing, a failed
+// one shows the web server's message, and the page says when one has worked. The client's files are
+// compiled the way its build compiles them, loaded with the client's own packages, and rendered to
+// HTML, with stand-ins for the GraphQL requests. A dialog is rendered in place, as reactstrap only
+// shows one in a browser; its focus handling is reactstrap's and the browser's, and the focus the
+// pages move is only checked in a browser.
 
 const CLIENT = new URL('../../client/src/', import.meta.url);
 
@@ -52,7 +53,11 @@ let answer;
 const useQuery = () => answer;
 
 // A page can only be rendered, not used, so state is set beforehand: the next useState calls start
-// with the values in startWith, in order, and every value a component sets is kept in setTo.
+// with the values in startWith, in order, and every value a component sets is kept in setTo. A
+// delete button's state is whether its dialog is open, then the dialog's whether it is ready to
+// confirm: so OPEN is a dialog just opened, and READY one that has been open for a moment.
+const OPEN = [true];
+const READY = [true, true];
 const startWith = [];
 const setTo = [];
 const useState = (initial) => {
@@ -67,12 +72,15 @@ const useState = (initial) => {
 };
 
 // The props of the buttons and dialogs on the last thing rendered, and the keys of its table rows.
+// A closed dialog is rendered too while closing is set, as reactstrap keeps one in the page while it
+// fades out.
 const buttons = [];
 const dialogs = [];
 const rowKeys = [];
+let closing = false;
 const Modal = (props) => {
   dialogs.push(props);
-  return props.isOpen
+  return props.isOpen || closing
     ? h(
         'div',
         { className: 'modal', role: props.role, 'aria-labelledby': props.labelledBy },
@@ -212,7 +220,8 @@ const BATTLEMETRICS = { id: 7, name: 'Main list', type: 'battlemetrics', battlem
 const REMOTE = { id: 8, name: 'Squad servers', type: 'remote', battlemetricsID: null };
 const NO_BATTLEMETRICS_LIST = { ...BATTLEMETRICS, id: 9, battlemetricsID: null };
 
-const SERVERS = 'Servers using this export ban list will stop getting its bans.';
+const SERVERS =
+  'Servers using this export ban list lose all of its bans, so the players it bans can join them again.';
 const BATTLEMETRICS_TOO =
   'Its BattleMetrics ban list is deleted too: its share invite stops working, and the organisations subscribed to it are removed from it. This can take a few minutes.';
 const FOR_GOOD = 'This cannot be undone.';
@@ -234,7 +243,7 @@ const FOR_GOOD = 'This cannot be undone.';
 // The dialog is labelled by its title, which names the list, and says what deleting it does. Its
 // focus starts on Cancel, before the button that deletes, which names the action.
 {
-  const html = render(h(DeleteExportBanList, { exportBanList: BATTLEMETRICS }), { start: [true] });
+  const html = render(h(DeleteExportBanList, { exportBanList: BATTLEMETRICS }), { start: OPEN });
   const [dialog] = dialogs;
   assert.strictEqual(dialog.isOpen, true);
   assert.strictEqual(dialog.role, 'alertdialog');
@@ -254,21 +263,76 @@ const FOR_GOOD = 'This cannot be undone.';
   assert.strictEqual(confirm.color, 'danger');
   assert.ok(html.indexOf('>Cancel<') < html.indexOf('>Delete export ban list<'));
 
-  // Cancel, and Escape or a click outside the dialog, which reactstrap passes to toggle, close it
-  // and send nothing.
+  // Just opened, the button that deletes takes no press, so the second press of a double click or
+  // double tap on Delete, which can land on it, does nothing. It is marked disabled, and a click
+  // outside the dialog does not close it, while Escape, which reactstrap passes to toggle, does.
+  assert.strictEqual(confirm['aria-disabled'], true);
+  assert.strictEqual(confirm.className, 'disabled');
+  assert.strictEqual(dialog.backdrop, 'static');
+  assert.notStrictEqual(dialog.keyboard, false);
+  confirm.onClick();
+  assert.deepStrictEqual(sent, [], 'the button that deletes waits');
+
+  // Cancel, and Escape or a click outside the dialog, close it and send nothing.
   cancel.onClick();
   dialog.toggle();
   assert.deepStrictEqual(sent, []);
   assert.deepStrictEqual(setTo, [false, false]);
+}
 
-  // Only the dialog's button deletes, and only that list.
+// reactstrap calls onOpened once the dialog has opened, which starts the wait, and onClosed once it
+// has gone, which ends it, so the button that deletes waits again each time the dialog opens. The
+// wait is longer than the dialog takes to slide into place, 0.3 seconds.
+{
+  render(h(DeleteExportBanList, { exportBanList: BATTLEMETRICS }), { start: OPEN });
+  const timers = [];
+  const cleared = [];
+  const { setTimeout: realSetTimeout, clearTimeout: realClearTimeout } = globalThis;
+  globalThis.setTimeout = (callback, ms) => timers.push({ callback, ms });
+  globalThis.clearTimeout = (timer) => cleared.push(timer);
+  try {
+    dialogs[0].onOpened();
+    assert.strictEqual(timers.length, 1);
+    assert.ok(timers[0].ms > 300, `the wait is ${timers[0].ms} ms`);
+    assert.deepStrictEqual(setTo, [], 'not ready before the wait is over');
+    timers[0].callback();
+    assert.deepStrictEqual(setTo, [true], 'ready once it is over');
+    dialogs[0].onClosed();
+    assert.ok(cleared.includes(1), 'closing ends the wait');
+    assert.deepStrictEqual(setTo, [true, false], 'not ready once closed');
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+  }
+}
+
+// Once ready, the button that deletes is no longer marked disabled, a click outside closes the
+// dialog, and only that button deletes, and only that list.
+{
+  render(h(DeleteExportBanList, { exportBanList: BATTLEMETRICS }), { start: READY });
+  const confirm = button('Delete export ban list');
+  assert.strictEqual(confirm['aria-disabled'], false);
+  assert.strictEqual(confirm.className, undefined);
+  assert.strictEqual(dialogs[0].backdrop, true);
   confirm.onClick();
   assert.deepStrictEqual(sent, [{ id: 7 }]);
 }
 
+// Once it is cancelled, its buttons stay in the page while it closes, which takes a moment, but the
+// button that deletes no longer does.
+{
+  closing = true;
+  render(h(DeleteExportBanList, { exportBanList: BATTLEMETRICS }), { start: [false, true] });
+  closing = false;
+  const confirm = button('Delete export ban list');
+  assert.strictEqual(confirm['aria-disabled'], true);
+  confirm.onClick();
+  assert.deepStrictEqual(sent, [], 'nothing is sent once cancelled');
+}
+
 // Only a BattleMetrics list that has a BattleMetrics ban list says that it is deleted too.
 for (const exportBanList of [REMOTE, NO_BATTLEMETRICS_LIST]) {
-  const html = render(h(DeleteExportBanList, { exportBanList }), { start: [true] });
+  const html = render(h(DeleteExportBanList, { exportBanList }), { start: OPEN });
   assert.ok(plain(html).includes(`${SERVERS} ${FOR_GOOD}`), exportBanList.name);
   assert.ok(!html.includes('BattleMetrics'), exportBanList.name);
 }
@@ -289,7 +353,7 @@ function checkBusy() {
 }
 render(h(DeleteExportBanList, { exportBanList: BATTLEMETRICS }), {
   state: { ...IDLE, loading: true },
-  start: [true]
+  start: READY
 });
 checkBusy();
 
@@ -307,7 +371,7 @@ for (const [error, message] of [
 ]) {
   const html = render(h(DeleteExportBanList, { exportBanList: BATTLEMETRICS }), {
     state: { ...IDLE, error },
-    start: [true]
+    start: READY
   });
   assert.match(html, new RegExp(`role="alert"><p class="mb-0">${escape(message)}</p>`));
   assert.strictEqual(button('Cancel').disabled, false);
@@ -326,7 +390,7 @@ for (const [error, message] of [
       exportBanList: BATTLEMETRICS,
       onDeleted: (name) => deleted.push(name)
     }),
-    { state: { ...IDLE, data: { deleteExportBanList: { id: 7 } } }, start: [true] }
+    { state: { ...IDLE, data: { deleteExportBanList: { id: 7 } } }, start: READY }
   );
   assert.strictEqual(dialogs[0].returnFocusAfterClose, false);
   mutationOptions.onCompleted();
@@ -361,7 +425,7 @@ const BAN_LIST_POINTS = config(10, 'Squad Bans');
   );
   assert.strictEqual(resets, 1);
 
-  html = render(h(DeleteExportBanListConfig, props), { start: [true] });
+  html = render(h(DeleteExportBanListConfig, props), { start: OPEN });
   const titled = html.match(/aria-labelledby="([^"]+)"/)[1];
   assert.match(
     html,
@@ -377,14 +441,19 @@ const BAN_LIST_POINTS = config(10, 'Squad Bans');
   );
   assert.strictEqual(button('Cancel').autoFocus, true);
   assert.strictEqual(dialogs[0].autoFocus, false);
+  assert.strictEqual(dialogs[0].backdrop, 'static');
+  button('Delete custom points').onClick();
   button('Cancel').onClick();
   dialogs[0].toggle();
-  assert.deepStrictEqual(sent, []);
+  assert.deepStrictEqual(sent, [], 'nothing is sent before the dialog is ready');
+
+  render(h(DeleteExportBanListConfig, props), { start: READY });
+  assert.strictEqual(button('Delete custom points')['aria-disabled'], false);
   button('Delete custom points').onClick();
   assert.deepStrictEqual(sent, [{ id: 10 }]);
 
   // Its Delete button is disabled while the deletion runs, and the dialog's buttons do nothing.
-  render(h(DeleteExportBanListConfig, props), { state: { ...IDLE, loading: true }, start: [true] });
+  render(h(DeleteExportBanListConfig, props), { state: { ...IDLE, loading: true }, start: READY });
   checkBusy();
 
   // A refused deletion shows the web server's message.
@@ -397,18 +466,36 @@ const BAN_LIST_POINTS = config(10, 'Squad Bans');
         errors: [{ message: 'Export ban list config does not exist!' }]
       })
     },
-    start: [true]
+    start: READY
   });
   assert.match(html, /role="alert"><p class="mb-0">Export ban list config does not exist!<\/p>/);
   assert.strictEqual(dialogs[0].returnFocusAfterClose, true);
 
   render(h(DeleteExportBanListConfig, props), {
     state: { ...IDLE, data: { deleteExportBanListConfig: { id: 10 } } },
-    start: [true]
+    start: READY
   });
   assert.strictEqual(dialogs[0].returnFocusAfterClose, false);
   mutationOptions.onCompleted();
   assert.deepStrictEqual(deleted, ["AFO's Squad Bans"]);
+}
+
+// For a paused ban list, whose bans count for nothing until it counts again, the dialog says so,
+// and that its custom points cannot be added back until then, as the web server refuses them.
+{
+  const paused = config(12, 'Main Bans');
+  paused.banList.paused = true;
+  const html = render(
+    h(DeleteExportBanListConfig, { exportBanListConfig: paused, exportBanList: EXPORT_BAN_LIST }),
+    { start: OPEN }
+  );
+  assert.ok(
+    plain(html).includes(
+      "AFO's Main Bans is paused, so its bans count for nothing for now. Once it counts again, they will count for this export ban list's default points: 3 for an active ban and 1 for an expired ban. Custom points for it cannot be added back while it is paused."
+    ),
+    plain(html)
+  );
+  assert.ok(!plain(html).includes('Bans on'));
 }
 
 // The export ban lists page keys each list's row by the list's ID, so a row, and the Delete button
@@ -452,7 +539,8 @@ const BAN_LIST_POINTS = config(10, 'Squad Bans');
 }
 
 // The configs table keys each row by the config's ID, gives Delete the config and the list's
-// default points, and says once custom points are deleted.
+// default points, and says once custom points are deleted, until custom points for that ban list
+// are added again.
 {
   const data = {
     loggedInSteamUser: {
@@ -480,16 +568,38 @@ const BAN_LIST_POINTS = config(10, 'Squad Bans');
   );
   assert.match(html, /aria-label="Delete the custom points for AFO&#x27;s Seed Bans"/);
   configButtons[1].onDeleted("AFO's Seed Bans");
-  assert.deepStrictEqual(setTo, [{ banListName: "AFO's Seed Bans" }]);
+  const deleted = { banListName: "AFO's Seed Bans", banListID: 111 };
+  assert.deepStrictEqual(setTo, [deleted]);
 
+  const { exportBanList } = data.loggedInSteamUser;
+  const without = {
+    loggedInSteamUser: {
+      exportBanList: { ...exportBanList, exportBanListConfigs: [BAN_LIST_POINTS] }
+    }
+  };
   html = render(h(ExportBanListConfigs, { exportBanListID: 7 }), {
-    data,
-    start: [{ banListName: "AFO's Seed Bans" }]
+    data: without,
+    start: [deleted]
   });
   assert.match(
     html,
     /<p tabindex="-1" class="fw-bold mb-0">Deleted the custom points for AFO&#x27;s Seed Bans\.<\/p>/
   );
+
+  // Added again, with the form below the table, as a new config for the same ban list.
+  const addedAgain = {
+    loggedInSteamUser: {
+      exportBanList: {
+        ...exportBanList,
+        exportBanListConfigs: [BAN_LIST_POINTS, { ...config(11, 'Seed Bans'), id: 13 }]
+      }
+    }
+  };
+  html = render(h(ExportBanListConfigs, { exportBanListID: 7 }), {
+    data: addedAgain,
+    start: [deleted]
+  });
+  assert.ok(!html.includes('Deleted the custom points'), 'the message goes once they are back');
 }
 
 console.log(

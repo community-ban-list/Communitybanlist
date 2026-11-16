@@ -45,15 +45,21 @@ export default function (props) {
 
   // Once custom points are deleted, their row and Delete button are gone, so focus moves to the
   // message that says they were deleted, rather than being lost or landing on the next row's button.
+  // The message goes once custom points for that ban list are added again.
   const [deleted, setDeleted] = useState(null);
   const deletedMessage = useRef(null);
   useEffect(() => {
     if (deleted) deletedMessage.current?.focus();
   }, [deleted]);
+  const addedAgain =
+    deleted !== null &&
+    data?.loggedInSteamUser?.exportBanList?.exportBanListConfigs?.some(
+      (exportBanListConfig) => exportBanListConfig.banList.id === deleted.banListID
+    );
 
   return (
     <>
-      {deleted && (
+      {deleted && !addedAgain && (
         <CardBody className="pt-0 pb-3">
           <p ref={deletedMessage} tabIndex={-1} className="fw-bold mb-0">
             Deleted the custom points for {deleted.banListName}.
@@ -122,7 +128,9 @@ export default function (props) {
                       <DeleteExportBanListConfig
                         exportBanListConfig={exportBanListConfig}
                         exportBanList={data.loggedInSteamUser.exportBanList}
-                        onDeleted={(banListName) => setDeleted({ banListName })}
+                        onDeleted={(banListName) =>
+                          setDeleted({ banListName, banListID: exportBanListConfig.banList.id })
+                        }
                       />
                     </td>
                   </tr>
