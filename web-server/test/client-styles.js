@@ -533,6 +533,26 @@ for (const rule of rules)
   )
     failures.push('The search box keeps its ring while its button has focus');
 
+// The same goes for the focus colour of the field's and icon's borders, which the icon takes only
+// while the field has focus.
+const declares = (rule, property) =>
+  rule.declarations.some((declaration) => declaration.property === property);
+for (const rule of rules)
+  if (
+    rule.selectors.some((selector) => selector.startsWith('.input-group:focus-within')) &&
+    declares(rule, 'border-color')
+  )
+    failures.push("The search box's borders take the focus colour while its button has focus");
+if (
+  !rules.some(
+    (rule) =>
+      rule.selectors.some((selector) =>
+        /^\.input-group:has\(.*\.form-control:focus.*\) > \.input-group-text$/.test(selector)
+      ) && declares(rule, 'border-color')
+  )
+)
+  failures.push("The search box's icon does not take the focus colour while its field has focus");
+
 // Browsers leave shadows out when a device forces its own colours, so each control that shows the
 // ring also has an outline, which is transparent until then.
 for (const selector of [

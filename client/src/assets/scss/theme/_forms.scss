@@ -54,7 +54,10 @@
     box-shadow: $btn-focus-box-shadow;
   }
 
-  &:focus-within {
+  // While the field has focus, the icon's border takes the field's focus colour. Not while the
+  // button has focus, so it is clear which of the two has focus. :where() keeps an invalid group's
+  // red border, set below, while its field has focus.
+  &:has(> :where(.form-control:focus)) {
     > .form-control,
     > .input-group-text {
       border-color: $input-focus-border-color;
