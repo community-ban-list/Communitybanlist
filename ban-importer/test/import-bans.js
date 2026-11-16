@@ -464,7 +464,8 @@ async function readBattlemetricsPages(endpoint, params) {
   if (visible instanceof Error) throw visible;
   return visible.map((id) => ({ type: 'banList', id, attributes: { name: `List ${id}` } }));
 }
-const record = ([uid, steamUser, reason = 'Cheating', identifiers]) => ({
+// An entry may give other attributes too, e.g. { expires, note }, in place of those here.
+const record = ([uid, steamUser, reason = 'Cheating', identifiers, attributes]) => ({
   type: 'ban',
   attributes: {
     uid,
@@ -472,7 +473,8 @@ const record = ([uid, steamUser, reason = 'Cheating', identifiers]) => ({
     expires: null,
     reason,
     note: null,
-    identifiers: identifiers ?? [{ type: 'steamID', identifier: steamUser }]
+    identifiers: identifiers ?? [{ type: 'steamID', identifier: steamUser }],
+    ...attributes
   }
 });
 const countOf = (pages) =>
@@ -3757,19 +3759,57 @@ assert.strictEqual(
   1
 );
 
+// The times of a player's last updates, of their Steam profile, export bans, reputation points and
+// rank, which are all NULL while they are queued for an update.
+const flagsOf = (id) => {
+  const player = steamUsers.get(id);
+  return [
+    player.lastRefreshedInfo,
+    player.lastRefreshedExport,
+    player.lastRefreshedReputationPoints,
+    player.lastRefreshedReputationRank
+  ];
+};
+const QUEUED = [null, null, null, null];
+const NOT_QUEUED = [FRESH, FRESH, FRESH, FRESH];
+
 // An unchanged remote ban has no note, which matches the NULL stored for it, so it is not written
-// again. A changed one is, and its player is queued for an update.
+// again. A changed one is, but its player is queued for an update only when the change can change
+// the player. Here one ban's reason changed, which only describes it, so its player is not queued,
+// and another's expiry passed since it was saved, so it is marked expired, which queues its player,
+// in the same transaction as the write.
 reset();
-remoteList(9, [1, 2], `${steamID(1)}:0 //Cheating\n${steamID(2)}:0 //Teamkilling`);
+remoteList(
+  9,
+  [1, 2],
+  `${steamID(1)}:0 //Cheating\n${steamID(2)}:0 //Teamkilling\n${steamID(3)}:946684800 //Cheating`
+);
+// The ban whose expiry passed was saved before it did.
+const passedID = `9,${steamID(3)},946684800000`;
+steamUsers.set(steamID(3), user(steamID(3)));
+bans.set(passedID, {
+  ...bans.get(`9,${steamID(1)},null`),
+  id: passedID,
+  expires: new Date(946684800000),
+  expired: false,
+  steamUser: steamID(3)
+});
 await run();
-assert.deepStrictEqual(written(), [`9,${steamID(2)},null`]);
-assert.strictEqual(bans.get(`9,${steamID(2)},null`).rawReason, 'Teamkilling');
+assert.deepStrictEqual(written(), [`9,${steamID(2)},null`, passedID]);
 assert.deepStrictEqual(
-  [steamUsers.get(steamID(1)).lastRefreshedExport, steamUsers.get(steamID(2)).lastRefreshedExport],
-  [FRESH, null]
+  [bans.get(`9,${steamID(2)},null`).rawReason, bans.get(passedID).expired],
+  ['Teamkilling', true]
+);
+assert.deepStrictEqual(
+  [1, 2, 3].map((n) => flagsOf(steamID(n))),
+  [NOT_QUEUED, NOT_QUEUED, QUEUED]
+);
+assert.deepStrictEqual(
+  events.filter(([type]) => type === 'flags').map(([, ids, tx]) => [ids, tx]),
+  [[[steamID(3)], events.find(([type]) => type === 'write')[2]]]
 );
 assert.strictEqual(
-  logged(2, /^Imported ban list \(ID: 9\): 2 bans fetched, 0 new, 1 updated\.$/).length,
+  logged(2, /^Imported ban list \(ID: 9\): 3 bans fetched, 0 new, 2 updated\.$/).length,
   1
 );
 assert.strictEqual(
@@ -3779,6 +3819,112 @@ assert.strictEqual(
   ).length,
   1
 );
+assert.strictEqual(
+  logged(
+    2,
+    /^Found updated ban \(ID: 9,76561198000000003,946684800000\) in ban list \(ID: 9\): expired changed\.$/
+  ).length,
+  1
+);
+
+// A change to how reasons are classified changes the reason of many of a list's bans at once, here
+// 600 of its 620. Each is written, 500 to a transaction, so its stored reason is the new one, but
+// none queues its player, as a ban's reason only describes it: neither a player's reputation
+// points, nor their rank, export bans or Steam profile read it. So each batch adds its players and
+// writes its bans, in one transaction as before, and queues nobody.
+reset();
+battlemetricsList(15, pairs('r', 0, 620), [pairs('r', 0, 620)]);
+for (let n = 0; n < 600; n++) bans.get(`15,r${n}`).reason = 'Old label';
+results = await run();
+assert.deepStrictEqual(
+  [results[0].fetched, results[0].created, results[0].updated, results[0].removed],
+  [620, 0, 600, 0]
+);
+assert.ok(storedIDs(15).every((id) => bans.get(id).reason === 'Cheating'));
+const relabelTxs = events
+  .filter(([type]) => type === 'write')
+  .map(([, ids, tx]) => [ids.length, tx]);
+assert.deepStrictEqual(
+  relabelTxs.map(([count]) => count),
+  [500, 100]
+);
+for (const [, tx] of relabelTxs)
+  assert.deepStrictEqual(inTransaction(tx), ['begin', 'add users', 'write', 'commit']);
+assert.ok(!events.some(([type]) => type === 'flags'));
+assert.ok(pairs('r', 0, 620).every(([, id]) => flagsOf(id).every((time) => time === FRESH)));
+assert.strictEqual(
+  logged(2, /^Imported ban list \(ID: 15\): 620 bans fetched, 0 new, 600 updated\.$/).length,
+  1
+);
+assert.strictEqual(
+  logged(2, /^Found updated ban \(ID: 15,r0\) in ban list \(ID: 15\): reason changed\.$/).length,
+  1
+);
+
+// What still queues players: a new ban, and a changed one whose expiry, whether it has expired, or
+// player changed, also with its reason, as for a ban that moves to another SteamID, which queues
+// the player it had before too. A ban whose raw reason or note alone changed, leaving its reason as
+// it was, or whose reason and raw reason changed, queues nobody, also in the same batch as those
+// that do.
+const PAST = '2020-01-02T00:00:00.000Z';
+reset();
+env.IMPORTER_APPLY_STEAMID_MOVES = '1';
+battlemetricsList(16, pairs('q', 0, 7), [
+  [
+    ['q0', steamID(0), 'Wallhacking'],
+    ['q1', steamID(1), 'Cheating', undefined, { note: 'Appeal denied' }],
+    ['q2', steamID(2), 'Toxic'],
+    ['q3', steamID(3), 'Cheating', undefined, { expires: PAST }],
+    ['q4', steamID(14)],
+    ['q5', steamID(5), 'Toxic'],
+    ['q6', steamID(6)],
+    ['q7', steamID(7)]
+  ]
+]);
+bans.get('16,q2').expires = new Date('2027-01-01T00:00:00.000Z');
+bans.get('16,q3').expires = new Date(PAST);
+results = await run();
+assert.deepStrictEqual([results[0].created, results[0].updated, results[0].moves], [1, 6, 1]);
+assert.deepStrictEqual(written(), ['16,q7', '16,q0', '16,q1', '16,q2', '16,q3', '16,q4', '16,q5']);
+assert.deepStrictEqual(
+  [
+    bans.get('16,q0').rawReason,
+    bans.get('16,q1').rawNote,
+    bans.get('16,q2').expires,
+    bans.get('16,q2').reason,
+    bans.get('16,q3').expired,
+    bans.get('16,q4').steamUser,
+    bans.get('16,q5').reason
+  ],
+  ['Wallhacking', 'Appeal denied', null, 'Toxic', true, steamID(14), 'Toxic']
+);
+assert.deepStrictEqual(
+  events.filter(([type]) => type === 'flags').map(([, ids]) => ids),
+  [[steamID(7), steamID(2), steamID(3), steamID(14), steamID(4)]]
+);
+assert.deepStrictEqual(
+  [0, 1, 5, 6].map((n) => flagsOf(steamID(n))),
+  [NOT_QUEUED, NOT_QUEUED, NOT_QUEUED, NOT_QUEUED]
+);
+assert.ok([2, 3, 4, 7, 14].every((n) => flagsOf(steamID(n)).every((time) => time === null)));
+for (const [uid, fields] of [
+  ['q0', 'rawReason'],
+  ['q1', 'rawNote'],
+  ['q2', 'expires, reason, rawReason'],
+  ['q3', 'expired'],
+  ['q4', 'steamUser'],
+  ['q5', 'reason, rawReason']
+])
+  assert.strictEqual(
+    logged(
+      2,
+      new RegExp(
+        `^Found updated ban \\(ID: 16,${uid}\\) in ban list \\(ID: 16\\): ${fields} changed\\.$`
+      )
+    ).length,
+    1,
+    uid
+  );
 
 // Errors that would only happen again are not retried. The batch is written again a ban at a time,
 // so a ban that cannot be saved is counted, and the rest of the list is still saved and checked
@@ -7999,7 +8145,10 @@ for (const moves of ['0', '1']) {
     Array.from({ length: 10 }, (_, i) => eosAccount(100 + i))
   );
   assert.deepStrictEqual([written(), bans.get('320,u0').rawReason], [['320,u0'], 'Toxic']);
+  // Only its reason changed, which only describes it, so neither its new account nor its stored
+  // one is queued for an update.
   assert.ok(!queued(steamID(500)));
+  assert.ok(!queued(eosAccount(100)));
   assert.strictEqual(
     logged(
       2,
@@ -8956,5 +9105,5 @@ assert.strictEqual(
 assert.strictEqual(verboseLevelOneLines, 0, 'Lines for the log channel are logged as important');
 
 console.log(
-  "Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed, of lists that lost all their bans, until one of the bans they began with comes back, those they saved since held with them, whatever the clock says, and as earlier importers left them, or a large part of them at once, until fewer than a large part of the bans the list had then are still missing, also as the list grows, with those that come back no longer held, and once it loses all of its bans, or another large part of them, measured against fewer bans as the list shrinks, holds of lists that lost all their bans that take in a large loss, holds ended, begun or taken in whole, or not at all, as a run is cut short, holds that keep bans written before the bans a read saves, with the records of the bans it found again dropped, also by a read that is not complete, so a cut or stop then keeps the hold it wrote, also without the run lock, as the drop fails or as the list is removed, and those that only end after them, and in the run record only once written, with the bans a hold's end lets wait counted from then, less those removed, confirmations said to end only the holds they ended, also as a large loss would begin another, large removals said in every line, the holds replaced sources ended, reasons that outlived their holds, also found by a poll's drift, without queueing their players, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, bans for EOS IDs, with the floor raised first, account changes timed by the rules for removing bans, waiting, held, released, applied, healed and never made by head polls, second attempts, retries, sync state, the access check, lost access, also with no hold written or record dropped before the bans are saved, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, also as the run stops, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming reads, periodic full reads at each list's slot, by the lists' pages and the cycle, cycles whose full reads spread out after the first, held counts of polled lists, the switches, stops, also during a poll, and the list a stop came in, each list's seconds without the access check, the page a failed or stopped read was on, but no count of the old source's for a changed one, how a list's first attempt ended, the list under way and the access check while it is read, runs an interval apart, the loop's cycle, the oldest periodic reads first, and the run summary."
+  "Ban import checks passed: complete lists only, writes of what changed only, which queue players only for changes that can change them, also as reasons are classified anew, removals after a second read, holds over several runs until confirmed, of lists that lost all their bans, until one of the bans they began with comes back, those they saved since held with them, whatever the clock says, and as earlier importers left them, or a large part of them at once, until fewer than a large part of the bans the list had then are still missing, also as the list grows, with those that come back no longer held, and once it loses all of its bans, or another large part of them, measured against fewer bans as the list shrinks, holds of lists that lost all their bans that take in a large loss, holds ended, begun or taken in whole, or not at all, as a run is cut short, holds that keep bans written before the bans a read saves, with the records of the bans it found again dropped, also by a read that is not complete, so a cut or stop then keeps the hold it wrote, also without the run lock, as the drop fails or as the list is removed, and those that only end after them, and in the run record only once written, with the bans a hold's end lets wait counted from then, less those removed, confirmations said to end only the holds they ended, also as a large loss would begin another, large removals said in every line, the holds replaced sources ended, reasons that outlived their holds, also found by a poll's drift, without queueing their players, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, bans for EOS IDs, with the floor raised first, account changes timed by the rules for removing bans, waiting, held, released, applied, healed and never made by head polls, second attempts, retries, sync state, the access check, lost access, also with no hold written or record dropped before the bans are saved, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, also as the run stops, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming reads, periodic full reads at each list's slot, by the lists' pages and the cycle, cycles whose full reads spread out after the first, held counts of polled lists, the switches, stops, also during a poll, and the list a stop came in, each list's seconds without the access check, the page a failed or stopped read was on, but no count of the old source's for a changed one, how a list's first attempt ended, the list under way and the access check while it is read, runs an interval apart, the loop's cycle, the oldest periodic reads first, and the run summary."
 );
