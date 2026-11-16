@@ -553,6 +553,51 @@ if (
 )
   failures.push("The search box's icon does not take the focus colour while its field has focus");
 
+// A selector's specificity as [ids, classes, elements], for the selectors used here: :where()
+// counts nothing, and :has(), :is() and :not() count as their argument.
+function specificity(selector) {
+  let text = selector;
+  for (let previous; previous !== text;) {
+    previous = text;
+    text = text.replace(/:where\([^()]*\)/g, '').replace(/:(?:has|is|not)\(([^()]*)\)/g, ' $1 ');
+  }
+  return [
+    (text.match(/#[\w-]+/g) ?? []).length,
+    (text.match(/\.[\w-]+|\[[^\]]*\]|(?<!:):(?!:)[\w-]+/g) ?? []).length,
+    (text.match(/(?:^|[\s>+~])[a-z][\w-]*|::[\w-]+/gi) ?? []).length
+  ];
+}
+const higher = (a, b) => {
+  const index = a.findIndex((n, i) => n !== b[i]);
+  return index !== -1 && a[index] > b[index];
+};
+
+// An invalid search box keeps its red border while its field has focus: for the field and the icon,
+// the invalid rule wins over the focus rule, by specificity or by coming later.
+for (const part of ['.form-control', '.input-group-text']) {
+  const isFocus = (selector) =>
+    selector.startsWith('.input-group:has(') &&
+    selector.includes('.form-control:focus') &&
+    selector.endsWith(`> ${part}`);
+  const isInvalid = (selector) => selector === `.input-group.is-invalid > ${part}`;
+  const find = (test) =>
+    rules.findLastIndex((rule) => rule.selectors.some(test) && declares(rule, 'border-color'));
+  const focus = find(isFocus);
+  const invalid = find(isInvalid);
+  if (invalid === -1) {
+    failures.push(`An invalid search box's ${part} has no red border`);
+    continue;
+  }
+  if (focus === -1) continue;
+  const focusSpecificity = specificity(rules[focus].selectors.find(isFocus));
+  const invalidSpecificity = specificity(rules[invalid].selectors.find(isInvalid));
+  if (
+    !higher(invalidSpecificity, focusSpecificity) &&
+    (higher(focusSpecificity, invalidSpecificity) || invalid < focus)
+  )
+    failures.push(`An invalid search box's ${part} loses its red border while its field has focus`);
+}
+
 // Browsers leave shadows out when a device forces its own colours, so each control that shows the
 // ring also has an outline, which is transparent until then.
 for (const selector of [
