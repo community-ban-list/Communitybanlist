@@ -36,7 +36,7 @@ export default function (props) {
 
             <Input
               type="text"
-              placeholder="Steam 64 ID or EOS ID"
+              placeholder="Steam 64 or EOS ID"
               value={search}
               onChange={(e) => updateSearch(e.target.value)}
             />

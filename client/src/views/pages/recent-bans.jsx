@@ -135,6 +135,7 @@ export default function () {
                             href={edge.node.banList.organisation.discord}
                             target="_blank"
                             rel="noopener noreferrer"
+                            className="text-decoration-underline"
                           >
                             {edge.node.banList.organisation.name}
                           </a>
