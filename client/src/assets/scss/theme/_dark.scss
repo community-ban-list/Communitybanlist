@@ -41,8 +41,10 @@
     }
   }
 
-  // A field's border stands out from the dark card (3:1). Its placeholder keeps its light grey.
+  // A field's border stands out from the dark card (3:1). A focused field's border and the
+  // placeholder keep their light yellow and grey.
   --cbl-input-border-color: #626d88;
+  --cbl-input-focus-border-color: #{tint-color($primary, 50%)};
   --cbl-input-placeholder-color: #{$gray-500};
 
   // Text in the theme colours (_variables.scss).
@@ -109,6 +111,11 @@
 
   .btn-secondary {
     @include button-variant($dark-surface-alt, $dark-border);
+  }
+
+  // Outline buttons in the light grey keep it, as it is easy to see on the dark panels.
+  .btn-outline-secondary {
+    @include button-outline-variant($secondary);
   }
 
   .btn-default {

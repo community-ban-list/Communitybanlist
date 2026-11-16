@@ -84,7 +84,15 @@ $text-colors-dark: (
   'danger': #f64669
 );
 
-// Alerts in dark mode keep the brighter red they had, which is easy to read on the dark page.
+// Code, such as a remote ban list's address and a player's EOS ID: in light mode the pink darkened as
+// the text colours above are, and in dark mode the light pink it had.
+$code-color: #92626d;
+$code-color-dark: tint-color($pink, 40%);
+
+// Alerts keep the brighter red they had, which is easy to read in both modes.
+$danger-text-emphasis: shade-color($red, 60%);
+$danger-bg-subtle: tint-color($red, 80%);
+$danger-border-subtle: tint-color($red, 60%);
 $danger-text-emphasis-dark: tint-color($red, 40%);
 $danger-bg-subtle-dark: shade-color($red, 80%);
 $danger-border-subtle-dark: shade-color($red, 40%);
@@ -172,13 +180,19 @@ $btn-active-box-shadow: none;
 $focus-ring-box-shadow:
   0 0 0 2px $white,
   0 0 0 4px $default;
+// Browsers leave shadows out when the visitor's device forces its own colours, as Windows' contrast
+// themes do, so focused controls also get a transparent outline, which shows in those colours.
+$focus-ring-outline: 2px solid transparent;
 
 $input-color: var(--bs-body-color);
 // CSS variables so dark mode can change them; theme/_forms.scss sets them.
 $input-border-color: var(--cbl-input-border-color);
+$input-focus-border-color: var(--cbl-input-focus-border-color);
 $input-placeholder-color: var(--cbl-input-placeholder-color);
+// Switches, which the site does not use, draw this colour into an image, where a CSS variable does
+// not work, so they keep the colour they had.
+$form-switch-focus-color: tint-color($primary, 50%);
 $input-box-shadow: none;
-$input-focus-border-color: $default;
 $input-disabled-bg: var(--bs-secondary-bg);
 $form-label-font-size: $font-size-sm;
 $form-select-box-shadow: none;

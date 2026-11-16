@@ -9,8 +9,14 @@
   --#{$prefix}btn-focus-box-shadow: #{$btn-focus-box-shadow};
 
   &:not(.btn-link):hover {
-    box-shadow: 0 7px 14px rgba(50, 50, 93, 0.1), 0 3px 6px rgba(0, 0, 0, 0.08);
     transform: translateY(-1px);
+  }
+
+  // A button with keyboard focus keeps its focus ring when hovered, in place of the hover shadow.
+  &:not(.btn-link, :focus-visible):hover {
+    box-shadow:
+      0 7px 14px rgba(50, 50, 93, 0.1),
+      0 3px 6px rgba(0, 0, 0, 0.08);
   }
 
   // Space out buttons that sit next to each other.
@@ -46,6 +52,13 @@
   .text-#{$name} {
     color: $value !important;
   }
+}
+
+// Outline buttons in the light grey, such as the Copy button on EOS player pages, are drawn in the
+// darker grey of help text in light mode, as the light grey can't be seen on white. Dark mode keeps
+// the light grey (theme/_dark.scss).
+.btn-outline-secondary {
+  @include button-outline-variant($body-secondary-color);
 }
 
 // Discord's buttons hold only its logo, which needs 3:1 on Discord's colour rather than the 4.5:1 that

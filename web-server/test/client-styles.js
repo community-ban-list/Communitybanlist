@@ -7,9 +7,11 @@ import viteConfig from '../../client/vite.config.mjs';
 
 // Checks the client's stylesheet, compiled with the client's build settings, in light and dark mode:
 // text can be read (4.5:1, WCAG's contrast for text), field borders and focus rings can be seen
-// (3:1, WCAG's contrast for parts of controls), links in sentences are underlined, fields are big
-// enough that iOS Safari does not zoom in on them, and motion stops for visitors who ask for less.
-// Colours are read from the stylesheet and measured against the backgrounds they are shown on.
+// (3:1, WCAG's contrast for parts of controls), no rule takes the ring away from a focused button,
+// focused controls have an outline for devices that force their own colours, links in sentences are
+// underlined, fields are big enough that iOS Safari does not zoom in on them, and motion stops for
+// visitors who ask for less. Colours are read from the stylesheet and measured against the
+// backgrounds they are shown on.
 
 const CLIENT = new URL('../../client/', import.meta.url);
 
@@ -124,9 +126,8 @@ const root = (name, mode) =>
   (mode === 'dark' && declared('[data-bs-theme=dark]', name, 'light')) ||
   declared(':root', name, 'light');
 
-// A property's value with its var()s filled in, from the element's own rules or from the page.
-function value(selector, property, mode) {
-  let text = declared(selector, property, mode) ?? '';
+// Text with its var()s filled in, from the element's own rules or from the page.
+function fill(text, selector, mode) {
   for (let i = 0; i < 10 && text.includes('var('); i++)
     text = text.replace(
       /var\((--[\w-]+)(?:,\s*([^()]*))?\)/,
@@ -135,6 +136,10 @@ function value(selector, property, mode) {
     );
   return text;
 }
+
+// A property's value with its var()s filled in.
+const value = (selector, property, mode) =>
+  fill(declared(selector, property, mode) ?? '', selector, mode);
 
 // A colour as red, green and blue from 0 to 255, and alpha, or null for anything else. Sass writes
 // some colours it works out by name.
@@ -164,6 +169,16 @@ function colour(text) {
 // Whether two colours are the same, however they are written.
 const sameColour = (a, b) =>
   colour(a) !== null && colour(a).every((channel, i) => Math.abs(channel - colour(b)?.[i]) < 0.5);
+
+// A colour mixed with white or black by a weight from 0 to 1, as Sass's tint-color() and
+// shade-color() do.
+const mix = (text, weight, towards) =>
+  `rgb(${colour(text)
+    .slice(0, 3)
+    .map((channel) => Math.round((channel + (towards - channel) * weight) * 100) / 100)
+    .join(', ')})`;
+const tint = (text, weight) => mix(text, weight, 255);
+const shade = (text, weight) => mix(text, weight, 0);
 
 // WCAG's contrast ratio between a colour, which may be see-through, and the background under it.
 function contrast(foreground, background) {
@@ -229,6 +244,7 @@ const lightText = [
   ["the navbar menus' descriptions", value('.dropdown-media p', 'color', 'light'), ['page']],
   ['placeholders', value('.form-control::placeholder', 'color', 'light'), ['page']],
   ['invalid field messages', value('.invalid-feedback', 'color', 'light'), ['page']],
+  ['code, such as EOS IDs', value('code', 'color', 'light'), ['page']],
   ['titles in the yellow', value('.text-primary', 'color', 'light'), ['page', 'footer']],
   ...['info', 'success', 'warning', 'danger'].map((name) => [
     `titles and risk ratings in .text-${name}`,
@@ -248,6 +264,7 @@ const darkText = [
   ["the navbar menus' descriptions", value('.dropdown-media p', 'color', 'dark'), ['menu']],
   ['placeholders', value('.form-control::placeholder', 'color', 'dark'), ['page']],
   ['invalid field messages', value('.invalid-feedback', 'color', 'dark'), ['card']],
+  ['code, such as EOS IDs', value('code', 'color', 'dark'), ['card']],
   ...['primary', 'info', 'success', 'warning', 'danger'].map((name) => [
     `titles and risk ratings in .text-${name}`,
     value(`.text-${name}`, 'color', 'dark'),
@@ -264,7 +281,20 @@ for (const [what, actual, expected] of [
   ['titles in the yellow', value('.text-primary', 'color', 'dark'), root('--bs-primary', 'dark')],
   ["the footer's links", value('.footer .nav .nav-link', 'color', 'dark'), root('--bs-gray-600')],
   ["the menus' descriptions", value('.dropdown-media p', 'color', 'dark'), root('--bs-gray-600')],
-  ['placeholders', value('.form-control::placeholder', 'color', 'dark'), root('--bs-gray-500')]
+  ['placeholders', value('.form-control::placeholder', 'color', 'dark'), root('--bs-gray-500')],
+  // Bootstrap's own, the pink tinted 40% towards white.
+  ['code', value('code', 'color', 'dark'), tint(root('--bs-pink'), 0.4)],
+  // Bootstrap's own, the yellow tinted halfway to white.
+  [
+    "focused fields' borders",
+    value('.form-control:focus', 'border-color', 'dark'),
+    tint(root('--bs-primary'), 0.5)
+  ],
+  [
+    'outline buttons in the light grey',
+    value(['.btn', '.btn-outline-secondary'], '--bs-btn-color', 'dark'),
+    root('--bs-secondary')
+  ]
 ])
   if (!sameColour(actual, expected))
     failures.push(`Dark mode ${what} changed colour: ${actual}, where it was ${expected}`);
@@ -299,6 +329,70 @@ for (const name of ['primary', 'secondary', 'info', 'success', 'danger', 'github
     name === 'discord' ? 3 : 4.5
   );
 
+// Discord's logo stays white on its buttons and badge.
+for (const [what, logo] of [
+  ["Discord's buttons", value(['.btn', '.btn-discord'], '--bs-btn-color', 'light')],
+  ["Discord's buttons, hovered", value(['.btn', '.btn-discord'], '--bs-btn-hover-color', 'light')],
+  ["Discord's buttons, pressed", value(['.btn', '.btn-discord'], '--bs-btn-active-color', 'light')],
+  ["Discord's badge", value('.badge.bg-discord', 'color', 'light')]
+])
+  if (!sameColour(logo, '#fff')) failures.push(`${what} show the logo in ${logo}, not white`);
+
+// Outline buttons in the colours the site uses for them: the light grey of the Copy button on EOS
+// player pages. Their text and border are on the card, and hovered or pressed they fill with their
+// colour.
+for (const name of ['secondary'])
+  for (const [mode, card] of [
+    ['Light', backgrounds.light.page],
+    ['Dark', backgrounds.dark.card]
+  ]) {
+    const button = ['.btn', `.btn-outline-${name}`];
+    const at = (variable) => value(button, `--bs-btn-${variable}`, mode.toLowerCase());
+    check(`${mode} mode text on .btn-outline-${name}`, at('color'), card, 4.5);
+    check(`${mode} mode border of .btn-outline-${name}`, at('border-color'), card, 3);
+    for (const state of ['hover', 'active'])
+      check(
+        `${mode} mode text on .btn-outline-${name}, ${state === 'hover' ? 'hovered' : 'pressed'}`,
+        at(`${state}-color`),
+        at(`${state}-bg`),
+        4.5
+      );
+  }
+
+// Red alerts, such as the disclaimer on player pages, keep the red they had in both modes, as their
+// text could already be read on them.
+const red = root('--bs-red');
+for (const [mode, was] of [
+  [
+    'light',
+    {
+      '--bs-danger-text-emphasis': shade(red, 0.6),
+      '--bs-danger-bg-subtle': tint(red, 0.8),
+      '--bs-danger-border-subtle': tint(red, 0.6)
+    }
+  ],
+  [
+    'dark',
+    {
+      '--bs-danger-text-emphasis': tint(red, 0.4),
+      '--bs-danger-bg-subtle': shade(red, 0.8),
+      '--bs-danger-border-subtle': shade(red, 0.4)
+    }
+  ]
+]) {
+  for (const [name, expected] of Object.entries(was))
+    if (!sameColour(root(name, mode), expected))
+      failures.push(
+        `Red alerts' ${name} changed in ${mode} mode: ${root(name, mode)}, where it was ${expected}`
+      );
+  check(
+    `Text on red alerts in ${mode} mode`,
+    root('--bs-danger-text-emphasis', mode),
+    root('--bs-danger-bg-subtle', mode),
+    4.5
+  );
+}
+
 // The error message's white text across its red gradient.
 const gradient = value('.bg-gradient-danger', 'background', 'light');
 const gradientStops = split(/linear-gradient\((.*)\)/.exec(gradient)?.[1] ?? '', ',')
@@ -329,25 +423,43 @@ check(
   backgrounds.light.page,
   3
 );
+check(
+  "Dark mode focused fields' borders",
+  value('.form-control:focus', 'border-color', 'dark'),
+  backgrounds.dark.card,
+  3
+);
 
 // Focus rings: on every background a focused control can be on, one of a ring's bands stands out.
+const buttonNames = [
+  'primary',
+  'secondary',
+  'outline-secondary',
+  'info',
+  'success',
+  'danger',
+  'default',
+  'github',
+  'discord',
+  'steam'
+];
 const focusRings = [
-  ...[
-    'primary',
-    'secondary',
-    'info',
-    'success',
-    'danger',
-    'default',
-    'github',
-    'discord',
-    'steam'
-  ].map((name) => [`.btn-${name} buttons`, ['.btn', `.btn-${name}`], '--bs-btn-focus-box-shadow']),
+  ...buttonNames.map((name) => [
+    `.btn-${name} buttons`,
+    ['.btn', `.btn-${name}`],
+    '--bs-btn-focus-box-shadow'
+  ]),
+  // The shadow a focused button is given, which shows the ring.
+  ...buttonNames.map((name) => [
+    `.btn-${name} buttons with keyboard focus`,
+    ['.btn', `.btn-${name}`, '.btn:focus-visible', `.btn-${name}:focus-visible`],
+    'box-shadow'
+  ]),
   ['nav links and menu toggles', '.nav-link:focus-visible', 'box-shadow'],
   ['fields', '.form-control:focus', 'box-shadow'],
   ['lists to choose from', '.form-select:focus', 'box-shadow'],
   ['invalid fields', '.form-control.is-invalid:focus', 'box-shadow'],
-  ['the search box', '.input-group:focus-within', 'box-shadow'],
+  ['the search box', '.input-group:has(> .form-control:focus)', 'box-shadow'],
   ["the search box's button", '.input-group > .btn:focus-visible', 'box-shadow'],
   ['the menu buttons', '.navbar-toggler:focus', 'box-shadow'],
   ['close buttons', '.btn-close', '--bs-btn-close-focus-shadow']
@@ -361,9 +473,9 @@ const focusBackgrounds = [
   ['dark mode card', backgrounds.dark.card, 'dark'],
   ['dark mode navbar', backgrounds.navbar, 'dark']
 ];
-for (const [what, selectors, property] of focusRings)
+function checkRing(what, shadowIn) {
   for (const [where, background, mode] of focusBackgrounds) {
-    const shadow = value(selectors, property, mode);
+    const shadow = shadowIn(mode);
     const colours = rings(shadow);
     const best = Math.max(0, ...colours.map((ring) => contrast(ring, background)));
     if (!(best >= 3))
@@ -372,6 +484,70 @@ for (const [what, selectors, property] of focusRings)
           (colours.length ? `"${shadow}" is ${best.toFixed(2)}:1` : `"${shadow}" has no colour`)
       );
   }
+}
+for (const [what, selectors, property] of focusRings)
+  checkRing(what, (mode) => value(selectors, property, mode));
+
+// No rule takes the ring away from a button with keyboard focus. A rule that gives a focused button
+// a shadow includes the ring. A rule that gives a hovered button a shadow leaves out buttons with
+// keyboard focus, or a later rule for the same button with keyboard focus puts the ring back. What
+// a selector says of the button itself is its last part, after any combinator, outside :not() and
+// :has().
+const lastPart = (selector) => split(selector.replace(/\s*([>+~])\s*/g, ' $1 '), ' ').at(-1);
+const own = (part) => part.replace(/:(not|has)\((?:[^()]|\([^()]*\))*\)/g, '');
+const isButton = (part) => /\.btn(-(?!close|check|group|toolbar)[\w-]+)?(?![\w-])/.test(own(part));
+const states = (part) => own(part).match(/(?<!:):[\w-]+/g) ?? [];
+let buttonShadows = 0;
+rules.forEach((rule, index) => {
+  const shadow = rule.declarations.findLast(({ property }) => property === 'box-shadow')?.value;
+  if (shadow === undefined) return;
+  for (const selector of rule.selectors) {
+    const part = lastPart(selector);
+    if (!isButton(part)) continue;
+    buttonShadows++;
+    const ringIn = (mode) => fill(shadow, '.btn', mode);
+    if (states(part).some((state) => state === ':focus-visible' || state === ':focus'))
+      checkRing(`buttons matching ${selector}`, ringIn);
+    else if (states(part).includes(':hover')) {
+      const leavesOut = /:not\([^)]*:focus/.test(part);
+      const focused = selector.replace(':hover', ':focus-visible');
+      const putBack = rules
+        .slice(index + 1)
+        .some(
+          (later) =>
+            later.selectors.includes(focused) &&
+            later.declarations.some(({ property }) => property === 'box-shadow')
+        );
+      if (!leavesOut && !putBack) checkRing(`hovered buttons matching ${selector}`, ringIn);
+    }
+  }
+});
+assert.ok(buttonShadows > 5, `Found only ${buttonShadows} rules with shadows for buttons`);
+
+// The search box's ring shows while its field has focus, not while its button has, so the button's
+// own ring stands out.
+for (const rule of rules)
+  if (
+    rule.selectors.includes('.input-group:focus-within') &&
+    rule.declarations.some(({ property }) => property === 'box-shadow')
+  )
+    failures.push('The search box keeps its ring while its button has focus');
+
+// Browsers leave shadows out when a device forces its own colours, so each control that shows the
+// ring also has an outline, which is transparent until then.
+for (const selector of [
+  '.btn:focus-visible',
+  '.btn-close:focus',
+  '.form-control:focus',
+  '.form-select:focus',
+  '.nav-link:focus-visible',
+  '.navbar-toggler:focus',
+  '.input-group:has(> .form-control:focus)'
+]) {
+  const outline = declared(selector, 'outline', 'light');
+  if (!/^[1-9][\d.]*px solid\b/.test(outline ?? ''))
+    failures.push(`${selector} has no outline for forced colours: ${outline}`);
+}
 
 // Links in sentences and lists are underlined, so they stand out without relying on colour.
 for (const selector of ['p a:not([class])', 'li a:not([class])'])
@@ -424,5 +600,5 @@ for (const warning of warnings)
 assert.deepStrictEqual(failures, [], `The stylesheet fails ${failures.length} checks`);
 
 console.log(
-  `Stylesheet checks passed: text, field borders and focus rings can be seen in light and dark mode, links in sentences are underlined, fields are 16px on phones, and motion stops when asked.`
+  `Stylesheet checks passed: text, field borders and focus rings can be seen in light and dark mode, focused controls keep their ring and have an outline for forced colours, links in sentences are underlined, fields are 16px on phones, and motion stops when asked.`
 );

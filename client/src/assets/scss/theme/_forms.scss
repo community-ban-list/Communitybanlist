@@ -1,7 +1,8 @@
-// A field's border stands out from the white card (3:1), and its placeholder can be read (4.5:1).
-// Dark mode sets its own (theme/_dark.scss).
+// A field's border stands out from the white card (3:1) and turns navy when the field has focus, and
+// its placeholder can be read (4.5:1). Dark mode sets its own (theme/_dark.scss).
 :root {
   --cbl-input-border-color: #8493a5;
+  --cbl-input-focus-border-color: #{$default};
   --cbl-input-placeholder-color: #{$body-secondary-color};
 }
 
@@ -24,7 +25,8 @@
   }
 }
 
-// An input group's icon sits inside the input's border, and the whole group gets the focus ring.
+// An input group's icon sits inside the input's border, and the whole group gets the focus ring while
+// its field has focus.
 .input-group {
   border-radius: $input-border-radius;
   transition: $input-transition;
@@ -53,15 +55,21 @@
   }
 
   &:focus-within {
-    box-shadow: $input-focus-box-shadow;
-
     > .form-control,
     > .input-group-text {
       border-color: $input-focus-border-color;
     }
+  }
+
+  // The group's ring takes the place of the field's own. When the button has focus, only its own
+  // ring shows, so it is clear which of the two has focus.
+  &:has(> .form-control:focus) {
+    box-shadow: $input-focus-box-shadow;
+    outline: $focus-ring-outline;
 
     > .form-control:focus {
       box-shadow: none;
+      outline: 0;
     }
   }
 

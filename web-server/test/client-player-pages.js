@@ -212,6 +212,11 @@ for (const id of [EOS_ID, EOS_ID.toUpperCase()]) {
   assert.match(html, /Unknown EOS ID/);
   assert.match(html, /No bans are stored under this EOS ID\./);
   assert.match(html, /most of their bans are listed under their\s+Steam 64 ID/);
+  // Its link to the FAQ is underlined, as links in sentences are.
+  assert.match(
+    html,
+    /<a (?=[^>]*class="text-decoration-underline")[^>]*href="\/faq"[^>]*>FAQ<\/a>/
+  );
   assert.doesNotMatch(html, /Unknown Steam User/);
   assert.doesNotMatch(html, /\[RecentlyViewedSteamUsers\]/);
 }

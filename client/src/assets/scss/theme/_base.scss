@@ -74,6 +74,17 @@ li a:not([class]) {
   padding-bottom: 250px !important;
 }
 
+// The controls that show the focus ring also get its outline, for devices that force their own
+// colours (_variables.scss). The search box's group has its own (theme/_forms.scss).
+.btn:focus-visible,
+.btn-close:focus,
+.form-control:focus,
+.form-select:focus,
+.nav-link:focus-visible,
+.navbar-toggler:focus {
+  outline: $focus-ring-outline;
+}
+
 // Visitors who ask their device for less motion get none. Bootstrap already stops its own transitions
 // for them; this stops the rest, from the theme and the packages it uses, such as the navbar sliding
 // away, its menus fading in, the steps of the "I'm banned" page sliding and the loading spinners.

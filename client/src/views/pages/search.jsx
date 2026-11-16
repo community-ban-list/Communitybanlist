@@ -219,7 +219,11 @@ export default function () {
                 <div className="text-center mt-2 mb-2">
                   Steam players have an EOS ID too, but most of their bans are listed under their
                   Steam 64 ID, so search for that as well. An Epic account ID looks like an EOS ID
-                  but is a different number: see our <Link to="/faq">FAQ</Link>.
+                  but is a different number: see our{' '}
+                  <Link to="/faq" className="text-decoration-underline">
+                    FAQ
+                  </Link>
+                  .
                 </div>
               </CardBody>
             )}
