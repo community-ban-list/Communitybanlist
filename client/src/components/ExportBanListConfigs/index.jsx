@@ -4,6 +4,7 @@ import { useQuery } from '@apollo/client/react';
 import { CardBody, Table } from 'reactstrap';
 
 import { CreateExportBanListConfig, DeleteExportBanListConfig } from '../';
+import { Loading, LoadError } from '../LoadStatus/index.jsx';
 
 // The list's settings are for the config form, which checks a config against them.
 const GET_EXPORT_BAN_LIST_CONFIGS = gql`
@@ -39,7 +40,7 @@ const GET_EXPORT_BAN_LIST_CONFIGS = gql`
 `;
 
 export default function (props) {
-  const { loading, error, data } = useQuery(GET_EXPORT_BAN_LIST_CONFIGS, {
+  const { loading, error, data, refetch } = useQuery(GET_EXPORT_BAN_LIST_CONFIGS, {
     variables: { exportBanListID: props.exportBanListID }
   });
 
@@ -80,23 +81,14 @@ export default function (props) {
           {loading && !data && (
             <tr>
               <td colSpan={4} className="text-center">
-                <div className="text-center mt-2 mb-3">Loading...</div>
-                <div className="btn-wrapper text-center">
-                  <i className="fas fa-circle-notch fa-spin fa-4x" />
-                </div>
+                <Loading />
               </td>
             </tr>
           )}
           {error && (
             <tr>
               <td colSpan={4} className="text-center">
-                <div className="text-center mt-2 mb-2">Error!</div>
-                <div className="btn-wrapper text-center">
-                  <i className="fas fa-exclamation-triangle fa-4x" />
-                </div>
-                <div className="text-center mt-2 mb-2">
-                  [ERR 1] Something went wrong. Sad times.
-                </div>
+                <LoadError error={error} retry={refetch} />
               </td>
             </tr>
           )}

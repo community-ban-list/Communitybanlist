@@ -196,3 +196,18 @@
     padding-right: $card-spacer-x;
   }
 }
+
+// A list's loading message, error and Load More button (components/LoadStatus), in a row across a
+// table in a card. On a narrow screen the table scrolls sideways, so they keep to the part of the
+// table in view and wrap, rather than being centred on the whole table and cut off. 100cqw is the
+// width of the table in view, so where the whole table fits, the block fills its cell.
+.card .table-responsive {
+  container-type: inline-size;
+
+  .load-status {
+    left: $card-spacer-x;
+    position: sticky;
+    white-space: normal;
+    width: calc(100cqw - 2 * $card-spacer-x);
+  }
+}
