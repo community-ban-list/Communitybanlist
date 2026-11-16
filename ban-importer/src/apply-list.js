@@ -265,32 +265,41 @@ export const RECORDED_HOLDS = ['full', 'large'];
 
 // How many bans a complete read of a list found, as planRemovals takes them (fetched), of the bans
 // it fetched (bans), given the bans the list had before the read (stored), those of them the read
-// did not find (missing, see planMissingBans in ban-importer.js) and whether the list holds bans
-// for an admin (held): all of them, but for a list with fewer than FULL_REMOVAL_BANS bans stored
-// for players that are not EOS IDs' that is missing one of them, such as one whose account changed
-// as it lost its SteamID, only those that have a SteamID. That is how such a list was read before
-// account changes, when it had only those bans and the bans without a SteamID were skipped, so its
-// bans stored for EOS IDs do not count towards the FULL_REMOVAL_BANS either. A read of such a list
-// that returned no bans with a SteamID, e.g. as its source stopped giving SteamIDs but still gives
-// EOS IDs, is taken for one that gave no bans, which keeps them all, as a small list that lost its
-// SteamIDs all at once more likely broke, whatever bans for EOS IDs it returned, stored or new; and
-// as those it saves never make it larger by this measure, a new one does not end that hold, though
-// once they make it a list of at least FULL_REMOVAL_BANS, a read that finds none of them holds it
-// as such a list is held (below), until one of them comes back, also one stored for an EOS ID. A
-// ban that gained a SteamID has one, and so does any ban of a remote list, which gives only its
-// SteamIDs' lines, or one made from the stored bans of a remote list whose file is unchanged.
-// Every ban counts for a list of at least FULL_REMOVAL_BANS bans that lost all of them, which is
-// held as it lost them all, with records, as it found bans; for a list that holds bans for an
-// admin, whose hold's rules decide, as for any read that found bans, so its held bans that came
-// back are no longer held, and its line, posted on every read while it is held, gives what the
-// read changed; and for a list that is missing only bans stored for EOS IDs, which no list had
-// before account changes: it loses, and changes, bans by the rules, so one of fewer than
-// FULL_REMOVAL_BANS bans is held only when its read returned no bans at all, and otherwise loses,
-// and changes, all the bans it is missing at once, also when every ban it returned changed account.
-export function countFetched(bans, missing, stored, held = false) {
+// did not find (missing, see planMissingBans in ban-importer.js), whether the list holds bans for
+// an admin (held), and the bans that earlier complete reads did not find, by ID (pending): all of
+// them, but for a list with fewer than FULL_REMOVAL_BANS bans stored for players that are not EOS
+// IDs that is missing one of them, such as one whose account changed as it lost its SteamID, only
+// those that have a SteamID. That is how such a list was read before account changes, when it had
+// only those bans and the bans without a SteamID were skipped, so its bans stored for EOS IDs do
+// not count towards the FULL_REMOVAL_BANS either. A read of such a list that returned no bans with
+// a SteamID, e.g. as its source stopped giving SteamIDs but still gives EOS IDs, is taken for one
+// that gave no bans, which keeps them all, as a small list that lost its SteamIDs all at once more
+// likely broke, whatever bans for EOS IDs it returned, stored or new; and as those it saves never
+// make it larger by this measure, a new one does not end that hold, though once they make it a
+// list of at least FULL_REMOVAL_BANS, a read that finds none of them holds it as such a list is
+// held (below), until one of them comes back, also one stored for an EOS ID. A ban that gained a
+// SteamID has one, and so does any ban of a remote list, which gives only its SteamIDs' lines, or
+// one made from the stored bans of a remote list whose file is unchanged. Every ban counts for a
+// list of at least FULL_REMOVAL_BANS bans that lost all of them, which is held as it lost them
+// all, with records, as it found bans; for a read whose missing bans that no earlier read had
+// missed are a large loss of all of the list's bans (see isLargeLoss), which is held as it lost a
+// large part of them, with records, as such a read of any list is, so its line says how many of
+// its bans it lost, and how many of those changed account, which a confirmation moves; for a list
+// that holds bans for an admin, whose hold's rules decide, as for any read that found bans, so its
+// held bans that came back are no longer held, and its line, posted on every read while it is
+// held, gives what the read changed; and for a list that is missing only bans stored for EOS IDs,
+// which no list had before account changes: it loses, and changes, bans by the rules, so one of
+// fewer than FULL_REMOVAL_BANS bans is held only when its read returned no bans at all, and
+// otherwise loses, and changes, all the bans it is missing at once, also when every ban it
+// returned changed account. Once either of the first two holds ends, as its bans come back, its
+// bans still missing are timed as those of any hold that ends: those that lost their SteamIDs move
+// at once when few are still missing, though no read returned a ban with a SteamID, and otherwise
+// wait for a confirming read, which counts its bans as above.
+export function countFetched(bans, missing, stored, held = false, pending = new Map()) {
   const lostAll = missing.length >= stored.length && stored.length >= FULL_REMOVAL_BANS;
+  const lostLarge = isLargeLoss(missing.filter(({ id }) => !pending.has(id)).length, stored.length);
   const notEos = ({ steamUser }) => accountKind(steamUser) !== 'eos';
-  if (lostAll || held || !missing.some(notEos)) return bans.length;
+  if (lostAll || lostLarge || held || !missing.some(notEos)) return bans.length;
   if (stored.filter(notEos).length >= FULL_REMOVAL_BANS) return bans.length;
   return bans.filter(({ steamIDs }) => !Array.isArray(steamIDs) || steamIDs.length > 0).length;
 }

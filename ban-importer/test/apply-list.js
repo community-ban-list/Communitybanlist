@@ -569,9 +569,10 @@ const fetchedToCount = [
 ];
 const steamPlayers = (count) => Array.from({ length: count }, (_, i) => steamID(20 + i));
 const eosPlayers = (count) => Array.from({ length: count }, (_, i) => eos(20 + i));
-const count = (fetched, missing, players, held) => {
+const count = (fetched, missing, players, held, recorded = 0) => {
   const stored = players.map((steamUser, i) => storedBan(`m${i}`, { steamUser }));
-  return countFetched(fetched, stored.slice(0, missing), stored, held);
+  const pending = new Map(stored.slice(0, recorded).map(({ id }) => [id, {}]));
+  return countFetched(fetched, stored.slice(0, missing), stored, held, pending);
 };
 assert.strictEqual(count(fetchedToCount, 1, steamPlayers(9)), 3);
 assert.strictEqual(count(fetchedToCount, 2, [eos(9), ...steamPlayers(8)]), 3);
@@ -594,6 +595,17 @@ assert.strictEqual(count(eosOnly, 1, steamPlayers(9), true), 4);
 assert.strictEqual(count(fetchedToCount, 2, [eos(9), eos(10), ...steamPlayers(7)]), 7);
 assert.strictEqual(count(eosOnly, 1, [eos(9), ...steamPlayers(8)]), 4);
 assert.strictEqual(count(fetchedToCount, 0, steamPlayers(9)), 7);
+// So does every ban for a read whose missing bans, of those that no earlier read had missed (the
+// first few, recorded), are a large loss of all of the list's bans: 25 of a list of 45, and a fifth
+// of a list of more than 125, here 42 of 209. Fewer count as before.
+const mostlyEos = [...steamPlayers(5), ...eosPlayers(40)];
+const largerEos = [...steamPlayers(9), ...eosPlayers(200)];
+assert.strictEqual(count(eosOnly, 25, mostlyEos), 4);
+assert.strictEqual(count(eosOnly, 26, mostlyEos, false, 1), 4);
+assert.strictEqual(count(eosOnly, 42, largerEos), 4);
+assert.strictEqual(count(eosOnly, 24, mostlyEos), 0);
+assert.strictEqual(count(eosOnly, 25, mostlyEos, false, 1), 0);
+assert.strictEqual(count(eosOnly, 41, largerEos), 0);
 
 // Which of the bans missing from a complete read of a list are removed, kept for a later read, or
 // held for an admin. Each case is [the rules' inputs, what they decide].
@@ -1743,5 +1755,5 @@ assert.deepStrictEqual(batches, [2, 2]);
 assert.strictEqual(events.filter(([type]) => type === 'commit').length, 2);
 
 console.log(
-  'Apply checks passed: values compared, players kept, moved and changed to new accounts, the bans a small list found counted by their SteamIDs, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, with their bans, records of missing bans, counted a statement at a time, with their IDs, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
+  'Apply checks passed: values compared, players kept, moved and changed to new accounts, the bans a small list found counted by their SteamIDs, unless it lost a large part of its bans, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, with their bans, records of missing bans, counted a statement at a time, with their IDs, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
 );
