@@ -274,8 +274,10 @@ export const RECORDED_HOLDS = ['full', 'large'];
 // that returned no bans with a SteamID, e.g. as its source stopped giving SteamIDs but still gives
 // EOS IDs, is taken for one that gave no bans, which keeps them all, as a small list that lost its
 // SteamIDs all at once more likely broke, whatever bans for EOS IDs it returned, stored or new; and
-// as those it saves never make it larger by this measure, a new one never ends that hold. A ban
-// that gained a SteamID has one, and so does any ban of a remote list, which gives only its
+// as those it saves never make it larger by this measure, a new one does not end that hold, though
+// once they make it a list of at least FULL_REMOVAL_BANS, a read that finds none of them holds it
+// as such a list is held (below), until one of them comes back, also one stored for an EOS ID. A
+// ban that gained a SteamID has one, and so does any ban of a remote list, which gives only its
 // SteamIDs' lines, or one made from the stored bans of a remote list whose file is unchanged.
 // Every ban counts for a list of at least FULL_REMOVAL_BANS bans that lost all of them, which is
 // held as it lost them all, with records, as it found bans; for a list that holds bans for an
