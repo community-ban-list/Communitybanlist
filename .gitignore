@@ -3,8 +3,8 @@ client/.eslintcache
 
 # Dependencies
 node_modules/
+# Yarn installs the packages, from the committed yarn.lock, so npm's lockfile is not used.
 package-lock.json
-yarn.lock
 
 # IDEs
 .idea/

@@ -3,18 +3,23 @@ name: Pull request checks
 # Lint, test and build every pull request, so a change that breaks them shows on the pull request
 # before it is merged, not after. It runs for a pull request into any branch that has this file,
 # such as master or another pull request's branch. A pull request from a branch of this repository
-# runs on the self-hosted dal-1 runner, as the image workflows do. A fork's pull request runs code
-# nobody has reviewed yet, so its Lint and Test jobs run on GitHub's own runners instead, never on
-# dal-1, which has Docker access to the host; the repository also makes a fork's runs wait for an
-# admin's approval. The trigger is pull_request, which gives a fork's run no secrets and a read-only
-# token.
+# runs on the self-hosted dal-1 runner, as the image workflows do. Two kinds of pull request run
+# code nobody has reviewed yet, so they run on GitHub's own runners instead, never on dal-1, which
+# has Docker access to the host:
+# - A fork's pull request. Its Lint and Test jobs run there, and the repository also makes a fork's
+#   runs wait for an admin's approval. The trigger is pull_request, which gives a fork's run no
+#   secrets and a read-only token.
+# - Dependabot's pull requests. Their branches are in this repository, but their checks start with
+#   no approval, and they install, build and test the package and action versions Dependabot
+#   proposes, so all three jobs run there. Their runs get a read-only token and only the Dependabot
+#   secrets.
 on:
   pull_request:
 
 # A new push to a pull request cancels the checks still running for its earlier commit. The image
 # workflows use another group, so a push to master never cancels these checks or is cancelled by
-# them. A pull request from this repository shares dal-1 with them, though, so each may wait for
-# the runner while the other uses it.
+# them. A pull request from a branch of this repository, other than Dependabot's, shares dal-1 with
+# them, though, so each may wait for the runner while the other uses it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -25,7 +30,7 @@ permissions:
 jobs:
   lint:
     name: Lint
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'dal-1' || 'ubuntu-latest' }}
+    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && 'dal-1' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -42,8 +47,12 @@ jobs:
       - name: Install Yarn
         run: npm install --global yarn@1.22.22
 
+      # Install the package versions yarn.lock lists, as the images do. Yarn's --frozen-lockfile
+      # still installs a package that a workspace asks for and yarn.lock does not list, so the
+      # script first checks that yarn.lock lists them all, and nothing else. --all-workspaces makes
+      # a missing workspace fail it, where an image build would leave that workspace's packages out.
       - name: Install dependencies
-        run: yarn install
+        run: node scripts/check-lockfile.mjs --all-workspaces && yarn install --frozen-lockfile
 
       # Unlike yarn lint, this only reports what ESLint and Prettier would change.
       - name: Check the code with ESLint and Prettier
@@ -51,7 +60,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && 'dal-1' || 'ubuntu-latest' }}
+    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && 'dal-1' || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -68,8 +77,9 @@ jobs:
       - name: Install Yarn
         run: npm install --global yarn@1.22.22
 
+      # Install the package versions yarn.lock lists, as in the Lint job.
       - name: Install dependencies
-        run: yarn install
+        run: node scripts/check-lockfile.mjs --all-workspaces && yarn install --frozen-lockfile
 
       # The client is built before the tests run, as in the web server image.
       - name: Build the client
@@ -82,13 +92,16 @@ jobs:
 
   # Each image's build stage installs its dependencies and runs its tests. The base images come from
   # dhi.io, which needs a login with the same Docker Hub secrets as the image workflows. A fork's
-  # pull request gets no secrets, so only pull requests from branches of this repository build them. It is one job rather than a matrix: a skipped
-  # matrix job reports nothing under its per-image names, so a required check on one of them would
-  # wait forever on a fork's pull request, while a skipped job counts as passed.
+  # pull request gets no secrets, so only pull requests from branches of this repository build them.
+  # Dependabot's pull requests get the Dependabot secrets of the same names instead, whose token can
+  # only read (see .github/dependabot.yml), and build on GitHub's own runners, as above. It is one
+  # job rather than a matrix: a skipped matrix job reports nothing under its per-image names, so a
+  # required check on one of them would wait forever on a fork's pull request, while a skipped job
+  # counts as passed.
   image-build:
     name: Image build
     if: github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: dal-1
+    runs-on: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && 'ubuntu-latest' || 'dal-1' }}
     timeout-minutes: 30
     steps:
       - name: Checkout

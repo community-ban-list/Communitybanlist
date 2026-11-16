@@ -7,7 +7,9 @@ ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
 
 # Stage 1: Build
 # The dev variant includes the shell and Yarn needed to install dependencies and build the client.
-FROM dhi.io/node:26-dev AS build
+# Both stages' base images are pinned by digest, so every build of a commit starts from the same
+# images. Dependabot proposes newer digests, such as security fixes, as pull requests.
+FROM dhi.io/node:26-dev@sha256:6d3e8e6f76812d4beb7b1ff5887458e67b33c0e82219bff4cc43d97f12e4d777 AS build
 
 WORKDIR /opt/workdir/
 
@@ -15,10 +17,15 @@ WORKDIR /opt/workdir/
 COPY scbl-lib ./scbl-lib
 COPY client ./client
 COPY web-server ./web-server
-COPY package.json .
+COPY package.json yarn.lock ./
+COPY scripts/check-lockfile.mjs ./scripts/
 
-# Install dependencies and build client
-RUN yarn install --production && \
+# Install the package versions yarn.lock lists, so every build of a commit installs the same
+# packages, then build the client. --frozen-lockfile stops Yarn changing yarn.lock, but Yarn still
+# installs a package that a workspace asks for and yarn.lock does not list, so the script first
+# checks that yarn.lock lists them all.
+RUN node scripts/check-lockfile.mjs && \
+    yarn install --production --frozen-lockfile && \
     yarn build-web-server
 
 # Run the tests, so an image that fails them is never built or pushed.
@@ -27,7 +34,7 @@ RUN node scripts/run-tests.mjs scbl-lib web-server
 
 # Stage 2: Runtime
 # The runtime variant has no shell or package manager and runs as the non-root node user.
-FROM dhi.io/node:26
+FROM dhi.io/node:26@sha256:25ed2b0240365e3b459cb22934e87557115b95f1f3cf5dab5dca45f80d5987de
 
 WORKDIR /opt/workdir/
 
