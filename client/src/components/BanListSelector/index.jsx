@@ -3,6 +3,8 @@ import { gql } from '@apollo/client';
 import { useQuery } from '@apollo/client/react';
 import { Input } from 'reactstrap';
 
+import { LoadError } from '../LoadStatus/index.jsx';
+
 // Also read by the config form, to name the ban list chosen.
 export const GET_BAN_LISTS = gql`
   query GetBanLists {
@@ -19,10 +21,10 @@ export const GET_BAN_LISTS = gql`
 `;
 
 export default function (props) {
-  const { loading, error, data } = useQuery(GET_BAN_LISTS);
+  const { loading, error, data, refetch } = useQuery(GET_BAN_LISTS);
 
-  if (loading) return <p>Loading...</p>;
-  if (error) return <p>Error!</p>;
+  if (loading) return <p role="status">Loading...</p>;
+  if (error) return <LoadError error={error} retry={refetch} small />;
 
   return (
     <Input type="select" {...props}>

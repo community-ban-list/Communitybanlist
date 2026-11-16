@@ -19,6 +19,8 @@ import {
 
 import Layout from '../layout/layout.jsx';
 
+import { Loading, LoadError } from '../../components/LoadStatus/index.jsx';
+
 import { gql } from '@apollo/client';
 import { useQuery } from '@apollo/client/react';
 
@@ -483,7 +485,7 @@ export default function () {
   // The player's ID as CBL stores it, or null when the address has no player's ID.
   const player = parsePlayerInput(search);
 
-  const { loading, error, data } = player
+  const { loading, error, data, refetch } = player
     ? useQuery(GET_PLAYER, { variables: { id: player.id } })
     : { loading: null, error: null, data: null };
 
@@ -502,25 +504,8 @@ export default function () {
               </p>
             </CardBody>
             <CardBody>
-              {loading && (
-                <>
-                  <div className="text-center mt-2 mb-3">Loading...</div>
-                  <div className="btn-wrapper text-center">
-                    <i className="fas fa-circle-notch fa-spin fa-4x" />
-                  </div>
-                </>
-              )}
-              {error && (
-                <>
-                  <div className="text-center mt-2 mb-2">Error!</div>
-                  <div className="btn-wrapper text-center">
-                    <i className="fas fa-exclamation-triangle fa-4x" />
-                  </div>
-                  <div className="text-center mt-2 mb-2">
-                    [ERR 1] Something went wrong. Sad times.
-                  </div>
-                </>
-              )}
+              {loading && <Loading />}
+              {error && <LoadError error={error} retry={refetch} />}
               {!loading && !error && (
                 <div className="px-3 py-4 px-sm-4 py-sm-5">
                   <StepWizard>

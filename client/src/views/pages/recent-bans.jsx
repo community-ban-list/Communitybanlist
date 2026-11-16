@@ -1,10 +1,12 @@
 import React from 'react';
-import { Button, Card, CardBody, Container, Table, UncontrolledTooltip } from 'reactstrap';
+import { Card, CardBody, Container, Table, UncontrolledTooltip } from 'reactstrap';
 
 import { gql } from '@apollo/client';
 import { useQuery } from '@apollo/client/react';
 
 import Layout from '../layout/layout.jsx';
+
+import { Loading, LoadError, LoadMore } from '../../components/LoadStatus/index.jsx';
 
 import { BanDates, SteamUser } from '../../components';
 
@@ -45,7 +47,7 @@ const query = gql`
 `;
 
 export default function () {
-  const { loading, error, data, fetchMore } = useQuery(query);
+  const { loading, error, data, fetchMore, refetch } = useQuery(query);
   return (
     <Layout>
       <section className="section section-lg pt-lg-0 mt--200">
@@ -103,23 +105,14 @@ export default function () {
                 {loading && (
                   <tr>
                     <td colSpan={4} className="text-center">
-                      <div className="text-center mt-2 mb-3">Loading...</div>
-                      <div className="btn-wrapper text-center">
-                        <i className="fas fa-circle-notch fa-spin fa-4x" />
-                      </div>
+                      <Loading />
                     </td>
                   </tr>
                 )}
                 {error && (
                   <tr>
                     <td colSpan={4} className="text-center">
-                      <div className="text-center mt-2 mb-2">Error!</div>
-                      <div className="btn-wrapper text-center">
-                        <i className="fas fa-exclamation-triangle fa-4x" />
-                      </div>
-                      <div className="text-center mt-2 mb-2">
-                        [ERR 1] Something went wrong. Sad times.
-                      </div>
+                      <LoadError error={error} retry={refetch} />
                     </td>
                   </tr>
                 )}
@@ -151,19 +144,15 @@ export default function () {
                     ))}
                     <tr>
                       <td colSpan={4} className="text-center">
-                        <Button
-                          color="primary"
-                          disabled={!data.bans.pageInfo.hasNextPage}
-                          onClick={() => {
+                        <LoadMore
+                          hasNextPage={data.bans.pageInfo.hasNextPage}
+                          fetchMore={() =>
                             fetchMore({
                               query,
                               variables: { after: data.bans.pageInfo.endCursor }
-                            });
-                          }}
-                        >
-                          <i className="fa fa-angle-double-down me-2" />
-                          Load More
-                        </Button>
+                            })
+                          }
+                        />
                       </td>
                     </tr>
                   </>

@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import { Link, useParams } from 'react-router';
 
 import {
-  Alert,
   Button,
   Card,
   CardBody,
@@ -18,6 +17,7 @@ import { useQuery } from '@apollo/client/react';
 
 import Layout from '../layout/layout.jsx';
 
+import { Loading, LoadError } from '../../components/LoadStatus/index.jsx';
 import SteamUserSearchBox from '../../components/steam-user-search-box.jsx';
 
 import steamAvatar from '../../assets/img/misc/avatar.jpg';
@@ -160,7 +160,7 @@ export default function () {
   // The player's ID as CBL stores it, or null when the search is not a player's ID.
   const player = parsePlayerInput(search);
 
-  const { loading, error, data } = player
+  const { loading, error, data, refetch } = player
     ? useQuery(GET_PLAYER, { variables: { id: player.id } })
     : { loading: null, error: null, data: null };
 
@@ -181,24 +181,16 @@ export default function () {
             </CardBody>
             {loading && (
               <CardBody>
-                <div className="text-center mt-2 mb-3">Loading...</div>
-                <div className="btn-wrapper text-center">
-                  <i className="fas fa-circle-notch fa-spin fa-4x" />
-                </div>
+                <Loading />
               </CardBody>
             )}
             {error && (
               <CardBody>
-                <div className="text-center mt-2 mb-2">Error!</div>
-                <div className="btn-wrapper text-center">
-                  <i className="fas fa-exclamation-triangle fa-4x" />
-                </div>
-                <div className="text-center mt-2 mb-2">
-                  [ERR 1] Something went wrong. Sad times.
-                </div>
+                <LoadError error={error} retry={refetch} />
               </CardBody>
             )}
-            {data && data.steamUser === null && player.kind === 'steam' && (
+            {/* Only a lookup that worked says a player is not on record. */}
+            {data && !error && data.steamUser === null && player.kind === 'steam' && (
               <CardBody>
                 <div className="text-center mt-2 mb-2">Unknown Steam User</div>
                 <div className="btn-wrapper text-center">
@@ -209,7 +201,7 @@ export default function () {
                 </div>
               </CardBody>
             )}
-            {data && data.steamUser === null && player.kind === 'eos' && (
+            {data && !error && data.steamUser === null && player.kind === 'eos' && (
               <CardBody>
                 <div className="text-center mt-2 mb-2">Unknown EOS ID</div>
                 <div className="btn-wrapper text-center">
@@ -518,7 +510,8 @@ export default function () {
                   </tbody>
                 </Table>
                 <CardBody>
-                  <Alert color="danger">
+                  {/* Styled as an alert but not announced as one, as it is on every player's page. */}
+                  <div className="alert alert-danger">
                     <i className="fas fa-exclamation-circle me-2" />
                     <strong>Disclaimer</strong>
                     <br />
@@ -533,7 +526,7 @@ export default function () {
                       "I'm banned, what now?" information page
                     </Link>
                     .
-                  </Alert>
+                  </div>
                 </CardBody>
               </>
             )}
