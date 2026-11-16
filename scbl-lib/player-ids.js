@@ -3,6 +3,8 @@
 // can be on them, and the website as it looks a player up. There are two kinds of ID:
 // - steam: a SteamID64, the 17 digits of a Steam account.
 // - eos: an EOS ID, the 32 lowercase hexadecimal characters of an Epic Online Services account.
+// It also has the rule for the IDs a remote ban list's file bans, and so for which files are ban
+// lists, which the importer and the bot both go by (see parseRemoteFile).
 //
 // This file has no imports, so it can be loaded on its own. The website loads it too, so its regular
 // expressions have no lookbehind, which Safari before 16.4 cannot read: where an ID must not follow a
@@ -110,4 +112,34 @@ export function parseRemoteLine(line) {
 // That character is never the ID's first, as it cannot be part of the ID.
 function idStart(match) {
   return match.index + (match[0].startsWith(match[1]) ? 0 : 1);
+}
+
+// The bans of a remote ban list's file, as the importer reads it and the bot checks it, as
+// { bans, problem }. CBL takes only SteamIDs from remote ban lists, so the bans are those of the
+// lines that ban a SteamID, as parseRemoteLine gives them, and a line that bans an EOS ID is left
+// out. A blank file is a list with no bans. Any other file with no bans is not a ban list, and the
+// problem says why, as the importer fails it: its only bans are of EOS IDs, which CBL does not
+// import from remote ban lists, or it has none at all, as an error page has none. Otherwise the
+// problem is null.
+export function parseRemoteFile(text) {
+  const file = String(text ?? '');
+  if (file.trim() === '') return { bans: [], problem: null };
+
+  const bans = [];
+  // The lines that ban an EOS ID, which are counted to say so when the file has no other bans.
+  let eosLines = 0;
+  for (const line of file.split('\n')) {
+    const ban = parseRemoteLine(line);
+    if (ban?.kind === 'eos') eosLines++;
+    if (ban?.kind === 'steam') bans.push(ban);
+  }
+  if (bans.length > 0) return { bans, problem: null };
+
+  const none = 'The remote ban list has no bans in the `steamID:expiry //reason` format';
+  if (eosLines > 0)
+    return {
+      bans,
+      problem: `${none}. It has ${eosLines.toLocaleString('en-US')} ${eosLines === 1 ? 'line' : 'lines'} with an EOS ID, which CBL does not import from remote ban lists.`
+    };
+  return { bans, problem: `${none}, so it may be an error page.` };
 }

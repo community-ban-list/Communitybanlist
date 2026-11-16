@@ -2,7 +2,7 @@ import axios from 'axios';
 import { createHash } from 'crypto';
 
 import { battlemetrics } from 'scbl-lib/apis';
-import { findSteamIDIn, normaliseEosID, parseRemoteLine } from 'scbl-lib/player-ids';
+import { findSteamIDIn, normaliseEosID, parseRemoteFile } from 'scbl-lib/player-ids';
 import { classifyBanReason, Logger } from 'scbl-lib/utils';
 
 import { stopIfRequested } from './run-control.js';
@@ -359,23 +359,16 @@ export default class BanFetcher {
     if (previous?.bodyHash && previous.bodyHash === remote.bodyHash)
       return { ...unchanged, remote };
 
-    // An empty file is a list with no bans.
-    if (data.trim() === '')
-      return { bans: [], rawCount: 0, firstMetaTotal: null, complete: true, remote };
+    // The file's lines that ban a SteamID, as CBL takes only SteamIDs from remote ban lists, whatever
+    // IMPORTER_EOS_IMPORT says. An empty file is a list with no bans. Anything else with no bans in
+    // it, such as an error page, is not a ban list, and one whose only bans are of EOS IDs says so.
+    // The bot checks a remote source by the same rule (see parseRemoteFile).
+    const { bans: lines, problem } = parseRemoteFile(data);
+    if (problem) throw new Error(problem);
 
     const bans = [];
-    // The lines that ban an EOS ID, which are counted to say so when the file has no other bans.
-    let eosLines = 0;
-
-    // Loop over each line of the ban file.
-    for (const line of data.split('\n')) {
-      // Split the line to get the steam user, expiry data and reason. Skip the line if no ban is
-      // contained on it, or if it bans an EOS ID, as CBL takes only SteamIDs from remote ban lists,
-      // whatever IMPORTER_EOS_IMPORT says.
-      const ban = parseRemoteLine(line);
-      if (ban?.kind === 'eos') eosLines++;
-      if (ban?.kind !== 'steam') continue;
-
+    // Each line gives the steam user, expiry data and reason.
+    for (const ban of lines) {
       const { value: steamUser, reason } = ban;
       let { expires } = ban;
 
@@ -398,17 +391,6 @@ export default class BanFetcher {
         banList
       });
     }
-
-    // Anything else with no bans in it, such as an error page, is not a ban list. One whose only bans
-    // are of EOS IDs says so, as CBL does not import those from remote ban lists.
-    if (bans.length === 0 && eosLines > 0)
-      throw new Error(
-        `The remote ban list has no bans in the \`steamID:expiry //reason\` format. It has ${eosLines.toLocaleString('en-US')} ${eosLines === 1 ? 'line' : 'lines'} with an EOS ID, which CBL does not import from remote ban lists.`
-      );
-    if (bans.length === 0)
-      throw new Error(
-        'The remote ban list has no bans in the `steamID:expiry //reason` format, so it may be an error page.'
-      );
 
     return { bans, rawCount: bans.length, firstMetaTotal: null, complete: true, remote };
   }

@@ -7,7 +7,8 @@ import {
   describeError,
   isSameBattlemetricsID,
   Logger,
-  normaliseBattlemetricsID
+  normaliseBattlemetricsID,
+  sourceKey
 } from 'scbl-lib/utils';
 
 import {
@@ -51,7 +52,6 @@ import {
   readEosImport,
   readSwitch,
   readVisibleBanLists,
-  sourceKey,
   stateOf,
   STATES,
   UNCONFIRMED

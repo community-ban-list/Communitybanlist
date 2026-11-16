@@ -1,5 +1,7 @@
 import { EmbedBuilder, escapeMarkdown, time, TimestampStyles } from 'discord.js';
 
+import { logText } from 'scbl-lib/utils';
+
 // The CBL brand colour used in its Discord webhook messages.
 const COLOR = 0xffc40b;
 
@@ -24,14 +26,20 @@ export function formatBanListName(banList, organisation) {
   return `${bold(organisation.name)} / ${bold(banList.name)}`;
 }
 
+// A name, or other text someone chose, in quotes, as the audit log gives it: kept on one line and
+// shown as written (logText), as the website's lines give names, so it cannot start a line that
+// looks like another one, or hide part of its line. Only for the log: replies escape names with
+// bold.
+export const quote = (text) => `"${logText(text)}"`;
+
 // Describe the organisation for the audit log.
 export function describeOrganisation(organisation) {
-  return `organisation "${organisation.name}" (ID: ${organisation.id})`;
+  return `organisation ${quote(organisation.name)} (ID: ${organisation.id})`;
 }
 
 // Describe the ban list for the audit log.
 export function describeBanList(banList, organisation) {
-  return `ban list "${banList.name}" (ID: ${banList.id}) of ${describeOrganisation(organisation)}`;
+  return `ban list ${quote(banList.name)} (ID: ${banList.id}) of ${describeOrganisation(organisation)}`;
 }
 
 export function formatBanListType(type) {
@@ -119,20 +127,46 @@ const IMPORT_STATES = {
   self_import: "Not imported, as its source is one of CBL's own export ban lists"
 };
 
+// What a list's status says when its type or source was changed and the ban importer has not read
+// it since, or not finished switching it to its new source (see readStatus), on its own line and
+// in short, for a list of lists.
+const SOURCE_CHANGES = {
+  unread: {
+    line: 'Its type or source was changed, and the ban importer has not read it since.',
+    short: 'type or source changed, not read since'
+  },
+  replacing: {
+    line: 'Its type or source was changed, and the ban importer has not finished switching it to the new source yet.',
+    short: 'type or source changed, switch not finished yet'
+  }
+};
+
 // A time, as Discord shows it in each reader's own time zone, relative to now, or never.
 const when = (value) => (value ? time(new Date(value), TimestampStyles.RelativeTime) : 'never');
 const count = (value) =>
   value === null || value === undefined ? 'unknown' : plural(Number(value), 'ban');
 
+// What a list's status says first, from its BanListSyncs row (sync), when its type or source was
+// changed and the ban importer has not read it since, or not finished switching it to its new
+// source, or null.
+export function describeSourceChange(sync) {
+  return SOURCE_CHANGES[sync?.sourceChange]?.line ?? null;
+}
+
 // How the ban importer last imported a list, on a few lines, from its BanListSyncs row (sync), or
 // that it has not imported it yet, and the bans it holds back from removing (removals: waiting for a
-// confirming read, and held for an admin).
+// confirming read, and held for an admin). A list whose type or source was changed says so first
+// (see describeSourceChange): with nothing else until the importer has read it since, as nothing in
+// the row is of its source until then, and with the rest after that, as all of it is.
 export function describeImport(sync, removals = { waiting: 0, held: 0 }) {
   if (!sync) return 'Not imported yet.';
+  const changed = describeSourceChange(sync);
+  if (sync.sourceChange === 'unread') return changed;
   const lines = [
     `${IMPORT_STATES[sync.state] ?? escapeMarkdown(String(sync.state))} · last imported ${when(sync.lastSuccessAt)} · last read in full ${when(sync.lastFullScanAt)}`,
     `${count(sync.storedCount)} stored${sync.headTotal === null || sync.headTotal === undefined ? '' : ` · ${count(sync.headTotal)} on BattleMetrics`}`
   ];
+  if (changed) lines.unshift(changed);
   if (removals.waiting > 0 || removals.held > 0)
     lines.push(
       `Removals: ${plural(removals.waiting, 'ban')} waiting for a confirming read, ${plural(removals.held, 'ban')} held for an admin`
@@ -141,10 +175,15 @@ export function describeImport(sync, removals = { waiting: 0, held: 0 }) {
   return lines.join('\n');
 }
 
-// How the ban importer last imported a list, on one line: its state and when, for a list of lists.
+// How the ban importer last imported a list, on one line, for a list of lists: its state and when,
+// and for a list whose type or source was changed, that first, or only that while the importer has
+// not read it since (see describeImport).
 export function summariseImport(sync) {
   if (!sync) return 'not imported yet';
-  return `${IMPORT_STATES[sync.state] ?? escapeMarkdown(String(sync.state))} · last imported ${when(sync.lastSuccessAt)}`;
+  const changed = SOURCE_CHANGES[sync.sourceChange]?.short;
+  if (sync.sourceChange === 'unread') return changed;
+  const imported = `${IMPORT_STATES[sync.state] ?? escapeMarkdown(String(sync.state))} · last imported ${when(sync.lastSuccessAt)}`;
+  return changed ? `${changed} · ${imported}` : imported;
 }
 
 // A ban list's status: whether it is paused, and how the ban importer last imported it.

@@ -24,6 +24,7 @@ import {
   paginate,
   parseBanListSource,
   plural,
+  quote,
   readPaused,
   readQueueSkips,
   skipCheckOption,
@@ -150,7 +151,7 @@ async function add(interaction) {
   });
 
   const description = describeOrganisation(organisation);
-  const banListDescription = `ban list "${banList.name}" (ID: ${banList.id})`;
+  const banListDescription = `ban list ${quote(banList.name)} (ID: ${banList.id})`;
   const sourceDescription = `${formatBanListType(type)} source "${source}"`;
   audit(interaction, `added ${description} with ${banListDescription} and ${sourceDescription}.`);
 

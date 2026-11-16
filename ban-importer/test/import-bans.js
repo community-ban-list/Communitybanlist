@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import { readFile } from 'fs/promises';
 import vm from 'vm';
 
+import sourceKey from '../../scbl-lib/utils/ban-list-source-key.js';
 import isSameBattlemetricsID, {
   normaliseBattlemetricsID
 } from '../../scbl-lib/utils/battlemetrics-id.js';
@@ -516,7 +517,8 @@ const failsOnce = (entries, error = httpError(502)) => {
 };
 
 // Remote lists, by URL: the body of the file, or an error, or { status, data, headers } to answer
-// with. Each request is recorded with the headers it sent.
+// with, or a function that gives one of those for the headers a request sent, as a host that
+// answers what it is asked does. Each request is recorded with the headers it sent.
 const remoteLists = new Map();
 const remoteRequests = [];
 const remoteHeaders = [];
@@ -558,7 +560,8 @@ const dependencies = {
       async get(url, options) {
         remoteRequests.push(url);
         remoteHeaders.push({ ...options?.headers });
-        const body = remoteLists.get(url);
+        let body = remoteLists.get(url);
+        if (typeof body === 'function') body = body({ ...options?.headers });
         if (body instanceof Error) throw body;
         if (body && typeof body === 'object') {
           if (!options.validateStatus(body.status))
@@ -608,7 +611,8 @@ const dependencies = {
       // so the logger has none to give it.
       important: (module, message) => logs.push({ level: 1, message, important: true })
     },
-    normaliseBattlemetricsID
+    normaliseBattlemetricsID,
+    sourceKey
   }
 };
 
@@ -5615,6 +5619,35 @@ syncRows.set(97, {
 });
 await run();
 assert.deepStrictEqual(remoteHeaders, [{}]);
+// So does a list whose source was changed and then changed back with /banlist update before the
+// importer read the one it was changed to. Its row is still of its source, with the file it was last
+// imported from, but the first change deleted its bans, and each change marked the row
+// (replacePending). So the importer reads the file afresh, without asking its host whether it has
+// changed, which here would answer 304 Not Modified and leave the list without its bans until the
+// file changed, imports the bans again, and the replace is then done.
+reset();
+const FILE98 = [1, 2, 3].map((n) => `${steamID(n)}:0 //Cheating`).join('\n');
+remoteList(98, [], (headers) =>
+  headers['If-None-Match'] === '"v7"'
+    ? { status: 304, data: '', headers: {} }
+    : { status: 200, data: FILE98, headers: { etag: '"v7"' } }
+);
+await run();
+assert.deepStrictEqual([storedIDs(98).length, row(98).remoteEtag], [3, '"v7"']);
+for (const banID of storedIDs(98)) bans.delete(banID);
+syncRows.get(98).replacePending = 1;
+remoteHeaders.length = 0;
+results = await run();
+assert.deepStrictEqual(remoteHeaders, [{}]);
+assert.deepStrictEqual(
+  [results[0].replace, results[0].unchanged, results[0].created, storedIDs(98).length],
+  [true, undefined, 3, 3]
+);
+assert.deepStrictEqual([row(98).replacePending, row(98).remoteEtag], [false, '"v7"']);
+// The next run asks again, as the list was imported from the file in full, and its bans stay.
+results = await run();
+assert.deepStrictEqual(remoteHeaders.at(-1), { 'If-None-Match': '"v7"' });
+assert.deepStrictEqual([results[0].unchanged, storedIDs(98).length], [true, 3]);
 
 // IMPORTER_DRY_RUN=1 reads everything and writes nothing: no ban, player, record of a missing ban
 // or row is written, and nothing is posted about the lists, only that the run is a dry run. Its
@@ -7429,6 +7462,32 @@ assert.strictEqual(
   summary(),
   'Got 0 deleted bans. Imported 1 ban list: 3 bans fetched, 3 new, 0 updated, 0 removed, 0 held, 0 lists failed.'
 );
+
+// A list whose source was changed and then changed back with /banlist update before the importer
+// read the one it was changed to has its row still of its source, with its newest page, which a
+// poll compares only the list's newest bans with, while the first change deleted all of its bans.
+// Each change marked the row (replacePending), so the next run reads the list in full, for its
+// source, rather than polling it, imports all of its bans again, and the replace is then done. A
+// poll would have saved only the bans on its newest page, until the list's next periodic full read.
+reset();
+delete env.IMPORTER_HEAD_POLL;
+battlemetricsList(140, [], paged(pairs('rt', 0, 12)));
+await pollRun();
+for (const banID of storedIDs(140)) bans.delete(banID);
+syncRows.get(140).replacePending = 1;
+polled = await pollRun();
+assert.deepStrictEqual(readsOf(polled), [[140, 'full', 'source']]);
+assert.deepStrictEqual(
+  storedIDs(140),
+  pairs('rt', 0, 12).map(([uid]) => `140,${uid}`)
+);
+assert.deepStrictEqual(
+  [row(140).sourceKey, Boolean(row(140).replacePending), row(140).state],
+  [sha256('battlemetrics', 'bm-140'), false, 'ok']
+);
+// So the run after it polls the list again.
+polled = await pollRun();
+assert.deepStrictEqual(readsOf(polled), [[140, 'head', null]]);
 
 // A change saved after the poll's bans, and before the poll reads the list again, deleted them with
 // the list's other bans, so there is nothing left to remove, and the poll says so. A list removed
