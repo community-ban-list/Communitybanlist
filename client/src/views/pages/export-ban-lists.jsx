@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { gql } from '@apollo/client';
 import { useQuery } from '@apollo/client/react';
 import { Link } from 'react-router';
@@ -49,6 +49,14 @@ function missingInvite(exportBanList) {
 export default function () {
   const { loading, error, data, refetch } = useQuery(GET_EXPORT_BAN_LISTS);
 
+  // Once a list is deleted, its row and Delete button are gone, so focus moves to the message that
+  // says it was deleted, rather than being lost.
+  const [deleted, setDeleted] = useState(null);
+  const deletedMessage = useRef(null);
+  useEffect(() => {
+    if (deleted) deletedMessage.current?.focus();
+  }, [deleted]);
+
   return (
     <Layout>
       <section className="section section-lg pt-lg-0 mt--200">
@@ -64,6 +72,11 @@ export default function () {
                 preemptively ban the most harmful players from your server before they have the
                 chance to cause any harm.
               </p>
+              {deleted && (
+                <p ref={deletedMessage} tabIndex={-1} className="fw-bold">
+                  Deleted export ban list "{deleted.name}".
+                </p>
+              )}
             </CardBody>
             <Table className="align-middle table-flush" responsive>
               <thead className="thead-light">
@@ -99,8 +112,8 @@ export default function () {
                         </td>
                       </tr>
                     )}
-                    {data.loggedInSteamUser.exportBanLists.map((exportBanList, key) => (
-                      <tr key={key}>
+                    {data.loggedInSteamUser.exportBanLists.map((exportBanList) => (
+                      <tr key={exportBanList.id}>
                         <th>{exportBanList.name}</th>
                         <td>{exportBanList.threshold}</td>
                         <td>{exportBanList.defaultActivePoints}</td>
@@ -166,7 +179,12 @@ export default function () {
                           >
                             Edit
                           </Button>
-                          <DeleteExportBanList exportBanListID={exportBanList.id} />
+                          {/* Set apart from Install and Edit, as it deletes the list. */}
+                          <DeleteExportBanList
+                            className="ms-3"
+                            exportBanList={exportBanList}
+                            onDeleted={(name) => setDeleted({ name })}
+                          />
                         </td>
                       </tr>
                     ))}

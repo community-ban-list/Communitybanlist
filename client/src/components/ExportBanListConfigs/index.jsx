@@ -1,7 +1,7 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { gql } from '@apollo/client';
 import { useQuery } from '@apollo/client/react';
-import { Table } from 'reactstrap';
+import { CardBody, Table } from 'reactstrap';
 
 import { CreateExportBanListConfig, DeleteExportBanListConfig } from '../';
 import { Loading, LoadError } from '../LoadStatus/index.jsx';
@@ -44,8 +44,29 @@ export default function (props) {
     variables: { exportBanListID: props.exportBanListID }
   });
 
+  // Once custom points are deleted, their row and Delete button are gone, so focus moves to the
+  // message that says they were deleted, rather than being lost or landing on the next row's button.
+  // The message goes once custom points for that ban list are added again.
+  const [deleted, setDeleted] = useState(null);
+  const deletedMessage = useRef(null);
+  useEffect(() => {
+    if (deleted) deletedMessage.current?.focus();
+  }, [deleted]);
+  const addedAgain =
+    deleted !== null &&
+    data?.loggedInSteamUser?.exportBanList?.exportBanListConfigs?.some(
+      (exportBanListConfig) => exportBanListConfig.banList.id === deleted.banListID
+    );
+
   return (
     <>
+      {deleted && !addedAgain && (
+        <CardBody className="pt-0 pb-3">
+          <p ref={deletedMessage} tabIndex={-1} className="fw-bold mb-0">
+            Deleted the custom points for {deleted.banListName}.
+          </p>
+        </CardBody>
+      )}
       <Table className="align-middle table-flush" responsive>
         <thead className="thead-light">
           <tr>
@@ -81,8 +102,8 @@ export default function (props) {
                 </tr>
               )}
               {data.loggedInSteamUser.exportBanList.exportBanListConfigs.map(
-                (exportBanListConfig, key) => (
-                  <tr key={key}>
+                (exportBanListConfig) => (
+                  <tr key={exportBanListConfig.id}>
                     <th>
                       {exportBanListConfig.banList.organisation.name}'s{' '}
                       {exportBanListConfig.banList.name}
@@ -96,7 +117,13 @@ export default function (props) {
                     <td>{exportBanListConfig.activePoints}</td>
                     <td>{exportBanListConfig.expiredPoints}</td>
                     <td>
-                      <DeleteExportBanListConfig exportBanListConfigID={exportBanListConfig.id} />
+                      <DeleteExportBanListConfig
+                        exportBanListConfig={exportBanListConfig}
+                        exportBanList={data.loggedInSteamUser.exportBanList}
+                        onDeleted={(banListName) =>
+                          setDeleted({ banListName, banListID: exportBanListConfig.banList.id })
+                        }
+                      />
                     </td>
                   </tr>
                 )

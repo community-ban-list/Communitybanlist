@@ -1,12 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { gql } from '@apollo/client';
 import { useMutation } from '@apollo/client/react';
 
-import graphQLErrors from '../../utils/graphql-errors.js';
-
 import { Button } from 'reactstrap';
 
-import { ErrorModal, LoadingModal } from '../';
+import ConfirmModal from '../ConfirmModal';
 
 const DELETE_EXPORT_BAN_LIST = gql`
   mutation DeleteExportBanList($id: Int!) {
@@ -42,27 +40,67 @@ function removeFromCache(cache, { data }) {
   });
 }
 
+// The Delete button for an export ban list. A deleted list cannot be brought back, so it asks
+// first, and says what the deletion removes: the servers that use the list lose all of its bans, as
+// its export bans go with it, and a BattleMetrics list's ban list on BattleMetrics is deleted too,
+// with its invites and its subscribers, as ExportBanList's deleteExportBanList does. A list that
+// never got its BattleMetrics ban list has none to delete. onDeleted is called with the list's name
+// once it is deleted.
 export default function (props) {
-  const [deleteExportBanList, { loading, error }] = useMutation(DELETE_EXPORT_BAN_LIST, {
-    update: removeFromCache,
-    errorPolicy: 'none',
-    onError: (error) => console.error('Failed to delete export ban list:', error.message)
-  });
+  const { exportBanList } = props;
+  const [confirming, setConfirming] = useState(false);
+  const [deleteExportBanList, { loading, error, data, reset }] = useMutation(
+    DELETE_EXPORT_BAN_LIST,
+    {
+      update: removeFromCache,
+      errorPolicy: 'none',
+      onError: (error) => console.error('Failed to delete export ban list:', error.message),
+      onCompleted: () => {
+        setConfirming(false);
+        if (props.onDeleted) props.onDeleted(exportBanList.name);
+      }
+    }
+  );
 
   return (
     <>
-      {loading && <LoadingModal />}
-      {error && <ErrorModal errors={graphQLErrors(error)} />}
       <Button
+        className={props.className}
         color="danger"
         size="sm"
         disabled={loading}
+        aria-label={`Delete ${exportBanList.name}`}
         onClick={() => {
-          deleteExportBanList({ variables: { id: props.exportBanListID } });
+          // An error from an earlier try is not shown again.
+          reset();
+          setConfirming(true);
         }}
       >
         Delete
       </Button>
+      <ConfirmModal
+        isOpen={confirming}
+        title={`Delete "${exportBanList.name}"?`}
+        confirmLabel="Delete export ban list"
+        busyLabel="Deleting..."
+        busy={loading}
+        error={error}
+        returnFocus={!loading && !data?.deleteExportBanList}
+        onCancel={() => setConfirming(false)}
+        onConfirm={() => deleteExportBanList({ variables: { id: exportBanList.id } })}
+      >
+        <p>
+          Servers using this export ban list lose all of its bans, so the players it bans can join
+          them again.
+        </p>
+        {exportBanList.type === 'battlemetrics' && exportBanList.battlemetricsID && (
+          <p>
+            Its BattleMetrics ban list is deleted too: its share invite stops working, and the
+            organisations subscribed to it are removed from it. This can take a few minutes.
+          </p>
+        )}
+        <p className="mb-0">This cannot be undone.</p>
+      </ConfirmModal>
     </>
   );
 }
