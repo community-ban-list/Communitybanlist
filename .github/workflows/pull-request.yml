@@ -7,7 +7,7 @@ name: Pull request checks
 # nobody has reviewed yet, so its Lint and Test jobs run on GitHub's own runners instead, never on
 # dal-1, which has Docker access to the host; the repository also makes a fork's runs wait for an
 # admin's approval. The trigger is pull_request, which gives a fork's run no secrets and a read-only
-# token.
+# token. The Export membership SQL job always runs on GitHub's own runners, as it starts a database.
 on:
   pull_request:
 
@@ -79,6 +79,60 @@ jobs:
       # listed as failed within the job's time limit.
       - name: Run the tests of every workspace
         run: node scripts/run-tests.mjs
+
+  # Runs the statements that decide who is on an export ban list on a real MySQL 8.0, as production
+  # runs, which the Test job cannot: its test of them has no database, so it checks only their text.
+  # The test seeds made-up rows in an empty database of its own, in a throwaway MySQL container that
+  # ends with the job, and checks the players each statement finds (see
+  # scbl-lib/test/export-membership-mysql.js). It needs no secrets, so it runs for a fork's pull
+  # request too, and always on GitHub's own runners, never on dal-1, which has Docker access to the
+  # host. The image is pinned by digest, like the actions; Dependabot does not update it, so bump it
+  # by hand.
+  export-membership-sql:
+    name: Export membership SQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      mysql:
+        image: mysql:8.0.46@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+        env:
+          MYSQL_RANDOM_ROOT_PASSWORD: 'yes'
+          MYSQL_DATABASE: cbl_test
+          MYSQL_USER: cbl_test
+          MYSQL_PASSWORD: cbl_test
+        ports:
+          - 3306:3306
+        # The job starts once MySQL takes connections over TCP, which it does only after its first
+        # start has made the database and the user.
+        options: >-
+          --health-cmd "mysqladmin ping --host 127.0.0.1 --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+
+      - name: Install Yarn
+        run: npm install --global yarn@1.22.22
+
+      - name: Install dependencies
+        run: yarn install
+
+      # With no database the test would skip itself and pass, as it does in the Test job.
+      # TEST_DATABASE_REQUIRED makes it fail instead, so this job can't pass without the checks.
+      - name: Run the export membership statements on MySQL
+        env:
+          TEST_DATABASE_URI: mysql://cbl_test:cbl_test@127.0.0.1:3306/cbl_test
+          TEST_DATABASE_REQUIRED: '1'
+        run: node --experimental-vm-modules scbl-lib/test/export-membership-mysql.js
 
   # Each image's build stage installs its dependencies and runs its tests. The base images come from
   # dhi.io, which needs a login with the same Docker Hub secrets as the image workflows. A fork's
