@@ -16,6 +16,7 @@ const found = [
   ['Hacker', 'Cheating'],
   ['Wallhacks', 'Cheating'],
   ['speedhacking', 'Cheating'],
+  ['Glowhack', 'Cheating'],
   ['hile', 'Cheating'],
   ['Hileci', 'Cheating'],
   ['triche', 'Cheating'],
@@ -26,6 +27,8 @@ const found = [
   ['BETRÜGER', 'Cheating'],
   ['Betrueger', 'Cheating'],
   ['betrügen', 'Cheating'],
+  // Betrüger with ü written as u and a combining diaeresis.
+  ['Betru\u0308ger', 'Cheating'],
   // The past participle of betrügen, which the keyword missed before.
   ['Hat betrogen', 'Cheating'],
   ['作弊', 'Cheating'],
@@ -44,6 +47,11 @@ const found = [
   ['ITKs', 'Teamkilling'],
   ['3xTK', 'Teamkilling'],
   ['5tk', 'Teamkilling'],
+  ['3xITK', 'Teamkilling'],
+  ['2ITK', 'Teamkilling'],
+  ['HeliTK on friendlies', 'Teamkilling'],
+  ['LogiTK', 'Teamkilling'],
+  ['MultiTK', 'Teamkilling'],
   ['IntTK', 'Teamkilling'],
   ['Teambeschuss', 'Teamkilling'],
   ['Teamabschuss', 'Teamkilling'],
@@ -65,12 +73,15 @@ const found = [
   ['greifing', 'Griefing'],
   ['greifers', 'Griefing'],
   ['greifed the FOB', 'Griefing'],
+  ['teamgreifing at fob', 'Griefing'],
+  ['Hat gegreift', 'Griefing'],
 
-  // Wasting assets.
+  // Wasting assets, also "taxing", as taxiing is often spelt.
   ['Wasting assets', 'Wasting Assets'],
   ['taxi', 'Wasting Assets'],
   ['taxiing players', 'Wasting Assets'],
   ['Helitaxi', 'Wasting Assets'],
+  ['Heli taxing players around', 'Wasting Assets'],
   ['israf', 'Wasting Assets'],
   ['zerstört', 'Wasting Assets'],
   ['verschwendet', 'Wasting Assets'],
@@ -117,10 +128,14 @@ const found = [
   ['Landminen in der Main', 'Camping'],
   ['Panzerminen', 'Camping'],
   ['AT-Minen', 'Camping'],
+  ['ATmines in main', 'Camping'],
+  ['Spawnminen gelegt', 'Camping'],
+  ['Tellerminen im Main', 'Camping'],
 
   // Helicopter ramming.
   ['Helicopter ramming', 'Helicopter Ramming'],
   ['heliramming', 'Helicopter Ramming'],
+  ['vicramming friendlies', 'Helicopter Ramming'],
   // The past tense, which the keyword missed before.
   ['Heli rammed a friendly', 'Helicopter Ramming'],
   ['Heli gerammt', 'Helicopter Ramming'],
@@ -147,6 +162,8 @@ const found = [
   ['1-manning', 'Soloing Vehicles'],
   ['He 1-mans the tank', 'Soloing Vehicles'],
   ['1 Mann Panzer', 'Soloing Vehicles'],
+  ['1 maning a tank', 'Soloing Vehicles'],
+  ['1-maned the tank', 'Soloing Vehicles'],
 
   // Stealing assets.
   ['Stealing assets', 'Stealing Assets'],
@@ -154,12 +171,14 @@ const found = [
   ['çalma', 'Stealing Assets'],
   ['gestohlen', 'Stealing Assets'],
 
-  // Advertising.
+  // Advertising, also bewerben and Bewerbung, which are to promote as well as to apply.
   ['Advertising', 'Advertising'],
   ['Werbung', 'Advertising'],
   ['werben', 'Advertising'],
   ['Serverwerbung', 'Advertising'],
   ['Eigenwerbung', 'Advertising'],
+  ['Fremden Discord-Server bewerben', 'Advertising'],
+  ['Bewerbung eines anderen Servers', 'Advertising'],
 
   // Other categories, in other languages.
   ['istismar', 'Exploiting'],
@@ -176,8 +195,8 @@ const found = [
   ['Breaking server rules', 'Unknown']
 ];
 
-// Everyday words that hold a keyword, which no longer get its label. The reason keeps the labels
-// its other keywords find.
+// Everyday words and names that hold a keyword, which no longer get its label. The reason keeps the
+// labels its other keywords find.
 const notFound = [
   // Not cheating: whack, shack, the name Dietrich, Strich (line) and betrunken (drunk).
   ['Whacked teammates with a shovel', 'Unknown'],
@@ -196,12 +215,11 @@ const notFound = [
   ['Patrolling the enemy main', 'Unknown'],
   ['strolling into the main', 'Unknown'],
 
-  // Not griefing: angreifen (attack) and Angreifer (attacker).
+  // Not griefing: greifen (grab), greift, angreifen (attack) and Angreifer (attacker).
+  ['Nach der Waffe greifen', 'Unknown'],
+  ['Greift eigene Leute an', 'Unknown'],
   ['Hat eigene Leute angreifen wollen', 'Unknown'],
   ['Angreifer im Spawn', 'Unknown'],
-
-  // Not wasting assets: taxing.
-  ['Taxing the server with spam', 'Spamming'],
 
   // Not toxic: crude, intruder and intoxicated.
   ['Crude jokes in all chat', 'Unknown'],
@@ -223,10 +241,11 @@ const notFound = [
   ['Minecraft skin name', 'Unknown'],
   ['Termine nicht eingehalten', 'Unknown'],
 
-  // Not ramming: programming, Programmen and cramming.
+  // Not ramming: programming, Programmen, cramming and scrammed.
   ['Programming macro to spam', 'Spamming'],
   ['Cheating mit Drittanbieter-Programmen', 'Cheating'],
   ['Cramming players into the heli', 'Unknown'],
+  ['Scrammed when admins arrived', 'Unknown'],
 
   // Not impersonation: herausgegeben (handed over).
   ['Daten herausgegeben', 'Unknown'],
@@ -244,9 +263,9 @@ const notFound = [
   // Not stealing assets: stealth.
   ['Used stealth to ghost', 'Unknown'],
 
-  // Not advertising: bewerben (apply) and Bewerbung (application).
-  ['Entbannung: im Discord bewerben', 'Unknown'],
-  ['Bewerbung als Admin', 'Unknown']
+  // Not advertising: erwerben (acquire) and Wettbewerben (competitions).
+  ['Vorteile erwerben', 'Unknown'],
+  ['Bei Wettbewerben gesperrt', 'Unknown']
 ];
 
 const wrong = [...found, ...notFound]
