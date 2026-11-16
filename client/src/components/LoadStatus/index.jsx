@@ -4,12 +4,15 @@ import { Button } from 'reactstrap';
 
 import { loadErrorMessages } from '../../utils/graphql-errors.js';
 
+// Each of these is marked load-status: in a row across a table, it keeps to the part of the table
+// in view and wraps, as on a narrow screen the table scrolls sideways (theme/_components.scss).
+
 // What a page or list shows while it loads. The page's footer waits while it shows (see
 // theme/_sections.scss), so the footer is not drawn under it and then pushed down as the content
 // arrives.
 export function Loading() {
   return (
-    <div role="status" className="loading-placeholder">
+    <div role="status" className="load-status loading-placeholder">
       <div className="text-center mt-2 mb-3">Loading...</div>
       <div className="btn-wrapper text-center">
         <i className="fas fa-circle-notch fa-spin fa-4x" aria-hidden="true" />
@@ -26,7 +29,7 @@ export function LoadError(props) {
   const messages = loadErrorMessages(props.error);
 
   return (
-    <div className={props.small ? 'mb-3' : 'text-center mt-2 mb-2'}>
+    <div className={`load-status ${props.small ? 'mb-3' : 'text-center mt-2 mb-2'}`}>
       <div role="alert">
         {!props.small && (
           <>
@@ -68,7 +71,7 @@ export function LoadMore(props) {
   const [state, setState] = useState({ loading: false, error: null });
 
   return (
-    <>
+    <div className="load-status">
       {state.error && (
         <div role="alert" className="mb-3">
           Could not load more. {loadErrorMessages(state.error).join(' ')}
@@ -92,6 +95,6 @@ export function LoadMore(props) {
         />
         {state.loading ? 'Loading...' : 'Load More'}
       </Button>
-    </>
+    </div>
   );
 }

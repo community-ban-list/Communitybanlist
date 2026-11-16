@@ -396,9 +396,63 @@ for (const [name, Page, field, edge, row] of [
 }
 
 // The loading card is marked, so the page's footer waits while it shows (theme/_sections.scss).
-assert.match(render(h(Loading)), /^<div role="status" class="loading-placeholder">/);
+assert.match(render(h(Loading)), /^<div role="status" class="load-status loading-placeholder">/);
 const sections = await readFile(new URL('assets/scss/theme/_sections.scss', CLIENT), 'utf8');
 assert.match(sections, /body:has\(\.loading-placeholder\) \.footer \{\s*display: none;\s*\}/);
+
+// In the lists' tables, the loading message, the error and Load More are each in a row across the
+// whole table, in a block marked load-status. On a narrow screen, where the table scrolls sideways,
+// that block keeps to the part of the table in view and wraps (theme/_components.scss), rather than
+// being centred on the whole table and cut off.
+{
+  // What the row across the table that holds the text holds.
+  function spanningCell(name, html, text) {
+    const columns = html.match(/<thead.*?<\/thead>/)[0].match(/<th[ >]/g).length;
+    const cell = [...html.matchAll(/<td colspan="(\d+)"[^>]*>(.*?)<\/td>/gi)].find(([, , inside]) =>
+      inside.includes(text)
+    );
+    assert.ok(cell, `${name}: a row across the table holds ${text}`);
+    assert.strictEqual(Number(cell[1]), columns, `${name}: the row spans the table`);
+    return cell[2];
+  }
+  const inBlock = (name, html, text) =>
+    assert.match(
+      spanningCell(name, html, text),
+      /^<div [^>]*class="load-status[ "]/,
+      `${name}: ${text} is in the block`
+    );
+
+  const configs = (fields) => render(h(ExportBanListConfigs, { exportBanListID: 1 }), fields);
+  for (const [name, show, data] of [
+    ['Recent Bans', page(RecentBans), { bans: pageOf([ban(1)], true) }],
+    ['Most Harmful Players', page(MostHarmfulPlayers), { steamUsers: pageOf([player(1)], true) }],
+    [
+      'Most Harmful Players This Month',
+      page(MostHarmfulPlayersThisMonth),
+      { steamUsers: pageOf([player(1)], true) }
+    ],
+    ['The partner organisation list', page(PartnerOrganisationList)],
+    ['The export ban lists page', page(ExportBanLists)],
+    ['The points table', configs]
+  ]) {
+    inBlock(name, show({ loading: true }), 'Loading...');
+    inBlock(name, show({ error: databaseUnavailable }), DATABASE_UNAVAILABLE);
+    if (data) inBlock(name, show({ data }), 'Load More');
+  }
+  // Load More's error is in the block too, above its button.
+  assert.match(
+    render(h(LoadMore, { hasNextPage: true, fetchMore() {} }), {}, [
+      { loading: false, error: noAnswer }
+    ]),
+    /^<div class="load-status"><div role="alert"/
+  );
+
+  const components = await readFile(new URL('assets/scss/theme/_components.scss', CLIENT), 'utf8');
+  assert.match(
+    components,
+    /\n\.card \.table-responsive \{\s*container-type: inline-size;\s*\.load-status \{\s*left: \$card-spacer-x;\s*position: sticky;\s*white-space: normal;\s*width: calc\(100cqw - 2 \* \$card-spacer-x\);\s*\}\s*\}/
+  );
+}
 
 // The search page, for a player's ID.
 {
