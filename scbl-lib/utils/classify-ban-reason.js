@@ -37,9 +37,11 @@ const reasons = {
   // Not "crude", "intrude", "prudent" or "Gertrude", nor "intoxicated".
   Toxic:
     /disrespect|flam(e|ing)|har(r)?as(s)?|insult|language|offensive|\brude|(?<!in)toxic|sayg(i|ı)s(i|ı)z|hakaret|irrespect|respektlos|beleidig(ung|en)/i,
-  // The n-word and f-bombs, but not "in words", "own words" or "own bomb truck".
+  // The n-word and f-bombs, but not "in words", "own words" or "own bomb truck". Nazi, also in
+  // Neonazi and Naziflagge, but not the Turkish nazik (polite), the Italian nazione (nation), or names
+  // such as Nazim, Nazir, Nazife or Ignazio. Nor "sniggering", "slurred" or "slurp".
   'Abusive Language/Hate Speech':
-    /abusive|bigot|derogatory|discriminat|hate ?spe(e|a)ch|(homo|trans)(-| )?phobi|nazi|racial|rac(si|is)m|racist|sexism|sexist|(küfür|kufur)|mal(é|e)diction|種族主義|fluchen|semitism|nigg(a|er)|fag|slur|swastika|schimpfw(o|ö)rt|rassis(t|m)|missbr(a|ä)uch|\b(f|n)(-| )?(word|bomb)/i,
+    /abusive|bigot|derogatory|discriminat|hate ?spe(e|a)ch|(homo|trans)(-| )?phobi|nazi(?!k|on|[fhmor]e?\b)|racial|rac(si|is)m|racist|sexism|sexist|(küfür|kufur)|mal(é|e)diction|種族主義|fluchen|semitism|(?<!s)nigg(a|er)|fag|slur(?![pr])|swastika|schimpfw(o|ö)rt|rassis(t|m)|missbr(a|ä)uch|\b(f|n)(-| )?(word|bomb)/i,
 
   AFK: /afk|unassigned/i,
   'Breaking Seeding Rules': /seed/i,
@@ -62,8 +64,8 @@ const reasons = {
   'No SL Kit': /sl kit/i,
   Recruiting: /recruiting|rekrutier/i,
   // One man, one-manned, 1-maning and 1 Mann, but not "someone managed", "done many" or
-  // "1 Mannschaft", nor the name Solomon.
-  'Soloing Vehicles': /crewman|manning|solo(?!mon)|\b(1|one)(-| )?mann?(ed|ing|s)?\b/i,
+  // "1 Mannschaft", nor the names Solomon and Soloman.
+  'Soloing Vehicles': /crewman|manning|solo(?!m[ao]n)|\b(1|one)(-| )?mann?(ed|ing|s)?\b/i,
   Spamming: /spam/i,
   'Squad Baiting':
     /bai(t|ting)|creat(?:ed?|ing)(?: a)? squad|pass sl|lead it|(of|to) lead|pas(s|sing)( |-)?SL/i,
