@@ -8521,6 +8521,93 @@ for (const [id, moving] of [
   assert.strictEqual(bans.get('353,m0').steamUser, steamID(0));
 }
 
+// So is such a list whose bans stored for SteamIDs are missing from the read, rather than changed,
+// as a read skips a ban with neither a SteamID nor an EOS ID, while it returns the list's bans for
+// EOS IDs, as once a source stops giving SteamIDs for bans that have no EOS ID: here 5 bans stored
+// for SteamIDs and 3 for EOS IDs (355). So is a list whose only ban for a SteamID was really lifted,
+// while it still has 8 for EOS IDs (356), as a read of such a list gave no bans before account
+// changes. Both keep their bans, with no records, and their lines, which say that they returned no
+// bans with a SteamID, are posted on every read. IMPORTER_ALLOW_MASS_REMOVAL removes 355's 5, and a
+// read that returns a new ban with a SteamID ends 356's hold, as it then returned a ban with a
+// SteamID: its lifted ban, as one of few, is removed at once.
+{
+  reset();
+  env.IMPORTER_EOS_IMPORT = '355,356';
+  const forEos = (count, from) =>
+    Array.from({ length: count }, (_, i) => [`e${i}`, eosAccount(from + i)]);
+  const returned = (eosBans) => eosBans.map(([uid, id]) => eosOnlyBan(uid, id));
+  const eos355 = forEos(3, 35500);
+  const eos356 = forEos(8, 35600);
+  const skipped = Array.from({ length: 5 }, (_, i) => [`s${i}`, null, 'Cheating', []]);
+  battlemetricsList(355, [...pairs('s', 0, 5), ...eos355], [[...skipped, ...returned(eos355)]]);
+  battlemetricsList(356, [['s0', steamID(9)], ...eos356], [returned(eos356)]);
+  const of = (results, id) => results.find((result) => result.id === id);
+  const posted = (id) =>
+    logged(1, new RegExp(`^Imported ban list \\(ID: ${id}\\): `)).map(({ message }) => message);
+  for (const read of [1, 2]) {
+    logs.length = 0;
+    const results = await run();
+    for (const [id, held, fetched, stored] of [
+      [355, 5, 3, 8],
+      [356, 1, 8, 9]
+    ]) {
+      const result = of(results, id);
+      assert.deepStrictEqual(
+        [
+          result.hold,
+          result.held,
+          result.pending,
+          result.removed,
+          result.accountChanges,
+          result.accountChangesWaiting,
+          pendingIDs(id),
+          storedIDs(id).length
+        ],
+        ['empty', held, 0, 0, 0, 0, [], stored],
+        `${id}, read ${read}`
+      );
+      assert.deepStrictEqual(
+        posted(id),
+        [
+          `Imported ban list (ID: ${id}): ${fetched} bans fetched, 0 new, 0 updated. It returned no bans with a SteamID, so its ${stored} stored bans were kept on their accounts in case the list is broken. If the list really has no bans with a SteamID, set IMPORTER_ALLOW_MASS_REMOVAL=${id} for one run.`
+        ],
+        `${id}, read ${read}`
+      );
+    }
+    assert.deepStrictEqual(
+      ['355,s0', '355,s4', '356,s0'].map((id) => bans.get(id)?.steamUser),
+      [steamID(0), steamID(4), steamID(9)],
+      `read ${read}`
+    );
+  }
+
+  env.IMPORTER_ALLOW_MASS_REMOVAL = '355';
+  battlemetricsLists.set('bm-356', [[...returned(eos356), ['n0', steamID(10)]]]);
+  logs.length = 0;
+  events.length = 0;
+  const results = await run();
+  assert.deepStrictEqual(
+    [355, 356].map((id) => {
+      const { hold, held, created, removed } = of(results, id);
+      return [hold, held, created, removed];
+    }),
+    [
+      [null, 0, 0, 5],
+      [null, 0, 1, 1]
+    ]
+  );
+  assert.deepStrictEqual(removedIDs().sort(), [
+    '355,s0',
+    '355,s1',
+    '355,s2',
+    '355,s3',
+    '355,s4',
+    '356,s0'
+  ]);
+  assert.deepStrictEqual(storedIDs(355).sort(), ['355,e0', '355,e1', '355,e2']);
+  assert.deepStrictEqual(posted(356), []);
+}
+
 // A list of at least 10 bans whose read found none of them is held as it lost them all, with
 // records, as it found bans, however few of them are stored for SteamIDs: here a list of 3 bans
 // stored for SteamIDs and 10 for EOS IDs whose read returned only a new ban for an EOS ID. A list
