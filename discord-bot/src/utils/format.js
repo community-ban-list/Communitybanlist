@@ -136,8 +136,8 @@ const SOURCE_CHANGES = {
     short: 'type or source changed, not read since'
   },
   replacing: {
-    line: 'Its type or source was changed, and the ban importer has not finished replacing its old bans yet.',
-    short: 'type or source changed, old bans not replaced yet'
+    line: 'Its type or source was changed, and the ban importer has not finished switching it to the new source yet.',
+    short: 'type or source changed, switch not finished yet'
   }
 };
 

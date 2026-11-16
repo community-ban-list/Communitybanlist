@@ -687,7 +687,7 @@ await run('resume', { banlist: '5' });
 assert.deepStrictEqual(prompts, [
   {
     content:
-      "Resume **Org** / **Main**? The ban importer reads it in full on its next cycle, and its 3 bans on 2 players count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes at least 10 more minutes when there are any, and longer when it seems to have lost all of them, or a large part of them at once. /banlist status shows when. Export bans follow from the cycle after it counts again, and players' reputation points within 1 cycle of it.",
+      "Resume **Org** / **Main**? The ban importer reads it in full on its next cycle, and its 3 bans on 2 players count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes at least 10 more minutes when at least 10 of them, and 5% of the list, are missing, and longer when it seems to have lost all of them, or a large part of them at once. /banlist status shows when. Export bans follow from the cycle after it counts again, and players' reputation points within 1 cycle of it.",
     confirmLabel: 'Resume ban list'
   }
 ]);
@@ -930,7 +930,7 @@ const replacingSync = {
     'Its source is not among the BattleMetrics ban lists the CBL organisation can see, so its bans are not checked for removal.'
 };
 const REPLACING =
-  'Its type or source was changed, and the ban importer has not finished replacing its old bans yet.';
+  'Its type or source was changed, and the ban importer has not finished switching it to the new source yet.';
 const REPLACING_IMPORT = `${REPLACING}\nCBL cannot read it on BattleMetrics · last imported ${String(ATTEMPTED_AT)} · last read in full ${String(ATTEMPTED_AT)}\n12 bans stored · 12 bans on BattleMetrics\nLast error: ${replacingSync.lastError}`;
 reset(0, 0);
 syncRows = [{ ...replacingSync }];
@@ -940,7 +940,7 @@ await run('status', { banlist: '5' });
 await run('status', {});
 assert.strictEqual(importOf(replies[0]), REPLACING_IMPORT);
 assert.deepStrictEqual(replies[1].lines, [
-  `**Org** / **Main** (#5) · type or source changed, old bans not replaced yet · CBL cannot read it on BattleMetrics · last imported ${String(ATTEMPTED_AT)}`
+  `**Org** / **Main** (#5) · type or source changed, switch not finished yet · CBL cannot read it on BattleMetrics · last imported ${String(ATTEMPTED_AT)}`
 ]);
 const replacing = await readStatus([record]);
 assert.strictEqual(replacing.syncs.get(5).sourceChange, 'replacing');
@@ -964,7 +964,7 @@ assert.strictEqual(
   `${REPLACING}\n${heldLine} · last read in full ${String(ATTEMPTED_AT)}\n40 bans stored · 10 bans on BattleMetrics\nRemovals: 30 bans waiting for a confirming read, 0 bans held for an admin`
 );
 assert.deepStrictEqual(replies[1].lines, [
-  `**Org** / **Main** (#5) · type or source changed, old bans not replaced yet · ${heldLine} · 30 removals held`
+  `**Org** / **Main** (#5) · type or source changed, switch not finished yet · ${heldLine} · 30 removals held`
 ]);
 syncRows[0].replacePending = 0;
 assert.strictEqual(format.summariseImport((await readStatus([record])).syncs.get(5)), heldLine);
@@ -991,7 +991,7 @@ assert.strictEqual(importOf(replies.at(-1)), UNREAD);
 // importer's reads have confirmed those the new source does not have, as any list does, so the
 // question says that too.
 const CONFIRMING =
-  ': once its reads have confirmed which of its 12 bans on 5 players the new source does not have, which takes at least 10 more minutes when there are any';
+  ': once its reads have confirmed which of its 12 bans on 5 players the new source does not have, which takes at least 10 more minutes when at least 10 of them, and 5% of the list, are missing';
 for (const [sync, changedLine] of [
   [changedSync, UNREAD],
   [replacingSync, REPLACING]

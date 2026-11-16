@@ -350,8 +350,9 @@ async function resume(interaction) {
   // A list given a new type or source whose old bans the importer has yet to finish replacing (see
   // readStatus) has them replaced by the new source's, which the importer never holds for an admin,
   // however many it loses, so the question says only that the list counts again once the importer
-  // has caught up with it. While the list has bans, that waits for the importer's reads to confirm
-  // those the new source does not have, as for any list, which the question says too: a source
+  // has caught up with it. While the list has bans, that can wait for the importer's reads to
+  // confirm those the new source does not have, as for any list (only when at least 10 of them, and
+  // 5% of the list, are missing; fewer are removed at once), which the question says too: a source
   // changed by hand keeps its old bans, and the importer may have saved some of the new source's
   // already. /banlist update deletes the old bans with the change, so a list it changed that the
   // importer has not read since has none.
@@ -360,11 +361,11 @@ async function resume(interaction) {
   const changed = describeSourceChange(syncs.get(banList.id));
   const confirming =
     bans.bans > 0
-      ? `: once its reads have confirmed which of its ${describeBanListDeletion(bans)} the new source does not have, which takes at least 10 more minutes when there are any`
+      ? `: once its reads have confirmed which of its ${describeBanListDeletion(bans)} the new source does not have, which takes at least 10 more minutes when at least 10 of them, and 5% of the list, are missing`
       : '';
   const catchUp = changed
     ? `${changed} The ban importer reads it in full on its next cycle, and the list counts again once it has caught up with it${confirming}.`
-    : `The ban importer reads it in full on its next cycle, and its ${describeBanListDeletion(bans)} count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes at least 10 more minutes when there are any, and longer when it seems to have lost all of them, or a large part of them at once.`;
+    : `The ban importer reads it in full on its next cycle, and its ${describeBanListDeletion(bans)} count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes at least 10 more minutes when at least 10 of them, and 5% of the list, are missing, and longer when it seems to have lost all of them, or a large part of them at once.`;
   const confirmed = await confirm(
     interaction,
     `Resume ${listName}? ${catchUp} /banlist status shows when. ${settles(bans.steamUsers, 'the cycle after it counts again')}`,

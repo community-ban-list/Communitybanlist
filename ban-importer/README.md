@@ -475,7 +475,7 @@ A migration waits at most 3 seconds for a table that another connection is using
 | `replacePending`                                     | Whether the bans of the list's old source are still being replaced by those of its new source. The bot sets it when `/banlist update` gives the list a new type or source.                                    |
 | `allowFullRemovalUntil`                              | Until when the list may lose all of its bans at once, as an admin confirmed, in UTC. The importer only reads it.                                                                                              |
 | `remoteEtag`, `remoteLastModified`, `remoteBodyHash` | For a remote list, the `ETag`, `Last-Modified` and SHA-256 of the file it was last imported from in full, with nothing kept back.                                                                             |
-| `updatedAt`                                          | When the row was last saved.                                                                                                                                                                                  |
+| `updatedAt`                                          | When the importer last saved the row. The bot's `replacePending` mark leaves it as it was.                                                                                                                    |
 
 To have a list read in full on the next run, e.g. after fixing something by hand: `UPDATE BanListSyncs SET nextFullScanAt = UTC_TIMESTAMP(3) WHERE banList = <id>;`
 
