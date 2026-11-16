@@ -108,10 +108,17 @@ const found = [
   ['f-bombs', 'Abusive Language/Hate Speech'],
   ['Dropping f bombs on admins', 'Abusive Language/Hate Speech'],
   ['Racial slurs in chat', 'Abusive Language/Hate Speech'],
+  // Slurring and slurred, which in a ban reason mostly mean using slurs.
+  ['Slurring in chat', 'Abusive Language/Hate Speech'],
+  ['Slurred at a teammate', 'Abusive Language/Hate Speech'],
   ['Neonazi', 'Abusive Language/Hate Speech'],
   ['Nazis', 'Abusive Language/Hate Speech'],
   ['Naziflagge', 'Abusive Language/Hate Speech'],
   ['Nazimusik', 'Abusive Language/Hate Speech'],
+  // Compounds that go on with ä, ö or ü after the letters that end names such as Nazim.
+  ['Naziführer', 'Abusive Language/Hate Speech'],
+  ['Nazimärsche', 'Abusive Language/Hate Speech'],
+  ['Nazimörder', 'Abusive Language/Hate Speech'],
   ['Rassismus', 'Abusive Language/Hate Speech'],
   ['Schimpfwörter', 'Abusive Language/Hate Speech'],
   ['küfür', 'Abusive Language/Hate Speech'],
@@ -133,8 +140,11 @@ const found = [
   ['Panzerminen', 'Camping'],
   ['AT-Minen', 'Camping'],
   ['ATmines in main', 'Camping'],
+  ['Antitankmines in main', 'Camping'],
+  ['Panzerabwehrminen im Main', 'Camping'],
   ['Spawnminen gelegt', 'Camping'],
   ['Tellerminen im Main', 'Camping'],
+  ['Main verminen', 'Camping'],
 
   // Helicopter ramming.
   ['Helicopter ramming', 'Helicopter Ramming'],
@@ -237,24 +247,26 @@ const notFound = [
   ['Poor choice of words in chat', 'Unknown'],
   ['Teamkilled squad with own bomb truck', 'Teamkilling'],
   ['Ran bomb car into friendlies', 'Unknown'],
-  // Nor sniggering, slurred words or slurping, nor the Turkish nazik (polite), the Italian nazionale
-  // (national), or names that hold nazi.
+  // Nor sniggering or slurping, nor the Turkish nazik (polite), the Italian nazionale (national), or
+  // names that hold nazi.
   ['Sniggering in chat', 'Unknown'],
-  ['Slurring words while drunk', 'Unknown'],
   ['Slurping noises on mic', 'Unknown'],
   ['Adminlere karşı nazik değil', 'Unknown'],
   ['Squadra nazionale', 'Unknown'],
   ['Banned by Nazim', 'Unknown'],
+  ['Banned by Nazih', 'Unknown'],
   ['Gebannt von Nazir', 'Unknown'],
   ['Banned by Nazife', 'Unknown'],
   ['Banned by Ignazio', 'Unknown'],
 
-  // Not camping: determined, examined, undermining, Minecraft and Termine (appointments).
+  // Not camping: determined, examined, undermining, Minecraft, Termine (appointments) and the French
+  // vermine (vermin).
   ['Determined to grief the main', 'Griefing'],
   ['Examined the logs', 'Unknown'],
   ['Undermining admins', 'Unknown'],
   ['Minecraft skin name', 'Unknown'],
   ['Termine nicht eingehalten', 'Unknown'],
+  ['Traite les joueurs de vermine', 'Unknown'],
 
   // Not ramming: programming, Programmen, cramming and scrammed.
   ['Programming macro to spam', 'Spamming'],

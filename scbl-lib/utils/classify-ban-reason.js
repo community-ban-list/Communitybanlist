@@ -6,7 +6,9 @@
 // not soloing vehicles. Compounds that partners write, such as wallhack, HeliTK, vicramming or
 // Spawnminen, are still found. \b counts only ASCII letters, digits and _ as part of a word, so it
 // is used only next to ASCII letters, and the keywords in other scripts are found anywhere, as
-// before. A word that can also mean the category's offence keeps its label, such as "mine".
+// before. Where a word could go on with ä, ö or ü, as Nazimüll does, those letters are listed
+// instead of \b. A word that can also mean the category's offence keeps its label, such as "mine"
+// or "slurring".
 // scbl-lib/test/classify-ban-reason.js has examples of what the keywords find and what they do not.
 // Only Node loads this: the importer, the web server and the bot, through scbl-lib/utils, and the
 // scripts. So it may use lookbehinds, but the website's browser code must not load it, as Safari
@@ -38,19 +40,23 @@ const reasons = {
   Toxic:
     /disrespect|flam(e|ing)|har(r)?as(s)?|insult|language|offensive|\brude|(?<!in)toxic|sayg(i|ı)s(i|ı)z|hakaret|irrespect|respektlos|beleidig(ung|en)/i,
   // The n-word and f-bombs, but not "in words", "own words" or "own bomb truck". Nazi, also in
-  // Neonazi and Naziflagge, but not the Turkish nazik (polite), the Italian nazione (nation), or names
-  // such as Nazim, Nazir, Nazife or Ignazio. Nor "sniggering", "slurred" or "slurp".
+  // Neonazi, Naziflagge and Nazimüll, but not the Turkish nazik (polite), the Italian nazione
+  // (nation), or names such as Nazim, Nazih, Nazir, Nazife or Ignazio, where no letter from a to z,
+  // ä, ö or ü follows. Slurs, also slurring and slurred, which mostly mean using slurs, but not
+  // "sniggering" or "slurp".
   'Abusive Language/Hate Speech':
-    /abusive|bigot|derogatory|discriminat|hate ?spe(e|a)ch|(homo|trans)(-| )?phobi|nazi(?!k|on|[fhmor]e?\b)|racial|rac(si|is)m|racist|sexism|sexist|(küfür|kufur)|mal(é|e)diction|種族主義|fluchen|semitism|(?<!s)nigg(a|er)|fag|slur(?![pr])|swastika|schimpfw(o|ö)rt|rassis(t|m)|missbr(a|ä)uch|\b(f|n)(-| )?(word|bomb)/i,
+    /abusive|bigot|derogatory|discriminat|hate ?spe(e|a)ch|(homo|trans)(-| )?phobi|nazi(?!k|on|[fhmor]e?(?![a-zäöü]))|racial|rac(si|is)m|racist|sexism|sexist|(küfür|kufur)|mal(é|e)diction|種族主義|fluchen|semitism|(?<!s)nigg(a|er)|fag|slur(?!p)|swastika|schimpfw(o|ö)rt|rassis(t|m)|missbr(a|ä)uch|\b(f|n)(-| )?(word|bomb)/i,
 
   AFK: /afk|unassigned/i,
   'Breaking Seeding Rules': /seed/i,
   'Breaking Vehicle Priority Rules':
     /priority|(ara(ç|c) (kural|ihlali))|(vic|vehicle|asset) (name )?claim|claim rule|ignor(ing|ed) claim/i,
   // Main camping, and mines and mining, as in mining the enemy main, also landmines, mainmining,
-  // ATmines, Landminen, Panzerminen, Spawnminen and Tellerminen, but not "determined", "examined",
-  // "undermine" or "Minecraft".
-  Camping: /camping|\b(at|land|main|panzer|spawn|teller)?min(e(?!craft)|ing)/i,
+  // ATmines, Antitankmines, Landminen, Panzerminen, Panzerabwehrminen, Spawnminen, Tellerminen and
+  // verminen (to mine), but not "determined", "examined", "undermine", "Minecraft" or the French
+  // vermine (vermin).
+  Camping:
+    /camping|\b(antitank|at|land|main|panzer(abwehr)?|spawn|teller)?min(e(?!craft)|ing)|verminen/i,
   'Current or Recent VAC Ban': /vac ban/i,
   'Discussing politics': /politi(c|k|s)|siyaset/i,
   // Ramming, rammed, gerammt, rammt and rammen, also vicramming, but not "programming",
