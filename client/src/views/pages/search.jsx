@@ -350,7 +350,9 @@ export default function () {
                         {!data.steamUser.reputationRank && <>Unranked</>}
                       </h2>
                       <small>
-                        {/* The importer dates a rank only when it changes or the player's bans change. */}
+                        {/* The importer dates a rank only when it changes or the player is queued
+                        for a recalculation, e.g. as their bans changed. A change to only a ban's
+                        reason, raw reason or note queues nobody. */}
                         <strong>Last Changed: </strong>{' '}
                         {data.steamUser.lastRefreshedReputationRank ? (
                           <FormattedDate date={data.steamUser.lastRefreshedReputationRank} />
