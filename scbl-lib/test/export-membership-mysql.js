@@ -86,9 +86,11 @@ const PAUSED = 4;
 //
 // The rule goes by the expired flag alone, so Q's ban counts as active although its expiry has
 // passed, as a ban's does until the importer marks it expired, and so does R's, whose expiry is to
-// come. A rule that went by the expiry as well would take Q off lists 1, 2 and 9, and one that read
-// it the wrong way round would take R off them. So a change to how expiry is decided (EXPIRED in
-// export-membership.js) must change what Q and R are expected on.
+// come. C's ban, whose flag is NULL, also counts as active although its expiry has passed. A rule
+// that went by the expiry as well would take Q off lists 1, 2 and 9, one that read it the wrong way
+// round would take R off them, and one that went by the expiry only when the flag is NULL would
+// take C off them. So a change like these to how expiry is decided (EXPIRED in
+// export-membership.js) must change what C, Q and R are expected on.
 const BANS = {
   A: [
     [1, 1, false],
@@ -100,7 +102,7 @@ const BANS = {
     [1, 5, true],
     [1, 5, true]
   ],
-  C: [[1, 1, null]],
+  C: [[1, 1, null, 'passed']],
   D: [[2, 'null', false]],
   E: [[1, 'day 30 start', false]],
   F: [[1, 'day 31 end', false]],
