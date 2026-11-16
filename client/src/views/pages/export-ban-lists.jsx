@@ -16,6 +16,7 @@ import {
 } from 'reactstrap';
 
 import Layout from '../layout/layout.jsx';
+import { Loading, LoadError } from '../../components/LoadStatus/index.jsx';
 
 import { AdvancedModal, DeleteExportBanList } from '../../components';
 
@@ -46,7 +47,7 @@ function missingInvite(exportBanList) {
 }
 
 export default function () {
-  const { loading, error, data } = useQuery(GET_EXPORT_BAN_LISTS);
+  const { loading, error, data, refetch } = useQuery(GET_EXPORT_BAN_LISTS);
 
   return (
     <Layout>
@@ -78,23 +79,14 @@ export default function () {
                 {loading && (
                   <tr>
                     <td colSpan={5} className="text-center">
-                      <div className="text-center mt-2 mb-3">Loading...</div>
-                      <div className="btn-wrapper text-center">
-                        <i className="fas fa-circle-notch fa-spin fa-4x" />
-                      </div>
+                      <Loading />
                     </td>
                   </tr>
                 )}
                 {error && (
                   <tr>
                     <td colSpan={5} className="text-center">
-                      <div className="text-center mt-2 mb-2">Error!</div>
-                      <div className="btn-wrapper text-center">
-                        <i className="fas fa-exclamation-triangle fa-4x" />
-                      </div>
-                      <div className="text-center mt-2 mb-2">
-                        [ERR 1] Something went wrong. Sad times.
-                      </div>
+                      <LoadError error={error} retry={refetch} />
                     </td>
                   </tr>
                 )}
