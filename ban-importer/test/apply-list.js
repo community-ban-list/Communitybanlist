@@ -553,12 +553,13 @@ assert.deepStrictEqual(plain([...findAccountChanges(fetchedEos, storedEos)]), [
 assert.deepStrictEqual(plain([...findAccountChanges([newEos], storedEos)]), []);
 
 // How many bans a complete read found, for the rules for removing bans: all of them, but for a list
-// of fewer than 10 bans that is missing a ban not stored for an EOS ID, only those with a SteamID,
-// as before account changes, when the others were skipped. A ban that gained a SteamID has one, and
-// so has a remote ban, or one made from a stored ban, which has no SteamIDs, as remote lists give
-// only their SteamIDs' lines. A missing ban stored for a player saved before SteamIDs were checked,
-// or for an EOS ID in capitals, is not stored for an EOS ID as CBL stores them, so it counts as one
-// stored for a SteamID does.
+// with fewer than 10 bans not stored for EOS IDs that is missing one of them, only those with a
+// SteamID, as before account changes, when the list had only those bans and the others were
+// skipped. A ban that gained a SteamID has one, and so has a remote ban, or one made from a stored
+// ban, which has no SteamIDs, as remote lists give only their SteamIDs' lines. A ban stored for a
+// player saved before SteamIDs were checked, or for an EOS ID in capitals, is not stored for an EOS
+// ID as CBL stores them, so it counts as one stored for a SteamID does. Each case gives the players
+// of the list's stored bans, of which the read did not find the first few (missing).
 const eosOnly = [downgraded, eosToEos, eosKept, newEos];
 const fetchedToCount = [
   fetchedBan('s'),
@@ -566,18 +567,33 @@ const fetchedToCount = [
   ...eosOnly,
   { id: '1,r', steamUser: steamID(3) }
 ];
-const missingFor = (...players) => players.map((steamUser, i) => storedBan(`m${i}`, { steamUser }));
-assert.strictEqual(countFetched(fetchedToCount, missingFor(steamID(9)), 9), 3);
-assert.strictEqual(countFetched(fetchedToCount, missingFor(eos(9), steamID(9)), 9), 3);
-assert.strictEqual(countFetched(fetchedToCount, missingFor(`${steamID(9)}/`), 9), 3);
-assert.strictEqual(countFetched(fetchedToCount, missingFor(eos(0xabc).toUpperCase()), 9), 3);
-assert.strictEqual(countFetched(eosOnly, missingFor(steamID(9)), 9), 0);
-// A list that is missing only bans stored for EOS IDs, or none, counts every ban, and so does a list
-// of 10 or more.
-assert.strictEqual(countFetched(fetchedToCount, missingFor(eos(9), eos(10)), 9), 7);
-assert.strictEqual(countFetched(eosOnly, missingFor(eos(9)), 9), 4);
-assert.strictEqual(countFetched(fetchedToCount, [], 9), 7);
-assert.strictEqual(countFetched(eosOnly, missingFor(steamID(9)), FULL_REMOVAL_BANS), 4);
+const steamPlayers = (count) => Array.from({ length: count }, (_, i) => steamID(20 + i));
+const eosPlayers = (count) => Array.from({ length: count }, (_, i) => eos(20 + i));
+const count = (fetched, missing, players, held) => {
+  const stored = players.map((steamUser, i) => storedBan(`m${i}`, { steamUser }));
+  return countFetched(fetched, stored.slice(0, missing), stored, held);
+};
+assert.strictEqual(count(fetchedToCount, 1, steamPlayers(9)), 3);
+assert.strictEqual(count(fetchedToCount, 2, [eos(9), ...steamPlayers(8)]), 3);
+assert.strictEqual(count(fetchedToCount, 1, [`${steamID(9)}/`, ...steamPlayers(8)]), 3);
+assert.strictEqual(count(fetchedToCount, 1, [eos(0xabc).toUpperCase(), ...steamPlayers(8)]), 3);
+assert.strictEqual(count(eosOnly, 1, steamPlayers(9)), 0);
+assert.strictEqual(count(eosOnly, 9, steamPlayers(9)), 0);
+// The bans stored for EOS IDs do not count towards the 10, so a list with fewer than 10 others
+// counts the same however many it has, unless the read found none of its bans, of a list of at
+// least 10, which counts every ban, so it is held as it lost them all, with records.
+assert.strictEqual(count(eosOnly, 1, [...steamPlayers(9), ...eosPlayers(1)]), 0);
+assert.strictEqual(count(fetchedToCount, 8, [...steamPlayers(8), ...eosPlayers(20)]), 3);
+assert.strictEqual(count(eosOnly, 9, [...steamPlayers(4), ...eosPlayers(6)]), 0);
+assert.strictEqual(count(eosOnly, 10, [...steamPlayers(4), ...eosPlayers(6)]), 4);
+// Every ban counts for a list with 10 bans not stored for EOS IDs or more, for one that holds bans
+// for an admin, and for one that is missing only bans stored for EOS IDs, or none.
+assert.strictEqual(count(eosOnly, 1, steamPlayers(10)), 4);
+assert.strictEqual(count(eosOnly, 1, [eos(9).toUpperCase(), ...steamPlayers(9)]), 4);
+assert.strictEqual(count(eosOnly, 1, steamPlayers(9), true), 4);
+assert.strictEqual(count(fetchedToCount, 2, [eos(9), eos(10), ...steamPlayers(7)]), 7);
+assert.strictEqual(count(eosOnly, 1, [eos(9), ...steamPlayers(8)]), 4);
+assert.strictEqual(count(fetchedToCount, 0, steamPlayers(9)), 7);
 
 // Which of the bans missing from a complete read of a list are removed, kept for a later read, or
 // held for an admin. Each case is [the rules' inputs, what they decide].

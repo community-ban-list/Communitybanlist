@@ -8426,15 +8426,161 @@ for (const [id, moving] of [
   assert.deepStrictEqual(posted(345), []);
 }
 
+// The bans stored for EOS IDs do not count towards the 10, so such a list stays held while its
+// reads save new bans for EOS IDs, also once they make it a list of 10: here 8 bans stored for
+// SteamIDs lost them, and the list also returned 2 new bans for EOS IDs (351), or 9 and 1 (352). The
+// next read holds it again, with its line, and a read that returns one of them with its SteamID
+// again ends the hold, as it then returned a ban with a SteamID: the other 7, as few, move at once.
+{
+  reset();
+  env.IMPORTER_EOS_IMPORT = '351,352';
+  const lists = [
+    [351, 8, 2],
+    [352, 9, 1]
+  ];
+  const page = (id, lost, added) => [
+    ...Array.from({ length: lost }, (_, i) => eosOnlyBan(`m${i}`, eosAccount(id * 100 + i))),
+    ...Array.from({ length: added }, (_, i) => eosOnlyBan(`n${i}`, eosAccount(id * 100 + 50 + i)))
+  ];
+  for (const [id, lost, added] of lists)
+    battlemetricsList(id, pairs('m', 0, lost), [page(id, lost, added)]);
+  const of = (results, id) => results.find((result) => result.id === id);
+  const posted = (id) =>
+    logged(1, new RegExp(`^Imported ban list \\(ID: ${id}\\): `)).map(({ message }) => message);
+  for (const read of [1, 2]) {
+    logs.length = 0;
+    const results = await run();
+    for (const [id, lost, added] of lists) {
+      const held = of(results, id);
+      const created = read === 1 ? added : 0;
+      assert.deepStrictEqual(
+        [
+          held.hold,
+          held.held,
+          held.pending,
+          held.created,
+          held.accountChanges,
+          held.accountChangesWaiting,
+          pendingIDs(id),
+          storedIDs(id).length
+        ],
+        ['empty', lost, 0, created, 0, lost, [], 10],
+        `${id}, read ${read}`
+      );
+      assert.deepStrictEqual(
+        posted(id),
+        [
+          `Imported ban list (ID: ${id}): 10 bans fetched, ${created} new, 0 updated, ${lost} bans waiting to move to their new accounts. It returned no bans with a SteamID, so its ${read === 1 ? lost : 10} stored bans were kept on their accounts in case the list is broken. If the list really has no bans with a SteamID, set IMPORTER_ALLOW_MASS_REMOVAL=${id} for one run.`
+        ],
+        `${id}, read ${read}`
+      );
+      assert.strictEqual(bans.get(`${id},m${lost - 1}`).steamUser, steamID(lost - 1));
+    }
+  }
+
+  battlemetricsLists.set('bm-351', [[['m0', steamID(0)], ...page(351, 8, 2).slice(1)]]);
+  logs.length = 0;
+  const results = await run();
+  const ended = of(results, 351);
+  assert.deepStrictEqual([ended.hold, ended.accountChanges, ended.removed], [null, 7, 0]);
+  assert.deepStrictEqual(
+    ['351,m0', '351,m1', '351,m7', '351,n1'].map((id) => bans.get(id).steamUser),
+    [steamID(0), eosAccount(35101), eosAccount(35107), eosAccount(35151)]
+  );
+  assert.deepStrictEqual(posted(351), []);
+}
+
+// So is a list with fewer than 10 bans not stored for EOS IDs from the start, however many it has
+// stored for EOS IDs: here 4 bans stored for SteamIDs lost them, on a list that also has 8 bans for
+// EOS IDs, which the read returned as they are.
+{
+  reset();
+  env.IMPORTER_EOS_IMPORT = '353';
+  const eosBans = Array.from({ length: 8 }, (_, i) => [`e${i}`, eosAccount(35300 + i)]);
+  battlemetricsList(
+    353,
+    [...pairs('m', 0, 4), ...eosBans],
+    [
+      [
+        ...Array.from({ length: 4 }, (_, i) => eosOnlyBan(`m${i}`, eosAccount(35350 + i))),
+        ...eosBans.map(([uid, id]) => eosOnlyBan(uid, id))
+      ]
+    ]
+  );
+  const [read] = await run();
+  assert.deepStrictEqual(
+    [read.hold, read.held, read.accountChanges, read.accountChangesWaiting, pendingIDs(353)],
+    ['empty', 4, 0, 4, []]
+  );
+  assert.deepStrictEqual(
+    logged(1, /^Imported ban list \(ID: 353\): /).map(({ message }) => message),
+    [
+      'Imported ban list (ID: 353): 12 bans fetched, 0 new, 0 updated, 4 bans waiting to move to their new accounts. It returned no bans with a SteamID, so its 12 stored bans were kept on their accounts in case the list is broken. If the list really has no bans with a SteamID, set IMPORTER_ALLOW_MASS_REMOVAL=353 for one run.'
+    ]
+  );
+  assert.strictEqual(bans.get('353,m0').steamUser, steamID(0));
+}
+
+// A list of at least 10 bans whose read found none of them is held as it lost them all, with
+// records, as it found bans, however few of them are stored for SteamIDs: here a list of 3 bans
+// stored for SteamIDs and 10 for EOS IDs whose read returned only a new ban for an EOS ID. A list
+// that holds bans for an admin counts every ban the read returned, so its hold decides: the next
+// read, in which the 10 come back and the 3 lost their SteamIDs, ends the hold, as its bans came
+// back, and the 3, as few, move at once, which its line, posted, says.
+{
+  reset();
+  env.IMPORTER_EOS_IMPORT = '354';
+  const eosBans = Array.from({ length: 10 }, (_, i) => [`e${i}`, eosAccount(35400 + i)]);
+  const added = eosOnlyBan('n0', eosAccount(35450));
+  battlemetricsList(354, [...pairs('s', 0, 3), ...eosBans], [[added]]);
+  let [read] = await run();
+  assert.deepStrictEqual(
+    [read.hold, read.held, heldIDs(354).length, holdReason(354)],
+    ['full', 13, 13, 'full']
+  );
+  battlemetricsLists.set('bm-354', [
+    [
+      ...eosBans.map(([uid, id]) => eosOnlyBan(uid, id)),
+      ...Array.from({ length: 3 }, (_, i) => eosOnlyBan(`s${i}`, eosAccount(35460 + i))),
+      added
+    ]
+  ]);
+  logs.length = 0;
+  [read] = await run();
+  assert.deepStrictEqual(
+    [
+      read.hold,
+      read.holdEnded?.hold,
+      read.cameBack,
+      read.accountChanges,
+      pendingIDs(354),
+      holdReason(354)
+    ],
+    [null, 'full', 10, 3, [], undefined]
+  );
+  assert.deepStrictEqual(
+    ['354,s0', '354,s2', '354,e0'].map((id) => bans.get(id).steamUser),
+    [eosAccount(35460), eosAccount(35462), eosAccount(35400)]
+  );
+  const [line] = logged(1, /^Imported ban list \(ID: 354\): /);
+  assert.ok(
+    line.message.endsWith(
+      'as 10 of them came back. The other 3, whose account changed, moved to their new accounts.'
+    ),
+    line.message
+  );
+}
+
 // A ban that gained a SteamID has one, so it counts as found: a small list whose bans gain SteamIDs
 // makes those account changes at once, as few, and is neither held as one that gave no bans nor
 // posted about. Here every ban of a list of 5 bans stored for EOS IDs gained a SteamID, on a list
 // that the setting does not name (346), and on a list that it names, 3 bans stored for SteamIDs
-// lost them in the read in which the other 2, stored for EOS IDs, gained one (347). A small list
-// that is missing only bans stored for EOS IDs counts every ban it returned, so it loses and changes
-// bans as a larger list does, also when every ban it returned changed account: here 2 of a list of
-// 5 bans stored for EOS IDs are gone and 1 changed to another EOS ID (348), and every ban of another
-// changed to another EOS ID (349).
+// lost them in the read in which the other 2, stored for EOS IDs, gained one (347). A list that is
+// missing only bans stored for EOS IDs counts every ban it returned, so one of fewer than 10 bans is
+// held only when its read returned no bans at all, and otherwise loses, and changes, all the bans
+// it is missing at once, also when every ban it returned changed account, which a list of 10 would
+// be held for: here 2 of a list of 5 bans stored for EOS IDs are gone and 1 changed to another EOS
+// ID (348), and every ban of another changed to another EOS ID (349).
 {
   reset();
   env.IMPORTER_EOS_IMPORT = '347,348,349';
@@ -9146,5 +9292,5 @@ assert.strictEqual(
 assert.strictEqual(verboseLevelOneLines, 0, 'Lines for the log channel are logged as important');
 
 console.log(
-  "Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed, of lists that lost all their bans, until one of the bans they began with comes back, those they saved since held with them, whatever the clock says, and as earlier importers left them, or a large part of them at once, until fewer than a large part of the bans the list had then are still missing, also as the list grows, with those that come back no longer held, and once it loses all of its bans, or another large part of them, measured against fewer bans as the list shrinks, holds of lists that lost all their bans that take in a large loss, holds ended, begun or taken in whole, or not at all, as a run is cut short, holds that keep bans written before the bans a read saves, with the records of the bans it found again dropped, also by a read that is not complete, so a cut or stop then keeps the hold it wrote, also without the run lock, as the drop fails or as the list is removed, and those that only end after them, and in the run record only once written, with the bans a hold's end lets wait counted from then, less those removed, confirmations said to end only the holds they ended, also as a large loss would begin another, large removals said in every line, the holds replaced sources ended, reasons that outlived their holds, also found by a poll's drift, without queueing their players, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, bans for EOS IDs, with the floor raised first, account changes timed by the rules for removing bans, waiting, held, released, applied, healed and never made by head polls, small lists held when they returned no bans with a SteamID, second attempts, retries, sync state, the access check, lost access, also with no hold written or record dropped before the bans are saved, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, also as the run stops, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming reads, periodic full reads at each list's slot, by the lists' pages and the cycle, cycles whose full reads spread out after the first, held counts of polled lists, the switches, stops, also during a poll, and the list a stop came in, each list's seconds without the access check, the page a failed or stopped read was on, but no count of the old source's for a changed one, how a list's first attempt ended, the list under way and the access check while it is read, runs an interval apart, the loop's cycle, the oldest periodic reads first, and the run summary."
+  "Ban import checks passed: complete lists only, writes of what changed only, removals after a second read, holds over several runs until confirmed, of lists that lost all their bans, until one of the bans they began with comes back, those they saved since held with them, whatever the clock says, and as earlier importers left them, or a large part of them at once, until fewer than a large part of the bans the list had then are still missing, also as the list grows, with those that come back no longer held, and once it loses all of its bans, or another large part of them, measured against fewer bans as the list shrinks, holds of lists that lost all their bans that take in a large loss, holds ended, begun or taken in whole, or not at all, as a run is cut short, holds that keep bans written before the bans a read saves, with the records of the bans it found again dropped, also by a read that is not complete, so a cut or stop then keeps the hold it wrote, also without the run lock, as the drop fails or as the list is removed, and those that only end after them, and in the run record only once written, with the bans a hold's end lets wait counted from then, less those removed, confirmations said to end only the holds they ended, also as a large loss would begin another, large removals said in every line, the holds replaced sources ended, reasons that outlived their holds, also found by a poll's drift, without queueing their players, empty lists, the count check, counts that change too much, lists left out of it, repeated incomplete reads, replaced sources, remote files, dry runs and invalid ones, SteamID moves, bans for EOS IDs, with the floor raised first, account changes timed by the rules for removing bans, waiting, held, released, applied, healed and never made by head polls, small lists held when they returned no bans with a SteamID, whatever bans for EOS IDs they have, second attempts, retries, sync state, the access check, lost access, also with no hold written or record dropped before the bans are saved, self-imports, lists removed before their missing bans are recorded, head polls that never remove, but for the bans they fetched of a source changed while they saved them, also as the run stops, drift, overflow, lists replaced under an overflow held, losses measured against the bans before the run, bursts followed, confirming reads, periodic full reads at each list's slot, by the lists' pages and the cycle, cycles whose full reads spread out after the first, held counts of polled lists, the switches, stops, also during a poll, and the list a stop came in, each list's seconds without the access check, the page a failed or stopped read was on, but no count of the old source's for a changed one, how a list's first attempt ended, the list under way and the access check while it is read, runs an interval apart, the loop's cycle, the oldest periodic reads first, and the run summary."
 );
