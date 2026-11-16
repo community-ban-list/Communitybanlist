@@ -7,8 +7,13 @@ import * as utils from '../utils/index.js';
 // shows the labels in place of the reason, so a keyword found inside an unrelated word shows an
 // accusation the reason never made. Each reason below is given with the labels it gets.
 
-// Reasons whose keywords are found: plurals and other forms, compounds, and the German, Turkish,
-// French, Chinese and Ukrainian keywords, which are found anywhere in a word, as before.
+// The n-word is a keyword, and the rows that check it is still found are built from its stem, as the
+// classifier spells it, so that the slur itself is not written out here.
+const nWordStem = 'nigg';
+
+// Reasons whose keywords are found: plurals and other forms, compounds, and the keywords in German,
+// Turkish, French, Chinese and Ukrainian, of which those with letters other than a to z are found
+// anywhere in a word, as before.
 const found = [
   // Cheating.
   ['Cheating', 'Cheating'],
@@ -105,6 +110,9 @@ const found = [
   ['Repeated n-words in chat', 'Abusive Language/Hate Speech'],
   ['Saying n words', 'Abusive Language/Hate Speech'],
   ['n-wording in local', 'Abusive Language/Hate Speech'],
+  // The n-word itself, also written together with a word before it, as in a player's name.
+  [`Said ${nWordStem}er in chat`, 'Abusive Language/Hate Speech'],
+  [`Name was Big${nWordStem}a`, 'Abusive Language/Hate Speech'],
   ['f-bombs', 'Abusive Language/Hate Speech'],
   ['Dropping f bombs on admins', 'Abusive Language/Hate Speech'],
   ['Racial slurs in chat', 'Abusive Language/Hate Speech'],
@@ -209,8 +217,9 @@ const found = [
   ['Breaking server rules', 'Unknown']
 ];
 
-// Everyday words and names that hold a keyword, which no longer get its label. The reason keeps the
-// labels its other keywords find.
+// Everyday words and names that hold a keyword, which do not get its label. All of them got it
+// before but "Scrammed when admins arrived", which is here because "rammed" is now found. The reason
+// keeps the labels its other keywords find.
 const notFound = [
   // Not cheating: whack, shack, the name Dietrich, Strich (line) and betrunken (drunk).
   ['Whacked teammates with a shovel', 'Unknown'],
@@ -229,10 +238,11 @@ const notFound = [
   ['Patrolling the enemy main', 'Unknown'],
   ['strolling into the main', 'Unknown'],
 
-  // Not griefing: greifen (grab), greift, angreifen (attack) and Angreifer (attacker).
+  // Not griefing: greifen (grab), greift, angreifen (attack, here with words) and Angreifer
+  // (attacker).
   ['Nach der Waffe greifen', 'Unknown'],
-  ['Greift eigene Leute an', 'Unknown'],
-  ['Hat eigene Leute angreifen wollen', 'Unknown'],
+  ['Greift Admins im Chat an', 'Unknown'],
+  ['Admins verbal angreifen', 'Unknown'],
   ['Angreifer im Spawn', 'Unknown'],
 
   // Not toxic: crude, intruder and intoxicated.
@@ -248,7 +258,7 @@ const notFound = [
   ['Teamkilled squad with own bomb truck', 'Teamkilling'],
   ['Ran bomb car into friendlies', 'Unknown'],
   // Nor sniggering or slurping, nor the Turkish nazik (polite), the Italian nazionale (national), or
-  // names that hold nazi.
+  // names that hold nazi, also with a digit or _ after them.
   ['Sniggering in chat', 'Unknown'],
   ['Slurping noises on mic', 'Unknown'],
   ['Adminlere karşı nazik değil', 'Unknown'],
@@ -258,6 +268,8 @@ const notFound = [
   ['Gebannt von Nazir', 'Unknown'],
   ['Banned by Nazife', 'Unknown'],
   ['Banned by Ignazio', 'Unknown'],
+  ['Banned by Nazim1998', 'Unknown'],
+  ['Banned by Nazim_TR', 'Unknown'],
 
   // Not camping: determined, examined, undermining, Minecraft, Termine (appointments) and the French
   // vermine (vermin).
@@ -314,5 +326,5 @@ assert.strictEqual(classifyBanReason(undefined), 'Unknown');
 assert.strictEqual(utils.classifyBanReason, classifyBanReason);
 
 console.log(
-  `Ban reason checks passed: ${found.length} reasons keep their labels, and ${notFound.length} no longer get a label from a keyword inside another word.`
+  `Ban reason checks passed: ${found.length} reasons keep their labels, and ${notFound.length} get no label from a keyword inside another word.`
 );
