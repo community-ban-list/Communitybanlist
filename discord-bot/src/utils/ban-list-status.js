@@ -98,19 +98,18 @@ async function readRemovals(banListIDs) {
 }
 
 // Whether the ban importer has yet to read the ban list since its type or source was changed, or to
-// finish replacing its old bans with those of its new source, as it tells by the list's
-// BanListSyncs row:
+// finish switching it to its new source, as it tells by the list's BanListSyncs row:
 // - 'unread' when it has not read the list since, so nothing in the row is of its source now: the
 //   row is of another source, by its sourceKey, or of the list's source but from before the change,
 //   as when the source was changed back before the importer read the one it was changed to. The
-//   row then says the old bans are still to be replaced (replacePending), but its latest attempt is
+//   row then says the switch is still under way (replacePending), but its latest attempt is
 //   from before the list's type or source was last changed, by the list's updatedAt, which only
 //   /banlist update moves, and only with a new type or source, as a rename leaves it as it was;
 // - 'replacing' when the row is of an attempt at the list's source since then, so its state and
-//   counts are of that source, but the importer has not finished replacing the old bans
+//   counts are of that source, but the importer has not finished switching it to that source
 //   (replacePending): its attempts failed, did not read all of the list, or could not remove the
-//   bans it no longer has, e.g. as BattleMetrics does not list it for CBL, or wait for a read to
-//   confirm them gone;
+//   bans the list no longer has, e.g. as BattleMetrics does not list it for CBL, or those bans wait
+//   for a read to confirm them gone;
 // - null when it has finished.
 function sourceChange(banList, row) {
   if (row.sourceKey !== sourceKey(banList)) return 'unread';

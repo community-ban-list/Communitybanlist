@@ -687,7 +687,7 @@ await run('resume', { banlist: '5' });
 assert.deepStrictEqual(prompts, [
   {
     content:
-      "Resume **Org** / **Main**? The ban importer reads it in full on its next cycle, and its 3 bans on 2 players count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes at least 10 more minutes when at least 10 of them, and 5% of the list, are missing, and longer when it seems to have lost all of them, or a large part of them at once. /banlist status shows when. Export bans follow from the cycle after it counts again, and players' reputation points within 1 cycle of it.",
+      "Resume **Org** / **Main**? The ban importer reads it in full on its next cycle, and its 3 bans on 2 players count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes a later read, at least 10 minutes after the first read that missed them, when at least 10 of them, and 5% of the list, are missing, and longer when it seems to have lost all of them, or a large part of them at once. /banlist status shows when. Export bans follow from the cycle after it counts again, and players' reputation points within 1 cycle of it.",
     confirmLabel: 'Resume ban list'
   }
 ]);
@@ -893,7 +893,7 @@ assert.strictEqual(changed.removals.has(5), false);
 syncRows = [{ ...changedSync, replacePending: 0 }];
 assert.strictEqual(format.describeImport((await readStatus([record])).syncs.get(5)), UNREAD);
 
-// So does a row of the list's source that says the old bans are still to be replaced, but whose
+// So does a row of the list's source that says the switch is still under way, but whose
 // latest attempt is from before the list's type or source was last changed, as when the source was
 // changed back before the importer read the one it was changed to: its state, counts and error are
 // from before the change, and the bans it held were deleted with it.
@@ -912,9 +912,9 @@ for (const fields of oldStates) {
 }
 
 // Once the importer has tried the list since, its row is of the list's source, so the status gives
-// all of it, saying first that the importer has not finished replacing the old bans, while the row
-// says so. Here BattleMetrics does not list the new source for CBL, so the importer reads it in full
-// and saves its bans on every run, but removes none of its bans, and has not replaced the old ones.
+// all of it, saying first that the importer has not finished switching it to the new source, while
+// the row says so. Here BattleMetrics does not list the new source for CBL, so the importer reads it
+// in full and saves its bans on every run, but removes none of its bans, so the switch is not done.
 // The records of the bans the change deleted are left out, as the importer leaves them out.
 const ATTEMPTED_AT = new Date('2026-10-29T11:40:00.000Z');
 const replacingSync = {
@@ -969,8 +969,8 @@ assert.deepStrictEqual(replies[1].lines, [
 syncRows[0].replacePending = 0;
 assert.strictEqual(format.summariseImport((await readStatus([record])).syncs.get(5)), heldLine);
 
-// A rename leaves the list's updatedAt as it was, so a list whose old bans are still being replaced
-// keeps its status, rather than being taken for one the importer has not read since the change. A
+// A rename leaves the list's updatedAt as it was, so a list the importer is still switching to its
+// new source keeps its status, rather than being taken for one the importer has not read since the change. A
 // new type or source moves it, so once the source is changed and changed back, the same row, of
 // the source the list is back to, is taken for one from before the change.
 reset(0, 0);
@@ -983,15 +983,15 @@ await run('update', { banlist: '5', source: 'old-list' });
 await run('status', { banlist: '5' });
 assert.strictEqual(importOf(replies.at(-1)), UNREAD);
 
-// Resuming a list the importer has not read since its type or source was changed, or whose old bans
-// it has not finished replacing, asks only that, as the importer replaces them with the new
+// Resuming a list the importer has not read since its type or source was changed, or has not
+// finished switching to its new source, asks only that, as the importer replaces them with the new
 // source's without holding them for an admin. Here the list has no bans, as /banlist update deleted
 // them with the change. One that still has bans, as its source was changed by hand, which keeps its
 // old ones, or as the importer has saved some of the new source's, catches up only once the
 // importer's reads have confirmed those the new source does not have, as any list does, so the
 // question says that too.
 const CONFIRMING =
-  ': once its reads have confirmed which of its 12 bans on 5 players the new source does not have, which takes at least 10 more minutes when at least 10 of them, and 5% of the list, are missing';
+  ': once its reads have confirmed which of its 12 bans on 5 players the new source does not have, which takes a later read, at least 10 minutes after the first read that missed them, when at least 10 of them, and 5% of the list, are missing';
 for (const [sync, changedLine] of [
   [changedSync, UNREAD],
   [replacingSync, REPLACING]
@@ -1011,6 +1011,22 @@ for (const [sync, changedLine] of [
     assert.deepStrictEqual(calls.at(-1), ['resume', 5]);
   }
 }
+
+// The importer measures a confirming read from the first read that missed a ban, so bans that
+// already waited before the list was suspended are confirmed by the first read after the resume,
+// if that is 10 minutes after the read that missed them. The question measures the wait from that
+// read too, not from the resume. Here the source was changed by hand, and the importer's first read
+// of the new one left the 30 old bans waiting.
+reset(40, 40);
+pausedRows = [paused()];
+syncRows = [{ ...replacingSync }];
+removalRows = banIDs('old', 30).map((banId) => removal(banId));
+storedBans = [...banIDs('old', 30), ...banIDs('new', 10)];
+await run('resume', { banlist: '5' });
+assert.strictEqual(
+  prompts[0].content,
+  `Resume **Org** / **Main**? ${REPLACING} The ban importer reads it in full on its next cycle, and the list counts again once it has caught up with it: once its reads have confirmed which of its 40 bans on 40 players the new source does not have, which takes a later read, at least 10 minutes after the first read that missed them, when at least 10 of them, and 5% of the list, are missing. /banlist status shows when. Export bans follow from the cycle after it counts again, and players' reputation points within 1 cycle of it.`
+);
 
 // Names and reasons are as admins typed them, so the log keeps each on one line and shows it as
 // written, as the website's lines show names (logText): a line break cannot start what looks like
@@ -1040,5 +1056,5 @@ assert.deepStrictEqual(audits, [
 assert.strictEqual(replies.at(-1).content, 'Updated **Org_\u202eA** / **New\n_name_**.');
 
 console.log(
-  "Ban list command checks passed: renames keep bans, source changes delete them once confirmed and only while no import runs, and mark the importer's row, also when changed back, removal, suspending and resuming lists, which then queue no players, and their status, which leaves out a changed source's old state until the importer has read the list since, and then gives the new one's while its old bans are being replaced, also once the list is renamed."
+  "Ban list command checks passed: renames keep bans, source changes delete them once confirmed and only while no import runs, and mark the importer's row, also when changed back, removal, suspending and resuming lists, which then queue no players, and their status, which leaves out a changed source's old state until the importer has read the list since, and then gives the new one's while the switch is not finished, also once the list is renamed, and when a resumed list's bans wait for a confirming read."
 );

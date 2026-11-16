@@ -128,8 +128,8 @@ const IMPORT_STATES = {
 };
 
 // What a list's status says when its type or source was changed and the ban importer has not read
-// it since, or not finished replacing its old bans with those of its new source (see readStatus),
-// on its own line and in short, for a list of lists.
+// it since, or not finished switching it to its new source (see readStatus), on its own line and
+// in short, for a list of lists.
 const SOURCE_CHANGES = {
   unread: {
     line: 'Its type or source was changed, and the ban importer has not read it since.',
@@ -147,8 +147,8 @@ const count = (value) =>
   value === null || value === undefined ? 'unknown' : plural(Number(value), 'ban');
 
 // What a list's status says first, from its BanListSyncs row (sync), when its type or source was
-// changed and the ban importer has not read it since, or not finished replacing its old bans, or
-// null.
+// changed and the ban importer has not read it since, or not finished switching it to its new
+// source, or null.
 export function describeSourceChange(sync) {
   return SOURCE_CHANGES[sync?.sourceChange]?.line ?? null;
 }
