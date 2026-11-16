@@ -97,20 +97,17 @@ function result(fields) {
   };
 }
 
-// The props of the buttons and the error boxes on the last page rendered, as a page can only be
-// rendered, not used.
+// The props of the buttons on the last page rendered, as a page can only be rendered, not used.
 const buttons = [];
-const errorModals = [];
 const capture = (list, Component) => (props) => {
   list.push(props);
-  return Component ? h(Component, props) : null;
+  return h(Component, props);
 };
 const buttonCalled = (text) => {
   const found = buttons.filter((props) => [props.children].flat().includes(text));
   assert.strictEqual(found.length, 1, `one ${text} button`);
   return found[0];
 };
-let mutationResult;
 
 const Plain = (props) => jsxRuntime.jsx(jsxRuntime.Fragment, { children: props.children });
 const stand = (name) => () => jsxRuntime.jsx('span', { children: `[${name}]` });
@@ -121,7 +118,7 @@ const packages = {
   reactstrap: { ...reactstrap, Button: capture(buttons, reactstrap.Button) },
   classnames: { default: classnames },
   '@apollo/client': apolloClient,
-  '@apollo/client/react': { useQuery, useMutation: () => [() => {}, mutationResult] },
+  '@apollo/client/react': { useQuery },
   'scbl-lib/config': config,
   'scbl-lib/player-ids': playerIDs,
   // The "I'm banned" page's steps all render, one after another.
@@ -135,9 +132,7 @@ const components = {
   DeleteExportBanList: stand('DeleteExportBanList'),
   DeleteExportBanListConfig: stand('DeleteExportBanListConfig'),
   DisplayRiskRating: stand('DisplayRiskRating'),
-  ErrorModal: capture(errorModals),
   FormattedDate: stand('FormattedDate'),
-  LoadingModal: stand('LoadingModal'),
   RecentlyViewedSteamUsers: stand('RecentlyViewedSteamUsers'),
   SteamUser: stand('SteamUser')
 };
@@ -208,11 +203,10 @@ const ExportBanListConfigs = await component('components/ExportBanListConfigs/in
 const QueryExportBanList = await component(
   'components/CreateExportBanList/query-export-ban-list.jsx'
 );
-const DeleteExportBanList = await component('components/DeleteExportBanList/index.jsx');
 const { Loading, LoadError, LoadMore } = await load('components/LoadStatus/index.jsx');
 const ErrorBoundary = await component('components/ErrorBoundary/index.jsx');
 const PageError = await component('views/pages/page-error.jsx');
-const { CHANGE_NOT_REACHED, LOAD_NOT_REACHED } = await load('utils/graphql-errors.js');
+const { LOAD_NOT_REACHED } = await load('utils/graphql-errors.js');
 
 // The pages' routes that name their parameters, as the client's routes name them, since the pages
 // read the ID by its name.
@@ -225,7 +219,6 @@ for (const path of Object.values(ROUTES)) assert.ok(routesFile.includes(`path: '
 function render(element, { address = '/', path = '*', data, ...fields } = {}, startStates = []) {
   answer = result({ data, ...fields });
   buttons.length = 0;
-  errorModals.length = 0;
   refetches.length = 0;
   fetches.length = 0;
   stateUpdates.length = 0;
@@ -607,23 +600,6 @@ for (const [name, Page, data, loaded] of [
   const showConfigs = (fields) => render(h(ExportBanListConfigs, { exportBanListID: 1 }), fields);
   await checkStates('The points table', showConfigs, { loaded: 'Org&#x27;s' });
   assert.ok(showConfigs({ data: { loggedInSteamUser: { exportBanList } } }).includes('Org&#x27;s'));
-}
-
-// Deleting an export ban list: a delete that got no answer says so in its error box, as the other
-// forms' error boxes do, one the web server refused gives its reason, and one that worked shows no
-// error box.
-for (const [error, messages] of [
-  [noAnswer, [CHANGE_NOT_REACHED]],
-  [databaseUnavailable, [DATABASE_UNAVAILABLE]],
-  [undefined, null]
-]) {
-  mutationResult = { loading: false, error };
-  render(h(DeleteExportBanList, { exportBanListID: 1 }));
-  assert.deepStrictEqual(
-    errorModals.length > 0 ? errorModals[0].errors.map(({ message }) => message) : null,
-    messages
-  );
-  assert.ok(errorModals.length <= 1);
 }
 
 // A page that fails to render shows a message within the site's layout, with a way to reload.

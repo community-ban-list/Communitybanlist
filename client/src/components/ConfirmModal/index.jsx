@@ -38,9 +38,10 @@ export default function ConfirmModal(props) {
   };
   useEffect(() => () => clearTimeout(readyTimer.current), []);
 
-  // The web server's messages, or the error's own for a request that got no answer.
-  const messages = error ? graphQLErrors(error).map(({ message }) => message) : [];
-  if (error && messages.length === 0) messages.push(error.message);
+  // The errors to show, as the site's forms show them (utils/graphql-errors.js): the web server's
+  // messages, or, for a request that got no answer, that the server could not be reached and the
+  // action may still have been done.
+  const messages = graphQLErrors(error).map(({ message }) => message);
 
   // Once a failed action has finished, focus goes to Cancel, so pressing Enter again does not try
   // again by accident.

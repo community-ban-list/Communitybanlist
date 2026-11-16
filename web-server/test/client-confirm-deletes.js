@@ -3,7 +3,6 @@ import { readFile, stat } from 'fs/promises';
 import vm from 'vm';
 
 import * as apolloClient from '@apollo/client';
-import * as apolloClientErrors from '@apollo/client/errors';
 import * as React from 'react';
 import * as jsxRuntime from 'react/jsx-runtime';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -15,16 +14,16 @@ import { transformWithOxc } from 'vite';
 // ban list: Delete only opens a dialog that names what is deleted and says what that does, Cancel
 // and Escape send nothing, and only the dialog's own button, which names the action, deletes, once
 // the dialog has been open for a moment. While the deletion runs its buttons do nothing, a failed
-// one shows the web server's message, and the page says when one has worked. The client's files are
-// compiled the way its build compiles them, loaded with the client's own packages, and rendered to
-// HTML, with stand-ins for the GraphQL requests. A dialog is rendered in place, as reactstrap only
+// one says why, as the site's forms do, and the page says when one has worked. The client's files
+// are compiled the way its build compiles them, loaded with the client's own packages, and rendered
+// to HTML, with stand-ins for the GraphQL requests. A dialog is rendered in place, as reactstrap only
 // shows one in a browser; its focus handling is reactstrap's and the browser's, and the focus the
 // pages move is only checked in a browser.
 
 const CLIENT = new URL('../../client/src/', import.meta.url);
 
 const { createElement: h } = React;
-const { CombinedGraphQLErrors } = apolloClientErrors;
+const { ApolloClient, CombinedGraphQLErrors, HttpLink, InMemoryCache, gql } = apolloClient;
 
 // The mutation's stand-in: the state every mutation has when rendered, the variables of each one
 // sent, the options it was set up with, and how often its state was reset.
@@ -112,7 +111,6 @@ const packages = {
   'react-router': reactRouter,
   reactstrap: { ...reactstrap, Modal, Button },
   '@apollo/client': apolloClient,
-  '@apollo/client/errors': apolloClientErrors,
   '@apollo/client/react': { useMutation, useQuery }
 };
 
@@ -167,11 +165,12 @@ async function loadClient(path) {
   });
   return module;
 }
-async function component(path) {
+async function load(path) {
   const module = await loadClient(path);
   if (module.status !== 'evaluated') await module.evaluate();
-  return module.namespace.default;
+  return module.namespace;
 }
+const component = async (path) => (await load(path)).default;
 
 const DeleteExportBanList = await component('components/DeleteExportBanList/index.jsx');
 const DeleteExportBanListConfig = await component('components/DeleteExportBanListConfig/index.jsx');
@@ -255,6 +254,7 @@ const FOR_GOOD = 'This cannot be undone.';
     new RegExp(`<span id="${escape(titled)}">Delete &quot;Main list&quot;\\?</span>`)
   );
   assert.ok(plain(html).includes(`${SERVERS} ${BATTLEMETRICS_TOO} ${FOR_GOOD}`), plain(html));
+  assert.doesNotMatch(html, /role="alert"/, 'no error before it is tried');
 
   const cancel = button('Cancel');
   const confirm = button('Delete export ban list');
@@ -357,8 +357,45 @@ render(h(DeleteExportBanList, { exportBanList: BATTLEMETRICS }), {
 });
 checkBusy();
 
-// A failed deletion shows the web server's message in the dialog, which stays open to try again,
-// or a request's own error when the web server did not answer.
+// The errors Apollo Client gives a delete button for a request that got no answer: one whose
+// connection dropped, for which the browser gives its own message, and one answered by a proxy's
+// error page, as while the web server restarts. The request goes through Apollo Client's own HTTP
+// link, with a stand-in for the browser's fetch, as only errors from there count as no answer.
+async function errorFor(answer) {
+  const client = new ApolloClient({
+    link: new HttpLink({ uri: '/graphql', fetch: async () => answer() }),
+    cache: new InMemoryCache()
+  });
+  const mutation = gql`
+    mutation DeleteExportBanList($id: Int!) {
+      deleteExportBanList(id: $id) {
+        id
+      }
+    }
+  `;
+  const error = await client.mutate({ mutation, variables: { id: 7 } }).then(
+    () => assert.fail('the deletion should fail'),
+    (error) => error
+  );
+  client.stop();
+  return error;
+}
+const connectionDropped = await errorFor(() => {
+  throw new TypeError('Failed to fetch');
+});
+const badGateway = await errorFor(
+  () =>
+    new Response('<html><body>502 Bad Gateway</body></html>', {
+      status: 502,
+      headers: { 'content-type': 'text/html' }
+    })
+);
+const { CHANGE_NOT_REACHED } = await load('utils/graphql-errors.js');
+
+// A failed deletion says why in the dialog, which stays open to try again, as the site's forms say
+// it: the web server's message when it refused, or, when it did not answer, that it could not be
+// reached and the list may have been deleted all the same, rather than the browser's own message.
+// Any other error shows its own message.
 for (const [error, message] of [
   [
     new CombinedGraphQLErrors({
@@ -367,13 +404,19 @@ for (const [error, message] of [
     }),
     'This export ban list is already being deleted.'
   ],
-  [new Error('Failed to fetch'), 'Failed to fetch']
+  [connectionDropped, CHANGE_NOT_REACHED],
+  [badGateway, CHANGE_NOT_REACHED],
+  [new Error('Something else failed'), 'Something else failed']
 ]) {
   const html = render(h(DeleteExportBanList, { exportBanList: BATTLEMETRICS }), {
     state: { ...IDLE, error },
     start: READY
   });
-  assert.match(html, new RegExp(`role="alert"><p class="mb-0">${escape(message)}</p>`));
+  assert.match(
+    html,
+    new RegExp(`role="alert"><p class="mb-0">${escape(message)}</p></div>`),
+    plain(html)
+  );
   assert.strictEqual(button('Cancel').disabled, false);
   assert.strictEqual(button('Delete export ban list')['aria-disabled'], false);
   assert.strictEqual(dialogs[0].returnFocusAfterClose, true);
@@ -470,6 +513,19 @@ const BAN_LIST_POINTS = config(10, 'Squad Bans');
   });
   assert.match(html, /role="alert"><p class="mb-0">Export ban list config does not exist!<\/p>/);
   assert.strictEqual(dialogs[0].returnFocusAfterClose, true);
+
+  // One that got no answer says the server could not be reached, as they may have been deleted all
+  // the same.
+  html = render(h(DeleteExportBanListConfig, props), {
+    state: { ...IDLE, error: connectionDropped },
+    start: READY
+  });
+  assert.match(
+    html,
+    new RegExp(`role="alert"><p class="mb-0">${escape(CHANGE_NOT_REACHED)}</p></div>`),
+    plain(html)
+  );
+  assert.strictEqual(button('Delete custom points')['aria-disabled'], false);
 
   render(h(DeleteExportBanListConfig, props), {
     state: { ...IDLE, data: { deleteExportBanListConfig: { id: 10 } } },
