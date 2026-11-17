@@ -19,6 +19,14 @@
       0 3px 6px rgba(0, 0, 0, 0.08);
   }
 
+  // A button marked disabled only by its class keeps keyboard focus, as the delete dialogs' confirm
+  // button does just after the dialog opens and while it deletes, so it keeps the focus ring that
+  // Bootstrap's style for disabled buttons takes away. A button with the disabled attribute cannot
+  // have focus.
+  &.disabled:focus-visible {
+    box-shadow: $btn-focus-box-shadow;
+  }
+
   // Space out buttons that sit next to each other.
   &:not(:last-child) {
     margin-right: 0.5rem;

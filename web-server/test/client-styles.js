@@ -201,6 +201,12 @@ function contrast(foreground, background) {
 const rings = (shadow) =>
   split(shadow, ',').flatMap((part) => split(part, ' ').filter((word) => colour(word)));
 
+// A colour drawn at an opacity, as everything on a faded button is, its ring among them.
+const faded = (text, opacity) => {
+  const [red, green, blue, alpha] = colour(text);
+  return `rgba(${red}, ${green}, ${blue}, ${alpha * opacity})`;
+};
+
 // The backgrounds things are shown on.
 const backgrounds = {
   light: {
@@ -473,15 +479,18 @@ const focusBackgrounds = [
   ['dark mode card', backgrounds.dark.card, 'dark'],
   ['dark mode navbar', backgrounds.navbar, 'dark']
 ];
-function checkRing(what, shadowIn) {
+function checkRing(what, shadowIn, opacity = 1) {
   for (const [where, background, mode] of focusBackgrounds) {
     const shadow = shadowIn(mode);
     const colours = rings(shadow);
-    const best = Math.max(0, ...colours.map((ring) => contrast(ring, background)));
+    const best = Math.max(0, ...colours.map((ring) => contrast(faded(ring, opacity), background)));
     if (!(best >= 3))
       failures.push(
         `Focus ring on ${what}, on the ${where}: ` +
-          (colours.length ? `"${shadow}" is ${best.toFixed(2)}:1` : `"${shadow}" has no colour`)
+          (colours.length
+            ? `"${shadow}" is ${best.toFixed(2)}:1` +
+              (opacity < 1 ? ` at an opacity of ${opacity}` : '')
+            : `"${shadow}" has no colour`)
       );
   }
 }
@@ -489,14 +498,24 @@ for (const [what, selectors, property] of focusRings)
   checkRing(what, (mode) => value(selectors, property, mode));
 
 // No rule takes the ring away from a button with keyboard focus. A rule that gives a focused button
-// a shadow includes the ring. A rule that gives a hovered button a shadow leaves out buttons with
-// keyboard focus, or a later rule for the same button with keyboard focus puts the ring back. What
-// a selector says of the button itself is its last part, after any combinator, outside :not() and
-// :has().
+// a shadow includes the ring. A rule that gives a shadow to a hovered button, or to one marked
+// disabled only by its class, leaves out buttons with keyboard focus, or a later rule for the same
+// button with keyboard focus puts the ring back. A button marked disabled only by its class keeps
+// focus, as the delete dialogs' confirm button does just after the dialog opens and while it
+// deletes. One with the disabled attribute cannot have focus. Bootstrap fades a disabled button,
+// and the ring with it, so the ring of a button marked disabled is checked faded. What a selector
+// says of the button itself is its last part, after any combinator, outside :not() and :has().
 const lastPart = (selector) => split(selector.replace(/\s*([>+~])\s*/g, ' $1 '), ' ').at(-1);
 const own = (part) => part.replace(/:(not|has)\((?:[^()]|\([^()]*\))*\)/g, '');
 const isButton = (part) => /\.btn(-(?!close|check|group|toolbar)[\w-]+)?(?![\w-])/.test(own(part));
 const states = (part) => own(part).match(/(?<!:):[\w-]+/g) ?? [];
+const markedDisabled = (part) =>
+  /\.disabled(?![\w-])/.test(own(part)) && !states(part).includes(':disabled');
+const disabledOpacity = Number(value(['.btn', '.btn.disabled'], 'opacity', 'light'));
+assert.ok(
+  disabledOpacity > 0 && disabledOpacity <= 1,
+  `Found no opacity for disabled buttons: ${disabledOpacity}`
+);
 let buttonShadows = 0;
 rules.forEach((rule, index) => {
   const shadow = rule.declarations.findLast(({ property }) => property === 'box-shadow')?.value;
@@ -507,7 +526,7 @@ rules.forEach((rule, index) => {
     buttonShadows++;
     const ringIn = (mode) => fill(shadow, '.btn', mode);
     if (states(part).some((state) => state === ':focus-visible' || state === ':focus'))
-      checkRing(`buttons matching ${selector}`, ringIn);
+      checkRing(`buttons matching ${selector}`, ringIn, markedDisabled(part) ? disabledOpacity : 1);
     else if (states(part).includes(':hover')) {
       const leavesOut = /:not\([^)]*:focus/.test(part);
       const focused = selector.replace(':hover', ':focus-visible');
@@ -519,6 +538,18 @@ rules.forEach((rule, index) => {
             later.declarations.some(({ property }) => property === 'box-shadow')
         );
       if (!leavesOut && !putBack) checkRing(`hovered buttons matching ${selector}`, ringIn);
+    } else if (markedDisabled(part)) {
+      const leavesOut = /:not\([^)]*:focus/.test(part);
+      const focused = `${selector}:focus-visible`;
+      const putBack = rules
+        .slice(index + 1)
+        .some(
+          (later) =>
+            later.selectors.includes(focused) &&
+            later.declarations.some(({ property }) => property === 'box-shadow')
+        );
+      if (!leavesOut && !putBack)
+        checkRing(`buttons marked disabled matching ${selector}`, ringIn, disabledOpacity);
     }
   }
 });
