@@ -13,10 +13,11 @@ import { isStopping } from './run-control.js';
 // Bringing a ban list's bans in the database up to date with the bans its source gave, without
 // writing what has not changed. The list's stored bans are read with one query and compared with
 // the bans fetched, here in JavaScript, and only the bans that are new or changed are written, in
-// transactions of BATCH_SIZE bans that also add their players and queue those players for an
-// update. The bans the list no longer has are removed by the rules of planRemovals, also in
-// transactions of BATCH_SIZE bans, and the same rules time the bans whose account changed (see
-// placeBan). ban-importer.js decides what is applied to each list.
+// transactions of BATCH_SIZE bans that also add their players, and queue for an update the players
+// of the bans that are new or changed in a way that can change them (see queuesPlayers). The bans
+// the list no longer has are removed by the rules of planRemovals, also in transactions of
+// BATCH_SIZE bans, and the same rules time the bans whose account changed (see placeBan).
+// ban-importer.js decides what is applied to each list.
 
 // Thank god for this function.
 
@@ -103,6 +104,28 @@ const COMPARED = {
   rawNote: textOf
 };
 export const COMPARED_FIELDS = Object.keys(COMPARED);
+
+// The values compared that only describe a ban: its reason, as it is classified, and its raw reason
+// and note. A ban whose only changes are to these is written, so that they stay as its source gives
+// them, but queues nobody for an update (see queuesPlayers), as none of the steps that update
+// players reads them: a player's reputation points read their bans' players, lists, expiries and
+// created times (see reputation-points.js), their rank only their points, their export bans their
+// bans' players, lists, created times and whether each has expired (see export-membership.js in
+// scbl-lib/db), and their Steam profile nothing of their bans. So a change to how reasons are
+// classified, which changes the reason of many bans at once, rewrites them, but recalculates no
+// player. Every other value compared can change a player: a ban's player, whose points and export
+// bans it takes to another player, its expiry and whether it has expired. A ban's list and created
+// time never change once it is stored, as the statement that writes a ban sets them only for a new
+// one (see ON_DUPLICATE_BAN), and a new ban always queues its player.
+export const DESCRIPTIVE_FIELDS = ['reason', 'rawReason', 'rawNote'];
+
+// Whether writing a ban, new or changed, as diffBans gives it, queues its players for an update: a
+// new ban, which has no fields, always does, and a changed one when a value other than those that
+// only describe it changed. So a value that is compared from now on queues players unless it is
+// added to those.
+export function queuesPlayers(write) {
+  return !write.fields || write.fields.some((field) => !DESCRIPTIVE_FIELDS.includes(field));
+}
 
 function same(field, value, stored) {
   return Object.is(COMPARED[field](value), COMPARED[field](stored));
@@ -522,14 +545,20 @@ export async function readPendingRemovals(banList) {
 }
 
 // Write a batch of bans in one transaction: add their players that are new, write the bans, and
-// queue for an update their players and, for a changed ban, the player it had before.
+// queue for an update the players of the bans that queue them (see queuesPlayers) and, for such a
+// changed ban, the player it had before, which differs only when its player changed. A batch whose
+// bans only changed in what describes them queues nobody: it leaves out the statement that queues
+// players, whose empty list MySQL would refuse, so it locks no player's row to queue them. Its
+// other statements, and their order, are those of any batch.
 async function writeBatch(banList, writes, now) {
   const players = [...new Set(writes.map(({ steamUser }) => steamUser))];
   const queued = [
     ...new Set(
-      writes.flatMap(({ steamUser, previousSteamUser }) =>
-        previousSteamUser ? [steamUser, previousSteamUser] : [steamUser]
-      )
+      writes
+        .filter(queuesPlayers)
+        .flatMap(({ steamUser, previousSteamUser }) =>
+          previousSteamUser ? [steamUser, previousSteamUser] : [steamUser]
+        )
     )
   ];
   await sequelize.transaction(async (transaction) => {
@@ -553,7 +582,8 @@ async function writeBatch(banList, writes, now) {
       ]),
       transaction
     });
-    await sequelize.query(QUEUE_PLAYERS, { replacements: [queued], transaction });
+    if (queued.length > 0)
+      await sequelize.query(QUEUE_PLAYERS, { replacements: [queued], transaction });
   });
 }
 

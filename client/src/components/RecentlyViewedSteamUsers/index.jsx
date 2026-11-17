@@ -5,6 +5,7 @@ import { useQuery } from '@apollo/client/react';
 import { CardBody, Col, Row } from 'reactstrap';
 
 import { SteamUser } from '../index';
+import { Loading, LoadError } from '../LoadStatus/index.jsx';
 
 const GET_RECENTLY_VIEWED_PLAYERS = gql`
   query {
@@ -30,7 +31,7 @@ const GET_RECENTLY_VIEWED_PLAYERS = gql`
 `;
 
 export default function () {
-  const { loading, error, data } = useQuery(GET_RECENTLY_VIEWED_PLAYERS);
+  const { loading, error, data, refetch } = useQuery(GET_RECENTLY_VIEWED_PLAYERS);
 
   return (
     <CardBody>
@@ -45,23 +46,8 @@ export default function () {
             </Col>
           ))}
       </Row>
-      {loading && (
-        <>
-          <div className="text-center mt-2 mb-3">Loading...</div>
-          <div className="btn-wrapper text-center">
-            <i className="fas fa-circle-notch fa-spin fa-4x" />
-          </div>
-        </>
-      )}
-      {error && (
-        <>
-          <div className="text-center mt-2 mb-2">Error!</div>
-          <div className="btn-wrapper text-center">
-            <i className="fas fa-exclamation-triangle fa-4x" />
-          </div>
-          <div className="text-center mt-2 mb-2">[ERR 1] Something went wrong. Sad times.</div>
-        </>
-      )}
+      {loading && <Loading />}
+      {error && <LoadError error={error} retry={refetch} />}
     </CardBody>
   );
 }

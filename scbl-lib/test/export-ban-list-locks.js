@@ -31,12 +31,17 @@ class Model {
     return countedRows;
   }
 
-  async destroy() {
-    calls.push(['destroy this', this.id]);
+  // A list deleted by its ID, whoever owns it, as the bot deletes one, which fails with the next of
+  // `destroyFailures`, if any, as MySQL fails the statement.
+  async destroy(options) {
+    calls.push(['destroy this', { where: { id: this.id }, transaction: options?.transaction }]);
+    const failure = destroyFailures.shift();
+    if (failure) throw failure;
   }
 }
 let deletedRows = 1;
 let countedRows = 0;
+let destroyFailures = [];
 const dataType = () => dataType;
 // Sequelize's error for a database it cannot reach, which the web server shows as unavailable.
 class ConnectionError extends Error {
@@ -172,6 +177,7 @@ function reset() {
   random = 0.5;
   deletedRows = 1;
   countedRows = 0;
+  destroyFailures = [];
 }
 // MySQL's errors as Sequelize gives them, with MySQL's own as original and parent.
 const mysqlError = (errno, message) => {
@@ -395,7 +401,7 @@ const queries = () =>
   calls.map(([call, options]) =>
     typeof options === 'number'
       ? [call, options]
-      : [call, { ...options.where }, options.transaction.number]
+      : [call, { ...options.where }, options.transaction?.number]
   );
 reset();
 assert.strictEqual(await remoteList().deleteExportBanList({ owner: 'A' }), 'none');
@@ -441,10 +447,36 @@ assert.deepStrictEqual(
   ['begin', 'destroy', 'rollback', 'begin', 'destroy', 'commit']
 );
 
-// The bot, which deletes lists whoever owns them, gives no owner, and the row is deleted by its ID.
+// The bot, which deletes lists whoever owns them, gives no owner, and the row is deleted by its ID,
+// in a transaction too, which is run again after a deadlock, as the website's deletion is.
 reset();
 assert.strictEqual(await remoteList().deleteExportBanList({ important: true }), 'none');
-assert.deepStrictEqual(calls, [['destroy this', 42]]);
+assert.deepStrictEqual(queries(), [
+  ['begin', 1],
+  ['destroy this', { id: 42 }, 1],
+  ['commit', 1]
+]);
+reset();
+destroyFailures = [deadlock()];
+assert.strictEqual(await remoteList().deleteExportBanList(), 'none');
+assert.deepStrictEqual(queries(), [
+  ['begin', 1],
+  ['destroy this', { id: 42 }, 1],
+  ['rollback', 1],
+  ['begin', 2],
+  ['destroy this', { id: 42 }, 2],
+  ['commit', 2]
+]);
+// When MySQL still ends it in a deadlock on the fourth attempt, its error is marked busy, with the
+// stage that failed, so the bot can say that the database was busy and nothing more was deleted.
+reset();
+const lastDeletion = deadlock();
+destroyFailures = [deadlock(), deadlock(), deadlock(), lastDeletion];
+await assert.rejects(
+  remoteList().deleteExportBanList(),
+  (error) => error === lastDeletion && error.busy === true && error.stage === 'database deletion'
+);
+assert.strictEqual(transactions, 4);
 
 // The website deletes a new list it could not finish, while its owner waits, only while they still
 // own it, and gives how many rows were deleted. It runs on a connection of its own, outside the

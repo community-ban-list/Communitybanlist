@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import { readFile } from 'fs/promises';
 import vm from 'vm';
 
+import sourceKey from '../../scbl-lib/utils/ban-list-source-key.js';
 import isSameBattlemetricsID, {
   normaliseBattlemetricsID
 } from '../../scbl-lib/utils/battlemetrics-id.js';
@@ -279,7 +280,8 @@ async function loadBanImporter(lists, { onFetch = () => {}, options, syncs = [] 
           verbose: (module, level, message) => lines.push({ level, message }),
           important: (module, message) => lines.push({ level: 1, message, important: true })
         },
-        normaliseBattlemetricsID
+        normaliseBattlemetricsID,
+        sourceKey
       },
       './ban-fetcher.js': { default: BanFetcher }
     },

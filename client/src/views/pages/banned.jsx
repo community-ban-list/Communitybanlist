@@ -19,6 +19,8 @@ import {
 
 import Layout from '../layout/layout.jsx';
 
+import { Loading, LoadError } from '../../components/LoadStatus/index.jsx';
+
 import { gql } from '@apollo/client';
 import { useQuery } from '@apollo/client/react';
 
@@ -153,6 +155,15 @@ function Foreword(props) {
               We have no bans under this EOS ID. Steam players have an EOS ID too, but most of their
               bans are listed under their Steam 64 ID, so if you play Squad on Steam,{' '}
               <Link to="/banned">enter your Steam 64 ID</Link> as well.
+            </p>
+          )}
+          {props.enteredSteamID && (
+            <p>
+              We looked up the bans listed under your Steam 64 ID. Steam players have an EOS ID too,
+              and any ban we list that gives only your EOS ID is listed under that ID instead, so{' '}
+              <Link to="/search">search for your EOS ID</Link> as well. The admins of a server you
+              play on can see your EOS ID in their admin tools. Our <Link to="/faq">FAQ</Link> has
+              more about EOS IDs.
             </p>
           )}
           <p>
@@ -474,7 +485,7 @@ export default function () {
   // The player's ID as CBL stores it, or null when the address has no player's ID.
   const player = parsePlayerInput(search);
 
-  const { loading, error, data } = player
+  const { loading, error, data, refetch } = player
     ? useQuery(GET_PLAYER, { variables: { id: player.id } })
     : { loading: null, error: null, data: null };
 
@@ -493,25 +504,8 @@ export default function () {
               </p>
             </CardBody>
             <CardBody>
-              {loading && (
-                <>
-                  <div className="text-center mt-2 mb-3">Loading...</div>
-                  <div className="btn-wrapper text-center">
-                    <i className="fas fa-circle-notch fa-spin fa-4x" />
-                  </div>
-                </>
-              )}
-              {error && (
-                <>
-                  <div className="text-center mt-2 mb-2">Error!</div>
-                  <div className="btn-wrapper text-center">
-                    <i className="fas fa-exclamation-triangle fa-4x" />
-                  </div>
-                  <div className="text-center mt-2 mb-2">
-                    [ERR 1] Something went wrong. Sad times.
-                  </div>
-                </>
-              )}
+              {loading && <Loading />}
+              {error && <LoadError error={error} retry={refetch} />}
               {!loading && !error && (
                 <div className="px-3 py-4 px-sm-4 py-sm-5">
                   <StepWizard>
@@ -520,6 +514,7 @@ export default function () {
                       steamUser={data?.steamUser}
                       hasPlayerID={Boolean(player)}
                       unknownEosID={player?.kind === 'eos' && data?.steamUser === null}
+                      enteredSteamID={player?.kind === 'steam'}
                     />
                     <WhatIsCommunityBanList />
                     <GettingUnlistedFromCommunityBanList steamUser={data?.steamUser} />

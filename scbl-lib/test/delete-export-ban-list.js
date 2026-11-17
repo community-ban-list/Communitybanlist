@@ -139,7 +139,8 @@ const dataType = () => dataType;
 
 const stubs = {
   sequelize: { default: { Model, DataTypes: new Proxy({}, { get: () => dataType }) } },
-  '../sequelize.js': { default: {} },
+  // The transaction a row is deleted in, which export-ban-list-locks.js checks.
+  '../sequelize.js': { default: { transaction: (work) => work({}) } },
   // The website holds a deletion lock while it deletes a list (whileDeleting), which
   // export-ban-list-locks.js checks. deleteExportBanList itself never opens a connection.
   '../open-connection.js': { default: () => assert.fail('A connection was opened.') },

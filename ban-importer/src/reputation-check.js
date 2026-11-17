@@ -10,8 +10,9 @@ import { checkRunLock, reportProgress, stopIfRequested } from './run-control.js'
 
 // The reputation check, a safety net for players' reputation points. A player's points, and from
 // them their rank and risk rating, are recalculated only when the player is queued for it: the
-// import queues the players whose bans it changes, the expiry step those whose bans expire, and
-// the bot's /banlist remove the players of the lists it removes. Bans removed any other way queue
+// import queues the players whose bans it adds or removes, or changes in a way that can change
+// them (see queuesPlayers in apply-list.js), the expiry step those whose bans expire, and the
+// bot's /banlist remove the players of the lists it removes. Bans removed any other way queue
 // nobody, e.g. those of a ban list deleted by hand in phpMyAdmin, whose bans the database deletes
 // with it, so their players would keep the points of bans they no longer have. So once every
 // IMPORTER_REPUTATION_CHECK_HOURS, the check works out every player's points from their bans, by
