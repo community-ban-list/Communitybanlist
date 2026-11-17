@@ -16,9 +16,9 @@ import * as playerIDs from 'scbl-lib/player-ids';
 
 // Checks what the client's player pages show for a player listed under their SteamID64 or under
 // their EOS ID, and for an ID with nothing on record: the search page, the "I'm banned" page and a
-// player in a list, and where their forms and the copy button send an ID. The pages are compiled
-// the way the client's build compiles them, loaded with the client's own packages, and rendered to
-// HTML with a stand-in for the GraphQL query.
+// player in a list, and where their forms and the copy button send an ID. Also checks Recent Bans'
+// links to organisations. The pages are compiled the way the client's build compiles them, loaded
+// with the client's own packages, and rendered to HTML with a stand-in for the GraphQL query.
 
 const CLIENT = new URL('../../client/src/', import.meta.url);
 
@@ -29,7 +29,7 @@ const EOS_ID = '0002a1b2c3d4e5f60718293a4b5c6d7e';
 let answer;
 const queried = [];
 const useQuery = (query, options) => {
-  queried.push(options.variables.id);
+  if (options) queried.push(options.variables.id);
   return answer;
 };
 
@@ -91,7 +91,8 @@ const stubs = {
     BanDates: stand('BanDates'),
     DisplayRiskRating: stand('DisplayRiskRating'),
     FormattedDate: stand('FormattedDate'),
-    RecentlyViewedSteamUsers: stand('RecentlyViewedSteamUsers')
+    RecentlyViewedSteamUsers: stand('RecentlyViewedSteamUsers'),
+    SteamUser: stand('SteamUser')
   }
 };
 
@@ -133,6 +134,7 @@ const Search = await component('views/pages/search.jsx');
 const Banned = await component('views/pages/banned.jsx');
 const SteamUser = await component('components/SteamUser/index.jsx');
 const SearchBox = await component('components/steam-user-search-box.jsx');
+const RecentBans = await component('views/pages/recent-bans.jsx');
 
 const { createElement: h } = React;
 const { MemoryRouter, Route, Routes } = reactRouter;
@@ -193,7 +195,7 @@ const player = (id, fields) => ({
 {
   const { html, queried } = render('/search', null);
   assert.deepStrictEqual(queried, []);
-  assert.match(html, /placeholder="Steam 64 ID or EOS ID"/);
+  assert.match(html, /placeholder="Steam 64 or EOS ID"/);
   assert.match(html, /\[RecentlyViewedSteamUsers\]/);
 }
 
@@ -212,6 +214,11 @@ for (const id of [EOS_ID, EOS_ID.toUpperCase()]) {
   assert.match(html, /Unknown EOS ID/);
   assert.match(html, /No bans are stored under this EOS ID\./);
   assert.match(html, /most of their bans are listed under their\s+Steam 64 ID/);
+  // Its link to the FAQ is underlined, as links in sentences are.
+  assert.match(
+    html,
+    /<a (?=[^>]*class="text-decoration-underline")[^>]*href="\/faq"[^>]*>FAQ<\/a>/
+  );
   assert.doesNotMatch(html, /Unknown Steam User/);
   assert.doesNotMatch(html, /\[RecentlyViewedSteamUsers\]/);
 }
@@ -267,7 +274,7 @@ for (const id of [EOS_ID, EOS_ID.toUpperCase()]) {
   const { html, queried } = render('/banned', null);
   assert.deepStrictEqual(queried, []);
   assert.match(html, /Who are you\?/);
-  assert.match(html, /placeholder="Steam 64 ID or EOS ID"/);
+  assert.match(html, /placeholder="Steam 64 or EOS ID"/);
   assert.match(html, /your EOS ID if you bought Squad on the Epic Games\s+Store/);
 }
 
@@ -339,6 +346,43 @@ for (const [address, data] of [
   assert.match(eos, />EOS<\/span>/);
 
   assert.match(listed(null), /Unknown player/);
+}
+
+// Recent Bans shows the organisation that issued each ban above its ban list's name, with an
+// underlined link to the organisation's Discord, so the link stands out from the name without
+// relying on colour.
+{
+  answer = {
+    loading: false,
+    error: undefined,
+    data: {
+      bans: {
+        edges: [
+          {
+            cursor: 'c0',
+            node: {
+              id: 'b1',
+              steamUser: { id: STEAM_ID, name: 'Someone', avatar: null },
+              banList: {
+                id: 'l1',
+                name: 'Main List',
+                organisation: { id: 'o1', name: 'Some Org', discord: 'https://discord.example/o' }
+              },
+              reason: 'Cheating',
+              created: '2026-11-01T00:00:00.000Z',
+              expires: null
+            }
+          }
+        ],
+        pageInfo: { hasNextPage: false, endCursor: 'c0' }
+      }
+    }
+  };
+  const html = renderToStaticMarkup(h(MemoryRouter, null, h(RecentBans)));
+  assert.match(
+    html,
+    /<a (?=[^>]*class="text-decoration-underline")[^>]*href="https:\/\/discord\.example\/o"[^>]*>Some Org<\/a><br\/>Main List/
+  );
 }
 
 // The search box sends a search for the ID as CBL stores it, so an EOS ID in capitals, with spaces,
@@ -433,5 +477,5 @@ for (const text of ['hello', ...TYPOS, EOS_ID.slice(1), `${STEAM_ID}0`]) {
 }
 
 console.log(
-  "Player page checks passed: search, the I'm banned page, their forms, the copy button and players in lists."
+  "Player page checks passed: search, the I'm banned page, their forms, the copy button, players in lists and Recent Bans' links."
 );

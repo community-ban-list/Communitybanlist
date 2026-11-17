@@ -29,7 +29,7 @@
   }
 
   p {
-    color: $gray-600;
+    color: $body-secondary-color;
   }
 
   &:hover {
@@ -231,6 +231,11 @@
 
 .navbar .collapsing .navbar-toggler {
   pointer-events: none;
+}
+
+// The buttons that open and close the menu show the site's focus ring when focused.
+.navbar-toggler:focus {
+  box-shadow: $btn-focus-box-shadow;
 }
 
 @keyframes show-navbar-collapse {

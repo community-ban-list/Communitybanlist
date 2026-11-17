@@ -1,8 +1,32 @@
+// A field's border stands out from the white card (3:1) and turns navy when the field has focus, and
+// its placeholder can be read (4.5:1). Dark mode sets its own (theme/_dark.scss).
 :root {
-  --cbl-input-border-color: #cad1d7;
+  --cbl-input-border-color: #8493a5;
+  --cbl-input-focus-border-color: #{$default};
+  --cbl-input-placeholder-color: #{$body-secondary-color};
 }
 
-// An input group's icon sits inside the input's border, and the whole group gets the focus ring.
+// A focused field shows the focus ring. Bootstrap leaves it out when fields have no shadow of their
+// own, as here.
+.form-control:focus,
+.form-select:focus,
+.form-control.is-invalid:focus,
+.form-select.is-invalid:focus {
+  box-shadow: $input-focus-box-shadow;
+}
+
+// On phones and tablets, fields have a 16px font, as iOS Safari zooms in on a focused field whose font
+// is smaller.
+@include media-breakpoint-down(lg) {
+  .form-control,
+  .form-select,
+  .input-group-text {
+    font-size: $font-size-base;
+  }
+}
+
+// An input group's icon sits inside the input's border, and the whole group gets the focus ring while
+// its field has focus.
 .input-group {
   border-radius: $input-border-radius;
   transition: $input-transition;
@@ -18,7 +42,7 @@
     padding-left: 0;
   }
 
-  // A button joined to an input stays flat.
+  // A button joined to an input stays flat, but shows the focus ring when it has keyboard focus.
   > .btn,
   > .btn:hover {
     box-shadow: none;
@@ -26,16 +50,29 @@
     transform: none;
   }
 
-  &:focus-within {
-    box-shadow: $input-focus-box-shadow;
+  > .btn:focus-visible {
+    box-shadow: $btn-focus-box-shadow;
+  }
 
+  // While the field has focus, the icon's border takes the field's focus colour. Not while the
+  // button has focus, so it is clear which of the two has focus. :where() keeps an invalid group's
+  // red border, set below, while its field has focus.
+  &:has(> :where(.form-control:focus)) {
     > .form-control,
     > .input-group-text {
       border-color: $input-focus-border-color;
     }
+  }
+
+  // The group's ring takes the place of the field's own. When the button has focus, only its own
+  // ring shows, so it is clear which of the two has focus.
+  &:has(> .form-control:focus) {
+    box-shadow: $input-focus-box-shadow;
+    outline: $focus-ring-outline;
 
     > .form-control:focus {
       box-shadow: none;
+      outline: 0;
     }
   }
 
@@ -49,7 +86,9 @@
 
 // A borderless input group with a shadow, used on the home page's header image.
 .input-group-alternative {
-  box-shadow: 0 1px 3px rgba(50, 50, 93, 0.15), 0 1px 0 rgba(0, 0, 0, 0.02);
+  box-shadow:
+    0 1px 3px rgba(50, 50, 93, 0.15),
+    0 1px 0 rgba(0, 0, 0, 0.02);
 
   > .form-control,
   > .input-group-text {

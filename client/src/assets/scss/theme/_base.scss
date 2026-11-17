@@ -10,6 +10,13 @@ p {
   margin-top: 1.5rem;
 }
 
+// Links in sentences and lists are underlined, so they stand out from the words around them without
+// relying on colour. Links with a class, such as buttons and menu items, are styled by it.
+p a:not([class]),
+li a:not([class]) {
+  text-decoration: underline;
+}
+
 // Short descriptions under card titles and in menus.
 .description {
   font-size: $font-size-sm;
@@ -37,6 +44,14 @@ p {
   font-size: $font-size-sm !important;
 }
 
+// Text in a theme colour is a darker shade of it, which can be read on white. Dark mode sets its own
+// (theme/_dark.scss).
+@each $name, $value in $text-colors-light {
+  .text-#{$name} {
+    color: $value !important;
+  }
+}
+
 .zindex-100 {
   z-index: 100;
 }
@@ -57,4 +72,33 @@ p {
 
 .pb-250 {
   padding-bottom: 250px !important;
+}
+
+// The controls that show the focus ring also get its outline, for devices that force their own
+// colours (_variables.scss). The search box's group has its own (theme/_forms.scss).
+.btn:focus-visible,
+.btn-close:focus,
+.form-control:focus,
+.form-select:focus,
+.nav-link:focus-visible,
+.navbar-toggler:focus {
+  outline: $focus-ring-outline;
+}
+
+// Visitors who ask their device for less motion get none. Bootstrap already stops its own transitions
+// for them; this stops the rest, from the theme and the packages it uses, such as the navbar sliding
+// away, its menus fading in, the steps of the "I'm banned" page sliding and the loading spinners.
+// Each ends at once where it would have ended, and the home page's cards no longer lift when hovered.
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .card-lift--hover:hover {
+    transform: none !important;
+  }
 }

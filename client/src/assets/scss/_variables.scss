@@ -1,6 +1,8 @@
 // Bootstrap variable overrides. These keep Community Ban List's colours and the look of the Argon
 // Design System theme that the site used with Bootstrap 4.
 
+@use 'sass:map';
+
 // Colours
 
 $white: #fff;
@@ -31,7 +33,20 @@ $secondary: #f4f5f7;
 $success: $green;
 $info: $teal;
 $warning: $orange;
-$danger: $red;
+// A darker red than $red, so white text on it can be read (4.5:1), on the Delete buttons and across
+// the error message's gradient, and so can red text on white.
+$danger: #c92c4b;
+
+// Text in the theme colours in light mode. On white the theme colours are too light to read, so text
+// uses each one darkened just enough to reach 4.5:1 on white and on the light greys of table headers
+// and the footer. Buttons and badges keep the theme colours. Red text is $danger, which is dark enough,
+// and dark mode has its own ($text-colors-dark).
+$text-colors-light: (
+  'primary': #8c6c06,
+  'info': #0a7b8f,
+  'success': #1c8055,
+  'warning': #bf4b31
+);
 
 // Argon's dark navy, used for the scrolled navbar and dark buttons.
 $default: #172b4d;
@@ -59,9 +74,33 @@ $headings-color-dark: #eef1f7;
 $link-color-dark: $primary;
 $link-hover-color-dark: tint-color($primary, 30%);
 
-// Text on coloured backgrounds is navy or white, whichever has at least this contrast. This gives
-// navy text on the yellow, green and cyan buttons, and white text on the others.
-$min-contrast-ratio: 3;
+// Text in the theme colours in dark mode: the colours themselves, which are easy to read on the dark
+// page, but red, which is lightened just enough to reach 4.5:1 on the dark panels.
+$text-colors-dark: (
+  'primary': $primary,
+  'info': $info,
+  'success': $success,
+  'warning': $warning,
+  'danger': #f64669
+);
+
+// Code, such as a remote ban list's address and a player's EOS ID: in light mode the pink darkened as
+// the text colours above are, and in dark mode the light pink it had.
+$code-color: #92626d;
+$code-color-dark: tint-color($pink, 40%);
+
+// Alerts keep the brighter red they had, which is easy to read in both modes.
+$danger-text-emphasis: shade-color($red, 60%);
+$danger-bg-subtle: tint-color($red, 80%);
+$danger-border-subtle: tint-color($red, 60%);
+$danger-text-emphasis-dark: tint-color($red, 40%);
+$danger-bg-subtle-dark: shade-color($red, 80%);
+$danger-border-subtle-dark: shade-color($red, 40%);
+
+// Text on coloured backgrounds is navy or white, whichever has at least this contrast, the 4.5:1 that
+// text needs. This gives navy text on the yellow, green, cyan and orange buttons, and white text on
+// the others.
+$min-contrast-ratio: 4.5;
 $color-contrast-dark: $default;
 
 // Layout
@@ -83,14 +122,26 @@ $enable-negative-margins: true;
 // Body and links
 
 $body-color: $gray-700;
-$link-color: $primary;
+// Text that matters less, such as help text under fields, table headers and the footer's links:
+// lighter than the body text, but still 4.5:1 on white and the light greys. Dark mode keeps
+// Bootstrap's own.
+$body-secondary-color: #636f8c;
+$link-color: map.get($text-colors-light, 'primary');
 $link-decoration: none;
 $link-hover-decoration: none;
 $link-shade-percentage: 15%;
 
 // Typography
 
-$font-family-sans-serif: 'Open Sans', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+$font-family-sans-serif:
+  'Open Sans',
+  system-ui,
+  -apple-system,
+  'Segoe UI',
+  Roboto,
+  'Helvetica Neue',
+  Arial,
+  sans-serif;
 $font-size-base: 1rem;
 $font-size-sm: $font-size-base * 0.875;
 $font-weight-bold: 600;
@@ -113,7 +164,9 @@ $hr-margin-y: 2rem;
 
 // Shadows
 
-$box-shadow: 0 15px 35px rgba(50, 50, 93, 0.1), 0 5px 15px rgba(0, 0, 0, 0.07);
+$box-shadow:
+  0 15px 35px rgba(50, 50, 93, 0.1),
+  0 5px 15px rgba(0, 0, 0, 0.07);
 $box-shadow-lg: 0 1rem 3rem rgba($black, 0.175);
 
 // Buttons and inputs
@@ -127,17 +180,38 @@ $input-btn-font-size-sm: 0.75rem;
 
 $btn-padding-x: 1.25rem;
 $btn-font-weight: 600;
-$btn-box-shadow: 0 4px 6px rgba(50, 50, 93, 0.11), 0 1px 3px rgba(0, 0, 0, 0.08);
+$btn-box-shadow:
+  0 4px 6px rgba(50, 50, 93, 0.11),
+  0 1px 3px rgba(0, 0, 0, 0.08);
 $btn-active-box-shadow: none;
 
+// Focus rings: a white ring inside a navy one. On the white cards the navy ring stands out, and on
+// the dark navbar and in dark mode the white one does. Bootstrap's buttons, fields, nav links and
+// close buttons draw it in place of their pale yellow ring, and so do the theme's search box and
+// menu buttons.
+$focus-ring-box-shadow:
+  0 0 0 2px $white,
+  0 0 0 4px $default;
+// Browsers leave shadows out when the visitor's device forces its own colours, as Windows' contrast
+// themes do, so focused controls also get a transparent outline, which shows in those colours.
+$focus-ring-outline: 2px solid transparent;
+
 $input-color: var(--bs-body-color);
-// A CSS variable so dark mode can change it; theme/_forms.scss sets it.
+// CSS variables so dark mode can change them; theme/_forms.scss sets them.
 $input-border-color: var(--cbl-input-border-color);
+$input-focus-border-color: var(--cbl-input-focus-border-color);
+$input-placeholder-color: var(--cbl-input-placeholder-color);
+// Switches, which the site does not use, draw this colour into an image, where a CSS variable does
+// not work, so they keep the colour they had.
+$form-switch-focus-color: tint-color($primary, 50%);
 $input-box-shadow: none;
-$input-placeholder-color: $gray-500;
 $input-disabled-bg: var(--bs-secondary-bg);
 $form-label-font-size: $font-size-sm;
 $form-select-box-shadow: none;
+// Invalid fields keep the brighter red border and icon they had. Their messages are in $danger, which
+// can be read on white; dark mode has its own lighter red for them.
+$form-feedback-invalid-color: $red;
+$form-invalid-color: $danger;
 
 // Components
 
@@ -148,7 +222,10 @@ $card-border-color: rgba($black, 0.05);
 $dropdown-min-width: 12rem;
 $dropdown-font-size: $font-size-sm;
 $dropdown-border-width: 0;
-$dropdown-box-shadow: 0 50px 100px rgba(50, 50, 93, 0.1), 0 15px 35px rgba(50, 50, 93, 0.15), 0 5px 15px rgba(0, 0, 0, 0.1);
+$dropdown-box-shadow:
+  0 50px 100px rgba(50, 50, 93, 0.1),
+  0 15px 35px rgba(50, 50, 93, 0.15),
+  0 5px 15px rgba(0, 0, 0, 0.1);
 $dropdown-item-padding-y: 1rem;
 $dropdown-item-padding-x: 1rem;
 $dropdown-link-active-color: $default;
@@ -163,7 +240,9 @@ $badge-font-weight: 600;
 $badge-padding-y: 0.35rem;
 $badge-padding-x: 0.375rem;
 $modal-content-border-width: 0;
-$modal-content-box-shadow-xs: 0 15px 35px rgba(50, 50, 93, 0.2), 0 5px 15px rgba(0, 0, 0, 0.17);
+$modal-content-box-shadow-xs:
+  0 15px 35px rgba(50, 50, 93, 0.2),
+  0 5px 15px rgba(0, 0, 0, 0.17);
 $modal-content-box-shadow-sm-up: $modal-content-box-shadow-xs;
 $modal-backdrop-opacity: 0.16;
 $tooltip-opacity: 1;
