@@ -136,6 +136,7 @@ const {
   clearPendingRemovals,
   COMPARED_FIELDS,
   CONFIRM_AFTER,
+  countFetched,
   DESCRIPTIVE_FIELDS,
   diffBans,
   fewestHeld,
@@ -580,6 +581,61 @@ assert.deepStrictEqual(plain([...findAccountChanges(fetchedEos, storedEos)]), [
   ['1,e', { from: eos(9), to: eos(5) }]
 ]);
 assert.deepStrictEqual(plain([...findAccountChanges([newEos], storedEos)]), []);
+
+// How many bans a complete read found, for the rules for removing bans: all of them, but for a list
+// with fewer than 10 bans not stored for EOS IDs that is missing one of them, only those with a
+// SteamID, as before account changes, when the list had only those bans and the others were
+// skipped. A ban that gained a SteamID has one, and so has a remote ban, or one made from a stored
+// ban, which has no SteamIDs, as remote lists give only their SteamIDs' lines. A ban stored for a
+// player saved before SteamIDs were checked, or for an EOS ID in capitals, is not stored for an EOS
+// ID as CBL stores them, so it counts as one stored for a SteamID does. Each case gives the players
+// of the list's stored bans, of which the read did not find the first few (missing).
+const eosOnly = [downgraded, eosToEos, eosKept, newEos];
+const fetchedToCount = [
+  fetchedBan('s'),
+  upgraded,
+  ...eosOnly,
+  { id: '1,r', steamUser: steamID(3) }
+];
+const steamPlayers = (count) => Array.from({ length: count }, (_, i) => steamID(20 + i));
+const eosPlayers = (count) => Array.from({ length: count }, (_, i) => eos(20 + i));
+const count = (fetched, missing, players, held, recorded = 0) => {
+  const stored = players.map((steamUser, i) => storedBan(`m${i}`, { steamUser }));
+  const pending = new Map(stored.slice(0, recorded).map(({ id }) => [id, {}]));
+  return countFetched(fetched, stored.slice(0, missing), stored, held, pending);
+};
+assert.strictEqual(count(fetchedToCount, 1, steamPlayers(9)), 3);
+assert.strictEqual(count(fetchedToCount, 2, [eos(9), ...steamPlayers(8)]), 3);
+assert.strictEqual(count(fetchedToCount, 1, [`${steamID(9)}/`, ...steamPlayers(8)]), 3);
+assert.strictEqual(count(fetchedToCount, 1, [eos(0xabc).toUpperCase(), ...steamPlayers(8)]), 3);
+assert.strictEqual(count(eosOnly, 1, steamPlayers(9)), 0);
+assert.strictEqual(count(eosOnly, 9, steamPlayers(9)), 0);
+// The bans stored for EOS IDs do not count towards the 10, so a list with fewer than 10 others
+// counts the same however many it has, unless the read found none of its bans, of a list of at
+// least 10, which counts every ban, so it is held as it lost them all, with records.
+assert.strictEqual(count(eosOnly, 1, [...steamPlayers(9), ...eosPlayers(1)]), 0);
+assert.strictEqual(count(fetchedToCount, 8, [...steamPlayers(8), ...eosPlayers(20)]), 3);
+assert.strictEqual(count(eosOnly, 9, [...steamPlayers(4), ...eosPlayers(6)]), 0);
+assert.strictEqual(count(eosOnly, 10, [...steamPlayers(4), ...eosPlayers(6)]), 4);
+// Every ban counts for a list with 10 bans not stored for EOS IDs or more, for one that holds bans
+// for an admin, and for one that is missing only bans stored for EOS IDs, or none.
+assert.strictEqual(count(eosOnly, 1, steamPlayers(10)), 4);
+assert.strictEqual(count(eosOnly, 1, [eos(9).toUpperCase(), ...steamPlayers(9)]), 4);
+assert.strictEqual(count(eosOnly, 1, steamPlayers(9), true), 4);
+assert.strictEqual(count(fetchedToCount, 2, [eos(9), eos(10), ...steamPlayers(7)]), 7);
+assert.strictEqual(count(eosOnly, 1, [eos(9), ...steamPlayers(8)]), 4);
+assert.strictEqual(count(fetchedToCount, 0, steamPlayers(9)), 7);
+// So does every ban for a read whose missing bans, of those that no earlier read had missed (the
+// first few, recorded), are a large loss of all of the list's bans: 25 of a list of 45, and a fifth
+// of a list of more than 125, here 42 of 209. Fewer count as before.
+const mostlyEos = [...steamPlayers(5), ...eosPlayers(40)];
+const largerEos = [...steamPlayers(9), ...eosPlayers(200)];
+assert.strictEqual(count(eosOnly, 25, mostlyEos), 4);
+assert.strictEqual(count(eosOnly, 26, mostlyEos, false, 1), 4);
+assert.strictEqual(count(eosOnly, 42, largerEos), 4);
+assert.strictEqual(count(eosOnly, 24, mostlyEos), 0);
+assert.strictEqual(count(eosOnly, 25, mostlyEos, false, 1), 0);
+assert.strictEqual(count(eosOnly, 41, largerEos), 0);
 
 // Which of the bans missing from a complete read of a list are removed, kept for a later read, or
 // held for an admin. Each case is [the rules' inputs, what they decide].
@@ -1870,5 +1926,5 @@ assert.deepStrictEqual(batches, [2, 2]);
 assert.strictEqual(events.filter(([type]) => type === 'commit').length, 2);
 
 console.log(
-  'Apply checks passed: values compared, players kept, moved and changed to new accounts, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, which queue the players only of new bans and of changed bans whose player, expiry or whether they have expired changed, retries, failed bans, bans written alone, removals counted a batch at a time, with their bans, records of missing bans, counted a statement at a time, with their IDs, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
+  'Apply checks passed: values compared, players kept, moved and changed to new accounts, the bans a small list found counted by their SteamIDs, unless it lost a large part of its bans, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, which queue the players only of new bans and of changed bans whose player, expiry or whether they have expired changed, retries, failed bans, bans written alone, removals counted a batch at a time, with their bans, records of missing bans, counted a statement at a time, with their IDs, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
 );

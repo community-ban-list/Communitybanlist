@@ -16,11 +16,11 @@ import {
   CONFIRM_AFTER,
   clearHoldReason,
   clearPendingRemovals,
+  countFetched,
   diffBans,
   fewestHeld,
   findAccountChanges,
   flagOf,
-  FULL_REMOVAL_BANS,
   isLargeLoss,
   isMissingBanList,
   planRemovals,
@@ -1458,10 +1458,13 @@ export default class BanImporter {
   // The bans whose account changed (changes, see findAccountChanges in apply-list.js) are missing
   // from their stored accounts, so they are planned as missing, and are not found again: a record
   // they have is kept, and one held is not back. The read still found them, so they count among
-  // the bans it found (fetched), and a list of at least FULL_REMOVAL_BANS bans whose every fetched
-  // ban changed is never taken for one that gave no bans, though one of fewer is (see rules). They
-  // count towards a large loss, and towards a list losing all of its bans, as the bans it no longer
-  // has do. Such a ban that the rules would remove is written for its new account instead
+  // the bans it found (fetched), and a list whose every fetched ban changed is never taken for one
+  // that gave no bans, unless it is a list with fewer than 10 bans not stored for EOS IDs that
+  // returned no ban with a SteamID while it is missing one of them, and is neither held for an
+  // admin, nor one of at least 10 bans that lost all of them, nor one that lost a large part of its
+  // bans in this read (see countFetched in apply-list.js).
+  // They count towards a large loss, and towards a list losing all of its bans, as the bans it no
+  // longer has do. Such a ban that the rules would remove is written for its new account instead
   // (applied), and never removed; one they keep waits, or is held, on its stored account, recorded
   // as a ban the list no longer has is.
   async planMissingBans(banList, bans, stored, pending, result, changes = new Map()) {
@@ -1498,14 +1501,17 @@ export default class BanImporter {
 
     const bySetting = this.allowMassRemoval.has(String(banList.id));
     const confirmed = bySetting || this.fullRemovalAllowed(banList, now);
-    // A list of fewer than FULL_REMOVAL_BANS bans whose every fetched ban changed account is taken
-    // for one that gave no bans, which keeps them all, as a list that lost its SteamIDs all at once
-    // more likely broke: so it is held as before account changes, when such bans were skipped. A
-    // larger list is held as it lost all of its bans, with records, as it found bans.
+    // A list with fewer than 10 bans not stored for EOS IDs that is missing one of them counts only
+    // the bans with a SteamID that it fetched, as before account changes, when it had only those
+    // bans and the others were skipped, so a read that returned none is taken for one that gave no
+    // bans, which keeps them all, as a list that lost its SteamIDs all at once more likely broke;
+    // unless it holds bans for an admin, whose hold decides, is a list of at least 10 bans that
+    // lost all of them, or lost a large part of its bans in this read, either of which is held as
+    // such (see countFetched).
     const rules = {
       missing: missing.map((ban) => ban.id),
       stored: stored.length,
-      fetched: stored.length < FULL_REMOVAL_BANS ? found.size : bans.length,
+      fetched: countFetched(bans, missing, stored, held.length > 0, pending),
       pending: new Map([...pending].map(([banId, { firstMissingAt }]) => [banId, firstMissingAt])),
       held: new Set(heldAt.keys()),
       firstHeld: new Set(firstHeld),
@@ -2056,11 +2062,16 @@ export default class BanImporter {
       const held = result.held > 0 ? `, ${formatCount(result.held)} held` : '';
       log(result.failed > 0 || again, `${imported}: ${counts.join(', ')}${held}.${dryRun}`);
     } else if (result.hold === 'empty' && result.fetched > 0) {
-      // A list of fewer than 10 bans whose every fetched ban changed account is held as one that
-      // gave no bans (see planMissingBans).
+      // A list with fewer than 10 bans not stored for EOS IDs that returned bans, but none with a
+      // SteamID, while it is missing one of them, is held as one that gave no bans (see countFetched
+      // in apply-list.js), unless it lost a large part of its bans in that read, which is held as
+      // such, with that hold's line. This line says so, as the line of a list that gave no bans with
+      // a SteamID does, with the counts of the bans for EOS IDs it returned, which may be new, or
+      // bans whose account changed, kept on their stored accounts. A ban that gained a SteamID has
+      // one, so it never makes this line.
       log(
         true,
-        `${imported}: it returned only bans whose account changed (${formatCount(result.fetched)}), which more likely means that its source broke, so its ${result.stored} stored bans were kept on their accounts. If their accounts really changed, set IMPORTER_ALLOW_MASS_REMOVAL=${result.id} for one run.${dryRun}`
+        `${imported}: ${counts.join(', ')}. It returned no bans with a SteamID, so its ${result.stored} stored bans were kept on their accounts in case the list is broken. If the list really has no bans with a SteamID, set IMPORTER_ALLOW_MASS_REMOVAL=${result.id} for one run.${dryRun}`
       );
     } else if (result.hold === 'empty') {
       // Only a BattleMetrics list gives bans that it skips, which a list that imports EOS IDs keeps
