@@ -117,7 +117,9 @@ export default class Core {
     // One statement, so it needs nothing left on a pooled connection by an earlier one and can run
     // again in the same process; NOW() is the same for every row. Only players whose rank changed
     // or who were queued for a refresh are written, so lastRefreshedReputationRank is when a
-    // player's rank last changed or was last recalculated after their bans changed.
+    // player's rank last changed or was last recalculated after they were queued, e.g. as their
+    // bans changed. A change to only a ban's reason, raw reason or note queues nobody (see
+    // queuesPlayers in apply-list.js).
     // While it runs, it locks every SteamUsers row and stops new rows being added, so other writes
     // to SteamUsers, a new player's first sign-in included, wait until it finishes: 2 to 2.5
     // seconds with 145,000 players when most of them are re-ranked, as new bans usually make them,

@@ -4,6 +4,7 @@ import { useQuery } from '@apollo/client/react';
 
 import { CardBody } from 'reactstrap';
 
+import { Loading, LoadError } from '../LoadStatus/index.jsx';
 import MutateExportBanList from './mutate-export-ban-list';
 
 // The list's configs are for the form, which checks changes to the list's settings with them.
@@ -42,34 +43,27 @@ const GET_EXPORT_BAN_LIST = gql`
 `;
 
 export default function (props) {
-  const { loading, error, data } = useQuery(GET_EXPORT_BAN_LIST, {
+  const { loading, error, data, refetch } = useQuery(GET_EXPORT_BAN_LIST, {
     variables: { id: props.exportBanListID }
   });
 
   if (loading)
     return (
       <CardBody>
-        <div className="text-center mt-2 mb-3">Loading...</div>
-        <div className="btn-wrapper text-center">
-          <i className="fas fa-circle-notch fa-spin fa-4x" />
-        </div>
+        <Loading />
       </CardBody>
     );
 
   if (error)
     return (
       <CardBody>
-        <div className="text-center mt-2 mb-2">Error!</div>
-        <div className="btn-wrapper text-center">
-          <i className="fas fa-exclamation-triangle fa-4x" />
-        </div>
-        <div className="text-center mt-2 mb-2">[ERR 1] Something went wrong. Sad times.</div>
+        <LoadError error={error} retry={refetch} />
       </CardBody>
     );
 
   // loggedInSteamUser is null when the web server answers as signed out, e.g. as the sign-in has
   // expired.
-  if (!data.loggedInSteamUser?.exportBanList)
+  if (!data?.loggedInSteamUser?.exportBanList)
     return (
       <CardBody>
         <div className="text-center mt-2 mb-2">Unknown Export Ban List</div>

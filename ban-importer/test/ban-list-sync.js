@@ -1,8 +1,8 @@
 import assert from 'assert';
-import { createHash } from 'crypto';
 import { readFile } from 'fs/promises';
 import vm from 'vm';
 
+import sourceKey from '../../scbl-lib/utils/ban-list-source-key.js';
 import { normaliseBattlemetricsID } from '../../scbl-lib/utils/battlemetrics-id.js';
 
 // Check how a ban list's sync state is worked out, without a database or network requests: every
@@ -15,7 +15,6 @@ import { normaliseBattlemetricsID } from '../../scbl-lib/utils/battlemetrics-id.
 let banListPages = [];
 const reads = [];
 const dependencies = {
-  crypto: { createHash },
   'scbl-lib/apis': {
     async readBattlemetricsPages(endpoint, params) {
       reads.push([endpoint, params]);
@@ -63,7 +62,6 @@ const {
   readEosImport,
   readSwitch,
   readVisibleBanLists,
-  sourceKey,
   stateOf,
   STATES,
   UNCONFIRMED,

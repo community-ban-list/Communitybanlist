@@ -1,3 +1,4 @@
+import sourceKey from './ban-list-source-key.js';
 import isSameBattlemetricsID, { normaliseBattlemetricsID } from './battlemetrics-id.js';
 import calculateRiskRating from './calculate-risk-rating.js';
 import classifyBanReason from './classify-ban-reason.js';
@@ -33,6 +34,7 @@ export {
   newerMessage,
   normaliseBattlemetricsID,
   sendDiscordWebhook,
+  sourceKey,
   stackTrace,
   testDiscordWebhook
 };

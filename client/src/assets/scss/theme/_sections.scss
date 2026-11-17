@@ -107,6 +107,12 @@
   }
 }
 
+// While a page shows that it is loading (components/LoadStatus), its footer waits, so the footer is
+// not drawn under the short loading card and then pushed down as the page's content arrives.
+body:has(.loading-placeholder) .footer {
+  display: none;
+}
+
 .nav-footer {
   .nav-link {
     font-size: $font-size-sm;

@@ -792,6 +792,33 @@ assert.strictEqual(
   'Could not remove export ban list **List 17** (#17). Deleting it from the database failed: Lock wait timeout exceeded'
 );
 
+// A deletion the database was too busy for, as the shared deletion runs it again after a deadlock
+// and marks the error busy when MySQL still ends it in one, or when it waits too long for a lock,
+// is said plainly, in the reply and the log: nothing more was deleted, and running the command
+// again finishes the removal. Here its BattleMetrics ban list was deleted before the row could not
+// be.
+const BUSY =
+  'Deleting it from the database failed, as the database was busy with other changes, so nothing more was deleted. Run the command again to finish removing it.';
+reset();
+addList(19, 'battlemetrics', { battlemetricsID: 'bm-19' });
+visible = new Set(['bm-19']);
+deletions.set(
+  19,
+  Object.assign(new Error('Deadlock found when trying to get lock; try restarting transaction'), {
+    stage: 'database deletion',
+    busy: true
+  })
+);
+await run('remove', { id: 19 });
+assert.strictEqual(
+  contentOf(replies.at(-1)),
+  `Could not remove export ban list **List 19** (#19). ${BUSY}`
+);
+assert.deepStrictEqual(audits, [
+  `admin (1) could not remove export ban list "List 19" (ID: 19, BattleMetrics, BattleMetrics ID: bm-19) of Steam user "Owner 19" (ID: 76561198000000019), which had 0 players: ${BUSY}`
+]);
+assert.ok(rows.has(19));
+
 // A list that does not exist is refused, and one deleted while the removal was confirmed is left.
 reset();
 await assert.rejects(run('remove', { id: 404 }), (err) => {
@@ -1872,6 +1899,33 @@ assert.strictEqual(
 );
 assert.deepStrictEqual(summary.attachments, []);
 
+// A deletion the database was too busy for says so plainly here too, in the summary and the log.
+reset();
+addList(96, 'remote');
+deletions.set(
+  96,
+  Object.assign(new Error('Lock wait timeout exceeded; try restarting transaction'), {
+    stage: 'database deletion',
+    busy: true
+  })
+);
+await run('remove_outside_limits');
+summary = replies.at(-1);
+assert.strictEqual(
+  summary.content,
+  "Removed 0 of the 1 export ban list outside today's limits. 1 failed."
+);
+assert.strictEqual(
+  embedOf(summary).description,
+  `**List 96** (#96): failed: ${discord.escapeMarkdown(BUSY)}`
+);
+assert.ok(
+  audits.includes(
+    `[important] admin (1) could not remove export ban list "List 96" (ID: 96, Remote) of Steam user "Owner 96" (ID: 76561198000000096), outside today's limits with 0 players: ${BUSY}`
+  )
+);
+assert.ok(rows.has(96));
+
 // Discord lets the reply be edited for 15 minutes. A removal that runs past them carries on, and
 // its results and summary are only logged; nor does a reply that can no longer be edited stop it.
 reset();
@@ -2435,6 +2489,49 @@ assert.match(audits[0], /^admin \(1\) transferred export ban list "List 12" /);
 assert.deepStrictEqual(notifications, []);
 
 console.log('Transferring an export ban list: checks passed.');
+
+// A list's name and its owners' Steam names are theirs to choose, so the log keeps each on one line
+// and shows it as written, as ExportBanList's and the website's lines do (logText): a line break
+// cannot start what looks like another entry, Markdown is shown as typed, and a character that
+// turns text around becomes a space. The replies escape the names with bold, once, as before.
+const ODD_NAME = 'Ours\n**Bot** removed ||x|| \u202eevil';
+const ODD_OWNER = 'Own_er *x*';
+const ODD_NEW_OWNER = 'New\u202eowner__';
+const ODD_NAME_LOGGED = 'Ours \\*\\*Bot\\*\\* removed \\|\\|x\\|\\| evil';
+const ODD_OWNER_LOGGED = 'Own\\_er \\*x\\*';
+const oddList = (id) =>
+  addList(id, 'remote', {
+    name: ODD_NAME,
+    SteamUser: { id: `765611980000000${id}`, name: ODD_OWNER },
+    problems: id === 42 ? [RULE] : []
+  });
+const repliedName = (id) => `**${discord.escapeMarkdown(ODD_NAME)}** (#${id})`;
+reset();
+oddList(40);
+addSteamUser(NEW_OWNER, ODD_NEW_OWNER);
+await run('transfer', { id: 40, owner: NEW_OWNER });
+assert.deepStrictEqual(audits, [
+  `admin (1) transferred export ban list "${ODD_NAME_LOGGED}" (ID: 40, Remote) of Steam user "${ODD_OWNER_LOGGED}" (ID: 76561198000000040) to Steam user "New owner\\_\\_" (ID: ${NEW_OWNER}).`
+]);
+assert.ok(
+  contentOf(replies.at(-1)).startsWith(`Transferred export ban list ${repliedName(40)} from`)
+);
+reset();
+oddList(41);
+await run('remove', { id: 41 });
+assert.deepStrictEqual(audits, [
+  `admin (1) removed export ban list "${ODD_NAME_LOGGED}" (ID: 41, Remote) of Steam user "${ODD_OWNER_LOGGED}" (ID: 76561198000000041), which had 0 players: there was nothing to delete on BattleMetrics.`
+]);
+assert.strictEqual(contentOf(replies.at(-1)), `Removed export ban list ${repliedName(41)}.`);
+reset();
+oddList(42);
+await run('remove_outside_limits');
+assert.ok(
+  audits.includes(
+    `[important] admin (1) removed export ban list "${ODD_NAME_LOGGED}" (ID: 42, Remote) of Steam user "${ODD_OWNER_LOGGED}" (ID: 76561198000000042), outside today's limits with 0 players: there was nothing to delete on BattleMetrics.`
+  )
+);
+assert.ok(audits.every((line) => !/[\n\u202e]/.test(line)));
 
 console.log(
   'Export ban list command checks passed: admin only, previews, confirmations, removals that do not wait for the importer, BattleMetrics access, failures, long removals and transfers.'

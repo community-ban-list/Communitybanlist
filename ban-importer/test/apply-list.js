@@ -136,6 +136,7 @@ const {
   clearPendingRemovals,
   COMPARED_FIELDS,
   CONFIRM_AFTER,
+  DESCRIPTIVE_FIELDS,
   diffBans,
   fewestHeld,
   findAccountChanges,
@@ -149,6 +150,7 @@ const {
   largeLossBans,
   placeBan,
   planRemovals,
+  queuesPlayers,
   readHold,
   readPendingRemovals,
   readStoredBans,
@@ -223,6 +225,14 @@ assert.deepStrictEqual(plain(COMPARED_FIELDS), [
   'rawReason',
   'rawNote'
 ]);
+// Of those, a ban's reason, raw reason and note only describe it, so a ban whose only changes are
+// to them queues nobody when it is written, and its player, its expiry and whether it has expired
+// are what queue its players.
+assert.deepStrictEqual(plain(DESCRIPTIVE_FIELDS), ['reason', 'rawReason', 'rawNote']);
+assert.deepStrictEqual(
+  plain(COMPARED_FIELDS.filter((field) => !DESCRIPTIVE_FIELDS.includes(field))),
+  ['steamUser', 'expires', 'expired']
+);
 
 // Times compare by their milliseconds: a Date, as MySQL's DATETIME columns come back, text in their
 // format, read as UTC, an ISO time or a number. None is null, and an invalid time NaN.
@@ -309,16 +319,23 @@ assert.deepStrictEqual(plain(diff), {
 
 // Each value that differs makes the ban changed, by itself: an expiry a millisecond later, one
 // added or removed, the ban expiring, its reasons and its note. Only the fields that differ are
-// named, and the ban keeps its player.
-for (const [overrides, fields] of [
-  [{ expires: new Date(MS + 1) }, ['expires']],
-  [{ expires: null }, ['expires']],
-  [{ expired: true }, ['expired']],
-  [{ reason: 'Toxic' }, ['reason']],
-  [{ rawReason: 'Cheating 😀 trailing ' }, ['rawReason']],
-  [{ rawNote: 'Appeal denied' }, ['rawNote']],
-  [{ rawNote: '' }, ['rawNote']],
-  [{ expired: true, reason: 'Toxic', rawNote: 'x' }, ['expired', 'reason', 'rawNote']]
+// named, and the ban keeps its player. Writing it queues its player for an update when its expiry
+// changed, or whether it has expired, alone or with what only describes it, but not when only its
+// reason, raw reason or note did.
+for (const [overrides, fields, queues] of [
+  [{ expires: new Date(MS + 1) }, ['expires'], true],
+  [{ expires: null }, ['expires'], true],
+  [{ expired: true }, ['expired'], true],
+  [{ reason: 'Toxic' }, ['reason'], false],
+  [{ rawReason: 'Cheating 😀 trailing ' }, ['rawReason'], false],
+  [{ rawNote: 'Appeal denied' }, ['rawNote'], false],
+  [{ rawNote: '' }, ['rawNote'], false],
+  [
+    { reason: 'Toxic', rawReason: 'Toxic', rawNote: 'x' },
+    ['reason', 'rawReason', 'rawNote'],
+    false
+  ],
+  [{ expired: true, reason: 'Toxic', rawNote: 'x' }, ['expired', 'reason', 'rawNote'], true]
 ]) {
   diff = diffBans([fetchedBan('a', overrides)], [storedBan('a')]);
   const label = JSON.stringify(overrides);
@@ -326,10 +343,23 @@ for (const [overrides, fields] of [
   assert.deepStrictEqual(plain(diff.changed[0].fields), fields, label);
   assert.strictEqual(diff.changed[0].steamUser, steamID(1), label);
   assert.strictEqual(diff.changed[0].previousSteamUser, steamID(1), label);
+  assert.strictEqual(queuesPlayers(diff.changed[0]), queues, label);
 }
 // A stored expiry where the source has none differs too, as does a stored NULL flag.
 diff = diffBans([fetchedBan('a')], [storedBan('a', { expires: null, expired: null })]);
 assert.deepStrictEqual(plain(diff.changed[0].fields), ['expires', 'expired']);
+// A new ban, which has no fields, always queues its player, and so does a changed ban whose player
+// changed, as a moved ban's does. So would one whose fields named a value that is not compared now,
+// e.g. its time of creation, until it is named as one that only describes a ban.
+for (const [write, queues] of [
+  [{ id: '1,n', steamUser: steamID(1) }, true],
+  [{ fields: ['steamUser'] }, true],
+  [{ fields: ['steamUser', 'rawReason'] }, true],
+  [{ fields: ['created'] }, true],
+  [{ fields: ['rawNote', 'created'] }, true],
+  [{ fields: ['rawReason', 'rawNote'] }, false]
+])
+  assert.strictEqual(queuesPlayers(write), queues, JSON.stringify(write));
 
 // A ban the list has not stored is new, with the values to write: a missing note as NULL, and its
 // time of creation. The stored bans the list no longer has are not the diff's business.
@@ -1125,8 +1155,9 @@ assert.deepStrictEqual(
 
 // Writing bans: each batch is one transaction of three statements. It adds the batch's players
 // that are new, once each, writes the bans with one INSERT that updates a ban that exists without
-// ever changing when it was created, and queues for an update each ban's player and, for a changed
-// ban, the player it had before. Times are written to the millisecond.
+// ever changing when it was created, and queues for an update the player of each new ban and of
+// each changed ban whose changes can change it, and for such a changed ban, the player it had
+// before. Times are written to the millisecond.
 const INSERT_PLAYERS = /^INSERT IGNORE INTO SteamUsers \(id, createdAt, updatedAt\) VALUES /;
 const WRITE_BANS =
   /^INSERT INTO Bans \(id, created, expires, expired, reason, rawReason, rawNote, steamUser, banList, createdAt, updatedAt\) VALUES (.*) AS new ON DUPLICATE KEY UPDATE steamUser = new\.steamUser, expires = new\.expires, expired = new\.expired, reason = new\.reason, rawReason = new\.rawReason, rawNote = new\.rawNote, updatedAt = new\.updatedAt$/;
@@ -1203,6 +1234,146 @@ assert.deepStrictEqual(queue[2], [[steamID(2), steamID(3)]]);
 // The moved ban queues both its new and its old player.
 const [, , queueMoved] = statements().slice(3);
 assert.deepStrictEqual(queueMoved[2], [[steamID(9), steamID(1)]]);
+
+// A batch whose bans only changed in their reasons, raw reasons or notes, as when the way reasons
+// are classified changes, is still one transaction that adds its players, whose rows exist, and
+// writes its bans with their new values, but queues nobody: it sends no statement to queue players
+// at all, rather than one with none.
+const rowsOf = (values) =>
+  Array.from({ length: values.length / 11 }, (_, i) => values.slice(i * 11, i * 11 + 11));
+const describedOnly = diffBans(
+  [
+    fetchedBan('r', { steamUser: steamID(2), steamIDs: ids([2]), reason: 'Toxic' }),
+    fetchedBan('w', { steamUser: steamID(3), steamIDs: ids([3]), rawReason: 'Wallhacking' }),
+    fetchedBan('t', { steamUser: steamID(4), steamIDs: ids([4]), rawNote: 'Appeal denied' }),
+    fetchedBan('b', { steamUser: steamID(2), steamIDs: ids([2]), reason: 'Toxic', rawNote: 'x' })
+  ],
+  [2, 3, 4, 2].map((n, i) => storedBan('rwtb'[i], { steamUser: steamID(n) }))
+);
+assert.deepStrictEqual(
+  [describedOnly.added.length, describedOnly.changed.length, describedOnly.unchanged],
+  [0, 4, 0]
+);
+reset();
+result = await writeBans(7, describedOnly.changed, { now: WRITTEN_AT });
+assert.deepStrictEqual(plain(result), { stopped: false });
+assert.deepStrictEqual(
+  events.map(([type, sql, , transaction]) =>
+    type === 'query' ? [sql.split(' ').slice(0, 3).join(' '), transaction] : [type, sql]
+  ),
+  [
+    ['begin', 1],
+    ['INSERT IGNORE INTO', 1],
+    ['INSERT INTO Bans', 1],
+    ['commit', 1]
+  ]
+);
+const [addDescribed, writeDescribed] = statements();
+assert.deepStrictEqual(addDescribed[2], [
+  steamID(2),
+  at,
+  at,
+  steamID(3),
+  at,
+  at,
+  steamID(4),
+  at,
+  at
+]);
+assert.deepStrictEqual(
+  rowsOf(writeDescribed[2]).map((row) => [row[0], row[4], row[5], row[6], row[7]]),
+  [
+    ['1,r', 'Toxic', 'Cheating 😀 trailing  ', null, steamID(2)],
+    ['1,w', 'Cheating', 'Wallhacking', null, steamID(3)],
+    ['1,t', 'Cheating', 'Cheating 😀 trailing  ', 'Appeal denied', steamID(4)],
+    ['1,b', 'Toxic', 'Cheating 😀 trailing  ', 'x', steamID(2)]
+  ]
+);
+assert.ok(!statements().some(([, sql]) => sql === QUEUE_PLAYERS));
+
+// In a batch with others, only the players of the new bans, and of the changed bans whose expiry,
+// whether they have expired, or player changed, are queued, each once, also when what describes
+// them changed too, with the player a moved ban had before. A ban that only changed in what
+// describes it still has its player added, as any ban's is, which changes nothing for a player
+// that exists.
+const mixed = diffBans(
+  [
+    fetchedBan('r', { steamUser: steamID(2), steamIDs: ids([2]), reason: 'Toxic' }),
+    fetchedBan('e', { steamUser: steamID(3), steamIDs: ids([3]), expires: new Date(MS + 1) }),
+    fetchedBan('x', { steamUser: steamID(4), steamIDs: ids([4]), expired: true, rawNote: 'x' }),
+    fetchedBan('m', { steamUser: steamID(6), steamIDs: ids([6]), rawReason: 'Wallhacking' }),
+    fetchedBan('y', { steamUser: steamID(3), steamIDs: ids([3]), expired: true }),
+    fetchedBan('n', { steamUser: steamID(8), steamIDs: ids([8]) })
+  ],
+  [2, 3, 4, 5, 3].map((n, i) => storedBan('rexmy'[i], { steamUser: steamID(n) })),
+  { applyMoves: true }
+);
+const mixedWrites = [...mixed.added, ...mixed.changed];
+assert.deepStrictEqual(
+  mixedWrites.map(({ id, fields }) => [id, fields ? [...fields] : 'new']),
+  [
+    ['1,n', 'new'],
+    ['1,r', ['reason']],
+    ['1,e', ['expires']],
+    ['1,x', ['expired', 'rawNote']],
+    ['1,m', ['steamUser', 'rawReason']],
+    ['1,y', ['expired']]
+  ]
+);
+reset();
+await writeBans(7, mixedWrites, { now: WRITTEN_AT });
+assert.deepStrictEqual(
+  events.map(([type, sql, , transaction]) =>
+    type === 'query' ? [sql.split(' ').slice(0, 3).join(' '), transaction] : [type, sql]
+  ),
+  [
+    ['begin', 1],
+    ['INSERT IGNORE INTO', 1],
+    ['INSERT INTO Bans', 1],
+    ['UPDATE SteamUsers SET', 1],
+    ['commit', 1]
+  ]
+);
+const [addMixed, , queueMixed] = statements();
+assert.deepStrictEqual(
+  addMixed[2].filter((_, i) => i % 3 === 0),
+  [steamID(8), steamID(2), steamID(3), steamID(4), steamID(6)]
+);
+assert.strictEqual(queueMixed[1], QUEUE_PLAYERS);
+assert.deepStrictEqual(queueMixed[2], [
+  [steamID(8), steamID(3), steamID(4), steamID(6), steamID(5)]
+]);
+
+// Written a ban at a time, as after a batch failed in a way that would only fail again, each ban
+// queues its players by the same rule: here the new ban does, and the one whose reason alone
+// changed does not.
+reset();
+fail(WRITE_BANS, new ValidationError('Validation error'));
+await writeBans(7, mixedWrites.slice(0, 2), { now: WRITTEN_AT });
+assert.deepStrictEqual(
+  events.map(([type, sql, replacements, transaction]) =>
+    type !== 'query'
+      ? [type, sql]
+      : sql === QUEUE_PLAYERS
+        ? ['queue', replacements[0], transaction]
+        : [sql.split(' ').slice(0, 3).join(' '), transaction]
+  ),
+  [
+    ['begin', 1],
+    ['INSERT IGNORE INTO', 1],
+    ['INSERT INTO Bans', 1],
+    ['rollback', 1],
+    ['begin', 2],
+    ['INSERT IGNORE INTO', 2],
+    ['INSERT INTO Bans', 2],
+    ['queue', [steamID(8)], 2],
+    ['commit', 2],
+    ['begin', 3],
+    ['INSERT IGNORE INTO', 3],
+    ['INSERT INTO Bans', 3],
+    ['commit', 3]
+  ]
+);
 
 // A batch that ends in a deadlock or a lock wait timeout is rolled back and run again as a whole,
 // after 5 seconds, so no statement of it is left applied on its own.
@@ -1699,5 +1870,5 @@ assert.deepStrictEqual(batches, [2, 2]);
 assert.strictEqual(events.filter(([type]) => type === 'commit').length, 2);
 
 console.log(
-  'Apply checks passed: values compared, players kept, moved and changed to new accounts, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, retries, failed bans, bans written alone, removals counted a batch at a time, with their bans, records of missing bans, counted a statement at a time, with their IDs, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
+  'Apply checks passed: values compared, players kept, moved and changed to new accounts, removals planned, holds of lists that lost all their bans, which last until confirmed or one of the bans they began with comes back, or a large part of them at once, which last until confirmed or fewer than a large loss of the fewer of the bans the list had then and has now are still missing, and which take in a large loss while they last, also into a hold of a list that lost all its bans, and reasons that outlived their holds, batched writes, which queue the players only of new bans and of changed bans whose player, expiry or whether they have expired changed, retries, failed bans, bans written alone, removals counted a batch at a time, with their bans, records of missing bans, counted a statement at a time, with their IDs, holds begun, gone on with, taken in and ended in one transaction, with why they are held and against how many bans, or not at all, and stops.'
 );

@@ -29,14 +29,17 @@ import {
   findBanList,
   findOrganisation,
   describePause,
+  describeSourceChange,
   formatBanListName,
   formatBanListType,
+  markSourceChanged,
   NO_TABLES,
   organisationOption,
   paginate,
   parseBanListSource,
   pauseState,
   plural,
+  quote,
   readPause,
   readQueueSkips,
   readStatus,
@@ -191,8 +194,11 @@ async function update(interaction) {
 
   // The list's bans came from its old source, so a new type or source deletes them, and the new
   // source's bans are imported on the next ban importer run, or once the list is resumed, if it is
-  // suspended. Left to the importer, most of them would be kept, as it holds back removing many of
-  // a list's bans at once.
+  // suspended. The importer would replace them itself, as it does for a source changed by hand, but
+  // a list of 10 or more bans would keep them counting until a read confirmed them gone, at least
+  // 10 minutes after its first read of the new source, so deleting them here makes them stop
+  // counting at once. The question gives what the check found of the new source, as it may warn of
+  // something the admin would rather not delete the bans for.
   let deletion = null;
   let paused = null;
   if (check !== undefined) {
@@ -206,7 +212,7 @@ async function update(interaction) {
       deletion = describeBanListDeletion(bans);
       const confirmed = await confirm(
         interaction,
-        `Change the source of ${currentName}? This deletes its ${deletion}, and the new source's bans are ${imported}.`,
+        `Change the source of ${currentName}? This deletes its ${deletion}, and the new source's bans are ${imported}. ${check}`,
         'Change source'
       );
       if (!confirmed) return;
@@ -223,11 +229,17 @@ async function update(interaction) {
   }
 
   // A paused list's bans count for nothing, so its players are not queued once the importer has
-  // settled them (see readQueueSkips), as read once the change is confirmed.
+  // settled them (see readQueueSkips), as read once the change is confirmed. A new type or source
+  // also marks the list's row of the importer's, so the importer reads the new source in full
+  // afresh, also when it had no bans to delete, e.g. as the source is changed back before the
+  // importer read the one it was changed to (see markSourceChanged). A rename alone leaves the
+  // list's updatedAt as it was, as /banlist status takes that for when its type or source was last
+  // changed (see readStatus).
   const skips = deletion ? await readQueueSkips([banList.id]) : [];
   await sequelize.transaction(async (transaction) => {
     if (deletion) await deleteBansOfBanLists([banList.id], transaction, { paused: skips });
-    await banList.save({ transaction });
+    await banList.save({ transaction, silent: check === undefined });
+    if (check !== undefined) await markSourceChanged(banList.id, transaction);
   });
   const deleted = deletion ? `, deleting ${deletion}` : '';
   audit(interaction, `updated ${description}: ${changes.join(', ')}${deleted}.`);
@@ -317,7 +329,7 @@ async function suspend(interaction) {
 
   audit(
     interaction,
-    `suspended ${describeBanList(banList, organisation)}${reason ? `, for the reason "${reason}"` : ''}.`
+    `suspended ${describeBanList(banList, organisation)}${reason ? `, for the reason ${quote(reason)}` : ''}.`
   );
   await interaction.editReply({
     content: `Suspended ${listName}. Resume it with /banlist resume.`,
@@ -335,10 +347,30 @@ async function resume(interaction) {
   if (pauseState(before) === 'resuming')
     throw new UserError(`${listName} is resuming already.\n${describePause(before)}`);
 
+  // A list given a new type or source that the importer has yet to finish switching it to (see
+  // readStatus) has its old bans, if any, replaced by the new source's, which the importer never
+  // holds for an admin, however many it loses, so the question says only that the list counts again
+  // once the importer has caught up with it. While the list has bans, that can wait for a later read
+  // to confirm those the new source does not have, as for any list: one at least 10 minutes after
+  // the first read that missed them, and only when at least 10 of them, and 5% of the list, are
+  // missing, as fewer are removed at once. The wait runs from that first read, which may have come
+  // before the list was suspended, not from the resume. The question says so too: a source changed
+  // by hand keeps its old bans, and the importer may have saved some of the new source's already.
+  // /banlist update deletes the old bans with the change, so a list it changed that the importer has
+  // not read since has none.
   const bans = await summariseBanListBans([banList.id]);
+  const { syncs } = await readStatus([banList]);
+  const changed = describeSourceChange(syncs.get(banList.id));
+  const confirming =
+    bans.bans > 0
+      ? `: once its reads have confirmed which of its ${describeBanListDeletion(bans)} the new source does not have, which takes a later read, at least 10 minutes after the first read that missed them, when at least 10 of them, and 5% of the list, are missing`
+      : '';
+  const catchUp = changed
+    ? `${changed} The ban importer reads it in full on its next cycle, and the list counts again once it has caught up with it${confirming}.`
+    : `The ban importer reads it in full on its next cycle, and its ${describeBanListDeletion(bans)} count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes a later read, at least 10 minutes after the first read that missed them, when at least 10 of them, and 5% of the list, are missing, and longer when it seems to have lost all of them, or a large part of them at once.`;
   const confirmed = await confirm(
     interaction,
-    `Resume ${listName}? The ban importer reads it in full on its next cycle, and its ${describeBanListDeletion(bans)} count again once it has caught up with it: once its reads have confirmed the bans its owner removed meanwhile, which takes at least 10 more minutes when there are any, and longer when it seems to have lost all of them, or a large part of them at once. /banlist status shows when. ${settles(bans.steamUsers, 'the cycle after it counts again')}`,
+    `Resume ${listName}? ${catchUp} /banlist status shows when. ${settles(bans.steamUsers, 'the cycle after it counts again')}`,
     'Resume ban list'
   );
   if (!confirmed) return;
@@ -366,7 +398,7 @@ async function status(interaction) {
   const value = interaction.options.getString('banlist');
   if (value) {
     const banList = await findBanList(value);
-    const { paused, syncs, removals } = await readStatus([banList.id]);
+    const { paused, syncs, removals } = await readStatus([banList]);
     await interaction.editReply({
       embeds: [
         banListStatusEmbed(banList, banList.Organisation, {
@@ -386,7 +418,7 @@ async function status(interaction) {
       ['name', 'ASC']
     ]
   });
-  const { paused, syncs, removals } = await readStatus(banLists.map((banList) => banList.id));
+  const { paused, syncs, removals } = await readStatus(banLists);
   const lines = banLists.map((banList) => {
     const state = pauseState(paused.get(banList.id));
     const held = removals.get(banList.id);

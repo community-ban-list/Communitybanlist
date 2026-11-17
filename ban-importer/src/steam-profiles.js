@@ -12,12 +12,12 @@ import { reportProgress, stopIfRequested } from './run-control.js';
 // Refreshing players' Steam profiles, their names and avatars, within a budget for each run, which
 // comes from how often runs start, so each profile is refreshed about once a week whatever the
 // schedule. A run takes first the players who were never refreshed or were queued for a refresh as
-// their bans changed, the newest first, then the players whose profile is due a refresh, in the
-// order of their IDs, carrying on from where the last run stopped. It asks Steam for 100 players a
-// call, and saves each call's profiles with one statement. A player Steam leaves out of its answer,
-// e.g. as the account no longer exists, is tried again a day later rather than on every run, and a
-// player whose ID is not a SteamID, such as a player of an EOS ID, who is not a Steam player, is
-// never sent to Steam.
+// their bans changed (see queuesPlayers in apply-list.js), the newest first, then the players whose
+// profile is due a refresh, in the order of their IDs, carrying on from where the last run stopped.
+// It asks Steam for 100 players a call, and saves each call's profiles with one statement. A player
+// Steam leaves out of its answer, e.g. as the account no longer exists, is tried again a day later
+// rather than on every run, and a player whose ID is not a SteamID, such as a player of an EOS ID,
+// who is not a Steam player, is never sent to Steam.
 
 // A run takes this many players who were never refreshed, or were queued for a refresh, the newest
 // first, as the export ban lists' alerts name the players they add. When there are more, e.g. after
