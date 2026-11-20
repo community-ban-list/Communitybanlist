@@ -37,7 +37,8 @@ export default sequelize.define(
       type: DataTypes.DATE(3)
     },
     // When the newest page of the list was last read, and when all of it was last read and is next
-    // due to be, and why.
+    // due to be, and why. The bot's /banlist resync and confirm-removal set a BattleMetrics list's
+    // nextFullScanAt to now (see planRead in ban-importer/src/planner.js).
     lastHeadPollAt: {
       type: DataTypes.DATE(3)
     },
@@ -80,17 +81,20 @@ export default sequelize.define(
       type: DataTypes.TEXT
     },
     // Whether the list's bans are to be replaced by those of its new source. The bot sets it when it
-    // gives the list a new type or source (see index.js).
+    // gives the list a new type or source (see index.js), as it sets the other columns that index.js
+    // lists.
     replacePending: {
       type: DataTypes.BOOLEAN,
       allowNull: false,
       defaultValue: false
     },
-    // Until when the list may lose all of its bans, as an admin confirmed that it really did.
+    // Until when the list may lose all of its bans, as an admin confirmed with the bot's /banlist
+    // confirm-removal (see fullRemovalAllowed in ban-importer/src/ban-importer.js).
     allowFullRemovalUntil: {
       type: DataTypes.DATE(3)
     },
-    // A remote list's ETag, Last-Modified and SHA-256 when it was last downloaded.
+    // A remote list's ETag, Last-Modified and SHA-256 when it was last downloaded, which the bot's
+    // /banlist resync clears (see lastFile in ban-importer/src/ban-importer.js).
     remoteEtag: {
       type: DataTypes.STRING(255)
     },
