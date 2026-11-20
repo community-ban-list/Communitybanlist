@@ -22,16 +22,23 @@ import {
   checkBanListSourceOption,
   checkBanListSourceUnused,
   confirm,
+  CONFIRM_HOURS,
+  confirmedUntil,
   deleteBanLists,
   deleteBansOfBanLists,
   describeBanList,
   describeBanListDeletion,
+  describeConfirmation,
+  describeHoldForLog,
   findBanList,
   findOrganisation,
   describePause,
   describeSourceChange,
   formatBanListName,
   formatBanListType,
+  formatDateTime,
+  markFullRead,
+  markRemovalConfirmed,
   markSourceChanged,
   NO_TABLES,
   organisationOption,
@@ -48,6 +55,7 @@ import {
   suggestOrganisations,
   summariseBanListBans,
   summariseBanListDeletion,
+  summariseHold,
   summariseImport,
   UserError
 } from '../utils/index.js';
@@ -116,12 +124,28 @@ const data = new SlashCommandBuilder()
   .addSubcommand((subcommand) =>
     subcommand
       .setName('status')
-      .setDescription('Show whether ban lists are paused, and how they were last imported.')
+      .setDescription(
+        'Show whether ban lists are paused or held, how they were last imported, and when next.'
+      )
       .addStringOption((option) =>
         banListOption(option, 'Ban list to show. Leave out for every ban list.', {
           required: false
         })
       )
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName('resync')
+      .setDescription('Have the ban importer read a ban list in full on its next cycle.')
+      .addStringOption((option) => banListOption(option, 'Ban list to read in full.'))
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName('confirm-removal')
+      .setDescription(
+        'Confirm that a held ban list really lost its bans, so the ban importer removes them.'
+      )
+      .addStringOption((option) => banListOption(option, 'Held ban list to confirm.'))
   );
 
 // The ban importer recalculates players' reputation points at most this many players a cycle when
@@ -396,15 +420,18 @@ async function resume(interaction) {
 
 async function status(interaction) {
   const value = interaction.options.getString('banlist');
+  const now = Date.now();
   if (value) {
     const banList = await findBanList(value);
-    const { paused, syncs, removals } = await readStatus([banList]);
+    const { paused, syncs, removals, holds } = await readStatus([banList]);
     await interaction.editReply({
       embeds: [
         banListStatusEmbed(banList, banList.Organisation, {
           paused: paused.get(banList.id) ?? null,
           sync: syncs.get(banList.id) ?? null,
-          removals: removals.get(banList.id)
+          removals: removals.get(banList.id),
+          hold: holds.get(banList.id) ?? null,
+          now
         })
       ]
     });
@@ -418,15 +445,27 @@ async function status(interaction) {
       ['name', 'ASC']
     ]
   });
-  const { paused, syncs, removals } = await readStatus(banLists);
+  const { paused, syncs, removals, holds } = await readStatus(banLists);
   const lines = banLists.map((banList) => {
     const state = pauseState(paused.get(banList.id));
-    const held = removals.get(banList.id);
-    const holding =
-      held && held.waiting + held.held > 0
-        ? ` · ${plural(held.waiting + held.held, 'removal')} held`
-        : '';
-    return `${formatBanListName(banList, banList.Organisation)} (#${banList.id})${state ? ` · **${state}**` : ''} · ${summariseImport(syncs.get(banList.id))}${holding}`;
+    const hold = holds.get(banList.id);
+    // The bans that wait for a confirming read, by the list's records, or none for an 'empty' hold,
+    // which gives the list's stored bans as held (see holdOf).
+    const waiting = hold?.kind === 'empty' ? 0 : (removals.get(banList.id)?.waiting ?? 0);
+    // A row whose sourceChange is 'unread' (see readStatus) is shown only as that change, as
+    // describeImport and summariseImport show it, so an admin's confirmation in it is not shown.
+    const sync = syncs.get(banList.id);
+    const until = sync?.sourceChange === 'unread' ? null : confirmedUntil(sync, now);
+    return [
+      `${formatBanListName(banList, banList.Organisation)} (#${banList.id})`,
+      state ? `**${state}**` : null,
+      summariseImport(sync),
+      hold ? `**${summariseHold(hold)}**` : null,
+      waiting > 0 ? `${plural(waiting, 'removal')} waiting for a confirming read` : null,
+      until ? `removal confirmed until ${formatDateTime(until)}` : null
+    ]
+      .filter(Boolean)
+      .join(' · ');
   });
   const pausedCount = banLists.filter((banList) => paused.has(banList.id)).length;
   await paginate(
@@ -436,7 +475,213 @@ async function status(interaction) {
   );
 }
 
-const subcommands = { add, update, remove, suspend, resume, status };
+// The ban list given, and what the ban importer's tables say of it, for /banlist resync and
+// confirm-removal: its paused row, its BanListSyncs row, the bans held back from removing it and its
+// hold of them for an admin, if any.
+async function readListStatus(interaction) {
+  const banList = await findBanList(interaction.options.getString('banlist', true));
+  const { paused, syncs, removals, holds } = await readStatus([banList]);
+  return {
+    banList,
+    organisation: banList.Organisation,
+    listName: formatBanListName(banList, banList.Organisation),
+    paused: paused.get(banList.id) ?? null,
+    sync: syncs.get(banList.id) ?? null,
+    removals: removals.get(banList.id) ?? null,
+    hold: holds.get(banList.id) ?? null
+  };
+}
+
+// Mark a list's BanListSyncs row to be read in full (see markFullRead), as after fixing something
+// by hand. A list that is suspended, that has no row, whose row's state is self_import, or whose
+// type or source was changed (see readStatus), is left as it is, which the reply says, and so is a
+// remote list while the importer's run lock is held.
+async function resync(interaction) {
+  const { banList, organisation, listName, paused, sync } = await readListStatus(interaction);
+  if (pauseState(paused) === 'suspended')
+    throw new UserError(
+      `${listName} is suspended, so nothing was changed. Ask again once it is resumed.`
+    );
+  if (!sync)
+    throw new UserError(
+      `/banlist status shows ${listName} as not imported yet, so nothing was changed.`
+    );
+  // A row whose state is self_import (see findExportBanList in ban-importer/src/ban-importer.js) is
+  // not taken for the list's source when its sourceChange is 'unread' (see readStatus).
+  if (sync.state === 'self_import' && sync.sourceChange !== 'unread')
+    throw new UserError(
+      `The ban importer does not read ${listName}, as its source is one of CBL's own export ban lists. Remove it with /banlist remove.`
+    );
+  if (sync.sourceChange)
+    throw new UserError(
+      `The type or source of ${listName} was changed, so the ban importer reads it in full anyway.`
+    );
+  // A remote list is left as it is while the importer's run lock is held (see lastFile and saveSync
+  // in ban-importer/src/ban-importer.js).
+  if (banList.type !== 'battlemetrics' && (await isRunLockHeld()))
+    throw new UserError(
+      `The ban importer is running, so nothing was changed: the cycle under way may still check the file of ${listName} as it did before, and keep it. Ask again once the cycle has finished.`
+    );
+
+  if (!(await markFullRead(banList)))
+    throw new UserError(
+      `${listName} was removed, or given a new type or source, meanwhile, so nothing was changed.`
+    );
+  audit(
+    interaction,
+    `asked for ${describeBanList(banList, organisation)} to be read in full on the ban importer's next cycle.`
+  );
+  const read =
+    banList.type === 'battlemetrics'
+      ? `The ban importer reads ${listName} in full on its next cycle, unless a cycle under way reads it in full first.`
+      : `The ban importer downloads the file of ${listName} whole on its next cycle, even if the file has not changed.`;
+  // The reply's sentence for a row whose state is access_lost (see importBanList in
+  // ban-importer/src/ban-importer.js).
+  const lost =
+    sync.state === 'access_lost'
+      ? ' If CBL still cannot read it on BattleMetrics by then, that read saves any new bans it finds, but removes none.'
+      : '';
+  // An admin's confirmation that still lasts (see confirmedUntil), as /banlist status gives it (see
+  // describeImport), but not what the read it asks for removes (see fullRemovalAllowed in
+  // ban-importer/src/ban-importer.js).
+  const until = confirmedUntil(sync);
+  const confirmed = until
+    ? ` Removal confirmed by an admin until ${formatDateTime(until)}: until then, ${sync.state === 'access_lost' ? 'once CBL can read it again, ' : ''}complete reads of it can remove every ban they do not find, at once.`
+    : '';
+  await interaction.editReply(
+    `${read}${lost}${confirmed} /banlist status shows when it was last read in full.`
+  );
+}
+
+// What the ban importer holds back from removing a list, for /banlist confirm-removal, from what
+// readListStatus gives: its hold of the list's bans for an admin (see holdOf), or a UserError that
+// says why the command confirms nothing (see Confirming a removal in ban-importer/README.md): the
+// list is suspended; it has no row; its row's state is self_import or access_lost; its type or
+// source was changed (see readStatus); or it has no hold. A suspended list's refusal adds "and CBL
+// can read it again" when its row's state is access_lost. A row whose sourceChange is 'unread' is
+// not taken for CBL's access or an export ban list.
+function holdToConfirm({ listName, paused, sync, removals, hold }) {
+  if (pauseState(paused) === 'suspended')
+    throw new UserError(
+      `${listName} is suspended. Confirm the removal once it is resumed${sync?.state === 'access_lost' && sync.sourceChange !== 'unread' ? ' and CBL can read it again' : ''}, if it is still held.`
+    );
+  if (!sync)
+    throw new UserError(`Cannot confirm: /banlist status shows ${listName} as not imported.`);
+  if (sync.state === 'self_import' && sync.sourceChange !== 'unread')
+    throw new UserError(
+      `Nothing to confirm: the ban importer does not read ${listName}, as its source is one of CBL's own export ban lists, so it removes none of its bans. Remove it with /banlist remove, which removes its bans too.`
+    );
+  if (sync.sourceChange)
+    throw new UserError(
+      `Nothing to confirm: its type or source was changed, and the ban importer replaces the bans of its old source with those of the new one without holding them for an admin.`
+    );
+  if (sync.state === 'access_lost')
+    throw new UserError(
+      `/banlist status shows that CBL cannot read ${listName} on BattleMetrics. The ban importer removes none of its bans while CBL cannot read it, confirmed or not. Confirm the removal once CBL can read it, if it is still held.`
+    );
+  if (hold) return hold;
+  // A list that is not held is refused by its records: by its waiting bans, if any, also when its
+  // row's state is failing, and otherwise by its row's state. The refusals for waiting bans and for
+  // a failing row point to the importer's line about the list (see holdOf). The one for waiting
+  // bans says neither what a confirming read removes or moves, nor when it is (see planRemovals in
+  // ban-importer/src/apply-list.js).
+  const waiting = removals?.waiting ?? 0;
+  if (waiting > 0)
+    throw new UserError(
+      `Nothing to confirm: the ban importer's records hold none of the bans of ${listName} for an admin. ${plural(waiting, 'ban')} ${waiting === 1 ? 'waits' : 'wait'} for a confirming read, which needs no admin's confirmation. If the importer's line about the list in the log channel says instead that it returned no bans, or none with a SteamID, so its stored bans were kept, which its records do not show, set IMPORTER_ALLOW_MASS_REMOVAL to the list's ID for one run.`
+    );
+  if (sync.state === 'failing')
+    throw new UserError(
+      `Nothing to confirm: the ban importer's records hold none of the bans of ${listName}. If its line about the list's last complete read says that it returned no bans, or none with a SteamID, so its stored bans were kept, confirm the removal once /banlist status shows them held.`
+    );
+  throw new UserError(
+    `Nothing to confirm: the ban importer's records hold none of the bans of ${listName}.`
+  );
+}
+
+// A time from a row, in milliseconds since 1970, or null for none, and a count, or null for none.
+const timeOf = (value) =>
+  value === null || value === undefined ? null : new Date(value).getTime();
+const countOf = (value) => (value === null || value === undefined ? null : Number(value));
+
+// Whether two holds of a list's bans (see holdOf), or none (null), are the same: the same kind, as
+// many bans held since the same time, as many waiting, and the same recorded hold, or none.
+function sameHold(a, b) {
+  if (a === null || b === null) return a === b;
+  return (
+    a.kind === b.kind &&
+    a.held === b.held &&
+    a.waiting === b.waiting &&
+    timeOf(a.since) === timeOf(b.since) &&
+    sameHold(a.recorded ?? null, b.recorded ?? null)
+  );
+}
+
+// Whether a list's BanListSyncs row, as read before the question and after it (a, b), has the same
+// lastAttemptAt (see nextSync in ban-importer/src/ban-list-sync.js) and the same counts of its
+// bans, stored and on BattleMetrics.
+const sameRead = (a, b) =>
+  timeOf(a.lastAttemptAt) === timeOf(b.lastAttemptAt) &&
+  countOf(a.storedCount) === countOf(b.storedCount) &&
+  countOf(a.headTotal) === countOf(b.headTotal);
+
+// Confirm the removal of a list's held bans (see markRemovalConfirmed). The question gives the
+// list, its hold, and what the next read can remove (see describeConfirmation), and only the admin
+// who asked can answer it, within the time confirm gives. The hold and the list's row are read
+// again once it is confirmed, and nothing is changed if the hold is not the one the question gave
+// (see sameHold), or the row's lastAttemptAt or counts changed (see sameRead).
+async function confirmRemoval(interaction) {
+  const status = await readListStatus(interaction);
+  const { banList, organisation, listName, sync } = status;
+  const hold = holdToConfirm(status);
+
+  const confirmed = await confirm(
+    interaction,
+    describeConfirmation(listName, hold, sync, CONFIRM_HOURS),
+    'Confirm removal'
+  );
+  if (!confirmed) return;
+
+  let after;
+  let current;
+  try {
+    after = await readListStatus(interaction);
+    current = holdToConfirm(after);
+  } catch (err) {
+    if (err instanceof UserError)
+      throw new UserError(`Nothing was confirmed, as it changed meanwhile. ${err.message}`);
+    throw err;
+  }
+  if (!sameHold(hold, current) || !sameRead(sync, after.sync))
+    throw new UserError(
+      `The ban importer tried to read ${listName}, or its hold of it changed, while you were asked, so nothing was confirmed. Run /banlist confirm-removal again to see it as it is now.`
+    );
+
+  const until = await markRemovalConfirmed(banList);
+  if (!until)
+    throw new UserError(
+      `${listName} was removed, or given a new type or source, meanwhile, so nothing was confirmed.`
+    );
+  audit(
+    interaction,
+    `confirmed the removal of the bans the ban importer holds back from ${describeBanList(banList, organisation)} (${describeHoldForLog(hold, sync.storedCount)}): until ${until.toISOString()}, complete reads of it can remove every ban they do not find at once.`,
+    { important: true }
+  );
+  await interaction.editReply(
+    `Confirmed the removal for ${listName}. The ban importer reads it in full on its next cycle, or, if a cycle under way reads it in full first, at its next full read, and, if that is by ${formatDateTime(until)}, can remove any ban it still does not find. Until then, complete reads of it can remove every ban they do not find, at once.`
+  );
+}
+
+const subcommands = {
+  add,
+  update,
+  remove,
+  suspend,
+  resume,
+  status,
+  resync,
+  'confirm-removal': confirmRemoval
+};
 
 export default {
   data,
